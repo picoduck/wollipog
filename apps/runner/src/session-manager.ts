@@ -7,7 +7,7 @@ import { campaignOperationEvidenceCurrent } from "./campaign-operation-evidence.
 import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
 import { type BackgroundFollowUpView, CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, isTerminal } from "@wollipog/protocol";
 import { CampaignIssueScopeRefusal, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
-import { boundedIssueNumbers, campaignRepositoryLocation, parseFullControlAutomaticResponse, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
+import { boundedIssueNumbers, campaignBoundaryRepository, campaignRepositoryLocation, parseFullControlAutomaticResponse, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
 import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
 import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage, ForgeDecisionActionMessage, ForgeDecisionActionResultMessage } from "@wollipog/protocol";
@@ -19223,7 +19223,8 @@ export class SessionManager {
         return { ...base, ok: false, error: "Stale or conflicting campaign scope revision" };
       }
       let control = message.control;
-      if (control && (!validCampaignControl(control) || control.mode === "full_control" && control.boundary.repository.toLowerCase() !== repository)) return { ...base, ok: false, error: "Scope authority boundary is invalid or in another repository" };
+      // A participant in any boundary repository stores its own repository's part (#4118, v290).
+      if (control && (!validCampaignControl(control) || control.mode === "full_control" && !campaignBoundaryRepository(control.boundary, repository))) return { ...base, ok: false, error: "Scope authority boundary is invalid or in another repository" };
       // A human scope revision intentionally invalidates older standing authorization, but
       // scope removal must still persist. Disable the stale runner diagnostic contract;
       // the server independently retains its boundary and evaluates it as human-required.

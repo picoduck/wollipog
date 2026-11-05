@@ -1,12 +1,50 @@
-import { boundedIssueNumbers, campaignIssueLimitsRequirement, campaignIssueScopeChangesRequirement, campaignRepositoryLocation,
-  gitlabCampaignIssuesRequirement, normalizeCampaignIssueScopeSnapshot, RUNNER_CAPABILITY_MIN_PROTOCOL, runnerSupportsProtocol, type RunnerCapabilityRequirementDetails,
+import { campaignIssueLimitsRequirement, campaignIssueScopeChangesRequirement, campaignRepositoryLocation,
+  campaignScopeForRepository, campaignScopeIssues, canonicalCampaignIssues,
+  gitlabCampaignIssuesRequirement, normalizeCampaignIssueScopeSnapshot, RUNNER_CAPABILITY_MIN_PROTOCOL, runnerCapabilityRequirementError, runnerSupportsProtocol,
+  type CampaignIssueRef, type CampaignIssueScope, type CampaignIssueScopeRepositoryView, type RunnerCapabilityRequirementDetails,
   type CampaignIssueScopeRequest, type CampaignIssueScopeSnapshot, type CampaignIssueScopeView, type SessionView, type WorkflowDecisionView, isTerminal } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import { issueClosureActiveChildren } from "./github-issue-closure.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
+import { campaignLaunchRepository, campaignScopeRepositories } from "./campaign-authority.js";
 
 export function scopeParticipants(db: ControlPlaneDb, root: SessionView): SessionView[] {
   return [root, ...db.campaignDescendantIds(root.id).flatMap((id) => { const s = db.getSession(id); return s?.orchestratorPolicy && !s.archived && !isTerminal(s.status) ? [s] : []; })];
+}
+
+/** Why an Orchestrator participant cannot hold the campaign's scope (#4118), or null. It must be in
+ * a Location of a boundary repository; outside the launch repository its runner needs v290. */
+export function participantScopeRefusal(db: ControlPlaneDb, root: SessionView, member: Pick<SessionView, "id" | "runnerId" | "workspaceId">):
+  { error: string; status: number; capability?: RunnerCapabilityRequirementDetails } | null {
+  // The root's own workspace always qualifies, even before the campaign records its repository.
+  if (db.campaignSharesRepositoryWorkspace(root, member)) return null;
+  const repository = db.campaignParticipantRepository(root, member);
+  if (!repository) return { status: 409, error: "Every active Orchestrator participant must run in a Location of one of the campaign's repositories. " +
+    "Move or finish the other participants, or start an independent campaign, then retry." };
+  if (repository === campaignLaunchRepository(root)) return null;
+  const version = db.getRunner(member.runnerId)?.protocolVersion;
+  if (runnerSupportsProtocol(version, "repositoryQualifiedIssueScope")) return null;
+  const { error, ...capability } = runnerCapabilityRequirementError(version, "repositoryQualifiedIssueScope", "issue scope in another campaign repository");
+  return { status: 409, error, capability };
+}
+
+/** The part of the root's scope a participant's runner stores (#4118): its own repository's
+ * numbers, in the earlier one-repository shape. A participant in no boundary repository gets the
+ * launch repository with no numbers, which authorizes nothing. */
+export function participantScope(db: ControlPlaneDb, root: SessionView, member: Pick<SessionView, "id" | "runnerId" | "workspaceId">): CampaignIssueScope | null {
+  const scope = root.orchestratorPolicy?.issueScope;
+  if (!scope) return null;
+  const repository = db.campaignParticipantRepository(root, member);
+  return repository ? campaignScopeForRepository(scope, repository) : { ...campaignScopeForRepository(scope, scope.repository), issueNumbers: [] };
+}
+
+/** The fixed refusal for a scope change naming a repository outside the boundary (#4118). It is
+ * decided from the stored boundary alone, before any runner call. */
+export function repositoryOutsideBoundary(repository: string): { status: 409; error: string; errorDetails: { code: "repository_outside_boundary"; repository: string } } {
+  return { status: 409, errorDetails: { code: "repository_outside_boundary", repository },
+    error: `${repository} is not one of this campaign's repositories, so its issues can't join the scope. If the campaign's Project ` +
+      "has a Location of that repository, ask the campaign owner to include it in the campaign, then retry this scope change. " +
+      "Otherwise report that the work needs a repository with no Location in this Project." };
 }
 
 /** GitLab issue closure and scope (#3539) need every participating Orchestrator runner at v249: an
@@ -38,8 +76,20 @@ export function compatibilityFields({ error, ...versions }: { error: string } & 
   return { compatibilityMessage: error, ...versions };
 }
 
-export function scopeView(db: ControlPlaneDb, root: SessionView, repository: string): CampaignIssueScopeView {
+/** The campaign's repository-qualified issues, as a view of `repository` reads them. A scope saved
+ * before #4118 (or a legacy campaign's bare numbers) reads as numbers in that repository. */
+function viewIssues(root: SessionView, repository: string): CampaignIssueRef[] {
+  const scope = root.orchestratorPolicy?.issueScope;
+  if (scope) return campaignScopeIssues(scope);
+  return repository ? (root.orchestratorPolicy?.issueNumbers ?? []).map((number) => ({ repository: repository.toLowerCase(), number })) : [];
+}
+
+/** `states` holds each repository verified or found offline for this view; any other repository
+ * shows its saved scope. */
+export function scopeView(db: ControlPlaneDb, root: SessionView, repository: string,
+  states: ReadonlyMap<string, CampaignIssueScopeRepositoryView["state"]> = new Map()): CampaignIssueScopeView {
   const numbers = root.orchestratorPolicy?.issueNumbers ?? [];
+  const issues = viewIssues(root, repository);
   const outsideScope: CampaignIssueScopeView["outsideScope"] = [];
   const unverifiedWork: NonNullable<CampaignIssueScopeView["unverifiedWork"]> = [];
   let cursor: string | undefined;
@@ -49,53 +99,96 @@ export function scopeView(db: ControlPlaneDb, root: SessionView, repository: str
     for (const item of result.data.items) {
       if (!item.issue) continue;
       const entry = { workItemId: item.id, title: item.title ?? item.key, issue: item.issue, sessionId: item.currentAttempt?.sessionId ?? null };
+      const held = issues.some((issue) => issue.repository === item.issue!.repository.toLowerCase() && issue.number === item.issue!.number);
       // An unknown repository (#2664) is no mismatch: only a number outside the saved list is.
-      if (!numbers.includes(item.issue.number) || repository && item.issue.repository.toLowerCase() !== repository.toLowerCase()) outsideScope.push(entry);
-      else if (!repository) unverifiedWork.push(entry);
+      if (!repository && numbers.includes(item.issue.number)) unverifiedWork.push(entry);
+      else if (!held) outsideScope.push(entry);
     }
     cursor = result.data.nextCursor ?? undefined;
   } while (cursor);
+  // Every boundary repository, the launch one first, then any the scope holds beyond them.
+  const launch = repository.toLowerCase();
+  const names = [...new Set([...(launch ? [launch] : []), ...campaignScopeRepositories(root).map((entry) => entry.repository),
+    ...issues.map((issue) => issue.repository)])];
+  const repositories: CampaignIssueScopeRepositoryView[] = names.map((name) => ({ repository: name,
+    issueNumbers: issues.filter((issue) => issue.repository === name).map((issue) => issue.number), state: states.get(name) ?? "saved" }));
   const requirement = scopeCompatibility(db, root);
   // A first message's context-only references (#3920), less any the scope now holds.
   const first = root.orchestratorPolicy?.firstMessageScope;
   const context = first && first.state !== "pending" ? (first.contextIssueNumbers ?? []).filter((n) => !numbers.includes(n)) : [];
   // The scope grant the first message established (#4102), for Campaign Status's Scope Grant section.
   const grant = first && first.state !== "pending" ? first.grant : undefined;
-  return { campaignSessionId: root.id, repository, issueNumbers: numbers, revision: root.orchestratorPolicy?.issueScope?.revision ?? 0,
+  return { campaignSessionId: root.id, repository, issueNumbers: numbers, ...(repositories.length ? { repositories } : {}),
+    revision: root.orchestratorPolicy?.issueScope?.revision ?? 0,
     ...(root.orchestratorPolicy?.issueScope ? { authorization: root.orchestratorPolicy.issueScope } : {}),
     supported: !requirement, ...(requirement ? compatibilityFields(requirement) : {}), canPropose: false,
     ...(context.length ? { contextIssueNumbers: context } : {}), ...(grant ? { scopeGrant: grant } : {}),
     ...(unverifiedWork.length ? { unverifiedWork } : {}), outsideScope };
 }
 
+/** The first repository a scope change names outside the campaign's repositories (#4118), from the
+ * stored boundary alone; null when every ref is inside it, or when the launch repository is not
+ * known yet (a legacy campaign learns it from its runner, and the snapshot then checks again). */
+export function scopeRequestOutsideBoundary(root: SessionView, request: CampaignIssueScopeRequest): string | null {
+  const allowed = new Set(campaignScopeRepositories(root).map((entry) => entry.repository));
+  if (!allowed.size || !request || !Array.isArray(request.additions) || !Array.isArray(request.removals)) return null;
+  for (const ref of [...request.additions, ...request.removals]) {
+    if (ref && typeof ref.repository === "string" && campaignRepositoryLocation(ref.repository) && !allowed.has(ref.repository.toLowerCase())) {
+      return ref.repository.toLowerCase();
+    }
+  }
+  return null;
+}
+
+/** The exact change, grouped by repository (#4118): `repository` is the launch repository, whose
+ * numbers stay at the top level, and every other boundary repository the scope holds or the change
+ * touches is an `otherRepositories` group. A same-numbered issue in two repositories is two entries. */
 export function scopeSnapshot(db: ControlPlaneDb, root: SessionView, repository: string, request: CampaignIssueScopeRequest): CampaignIssueScopeSnapshot | null {
+  const launch = repository.toLowerCase();
+  const allowed = new Set([launch, ...campaignScopeRepositories(root).map((entry) => entry.repository)]);
   if (!request || typeof request.requestId !== "string" || !request.requestId || request.requestId.length > 256 ||
       !Array.isArray(request.additions) || !Array.isArray(request.removals) ||
-      [...request.additions, ...request.removals].some((r) => !r || typeof r.repository !== "string" || r.repository.toLowerCase() !== repository.toLowerCase())) return null;
-  const additions = request.additions.map((r) => r.number);
-  const removals = request.removals.map((r) => r.number);
-  if (!boundedIssueNumbers(additions) || !boundedIssueNumbers(removals)) return null;
-  const before = root.orchestratorPolicy?.issueNumbers ?? [];
+      [...request.additions, ...request.removals].some((r) => !r || typeof r.repository !== "string" || !allowed.has(r.repository.toLowerCase()))) return null;
+  const additions = canonicalCampaignIssues(request.additions);
+  const removals = canonicalCampaignIssues(request.removals);
+  if (!additions || !removals) return null;
+  const held = viewIssues(root, launch);
+  const touched = [...new Set([...held, ...additions, ...removals].map((issue) => issue.repository).filter((name) => name !== launch))].sort();
+  const numbers = (issues: readonly CampaignIssueRef[], name: string) => issues.filter((issue) => issue.repository === name).map((issue) => issue.number);
+  const groups = [launch, ...touched].map((name) => ({ repository: name,
+    before: name === launch ? [...root.orchestratorPolicy?.issueNumbers ?? []] : numbers(held, name),
+    additions: numbers(additions, name), removals: numbers(removals, name) }));
   const affectedAssignments: CampaignIssueScopeSnapshot["affectedAssignments"] = [];
   // An identically numbered issue in another repository has separate authority.
   let cursor: string | undefined;
   do {
     const page = db.campaignWorkLedger.page(root.id, { limit: 100, ...(cursor ? { cursor } : {}) }, Date.now());
     if (!page.ok) return null;
-    for (const i of page.data.items) if (i.issue && i.issue.repository.toLowerCase() === repository.toLowerCase() && removals.includes(i.issue.number) && i.currentAttempt?.sessionId &&
-        !affectedAssignments.some((a) => a.sessionId === i.currentAttempt!.sessionId && a.issue === i.issue!.number)) {
-      affectedAssignments.push({ sessionId: i.currentAttempt.sessionId, issue: i.issue.number });
+    for (const i of page.data.items) {
+      const name = i.issue?.repository.toLowerCase();
+      const group = groups.find((g) => g.repository === name);
+      if (!i.issue || !group || !group.removals.includes(i.issue.number) || !i.currentAttempt?.sessionId ||
+          affectedAssignments.some((a) => a.sessionId === i.currentAttempt!.sessionId && a.issue === i.issue!.number && (a.repository ?? launch) === name)) continue;
+      affectedAssignments.push({ sessionId: i.currentAttempt.sessionId, issue: i.issue.number, ...(name === launch ? {} : { repository: name }) });
     }
     cursor = page.data.nextCursor ?? undefined;
   } while (cursor);
-  const changed = [...additions, ...removals];
-  const unrelated = db.campaignWorkLedger.sessionsUnrelatedToIssues(root.id, repository, changed);
-  const affectedDecisions = db.unconsumedWorkflowDecisionsForController(root.id)
-    .filter((d) => d.category !== "campaign_issue_scope" && scopeChangeAffectsDecision(db, root.id, repository, changed, removals.length > 0, unrelated, d))
+  // A decision or child is affected when any repository's part of the change affects it.
+  const changes = groups.filter((g) => g.additions.length || g.removals.length);
+  const affectedDecisions = db.unconsumedWorkflowDecisionsForController(root.id).filter((d) => d.category !== "campaign_issue_scope" &&
+    changes.some((g) => scopeChangeAffectsDecision(db, root.id, g.repository, [...g.additions, ...g.removals], groups.some((x) => x.removals.length > 0),
+      db.campaignWorkLedger.sessionsUnrelatedToIssues(root.id, g.repository, [...g.additions, ...g.removals]), d)))
     .map((d) => d.occurrenceId).sort();
-  return normalizeCampaignIssueScopeSnapshot({ category: "campaign_issue_scope", repository, expectedRevision: request.expectedRevision,
-    before, additions, removals, explanation: request.explanation, affectedAssignments, affectedDecisions,
-    activeChildren: issueClosureActiveChildren(db, root.id, { repository, numbers: changed }),
+  const activeChildren: CampaignIssueScopeSnapshot["activeChildren"] = [];
+  for (const g of changes) {
+    for (const child of issueClosureActiveChildren(db, root.id, { repository: g.repository, numbers: [...g.additions, ...g.removals] })) {
+      if (!activeChildren.some((c) => c.sessionId === child.sessionId)) activeChildren.push(child);
+    }
+  }
+  const [own, ...others] = groups;
+  return normalizeCampaignIssueScopeSnapshot({ category: "campaign_issue_scope", repository: launch, expectedRevision: request.expectedRevision,
+    before: own!.before, additions: own!.additions, removals: own!.removals, ...(others.length ? { otherRepositories: others } : {}),
+    explanation: request.explanation, affectedAssignments, affectedDecisions, activeChildren,
     ...(request.lineage === undefined ? {} : { lineage: request.lineage }) });
 }
 

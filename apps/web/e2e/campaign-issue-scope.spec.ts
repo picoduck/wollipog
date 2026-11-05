@@ -72,6 +72,35 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
     await scope.screenshot({ path: info.outputPath(`scope-reconnected-${viewport.width}.png`) });
   });
 
+  test(`a multi-repository scope is grouped under Repositories and accepts issues from each at ${viewport.width}px (#4118)`, async ({ page }, info) => {
+    await page.setViewportSize(viewport);
+    await page.route("**/api/sessions/*/campaign/issue-scope", async (route) => {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        campaignSessionId: "s_root", repository: "owner/app", issueNumbers: [5, 12], revision: 4, supported: true, canPropose: true, candidates: [],
+        repositories: [{ repository: "owner/app", issueNumbers: [5, 12], state: "verified" },
+          { repository: "owner/api", issueNumbers: [5, 40], state: "verified" },
+          { repository: "owner/docs", issueNumbers: [], state: "no_location_online" }],
+        outsideScope: [{ workItemId: "w_stray", title: "Stray Work", issue: { repository: "owner/api", number: 99 }, sessionId: null }] }) });
+    });
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=unsupported-target");
+    const scope = page.getByRole("region", { name: "Authorized Issue Scope" });
+    const repositories = scope.locator("dl.facts > div").filter({ has: page.getByRole("term").getByText("Repositories", { exact: true }) });
+    await expect(repositories.locator("li")).toHaveText(["owner/app: owner/app#5, owner/app#12", "owner/api: owner/api#5, owner/api#40",
+      "owner/docs (No Location Online): None"]);
+    await expect(scope.locator("dl.facts > div").filter({ has: page.getByRole("term").getByText("Authorized Issues", { exact: true }) })).toHaveCount(0);
+    const facts = scope.locator("dl.facts");
+    await facts.scrollIntoViewIfNeeded();
+    await facts.screenshot({ path: info.outputPath(`scope-repositories-${viewport.width}.png`) });
+    await scope.getByLabel("Issue Additions", { exact: true }).fill("owner/api#41, owner/app#41");
+    await scope.getByRole("button", { name: "Request Scope Approval", exact: true }).click();
+    await expect(scope.getByRole("status").filter({ hasText: "Scope is unchanged" })).toContainText("Scope is unchanged");
+    expect(await page.evaluate(() => (window as unknown as { __SCOPE_PROPOSAL__: unknown }).__SCOPE_PROPOSAL__)).toMatchObject({
+      expectedRevision: 4, additions: [{ repository: "owner/api", number: 41 }, { repository: "owner/app", number: 41 }], removals: [],
+    });
+    const geometry = await scope.evaluate((element) => ({ client: element.clientWidth, scroll: element.scrollWidth }));
+    expect(geometry.scroll).toBeLessThanOrEqual(geometry.client + 1);
+  });
+
   test(`human scope recovery and epic selection at ${viewport.width}px`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign");

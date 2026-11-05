@@ -1,5 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from "react";
-import type { CampaignIssueScopeSnapshot, CampaignIssueScopeView, SessionView } from "@wollipog/protocol";
+import { campaignScopeChangeGroups, type CampaignIssueScopeSnapshot, type CampaignIssueScopeView, type SessionView } from "@wollipog/protocol";
 import { browserRandomUUID } from "../browser-crypto.js";
 import { Checkbox } from "./ui/ChoiceControls.js";
 import { useApi } from "../api-context.js";
@@ -8,15 +8,20 @@ import { BusyButton } from "./ui/BusyButton.js";
 import { CampaignScopeGrantSection, ScopeGrantReviewFacts } from "./CampaignScopeGrant.js";
 
 export function CampaignIssueScopeSummary({ snapshot }: { snapshot: CampaignIssueScopeSnapshot }) {
-  const refs = (numbers: number[]) => numbers.length ? numbers.map((n) => `${snapshot.repository}#${n}`).join(", ") : "None";
+  // Every repository's part of the change, each issue qualified by its own repository (#4118).
+  const groups = campaignScopeChangeGroups(snapshot);
+  const refs = (pick: (group: (typeof groups)[number]) => number[]) => {
+    const list = groups.flatMap((group) => pick(group).map((n) => `${group.repository}#${n}`));
+    return list.length ? list.join(", ") : "None";
+  };
   return <>
     {snapshot.grantReview && <ScopeGrantReviewFacts review={snapshot.grantReview} />}
     <p>{snapshot.explanation}</p>
     <dl className="facts">
       <div><dt>Scope Revision</dt><dd>{snapshot.expectedRevision} to {snapshot.expectedRevision + 1}</dd></div>
-      <div><dt>Additions</dt><dd>{refs(snapshot.additions)}</dd></div>
-      <div><dt>Removals</dt><dd>{refs(snapshot.removals)}</dd></div>
-      <div><dt>Affected Assignments</dt><dd>{snapshot.affectedAssignments.length ? snapshot.affectedAssignments.map((a) => `${snapshot.repository}#${a.issue}: ${a.sessionId}`).join(", ") : "None"}</dd></div>
+      <div><dt>Additions</dt><dd>{refs((group) => group.additions)}</dd></div>
+      <div><dt>Removals</dt><dd>{refs((group) => group.removals)}</dd></div>
+      <div><dt>Affected Assignments</dt><dd>{snapshot.affectedAssignments.length ? snapshot.affectedAssignments.map((a) => `${a.repository ?? snapshot.repository}#${a.issue}: ${a.sessionId}`).join(", ") : "None"}</dd></div>
       <div><dt>Active Child Work</dt><dd>{snapshot.activeChildren.length ? snapshot.activeChildren.map((child) => `${child.title}: ${child.sessionId}`).join(", ") : "None"}</dd></div>
       <div><dt>Decisions to Revoke</dt><dd>{snapshot.affectedDecisions.length ? snapshot.affectedDecisions.join(", ") : "None"}</dd></div>
     </dl>
@@ -69,25 +74,37 @@ export function CampaignIssueScopePanel({ session, campaignId }: { session: Sess
   const refreshButton = <button className="btn sm" type="button" onClick={() => setReload((n) => n + 1)}>Refresh Scope</button>;
   const unverified = view?.unverifiedWork ?? [];
 
+  // Every campaign repository (#4118); a view from an older control plane names only its own.
+  const repositories = view?.repositories?.length ? view.repositories
+    : view ? [{ repository: view.repository, issueNumbers: view.issueNumbers, state: "saved" as const }] : [];
+  const grouped = repositories.length > 1;
+  const held = (repository: string, number: number) =>
+    repositories.some((entry) => entry.repository.toLowerCase() === repository.toLowerCase() && entry.issueNumbers.includes(number));
   const parse = (text: string) => {
-    const result = text.split(/[\s,]+/u).filter(Boolean).map((ref) => {
+    const names = repositories.map((entry) => entry.repository.toLowerCase());
+    const result = new Map<string, { repository: string; number: number }>();
+    for (const ref of text.split(/[\s,]+/u).filter(Boolean)) {
       const match = /^([\w.-]+\/[\w.-]+)#([1-9][0-9]*)$/u.exec(ref);
-      if (!match || !Number.isSafeInteger(Number(match[2])) || match[1]!.toLowerCase() !== view?.repository.toLowerCase()) {
-        throw new Error(`Use repository-qualified issues from ${view?.repository}, such as ${view?.repository}#123.`);
+      if (!match || !Number.isSafeInteger(Number(match[2])) || !names.includes(match[1]!.toLowerCase())) {
+        throw new Error(grouped ? `Use repository-qualified issues from this campaign's repositories (${names.join(", ")}), such as ${view?.repository}#123.`
+          : `Use repository-qualified issues from ${view?.repository}, such as ${view?.repository}#123.`);
       }
-      return Number(match[2]);
-    });
-    return [...new Set(result)];
+      const issue = { repository: match[1]!.toLowerCase(), number: Number(match[2]) };
+      result.set(`${issue.repository}#${issue.number}`, issue);
+    }
+    return [...result.values()];
   };
   const propose = async () => {
     if (!view || busy) return;
     setBusy(true); setError(null);
     try {
-      const add = [...new Set([...selected, ...parse(additions)])].filter((n) => !view.issueNumbers.includes(n));
+      const launch = view.repository.toLowerCase();
+      const add = [...new Map([...selected.map((number) => ({ repository: launch, number })), ...parse(additions)]
+        .map((issue) => [`${issue.repository}#${issue.number}`, issue] as const)).values()].filter((issue) => !held(issue.repository, issue.number));
       const remove = parse(removals);
       if (!add.length && !remove.length) throw new Error("Select at least one issue addition or removal.");
       await api.proposeCampaignIssueScope(campaignId, { requestId: browserRandomUUID(), expectedRevision: view.revision,
-        additions: add.map((number) => ({ repository: view.repository, number })), removals: remove.map((number) => ({ repository: view.repository, number })),
+        additions: add, removals: remove,
         explanation: "Update the campaign's authorized issue scope with the exact additions and removals shown in this request." });
       setPending(true); setSelected([]); setAdditions(""); setRemovals("");
     } catch (e) { setError(e instanceof Error ? e.message : "Could not request scope approval."); }
@@ -110,9 +127,15 @@ export function CampaignIssueScopePanel({ session, campaignId }: { session: Sess
       actions={refreshButton}>{error}</Notice>}
     {view ? <>
       <dl className="facts">
-        <div><dt>Repository</dt><dd>{view.repository || "Not Verified"}</dd></div>
+        {grouped ? <div><dt>Repositories</dt><dd>
+          <ul className="campaign-detail-list">{repositories.map((entry) => <li key={entry.repository}>
+            {entry.repository}
+            {entry.state === "no_location_online" && <> <span className="muted">(No Location Online)</span></>}
+            {": "}{entry.issueNumbers.length ? entry.issueNumbers.map((n) => `${entry.repository}#${n}`).join(", ") : "None"}
+          </li>)}</ul>
+        </dd></div> : <div><dt>Repository</dt><dd>{view.repository || "Not Verified"}</dd></div>}
         <div><dt>Scope Revision</dt><dd>{view.revision}</dd></div>
-        <div><dt>Authorized Issues</dt><dd>{view.issueNumbers.length ? view.issueNumbers.map((n) => `${view.repository}#${n}`).join(", ") : "None"}</dd></div>
+        {!grouped && <div><dt>Authorized Issues</dt><dd>{view.issueNumbers.length ? view.issueNumbers.map((n) => `${view.repository}#${n}`).join(", ") : "None"}</dd></div>}
         {context.length > 0 && !selectable && <div><dt>Context-Only References</dt><dd>{context.map((n) => `${view.repository}#${n}`).join(", ")}</dd></div>}
       </dl>
       {view.candidateMessage && <Notice tone="warning" title="Epic Members Need Review">{view.candidateMessage}</Notice>}
@@ -123,7 +146,7 @@ export function CampaignIssueScopePanel({ session, campaignId }: { session: Sess
         <ul className="campaign-detail-list">{unverified.map((item) => <li key={item.workItemId}>{item.issue.repository}#{item.issue.number}: {item.title}</li>)}</ul>
         Their issue numbers are in the saved scope, but the campaign repository is not verified, so this work is neither confirmed in scope nor outside it.
       </Notice>}
-      {!view.issueNumbers.length && <Notice tone="info" title="Issue Scope Needs Confirmation">Confirm the umbrella issue and intended members before delegating issue work. Recorded work and issue mentions do not grant authority.</Notice>}
+      {!repositories.some((entry) => entry.issueNumbers.length) && <Notice tone="info" title="Issue Scope Needs Confirmation">Confirm the umbrella issue and intended members before delegating issue work. Recorded work and issue mentions do not grant authority.</Notice>}
       {view.outsideScope.length > 0 && <Notice tone="warning" title="Work Outside Authorized Scope">
         <ul className="campaign-detail-list">{view.outsideScope.map((item) => <li key={item.workItemId}>{item.issue.repository}#{item.issue.number}: {item.title}</li>)}</ul>
         Add the intended issues through a scope approval to enable their closure requests.
@@ -149,7 +172,7 @@ export function CampaignIssueScopePanel({ session, campaignId }: { session: Sess
         <BusyButton className="btn ghost sm" busy={busy} progress="Resolving epic members…" onClick={() => void resolveEpic()}>Resolve Epic Members</BusyButton>
         <label className="field"><span>Issue Additions</span><input type="text" value={additions} onChange={(e) => setAdditions(e.target.value)} disabled={busy} /></label>
         <label className="field"><span>Issue Removals</span><input type="text" value={removals} onChange={(e) => setRemovals(e.target.value)} disabled={busy} /></label>
-        <p>Enter repository-qualified issues separated by commas, such as {view.repository}#123. Review the exact change and affected assignments in the approval request.</p>
+        <p>Enter repository-qualified issues separated by commas, such as {view.repository}#123{grouped ? ", from any of the repositories above" : ""}. Review the exact change and affected assignments in the approval request.</p>
         <BusyButton className="btn sm" busy={busy} progress="Requesting scope approval…" onClick={() => void propose()}>Request Scope Approval</BusyButton>
         <button className="btn ghost sm" type="button" onClick={() => setReload((n) => n + 1)}>Refresh Scope</button>
         {pending && <p role="status">Scope is unchanged. Review the exact additions and removals in the campaign's approval request.</p>}

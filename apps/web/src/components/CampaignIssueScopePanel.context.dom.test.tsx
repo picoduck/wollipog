@@ -106,3 +106,35 @@ test("a campaign with no context-only references shows neither the row nor the s
     assert.equal(contextGroup(host), undefined);
   } finally { await unmount(); }
 });
+
+test("a multi-repository scope is grouped under Repositories, and a proposal may name any of them (#4118)", async () => {
+  const { host, proposals, unmount } = await mount(view({ repository: "owner/app", issueNumbers: [5], contextIssueNumbers: undefined,
+    repositories: [{ repository: "owner/app", issueNumbers: [5], state: "verified" }, { repository: "owner/api", issueNumbers: [5, 40], state: "no_location_online" }] }));
+  try {
+    assert.deepEqual(facts(host), { "Repositories": "owner/app: owner/app#5owner/api (No Location Online): owner/api#5, owner/api#40", "Scope Revision": "2" });
+    const items = [...host.querySelectorAll("dl.facts li")].map((item) => item.textContent);
+    assert.deepEqual(items, ["owner/app: owner/app#5", "owner/api (No Location Online): owner/api#5, owner/api#40"]);
+    const field = (label: string) => [...host.querySelectorAll("label.field")].find((node) => node.textContent?.startsWith(label))!.querySelector("input")!;
+    const type = async (input: HTMLInputElement, value: string) => act(async () => {
+      input.focus();
+      Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")!.set!.call(input, value);
+      input.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true }) as unknown as Event);
+      input.dispatchEvent(new domWindow.KeyboardEvent("keyup", { bubbles: true }) as unknown as Event);
+    });
+    // owner/app#40 is new even though owner/api#40 is held; owner/api#5 is removed, owner/app#5 stays.
+    await type(field("Issue Additions"), "owner/api#41, Owner/App#40, owner/api#40");
+    await type(field("Issue Removals"), "owner/api#5");
+    const request = [...host.querySelectorAll("button")].find((button) => button.textContent === "Request Scope Approval")!;
+    await act(async () => { request.click(); });
+    await settle();
+    assert.equal(proposals.length, 1);
+    assert.deepEqual(proposals[0]!.additions, [{ repository: "owner/api", number: 41 }, { repository: "owner/app", number: 40 }]);
+    assert.deepEqual(proposals[0]!.removals, [{ repository: "owner/api", number: 5 }]);
+    // A repository outside the campaign is refused in the browser before any request.
+    await type(field("Issue Additions"), "third/repo#1");
+    await act(async () => { request.click(); });
+    await settle();
+    assert.equal(proposals.length, 1);
+    assert.match(host.querySelector("[role=alert]")!.textContent!, /this campaign's repositories \(owner\/app, owner\/api\)/u);
+  } finally { await unmount(); }
+});

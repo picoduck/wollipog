@@ -1373,7 +1373,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "get_campaign_issue_scope",
-    description: "Inspect the root campaign's authorized repository-qualified issue scope, revision, outside-scope work, and optional epic membership candidates. Native sub-issues and leading checklist entries in member sections are proposals only; dependencies and incidental references grant no authority. GitLab issues are supported from runner protocol v249: a GitLab epic is an ordinary issue of the same project whose member checklist (#N or same-project issue URLs) names its members; GitLab epics and issue links are not read. Use before delegating an epic and after any human scope change.",
+    description: "Inspect the root campaign's authorized repository-qualified issue scope, grouped by repository under `repositories` (every campaign repository, the launch repository first, with whether one of its Locations is online), its revision, outside-scope work, and optional epic membership candidates. Native sub-issues and leading checklist entries in member sections are proposals only; dependencies and incidental references grant no authority. GitLab issues are supported from runner protocol v249: a GitLab epic is an ordinary issue of the same project whose member checklist (#N or same-project issue URLs) names its members; GitLab epics and issue links are not read. Use before delegating an epic and after any human scope change.",
     inputSchema: { type: "object", properties: { epic: { type: "integer", minimum: 1 } }, additionalProperties: false },
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
@@ -1385,7 +1385,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_campaign_issue_scope_change",
-    description: "Propose exact repository-qualified issue additions/removals at the current scope revision. Custom requires a human. A human-established Full Control issue boundary admits verified epic or exact published follow-up lineage within its limits. Resolution atomically applies and consumes scope; do not consume it yourself. Pending, denied, stale and replayed requests never widen authority.",
+    description: "Propose exact repository-qualified issue additions/removals at the current scope revision, in any of the campaign's repositories; the same number in two repositories is two issues. Each repository is verified through one of its own online Locations. A repository outside the campaign is refused with repository_outside_boundary before any runner call. Custom requires a human. A human-established Full Control issue boundary admits verified epic or exact published follow-up lineage within its limits. Resolution atomically applies and consumes scope; do not consume it yourself. Pending, denied, stale and replayed requests never widen authority.",
     inputSchema: { type: "object", properties: {
       requestId: { type: "string" }, expectedRevision: { type: "integer", minimum: 0 }, explanation: { type: "string", minLength: 1, maxLength: 4000 },
       additions: { type: "array", maxItems: 100, items: { type: "object", properties: { repository: { type: "string" }, number: { type: "integer", minimum: 1 } }, required: ["repository", "number"], additionalProperties: false } },

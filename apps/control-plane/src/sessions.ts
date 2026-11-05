@@ -33,7 +33,7 @@ import { acknowledgementRepairFrame } from "./claude-cost-repair.js";
 import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
-import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignControlForRunner } from "./campaign-authority.js";
+import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignControlForRunner, campaignLaunchRepository, campaignScopeRepositories } from "./campaign-authority.js";
 import { genericRequestScreenData, implementationQuestionScreenData, ownerDecisionScreenData, screenCredentialRequest, type CredentialScreenSurface } from "./credential-screen.js";
 import { DecisionRuntime, hubDecisionTransport, type DecisionOutcome } from "./decision-runtime.js";
 import { DecisionModelSettings } from "./decision-model-settings.js";
@@ -44,7 +44,7 @@ import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelec
 import type { CampaignScopeGrantReview, DecisionErrorClass, FullControlScopeGrant } from "@wollipog/protocol";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
-  everyOutstandingScopeDecision } from "./campaign-issue-scope.js";
+  everyOutstandingScopeDecision, participantScope, participantScopeRefusal, repositoryOutsideBoundary, scopeRequestOutsideBoundary } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
 import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, githubIssueClosureRefusal, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure,
@@ -54,6 +54,7 @@ import {
   REVIEW_FULL_REASON_LIMIT, REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
   compactReviewFinding, REVIEW_ROUND_REFUSALS, type ReviewLaunchPolicy, type ReviewSessionRequest, type ReviewSessionUpdate, type ReviewSessionView, type ReviewSessionsPage,
   type PullRequestWatchOutcome, type PullRequestWatchUpdate, type PullRequestWatchView,
+  campaignScopeForRepository, campaignScopeChangeGroups, campaignScopeChangeResult, campaignScopeHolds, type CampaignIssueScopeRepositoryView,
 } from "@wollipog/protocol";
 import { SESSION_REVIEW_JOB_ID_PATTERN, type SessionReviewJobArtifacts, type SessionReviewJobRequest, type SessionReviewJobView, type SessionReviewJobsPage,
   type SessionReviewJobUpdate } from "@wollipog/protocol";
@@ -340,6 +341,7 @@ import {
   claudeStableAliasFamily,
 } from "./claude-model-aliases.js";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
+import { inspectProjectLocation } from "./project-location-inspection.js";
 import { SessionPromptOutbox, REVIEW_CONTINUATION_UNSUPPORTED_REASON } from "./session-prompt-outbox.js";
 import { automationCommandDigest, canonicalAutomationCommandJson } from "./automation-command-outbox.js";
 import { withHoldAdviceFor } from "./session-command-permissions.js";
@@ -5164,21 +5166,34 @@ export class SessionsService {
       const epic = initialCampaignEpic(requestedText);
       if (epic !== null) orchestratorPolicy.issueScopeProposalEpic = epic;
     }
-    const campaignIssueNumbers = campaignController?.runnerId === req.runnerId &&
+    const sharesControllerWorkspace = campaignController?.runnerId === req.runnerId &&
         campaignController.workspaceId === workspaceId &&
-        (workspaceId !== null || this.db.getAdHocWorkspacePath(campaignController.id) === workspacePath)
-      ? campaignController.orchestratorPolicy?.issueNumbers
-      : undefined;
+        (workspaceId !== null || this.db.getAdHocWorkspacePath(campaignController.id) === workspacePath);
+    // A participant in another Location of a campaign repository gets that repository's part of the
+    // root's scope (#4118); one in no campaign repository gets none.
+    const scopeRootId = campaignController ? this.db.campaignRootForMember(campaignController.id) ?? campaignController.id : null;
+    const scopeRoot = scopeRootId ? this.db.getSession(scopeRootId) : null;
+    const participantRepository = !campaignController || sharesControllerWorkspace || !workspaceId || !scopeRoot?.orchestratorPolicy?.issueScope ? null
+      : this.db.campaignParticipantRepository(scopeRoot, { id: "", runnerId: req.runnerId, workspaceId });
+    const participantIssueScope = participantRepository && scopeRoot?.orchestratorPolicy?.issueScope
+      ? campaignScopeForRepository(scopeRoot.orchestratorPolicy.issueScope, participantRepository) : undefined;
+    const campaignIssueNumbers = sharesControllerWorkspace ? campaignController?.orchestratorPolicy?.issueNumbers : participantIssueScope?.issueNumbers;
+    if (orchestratorPolicy && participantRepository && participantRepository !== campaignLaunchRepository(scopeRoot!) &&
+        !runnerSupportsProtocol(runner.protocolVersion, "repositoryQualifiedIssueScope")) {
+      return capabilityFail(runnerCapabilityRequirementError(runner.protocolVersion, "repositoryQualifiedIssueScope", "issue scope in another campaign repository"));
+    }
     if (campaignController && campaignNeedsEpicScope(this.db, campaignController)) {
       const unsupported = scopeCompatibility(this.db, campaignController);
       if (unsupported) return capabilityFail(unsupported);
       return fail("Confirm the epic's authorized issue scope in Campaign Status before delegating work. Use get_campaign_issue_scope and request_campaign_issue_scope_change, then wait for human approval.", 409);
     }
-    const inheritedIssueScope = campaignController?.orchestratorPolicy?.issueScope ?? snapshotSpec?.orchestrator?.issueScope;
+    const controllerScope = campaignController?.orchestratorPolicy?.issueScope;
+    const inheritedIssueScope = participantIssueScope ?? (controllerScope ? campaignScopeForRepository(controllerScope, controllerScope.repository) : undefined) ??
+      snapshotSpec?.orchestrator?.issueScope;
     if (orchestratorPolicy && inheritedIssueScope && !runnerSupportsProtocol(runner.protocolVersion, "campaignIssueScopeChanges")) {
       return capabilityFail(campaignIssueScopeChangesRequirement(runner.protocolVersion));
     }
-    if (orchestratorPolicy && inheritedIssueScope && campaignController && !campaignIssueNumbers) return fail("A scoped Orchestrator participant must use the campaign's runner and repository workspace. Select that workspace or start an independent campaign.", 409);
+    if (orchestratorPolicy && inheritedIssueScope && campaignController && !campaignIssueNumbers) return fail("A scoped Orchestrator participant must run in a Location of one of the campaign's repositories. Select such a Location or start an independent campaign.", 409);
     if (orchestratorPolicy && inheritedIssueScope) orchestratorPolicy.issueScope = inheritedIssueScope;
     const orchestratorIssueNumbers = inheritedIssueScope?.issueNumbers ?? snapshotSpec?.orchestrator?.issueNumbers ??
       campaignIssueNumbers ??
@@ -5373,7 +5388,7 @@ export class SessionsService {
       ...(orchestratorPolicy ? { orchestrator: {
         ...orchestratorPolicy.execution,
         ...(orchestratorIssueNumbers.length || orchestratorPolicy.issueScope ? { issueNumbers: orchestratorPolicy.issueNumbers ?? orchestratorIssueNumbers } : {}),
-        ...(orchestratorPolicy.issueScope ? { issueScope: orchestratorPolicy.issueScope } : {}),
+        ...(orchestratorPolicy.issueScope ? { issueScope: campaignScopeForRepository(orchestratorPolicy.issueScope, orchestratorPolicy.issueScope.repository) } : {}),
         ...(orchestratorPolicy.control ? { control: campaignControlForRunner(orchestratorPolicy.control, runner.protocolVersion) } : {}),
       } } : {}),
       acpSessionContext,
@@ -8450,9 +8465,12 @@ export class SessionsService {
     if (session.orchestratorPolicy?.issueScope) {
       const campaignId = this.db.campaignRootForMember(sessionId);
       const campaign = campaignId ? this.db.getSession(campaignId) : null;
-      if (!campaign || !this.db.campaignSharesRepositoryWorkspace(campaign, session)) {
-        return fail("A scoped Orchestrator must restart in the campaign's runner and repository workspace. Restore its campaign workspace or start an independent campaign.", 409);
+      // Any Location of a campaign repository will do (#4118); outside the launch one it needs v290.
+      const refusal = campaign ? participantScopeRefusal(this.db, campaign, session) : null;
+      if (!campaign || refusal && !refusal.capability) {
+        return fail("A scoped Orchestrator must restart in a Location of one of the campaign's repositories. Restore its campaign workspace or start an independent campaign.", 409);
       }
+      if (refusal?.capability) return capabilityFail({ error: refusal.error, ...refusal.capability });
     }
     const supportsIssueScope = runnerSupportsProtocol(restartProtocolVersion, "orchestratorIssueScope");
     const issueScopeRefusal = () => capabilityFail<SessionView>(runnerCapabilityRequirementError(
@@ -8538,7 +8556,7 @@ export class SessionsService {
       ...(session.orchestratorPolicy
         ? { orchestrator: {
           ...session.orchestratorPolicy.execution,
-          ...(session.orchestratorPolicy.issueScope ? { issueScope: session.orchestratorPolicy.issueScope } : {}),
+          ...(session.orchestratorPolicy.issueScope ? { issueScope: campaignScopeForRepository(session.orchestratorPolicy.issueScope, session.orchestratorPolicy.issueScope.repository) } : {}),
           ...(session.orchestratorPolicy.issueNumbers?.length
             ? { issueNumbers: session.orchestratorPolicy.issueNumbers }
             : {}),
@@ -9172,8 +9190,8 @@ export class SessionsService {
       const issueScope = root.orchestratorPolicy?.issueScope;
       if (this.db.campaignDescendantIds(root.id).length) return fail("fixedBy relationships must be recorded before creating any campaign child", 409);
       if (callerSessionId !== root.id || !issueScope || request.fixedBy.some((link) =>
-        typeof link?.issue?.repository !== "string" || link.issue.repository.toLowerCase() !== issueScope.repository.toLowerCase() ||
-        !issueScope.issueNumbers.includes(link.issue.number))) return fail("fixedBy relationships must stay inside the root's established issue scope", 409);
+        typeof link?.issue?.repository !== "string" || !Number.isSafeInteger(link.issue.number) ||
+        !campaignScopeHolds(issueScope, link.issue))) return fail("fixedBy relationships must stay inside the root's established issue scope", 409);
     }
     return this.ledgerWrite(scope.data, () =>
       this.db.campaignWorkLedger.recordPlan(scope.data!.root.id, callerSessionId, request, Date.now()));
@@ -11237,7 +11255,7 @@ export class SessionsService {
       // #3539: a GitLab repository needs every participating runner to read GitLab issues.
       const gitlab = gitlabIssueCompatibility(this.db, root, response.repository);
       if (gitlab) return ok({ ...scopeView(this.db, root, response.repository.toLowerCase()), supported: false, ...compatibilityFields(gitlab) });
-      return ok({ ...scopeView(this.db, root, response.repository.toLowerCase()), candidates: response.candidates ?? [], ...(candidateMessage ? {candidateMessage} : {}) });
+      return ok({ ...scopeView(this.db, root, response.repository.toLowerCase(), this.scopeRepositoryStates(root, response.repository)), candidates: response.candidates ?? [], ...(candidateMessage ? {candidateMessage} : {}) });
     } catch { return fail("Campaign scope inspection requires an online runner with GitHub access. Reconnect the runner and retry.", 409); }
   }
 
@@ -11245,22 +11263,46 @@ export class SessionsService {
     const root = this.db.getSession(sessionId);
     if (!root?.orchestratorPolicy || this.db.campaignRootForMember(sessionId) !== sessionId || !canAccess(sessionId)) return fail("scope proposals require the root campaign", 403);
     if (human && (human.kind !== "human" || !this.db.isSessionOwner(human, sessionId))) return fail("Only the authenticated campaign owner can propose human scope authority", 403);
+    // A repository outside the campaign's is refused from the stored boundary, before any runner call (#4118).
+    const outside = scopeRequestOutsideBoundary(root, request);
+    if (outside) {
+      this.log.info(JSON.stringify({ event: "campaign_issue_scope_refused", sessionId, requestId: typeof request?.requestId === "string" ? request.requestId.slice(0, 256) : null,
+        reason: "repository_outside_boundary" }));
+      const refusal = repositoryOutsideBoundary(outside);
+      return { ok: false, status: refusal.status, error: refusal.error, errorDetails: refusal.errorDetails };
+    }
     const unsupported = scopeCompatibility(this.db, root);
     if (unsupported) return capabilityFail(unsupported);
+    // Every active Orchestrator participant runs in a Location of a campaign repository (#4118).
+    for (const member of scopeParticipants(this.db, root)) {
+      const refusal = participantScopeRefusal(this.db, root, member);
+      if (refusal?.capability) return capabilityFail({ error: refusal.error, ...refusal.capability });
+      if (refusal) return fail(refusal.error, refusal.status);
+    }
     const view = await this.campaignIssueScope(sessionId, undefined, canAccess, false);
     if (!view.ok || !view.data) return failAs(view);
     const gitlab = gitlabIssueCompatibility(this.db, root, view.data.repository);
     if (gitlab) return capabilityFail(gitlab);
     if (!view.data.supported) return fail(view.data.compatibilityMessage ?? "Campaign issue scope changes are unavailable.", 409);
     if (request?.expectedRevision !== view.data.revision) return fail("Campaign scope changed. Refresh and propose against the current revision.", 409);
-    for (const member of scopeParticipants(this.db, root)) {
-      if (!this.db.campaignSharesRepositoryWorkspace(root, member)) {
-        return fail("All active Orchestrator participants must use the campaign's runner and repository workspace before changing issue scope. Move or finish the other participants, then retry.", 409);
-      }
+    // A legacy campaign learns its launch repository from the runner; check the boundary again.
+    const allowed = new Set([view.data.repository.toLowerCase(), ...campaignScopeRepositories(root).map((entry) => entry.repository)]);
+    const late = [...request.additions ?? [], ...request.removals ?? []].find((ref) => ref && typeof ref.repository === "string" &&
+      campaignRepositoryLocation(ref.repository) && !allowed.has(ref.repository.toLowerCase()));
+    if (late) {
+      const refusal = repositoryOutsideBoundary(late.repository.toLowerCase());
+      return { ok: false, status: refusal.status, error: refusal.error, errorDetails: refusal.errorDetails };
     }
     const snapshot = scopeSnapshot(this.db, root, view.data.repository, request);
     if (!snapshot) return fail("Provide unique repository-qualified additions/removals, a current revision, and an explanation. Review supports at most 100 issues and 100 active child assignments; finish some child work or resolve outstanding requests before retrying a larger campaign.", 400);
     try {
+      // Each other repository's part is verified through one of its own Locations, never the
+      // root's runner (#4118). One that cannot be verified refuses the whole request.
+      for (const group of snapshot.otherRepositories ?? []) {
+        if (!group.additions.length && !group.removals.length) continue;
+        const failure = await this.verifyScopeRepositoryIssues(root, group.repository, group.additions);
+        if (failure) return fail(failure, 409);
+      }
       const requestId = `issue_scope_validate_${randomUUID()}`;
       const response = await this.hub.requestFromRunner(root.runnerId, requestId,
         { type: "campaign_issue_scope", operation: "inspect", requestId, sessionId, issues: snapshot.additions }, 60_000);
@@ -11285,7 +11327,11 @@ export class SessionsService {
       // Issue additions without lineage that the first message's scope grant cannot admit go to the
       // owner as this one typed request (#4102), with the owner's message and why, never refused
       // and never decided from text.
-      const grantReview = !human && snapshot.additions.length && !snapshot.lineage ? this.scopeGrantReview(latest) : undefined;
+      // Additions and the resulting size count every repository's part (#4118).
+      const groups = campaignScopeChangeGroups(snapshot);
+      const additionCount = groups.reduce((total, group) => total + group.additions.length, 0);
+      const otherAdditions = additionCount - snapshot.additions.length;
+      const grantReview = !human && additionCount && !snapshot.lineage ? this.scopeGrantReview(latest) : undefined;
       if (!human && boundary && boundary.operations.includes("campaign_issue_scope")) {
         // Each refusal names the one condition that failed, in a fixed sentence and code (#2940).
         const refuse = (code: CampaignScopeAdmissionFailure, details: Record<string, number> = {}): ServiceResult<WorkflowDecisionView> => {
@@ -11295,27 +11341,31 @@ export class SessionsService {
           return { ok: false, status: refusal.status, error: refusal.message, errorDetails: { code, ...details } };
         };
         const excludedReservation = snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined;
-        const scopeSize = snapshot.before.length + snapshot.additions.length - snapshot.removals.length;
+        const scopeSize = campaignScopeChangeResult(snapshot).length;
         const requested = scopeSize + reservedPublicationSlots(this.db, latest, excludedReservation);
         // The owner's approval of a failed or uncertain grant's proposal sets the derived limit that
         // grant could not, so only the limit it may reach applies here.
         const limit = this.db.campaignIssueLimit(sessionId,
           (grantReview ? grantReviewMaxIssues(latest.orchestratorPolicy, { grantReview }, boundary, scopeSize) : undefined) ?? boundary.issueAuthority!.maxIssues);
         if (requested > limit) return refuse("capacity_exhausted", { limit, requested });
-        let evidence: unknown = { removals: snapshot.removals };
+        let evidence: unknown = { removals: snapshot.removals, ...(snapshot.otherRepositories ? { otherRepositories: snapshot.otherRepositories } : {}) };
         if (grantReview) {
           // No admission: the decision is the owner's.
-        } else if (snapshot.additions.length) {
+        } else if (additionCount) {
           if (!snapshot.lineage) return refuse("lineage_missing");
           if (snapshot.lineage.kind === "epic") {
             if (!boundary.issueAuthority!.epics.includes(snapshot.lineage.epic)) return refuse("epic_not_authorized");
+            // The epic is the launch repository's, so its members are too.
+            if (otherAdditions) return refuse("epic_members_unverified");
             const members = await this.campaignIssueScope(sessionId, snapshot.lineage.epic, canAccess, false);
             if (!members.ok || members.data?.candidateMessage || !snapshot.additions.every((n) => members.data?.candidates?.some((c) =>
               c.issue.number === n && c.issue.repository.toLowerCase() === snapshot.repository && ["umbrella", "sub_issue", "member_checklist"].includes(c.source)))) return refuse("epic_members_unverified");
             evidence = { epic: snapshot.lineage.epic, members: members.data?.candidates };
           } else {
             if (!boundary.issueAuthority!.relatedFollowUps) return refuse("follow_ups_not_authorized");
-            if (snapshot.additions.length !== 1) return refuse("follow_up_not_single");
+            if (additionCount !== 1) return refuse("follow_up_not_single");
+            // A publication names its own repository; one in another repository is #4119's route.
+            if (otherAdditions) return refuse("publication_not_found");
             const grant = this.db.workflowDecisionByOccurrence(snapshot.lineage.publicationOccurrenceId);
             if (!grant || grant.controllingSessionId !== sessionId || grant.resourceSnapshot.category !== "follow_up_issue_publication" ||
                 grant.resourceSnapshot.repository !== snapshot.repository) return refuse("publication_not_found");
@@ -11382,6 +11432,41 @@ export class SessionsService {
     } catch { return fail("GitHub issue validation timed out or failed. Try a smaller explicit proposal and verify the runner's GitHub access, then retry.", 409); }
   }
 
+  /** Each campaign repository's state for a verified view (#4118): the launch repository was just
+   * verified through the campaign runner; another is verified when one of its boundary-verified
+   * Locations is online to verify changes through, and otherwise has no Location online. */
+  private scopeRepositoryStates(root: SessionView, launch: string): Map<string, CampaignIssueScopeRepositoryView["state"]> {
+    const states = new Map<string, CampaignIssueScopeRepositoryView["state"]>([[launch.toLowerCase(), "verified"]]);
+    for (const entry of campaignScopeRepositories(root)) {
+      if (!states.has(entry.repository)) states.set(entry.repository, this.onlineScopeLocation(root, entry.repository) ? "verified" : "no_location_online");
+    }
+    return states;
+  }
+
+  /** The first Location of a campaign repository whose runner is online, in the entry's order: the
+   * Project's default Location first (#4118). Null when none is online. */
+  private onlineScopeLocation(root: SessionView, repository: string): string | null {
+    const entry = campaignScopeRepositories(root).find((candidate) => candidate.repository === repository.toLowerCase());
+    for (const id of entry?.locationIds ?? []) {
+      const location = this.db.getProjectLocation(id);
+      if (location && location.availability !== "runner_removed" && this.hub.isRunnerOnline(location.runnerId)) return id;
+    }
+    return null;
+  }
+
+  /** Verify one other repository's part of a scope change through its own Location (#4118): the
+   * Location must still be that repository, and every addition must read as one of its issues. A
+   * fixed sentence naming the repository when it cannot; nothing is changed either way. */
+  private async verifyScopeRepositoryIssues(root: SessionView, repository: string, additions: readonly number[]): Promise<string | null> {
+    const locationId = this.onlineScopeLocation(root, repository);
+    if (!locationId) return `No Location of ${repository} is online, so its part of this scope change can't be verified. Nothing changed; retry once one of its Locations is online.`;
+    const inspection = await inspectProjectLocation({ db: this.db, hub: this.hub }, locationId, { issueNumbers: additions });
+    if (!inspection.ok || inspection.location.repository !== repository.toLowerCase()) {
+      return `The forge could not verify every proposed change in ${repository} through its Location. Nothing changed; check that Location's repository and gh or glab access, then retry.`;
+    }
+    return null;
+  }
+
   async synchronizeCampaignIssueScope(sessionId: string): Promise<boolean> {
     const root = this.db.getSession(sessionId);
     const scope = root?.orchestratorPolicy?.issueScope;
@@ -11390,8 +11475,9 @@ export class SessionsService {
     for (const member of scopeParticipants(this.db, root)) {
       try {
         const requestId = `issue_scope_sync_${randomUUID()}`;
+        // Each runner stores only its own Location repository's part, in the earlier shape (#4118).
         const result = await this.hub.requestFromRunner(member.runnerId, requestId,
-          { type: "campaign_issue_scope", operation: "synchronize", requestId, sessionId: member.id, scope,
+          { type: "campaign_issue_scope", operation: "synchronize", requestId, sessionId: member.id, scope: participantScope(this.db, root, member)!,
             ...(member.orchestratorPolicy?.control === undefined ? {} : {
               control: campaignControlForRunner(member.orchestratorPolicy.control, this.db.getRunner(member.runnerId)?.protocolVersion) }) }, 30_000);
         if (result.type !== "campaign_issue_scope_result" || !result.ok || result.sessionId !== member.id || result.revision !== scope.revision) synchronized = false;
@@ -12567,10 +12653,13 @@ export class SessionsService {
       }
       const unsupported = scopeCompatibility(this.db, currentChild, snapshot.repository);
       if (unsupported) return capabilityFail(unsupported);
+      // Every repository's part, so the recomputed snapshot covers the whole change (#4118).
+      const changeGroups = campaignScopeChangeGroups(snapshot);
       const request: CampaignIssueScopeRequest = { requestId: decision.requestId, expectedRevision: snapshot.expectedRevision,
-        additions: snapshot.additions.map((number) => ({ repository: snapshot.repository, number })),
-        removals: snapshot.removals.map((number) => ({ repository: snapshot.repository, number })), explanation: snapshot.explanation,
+        additions: changeGroups.flatMap((group) => group.additions.map((number) => ({ repository: group.repository, number }))),
+        removals: changeGroups.flatMap((group) => group.removals.map((number) => ({ repository: group.repository, number }))), explanation: snapshot.explanation,
         ...(snapshot.lineage === undefined ? {} : { lineage: snapshot.lineage }) };
+      const scopeSize = campaignScopeChangeResult(snapshot).length;
       const latest = scopeSnapshot(this.db, currentChild, snapshot.repository, request);
       if (latest && snapshot.issueAdmission) latest.issueAdmission = snapshot.issueAdmission;
       if (latest && snapshot.verifiedPublications) latest.verifiedPublications = snapshot.verifiedPublications;
@@ -12581,7 +12670,7 @@ export class SessionsService {
       if (snapshot.verifiedPublications?.some((p) => this.db.admittedCampaignPublicationIssue(childSessionId, p.publicationOccurrenceId) !== null)) return fail("Publication lineage was already admitted; refresh the scope proposal", 409);
       const boundary = issueBoundary(currentChild);
       const reserved = reservedPublicationSlots(this.db, currentChild, snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined);
-      if (authority === "orchestrator" && (!boundary || snapshot.before.length + snapshot.additions.length - snapshot.removals.length + reserved >
+      if (authority === "orchestrator" && (!boundary || scopeSize + reserved >
           this.db.campaignIssueLimit(childSessionId, boundary.issueAuthority!.maxIssues))) return fail("Scope capacity or its human boundary changed before resolution", 409);
       // A Human approval re-mints the Full Control boundary around the scope it establishes (#2940),
       // within the scope limit that boundary names, counting the slots consumed publications still
@@ -12590,11 +12679,11 @@ export class SessionsService {
       // The owner approving a failed or uncertain grant's proposal sets the derived limit it could not (#4102).
       const maxIssues = authority === "human" && control?.mode === "full_control"
         ? grantReviewMaxIssues(currentChild.orchestratorPolicy, snapshot, control.boundary,
-          snapshot.before.length + snapshot.additions.length - snapshot.removals.length) ?? control.boundary.issueAuthority?.maxIssues
+          scopeSize) ?? control.boundary.issueAuthority?.maxIssues
         : undefined;
       const limit = maxIssues === undefined ? undefined : this.db.campaignIssueLimit(childSessionId, maxIssues);
       const held = limit === undefined ? 0 : this.db.unsettledPublicationSlots(childSessionId, scopeSettlements(snapshot));
-      const total = snapshot.before.length + snapshot.additions.length - snapshot.removals.length + held;
+      const total = scopeSize + held;
       if (limit !== undefined && total > limit) {
         return fail(`This change would give the campaign ${total} issues${held ? `, counting ${held} published follow-up${held === 1 ? "" : "s"} not yet in scope` : ""}, ` +
           `more than the ${limit} its Full Control boundary allows. Deny it and propose fewer issues, or Revoke Full Control in ` +

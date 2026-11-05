@@ -481,3 +481,20 @@ test("same-revision synchronization with a changed origin withdraws live issue p
     assert.deepEqual(policy.issueNumbers,[issue]);
   } finally {active.delete(sessionId);}
 });
+
+test("a participant in another boundary repository stores its own repository's part of the scope (#4118)", async (t) => {
+  const f = fixture(t);
+  // This runner's origin is example/project; the campaign launched in owner/app.
+  const boundary = (repositories: Array<{ repository: string; locationIds: string[] }>): import("@wollipog/protocol").CampaignControl => ({ mode: "full_control", boundary: {
+    version: 1, revision: 2, issueScopeRevision: 1, repository: "owner/app", objective: "Deliver across repositories",
+    authorizedByUserId: "owner", authorizedAt: 2000, operations: ["campaign_issue_scope"], delegatablePolicyIds: [], repositories } });
+  const scope = { repository: "example/project", issueNumbers: [5], revision: 1, authorizedByUserId: "owner", authorizedAt: 1000 };
+  const outside = await f.scope({ operation: "synchronize", scope, control: boundary([{ repository: "owner/app", locationIds: ["loc_app"] }]) });
+  assert.equal(outside.ok, false, "a boundary without this runner's repository is refused");
+  assert.match(outside.error ?? "", /another repository/u);
+  const synchronized = await f.scope({ operation: "synchronize", scope, control: boundary([
+    { repository: "owner/app", locationIds: ["loc_app"] }, { repository: "Example/Project", locationIds: ["loc_project"] }]) });
+  assert.equal(synchronized.ok, true, synchronized.error ?? "");
+  const stored = f.diskMeta().orchestrator!;
+  assert.deepEqual([stored.issueScope?.repository, stored.issueNumbers], ["example/project", [5]]);
+});
