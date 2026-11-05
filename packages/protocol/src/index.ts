@@ -870,7 +870,14 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      advertises `decisionCalls` on Claude Code and Codex App Server. An older runner never
 //      receives the call: the control plane records a non-transient `runner_incapable` failure and
 //      the caller's one typed, person-owned request follows.
-export const PROTOCOL_VERSION = 285;
+// 287: a regular session recovers from a repository mismatch (#4138). request_location_switch
+//      (`wollipog location-switch`) asks the control plane to inspect the session's Project
+//      Locations and create a human-owned `location_switch` workflow decision naming the verified
+//      Locations of the task's repository; only the session's owner decides it, and the requester
+//      executes the exact approved option. Orchestrators and child sessions are refused with their
+//      role's guidance. Older runners and control planes refuse the tool by name. (286 is claimed
+//      by an open pull request.)
+export const PROTOCOL_VERSION = 287;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -977,6 +984,7 @@ export const SESSION_NAMING_TRANSPORT_MARGIN_MS = SESSION_NAMING_CLEANUP_BUDGET_
 export const SESSION_NAMING_SUPERVISION_MARGIN_MS = SESSION_NAMING_TRANSPORT_MARGIN_MS + 1_000;
 export { buildConversationHandoff, handoffDestinationError, inPlaceHandoffTurns } from "./conversation-handoff.js";
 export * from "./automation-messages.js";
+export * from "./location-switch.js";
 export { PROMPT_TITLE_MAX, titleFromPrompt } from "./session-title.js";
 export { plainTextPreview } from "./plain-text-preview.js";
 export * from "./campaign-work-ledger.js";
@@ -1258,6 +1266,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * and a one-way handoff of an Orchestrator-owned occurrence to that owner. Checked against the
    * root's runner by the control plane and against the control plane by the runner. */
   ownerDecisions: 281,
+  /** (#4138) A regular session's request_location_switch, checked against the requester's runner by
+   * the control plane and against the control plane by the runner. */
+  sessionLocationSwitch: 287,
   /** v239 runner answers `gitlab_merge_preflight`, which a GitLab `pr_merge` consume requires (#3602). */
   gitlabMergeDecisions: 239,
   /** v242 runner answers `github_merge_preflight`, the closing-reference check of a GitHub merge (#3713). */
@@ -2807,8 +2818,11 @@ export type DelegatableWorkflowDecisionCategory = typeof WORKFLOW_DECISION_CATEG
  * creates it when the Orchestrator accepts that follow-up; only the campaign's Human decides it. */
 /** `owner_decision` (#4064): a Full Control root's question for its campaign's owner, created only
  * through request_owner_decision. Always the person's: no agent can answer, approve or resolve it. */
+/** `location_switch` (#4138): a regular session's request to continue its task in another Project
+ * Location of the repository it belongs to. Created only through request_location_switch; only the
+ * session's owner decides it, and the requester executes the exact approved target. */
 export type WorkflowDecisionCategory = DelegatableWorkflowDecisionCategory | "issue_closure" | "campaign_issue_scope" | "automation_creation" |
-  "campaign_follow_up_admission" | "owner_decision";
+  "campaign_follow_up_admission" | "owner_decision" | "location_switch";
 export type WorkflowDecisionAuthority = "human" | "orchestrator";
 
 export type ParentControlDecisionPolicy = Record<DelegatableWorkflowDecisionCategory, WorkflowDecisionAuthority>;
@@ -5388,6 +5402,7 @@ export const OWNER_DECISION_LIMITS = { question: 4000, material: 8000, minOption
 
 export type WorkflowDecisionResourceSnapshot =
   | AutomationCreationSnapshot
+  | import("./location-switch.js").LocationSwitchSnapshot
   | GithubIssueClosureSnapshot
   | CampaignIssueScopeSnapshot
   | CampaignFollowUpAdmissionSnapshot
@@ -5581,6 +5596,8 @@ export interface WorkflowDecisionView {
   forgeAction?: import("./forge-decision-action.js").WorkflowDecisionForgeAction;
   issueClosureResult?: GithubIssueClosureResult;
   automationCreationResult?: AutomationCreationResult;
+  /** (#4138) Where an approved Location switch continued the task. */
+  locationSwitchResult?: import("./location-switch.js").LocationSwitchResult;
   /** v242 (#3713): what the child's runner read from GitHub when a GitHub merge was requested.
    * Absent when the runner predates the check, so the closures it would make are unknown. */
   closingReferenceCheck?: PullRequestClosingReferenceCheck;
@@ -5670,6 +5687,9 @@ export interface PendingApproval {
   standingAdmissionFailure?: "provider_delivery_unavailable";
   /** CP-derived mandatory human rule on this occurrence. Provider input cannot set it. */
   humanRequired?: boolean;
+  /** CP-derived Decision Model screen of this request's text (#4104). The control plane overwrites
+   * it on every Full Control evaluation, so a runner or provider value is never read. */
+  credentialScreen?: import("./campaign-authority.js").CredentialScreenFact;
   /** Runner bridge envelope, not question/tool input. Missing provenance fails closed in Full
    * Control when sensitivity cannot otherwise be verified. */
   requestSource?: CampaignRequestSource;
@@ -7123,7 +7143,7 @@ export interface SessionNamingConnectionTestResult {
 /** A typed control-plane decision (#4101). Each kind has a fixed, versioned prompt and an output
  * schema registered in the control plane. `probe` is the fixed Test Decision Model question;
  * the Full Control callers (#4102–#4104) add their kinds here with their prompts. */
-export type DecisionKind = "probe";
+export type DecisionKind = "probe" | "credential_screen";
 
 /** Why one Decision attempt failed. The control plane, not the runner, decides what is transient:
  * see DECISION_TRANSIENT_ERROR_CLASSES. */
@@ -7265,9 +7285,26 @@ export interface DecisionModelTestResult {
 }
 
 /** Campaign Status: its Decision calls and their separate usage. Never managed worker accounting. */
+/** What a campaign decision affected (#4104), so Campaign Status shows its verdict beside it. */
+export interface CampaignDecisionSubject {
+  /** The session whose request was screened. */
+  sessionId: string;
+  surface: "implementation_question" | "provider_question" | "tool_request" | "owner_decision";
+  /** The affected request: a workflow decision request id, or a provider request occurrence id. */
+  requestId: string;
+  /** The owner's classification of an uncertain or failed screen. */
+  classification?: "decline" | "orchestrator";
+}
+
+/** Owner classification of a question the Decision Model could not screen (#4104). It never
+ * carries an answer to the question itself. */
+export interface ClassifyCampaignDecisionRequest {
+  classification: "decline" | "orchestrator";
+}
+
 export interface CampaignDecisionsResponse {
   campaignSessionId: string;
-  decisions: DecisionOccurrenceView[];
+  decisions: Array<DecisionOccurrenceView & { subject?: CampaignDecisionSubject }>;
   usage: DecisionUsageView & { calls: number; unpricedCalls: number };
 }
 

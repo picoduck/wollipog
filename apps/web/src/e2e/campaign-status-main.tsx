@@ -472,8 +472,41 @@ const scopeCompatibility = scopeRequirement ? (({ error, ...versions }) =>
   ({ supported: false, canPropose: false, compatibilityMessage: error, ...versions }))(scopeRequirement)
   : { supported: true, canPropose: true };
 
+/** `screen=1`: the question screen's checks (#4104), one of them waiting for the owner to classify. */
+const decisionUsage = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUsd: 0 };
+let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["decisions"] = params.get("screen") === "1" ? [
+  { occurrenceId: "dec_keys", kind: "credential_screen", promptVersion: "credential_screen.v1", state: "decided", verdict: "discusses",
+    reason: "It asks which keyboard keys the Side Panel tools should use; nothing is handed over.", inputDigests: {}, attempts: [],
+    usage: decisionUsage, createdAt: NOW - 240_000, subject: { sessionId: "s_child", surface: "implementation_question", requestId: "keys" } },
+  { occurrenceId: "dec_token", kind: "credential_screen", promptVersion: "credential_screen.v1", state: "decided", verdict: "ask",
+    reason: "It asks whoever answers to paste a GitHub token.", inputDigests: {}, attempts: [],
+    usage: decisionUsage, createdAt: NOW - 180_000, subject: { sessionId: "s_child", surface: "provider_question", requestId: "token" } },
+  { occurrenceId: "dec_sessions", kind: "credential_screen", promptVersion: "credential_screen.v1", state: "failed", failureClass: "timed_out",
+    inputDigests: {}, attempts: [], usage: decisionUsage, createdAt: NOW - 60_000,
+    subject: { sessionId: "s_child", surface: "implementation_question", requestId: "sessions" } },
+  ...(params.get("owner") === "1" ? [{ occurrenceId: "dec_owner", kind: "credential_screen" as const, promptVersion: "credential_screen.v1",
+    state: "uncertain" as const, verdict: "uncertain", reason: "It may ask the owner to sign in to the provider.", inputDigests: {}, attempts: [],
+    usage: decisionUsage, createdAt: NOW - 30_000, subject: { sessionId: "s_root", surface: "owner_decision" as const, requestId: "owner" } }] : []),
+] : [];
+
 const client = {
   ...api,
+  // `decisions=1` adds three Decision Model calls for the Decision Model section (#4101); the
+  // credential checks stay with the Question Screen section (#4104).
+  campaignDecisions: async (id: string) => params.get("decisions") === "1"
+    ? (() => {
+        const fixture = campaignDecisionsFixture(id);
+        return { ...fixture, decisions: [...screenDecisions, ...fixture.decisions],
+          usage: { ...fixture.usage, calls: fixture.usage.calls + screenDecisions.length } };
+      })()
+    : ({ campaignSessionId: id, decisions: screenDecisions,
+        usage: { ...decisionUsage, calls: screenDecisions.length, unpricedCalls: 0 } }),
+  classifyCampaignDecision: async (_id: string, occurrenceId: string, classification: "decline" | "orchestrator") => {
+    (window as unknown as { __CLASSIFIED__: unknown }).__CLASSIFIED__ = { occurrenceId, classification };
+    screenDecisions = screenDecisions.map((decision) => decision.occurrenceId === occurrenceId
+      ? { ...decision, subject: { ...decision.subject!, classification } } : decision);
+    return screenDecisions.find((decision) => decision.occurrenceId === occurrenceId)!.subject!;
+  },
   campaignIssueScope: async (id: string) => params.get("scope") === "unsupported-target" ? api.campaignIssueScope(id)
     : ({ campaignSessionId: id, repository: "team/repo", issueNumbers: [], revision: 0,
     ...scopeCompatibility, outsideScope: [{ workItemId: "scope-fixture", title: "Member work", issue: { repository: "team/repo", number: 124 }, sessionId: "s_child" }],
@@ -497,9 +530,6 @@ const client = {
   },
 
   childSessions: () => Promise.reject(new ApiError("No registry in this fixture.", 404)),
-  // `decisions=1` shows three Decision Model calls; otherwise there are none and the section stays hidden (#4101).
-  campaignDecisions: async (id: string) => params.get("decisions") === "1" ? campaignDecisionsFixture(id) : ({ campaignSessionId: id, decisions: [],
-    usage: { calls: 0, inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUsd: 0, unpricedCalls: 0 } }),
   campaignWorkItems: async (_id: string, query: string) => {
     queries.push(query);
     if (params.get("refresh") === "failing" && queries.length > 1) {

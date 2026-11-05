@@ -10,6 +10,7 @@ import type {
   CampaignCostSummary,
   CampaignCostValue,
   CampaignDecisionsResponse,
+  CampaignDecisionSubject,
   CampaignForgeRefreshResponse,
   CampaignMetric,
   CampaignPullRequestRef,
@@ -202,8 +203,12 @@ export function registerCampaignStatusRoutes(
     if (!read) return reply;
     const response: CampaignDecisionsResponse = {
       campaignSessionId: read.rootId,
-      decisions: db.listCampaignDecisionOccurrences(read.rootId).map((occurrence) =>
-        decisionOccurrenceView(occurrence, db.listDecisionAttempts(occurrence.occurrenceId))),
+      decisions: db.listCampaignDecisionOccurrences(read.rootId).map((occurrence) => {
+        // What the decision affected (#4104), so its verdict reads beside that request.
+        const { campaignSessionId: _root, ...subject } = db.campaignDecisionSubject(occurrence.occurrenceId) ?? {};
+        return { ...decisionOccurrenceView(occurrence, db.listDecisionAttempts(occurrence.occurrenceId)),
+          ...("sessionId" in subject ? { subject: subject as CampaignDecisionSubject } : {}) };
+      }),
       usage: db.campaignDecisionUsage(read.rootId),
     };
     return reply.send(response);

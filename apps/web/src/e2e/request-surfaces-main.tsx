@@ -10,6 +10,7 @@ import {
   type PendingApproval,
   type SessionView,
   type AutomationCreationSnapshot,
+  type LocationSwitchSnapshot,
 } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -338,6 +339,39 @@ function automationCreationSession(): SessionView {
   return { ...base, title: "Automation Creation", pendingApproval: { ...base.pendingApproval!, title: "Create Automation Approval Required",
     context: { input: JSON.stringify(snapshot) }, workflowDecision: { ...base.pendingApproval!.workflowDecision!,
       category: "automation_creation", resourceSnapshot: snapshot, controllingSessionId: base.id, authority: "human" } } };
+}
+
+/** `scenario=location-switch` (#4138): a regular session's repository mismatch, with `locations=2`
+ * for a second matching Location on another machine and `unavailable=1` for one that cannot be used. */
+function locationSwitchSession(): SessionView {
+  const base = evidenceSession();
+  const locations = Number(query.get("locations") ?? "1");
+  const candidates = [
+    { locationId: "loc-docs", name: "Docs Site", runnerId: "workstation", machineName: "Workstation", workspaceId: "docs",
+      path: "/home/dev/src/docs", repository: "acme/docs", sameRunner: true, actions: ["new_session" as const] },
+    { locationId: "loc-docs-laptop", name: "Docs Site (Laptop)", runnerId: "laptop", machineName: "Laptop", workspaceId: "docs",
+      path: "/Users/dev/src/docs", repository: "acme/docs", sameRunner: false, actions: ["new_session" as const] },
+  ].slice(0, locations);
+  const snapshot: LocationSwitchSnapshot = { category: "location_switch", repository: "acme/docs",
+    reason: "Issue acme/docs#12 is in the documentation repository, and this session runs in acme/app.",
+    handoff: "Fix the broken install link reported in acme/docs#12.\nNothing has been changed yet; no branch or pull request exists.",
+    trigger: query.get("trigger") === "review" ? "review" : "early", projectId: "acme", projectName: "Acme",
+    current: { locationId: "loc-app", name: "App", runnerId: "workstation", machineName: "Workstation", workspaceId: "app",
+      path: "/home/dev/src/app", repository: "acme/app" },
+    candidates,
+    unavailable: query.get("unavailable") === "1"
+      ? [{ locationId: "loc-mirror", name: "Docs Mirror", machineName: "Build Server", reason: "The Location's machine is offline." }] : [],
+    options: candidates.map((candidate) => ({ optionId: `new_session:${candidate.locationId}`, label: "Start a New Session",
+      description: `${candidate.name} on ${candidate.machineName}` })),
+    targetDigest: "a".repeat(64), expiresAt: Date.now() + 86_400_000 };
+  return { ...base, title: "App Session", pendingApproval: { ...base.pendingApproval!, title: "Location Switch Approval Required",
+    context: { toolName: "Typed Workflow Decision", input: JSON.stringify(snapshot) },
+    options: [
+      ...snapshot.options.map((option) => ({ optionId: option.optionId, name: option.label, description: option.description, kind: "allow_once" as const })),
+      { optionId: "__workflow_deny__", name: "Stay Here", kind: "reject_once" as const },
+    ],
+    workflowDecision: { ...base.pendingApproval!.workflowDecision!, category: "location_switch", resourceKey: "location_switch:acme/docs",
+      resourceSnapshot: snapshot, controllingSessionId: base.id, sessionId: base.id, policyRevision: 0, authority: "human" } } };
 }
 
 function standaloneApprovalSession(): SessionView {
@@ -862,7 +896,7 @@ function ReadingKeys({ scrollRef }: {
 function Fixture() {
   const [keyboard, updateKeyboard] = useState(keyboardOpen);
   setKeyboard = updateKeyboard;
-  const [session, setSession] = useState(() => scenario === "automation-creation" ? automationCreationSession() : scenario === "issue-scope" ? issueScopeSession() : scenario === "follow-up-admission" ? followUpAdmissionSession() : scenario === "follow-up-rebinding" ? followUpAdmissionSession(true) : scenario === "issue-closure-refused" ? issueClosureSession(true) : scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
+  const [session, setSession] = useState(() => scenario === "automation-creation" ? automationCreationSession() : scenario === "location-switch" ? locationSwitchSession() :scenario === "issue-scope" ? issueScopeSession() : scenario === "follow-up-admission" ? followUpAdmissionSession() : scenario === "follow-up-rebinding" ? followUpAdmissionSession(true) : scenario === "issue-closure-refused" ? issueClosureSession(true) : scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
     ? continuationSession()
     : scenario === "held" || scenario === "both"
     ? heldCampaignSession()

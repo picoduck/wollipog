@@ -25,6 +25,7 @@ export function rootHelp(): string {
     "  worktree            Create, attach, select, and discard session worktrees",
     "  artifact            Attach an image file to a session without passing its bytes through the model",
     "  automation          Propose, inspect, and create an automation with human approval",
+    "  location-switch     Ask your person to continue a task in its repository's Project Location",
     "  decision            Request, read, consume, execute, reconcile, and withdraw typed workflow decisions",
     "  issue-closure       Request human approval and execute one campaign issue closure",
     "  campaign            Record and read an Orchestrator campaign's work ledger",
@@ -314,6 +315,8 @@ function helpForTopic(topic: string): string | null {
       return issueClosureHelp();
     case "automation":
       return "Usage: wollipog automation request --proposal '<json>' [--json]\n       wollipog automation get <occurrence-id> [--json]\n       wollipog automation execute <occurrence-id> --digest <resource-digest> [--json]\nNormal and Orchestrator sessions propose exact configurations for human approval. Request returns a pending decision; execute creates only the unchanged approved configuration. Reuse the same request/occurrence after an uncertain response. No automation administration or approval commands are exposed.";
+    case "location-switch":
+      return "Usage: wollipog location-switch request --request '<json>' [--json]\n       wollipog location-switch get <occurrence-id> [--json]\n       wollipog location-switch execute <occurrence-id> --digest <resource-digest> [--json]\nA regular session whose task belongs to another repository asks its person to continue in a verified Project Location of that repository. The request names requestId, repository, reason, handoff and optionally trigger (early, worktree_attach or review). Only the person approves; execute carries out exactly the Location and action they chose. Orchestrators and child sessions are refused: they dispatch or report instead.";
     case "campaign":
       return campaignHelp();
     case "pr":

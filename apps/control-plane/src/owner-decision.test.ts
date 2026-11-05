@@ -7,6 +7,7 @@ import { Hub } from "./hub.js";
 import type { HumanPrincipal } from "./identity.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { SessionsService } from "./sessions.js";
+import { fakeScreenRuntime } from "./credential-screen-test-fixture.js";
 
 /** Owner decisions (#4064): a Full Control root hands a decision its owner kept to that owner as a
  * typed request only a person can answer, without parking the root. */
@@ -32,6 +33,10 @@ function harness(options: { full?: boolean; runnerProtocol?: number } = {}) {
   hub.isRunnerOnline = () => true; hub.sessionChangedById = () => {};
   hub.sendToRunner = (_runner, message) => { toRunner.push(message); return true; };
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
+  // A fake Decision Model (#4104): `ask` only for request texts a test lists, `discusses` otherwise.
+  const asking = new Set<string>();
+  svc.setDecisionRuntime(fakeScreenRuntime(db, (request) =>
+    [...asking].some((text) => JSON.stringify(request).includes(text)) ? { verdict: "ask" } : { verdict: "discusses" }).runtime);
   if (options.full !== false) {
     const enabled = svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #100",
       operations: ["implementation_question", "pr_merge", "question", "tool_approval", "policy_ask"], delegatablePolicyIds: [] }, 1, principal);
@@ -56,13 +61,13 @@ function harness(options: { full?: boolean; runnerProtocol?: number } = {}) {
     ...(db.raw().prepare("SELECT payload_json FROM session_prompt_commands WHERE session_id=?").all(sessionId) as Array<{ payload_json: string }>)
       .map((row) => (JSON.parse(row.payload_json) as { text: string }).text),
   ];
-  return { db, svc, principal, owner, ask, merge, rootResolve, prompts };
+  return { db, svc, principal, owner, ask, merge, rootResolve, prompts, asking };
 }
 
-test("a Full Control root asks its owner a typed decision that only the owner can answer (#4064)", () => {
+test("a Full Control root asks its owner a typed decision that only the owner can answer (#4064)", async () => {
   const h = harness();
   try {
-    const asked = h.ask();
+    const asked = await h.ask();
     assert.ok(asked.ok && asked.data, asked.error ?? "created");
     const decision = asked.data;
     assert.equal(decision.category, "owner_decision");
@@ -98,10 +103,10 @@ test("a Full Control root asks its owner a typed decision that only the owner ca
   } finally { h.db.close(); }
 });
 
-test("an owner decision does not park the root or hold other campaign work (#4064)", () => {
+test("an owner decision does not park the root or hold other campaign work (#4064)", async () => {
   const h = harness();
   try {
-    const asked = h.ask();
+    const asked = await h.ask();
     assert.ok(asked.ok && asked.data, asked.error ?? "created");
     const root = h.db.getSession("root")!;
     assert.equal(root.status, "running", "the root's turn keeps going");
@@ -136,7 +141,7 @@ test("an owner decision does not park the root or hold other campaign work (#406
   } finally { h.db.close(); }
 });
 
-test("handing an Orchestrator-owned occurrence to the owner is one way (#4064)", () => {
+test("handing an Orchestrator-owned occurrence to the owner is one way (#4064)", async () => {
   const h = harness();
   try {
     const twin = h.merge("merge-7-early", "pr-7-early");
@@ -181,10 +186,10 @@ test("handing an Orchestrator-owned occurrence to the owner is one way (#4064)",
   } finally { h.db.close(); }
 });
 
-test("a root's own handed decision stops holding the root (#4064)", () => {
+test("a root's own handed decision stops holding the root (#4064)", async () => {
   const h = harness();
   try {
-    const own = h.svc.createWorkflowDecision("root", { requestId: "layout", resourceKey: "layout", resourceSnapshot: {
+    const own = await h.svc.createWorkflowDecisionWithVideo("root", { requestId: "layout", resourceKey: "layout", resourceSnapshot: {
       category: "implementation_question", question: "Which layout should the status page use?",
       options: [{ optionId: "stacked", label: "Stacked" }, { optionId: "split", label: "Split" }] } });
     assert.ok(own.ok && own.data);
@@ -200,46 +205,47 @@ test("a root's own handed decision stops holding the root (#4064)", () => {
   } finally { h.db.close(); }
 });
 
-test("owner decisions exist only for a Full Control root on a current runner (#4064)", () => {
+test("owner decisions exist only for a Full Control root on a current runner (#4064)", async () => {
   const custom = harness({ full: false });
   try {
-    assert.equal(custom.ask().status, 409, "a Custom campaign is unchanged");
+    assert.equal((await custom.ask()).status, 409, "a Custom campaign is unchanged");
     const merge = custom.merge("merge-7");
     assert.ok(merge.ok && merge.data);
     assert.equal(custom.svc.handWorkflowDecisionToOwner("root", merge.data.occurrenceId, { reason: "x", sessionId: "child" }).status, 409);
   } finally { custom.db.close(); }
   const older = harness({ runnerProtocol: 280 });
   try {
-    const refused = older.ask();
+    const refused = await older.ask();
     assert.equal(refused.status, 409);
     assert.match(refused.error!, /owner decisions/u);
   } finally { older.db.close(); }
   const h = harness();
   try {
     // A child cannot ask, and nobody can create one through the generic request route.
-    assert.equal(h.svc.createOwnerDecision("child", { requestId: "c", resourceKey: "c", question: "Q?",
-      options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] }).status, 409);
+    assert.equal((await h.svc.createOwnerDecision("child", { requestId: "c", resourceKey: "c", question: "Q?",
+      options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] })).status, 409);
     assert.equal(h.svc.createWorkflowDecision("root", { requestId: "g", resourceKey: "g", resourceSnapshot: { category: "owner_decision",
       question: "Q?", options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } }).status, 403);
     // Full Control asks nobody for a credential value, the owner included.
-    const secret = h.svc.createOwnerDecision("root", { requestId: "s", resourceKey: "s", question: "Please paste your API key here",
+    h.asking.add("Please paste your API key here");
+    const secret = await h.svc.createOwnerDecision("root", { requestId: "s", resourceKey: "s", question: "Please paste your API key here",
       options: [{ optionId: "a", label: "Done" }, { optionId: "b", label: "Skip" }] });
     assert.equal(secret.status, 403);
   } finally { h.db.close(); }
 });
 
-test("a handed question recreated under a new key stays the owner's (#4064 review)", () => {
+test("a handed question recreated under a new key stays the owner's (#4064 review)", async () => {
   const h = harness();
   try {
     const snapshot = { category: "implementation_question" as const, question: "Which layout should the status page use?",
       options: [{ optionId: "stacked", label: "Stacked" }, { optionId: "split", label: "Split" }] };
-    const own = h.svc.createWorkflowDecision("root", { requestId: "layout-1", resourceKey: "layout", resourceSnapshot: snapshot });
+    const own = await h.svc.createWorkflowDecisionWithVideo("root", { requestId: "layout-1", resourceKey: "layout", resourceSnapshot: snapshot });
     assert.ok(own.ok && own.data);
     assert.ok(h.svc.handWorkflowDecisionToOwner("root", own.data.occurrenceId, { reason: "The owner kept the layout" }).ok);
     assert.ok(h.svc.withdrawWorkflowDecision("root", own.data.occurrenceId, { reason: "Ask again" }).ok);
     for (const [requestId, resourceKey, question] of [["layout-2", "another-key", snapshot.question],
       ["layout-3", "third-key", "  which LAYOUT should the status page   use? "]] as const) {
-      const again = h.svc.createWorkflowDecision("root", { requestId, resourceKey, resourceSnapshot: { ...snapshot, question } });
+      const again = await h.svc.createWorkflowDecisionWithVideo("root", { requestId, resourceKey, resourceSnapshot: { ...snapshot, question } });
       assert.ok(again.ok && again.data, again.error ?? "created");
       assert.deepEqual([again.data.authority, again.data.authorityEvaluation?.reason], ["human", "owner_kept"], resourceKey);
       assert.equal(h.rootResolve("root", again.data, "split").ok, false, "the root cannot decide it");
@@ -255,12 +261,12 @@ test("a handed question recreated under a new key stays the owner's (#4064 revie
   } finally { h.db.close(); }
 });
 
-test("handing a root's blocking decision to the owner clears the barrier while other owner cards wait (#4064 review)", () => {
+test("handing a root's blocking decision to the owner clears the barrier while other owner cards wait (#4064 review)", async () => {
   const h = harness();
   try {
-    const asked = h.ask();
+    const asked = await h.ask();
     assert.ok(asked.ok);
-    const own = h.svc.createWorkflowDecision("root", { requestId: "layout", resourceKey: "layout", resourceSnapshot: {
+    const own = await h.svc.createWorkflowDecisionWithVideo("root", { requestId: "layout", resourceKey: "layout", resourceSnapshot: {
       category: "implementation_question", question: "Which layout should the status page use?",
       options: [{ optionId: "stacked", label: "Stacked" }, { optionId: "split", label: "Split" }] } });
     assert.ok(own.ok && own.data);
@@ -276,11 +282,11 @@ test("handing a root's blocking decision to the owner clears the barrier while o
   } finally { h.db.close(); }
 });
 
-test("a root resolving its own blocking decision leaves the pause while an owner decision waits (#4064 review)", () => {
+test("a root resolving its own blocking decision leaves the pause while an owner decision waits (#4064 review)", async () => {
   const h = harness();
   try {
-    assert.ok(h.ask().ok);
-    const own = h.svc.createWorkflowDecision("root", { requestId: "layout", resourceKey: "layout", resourceSnapshot: {
+    assert.ok((await h.ask()).ok);
+    const own = await h.svc.createWorkflowDecisionWithVideo("root", { requestId: "layout", resourceKey: "layout", resourceSnapshot: {
       category: "implementation_question", question: "Which layout should the status page use?",
       options: [{ optionId: "stacked", label: "Stacked" }, { optionId: "split", label: "Split" }] } });
     assert.ok(own.ok && own.data);

@@ -1219,6 +1219,12 @@ export function createApiClient(transport: ApiTransport) {
   /** The campaign's Decision Model checks (#4101, #4104), each beside the request it affected. */
   campaignDecisions: (id: string, signal?: AbortSignal) =>
     req<import("@wollipog/protocol").CampaignDecisionsResponse>(`/api/sessions/${encodeURIComponent(id)}/campaign/decisions`, { signal }),
+  /** The campaign owner's classification of a question the Decision Model could not screen (#4104). */
+  classifyCampaignDecision: (id: string, occurrenceId: string, classification: "decline" | "orchestrator") =>
+    req<import("@wollipog/protocol").CampaignDecisionSubject>(
+      `/api/sessions/${encodeURIComponent(id)}/campaign/decisions/${encodeURIComponent(occurrenceId)}/classify`,
+      { method: "POST", body: JSON.stringify({ classification }) },
+    ),
   /** Campaign Status (#2417). `id` may be the campaign root session or any member. */
   campaignWorkItems: (id: string, query: string, signal?: AbortSignal) =>
     req<CampaignWorkItemsPage>(`/api/sessions/${encodeURIComponent(id)}/campaign/work-items?${query}`, { signal }),
