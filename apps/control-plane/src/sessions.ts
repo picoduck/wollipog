@@ -12033,7 +12033,7 @@ export class SessionsService {
       const session = this.db.getSession(childSessionId);
       const scope = this.db.sessionScope(childSessionId);
       const human = authority === "human" && actor.kind === "human" && actor.id && scope
-        ? this.db.activeHumanPrincipal(actor.id, scope.organizationId) : null;
+        ? this.db.operatingHumanPrincipal(actor.id, scope.organizationId) : null;
       if (!human || !this.db.isSessionOwner(human, childSessionId)) {
         return fail("Only this session's owner can approve a Location switch", 403);
       }

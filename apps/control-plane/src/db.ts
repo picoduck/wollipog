@@ -362,6 +362,7 @@ import {
   LEGACY_BOOTSTRAP_OWNER_NAME,
   LOCAL_OWNER_USER_ID,
   PERSONAL_ORGANIZATION_ID,
+  canOperate,
   type AuthPrincipal,
   type HumanPrincipal,
 } from "./identity.js";
@@ -22923,14 +22924,17 @@ export class ControlPlaneDb {
       .run(now, JSON.stringify(result), occurrenceId, resourceDigest).changes) === 1;
   }
 
-  /** Any active member of the organization; the caller still requires session ownership. */
-  activeHumanPrincipal(userId: string, organizationId: string): HumanPrincipal | null {
+  /** An active member of the organization who may still mutate its resources, so a member demoted
+   * to Viewer can neither approve nor carry out a mutation. The caller still requires session
+   * ownership. */
+  operatingHumanPrincipal(userId: string, organizationId: string): HumanPrincipal | null {
     const row = this.stmt(`SELECT user.display_name AS userName, organization.name AS organizationName, membership.role
       FROM identity_memberships membership JOIN identity_users user ON user.user_id=membership.user_id
       JOIN identity_organizations organization ON organization.organization_id=membership.organization_id
       WHERE membership.user_id=? AND membership.organization_id=? AND user.status='active'`)
       .get(userId, organizationId) as { userName: string; organizationName: string; role: HumanPrincipal["role"] } | undefined;
-    return row ? { kind: "human", actorId: userId, userId, organizationId, ...row, deviceId: null, localBootstrap: false } : null;
+    return row && canOperate(row.role)
+      ? { kind: "human", actorId: userId, userId, organizationId, ...row, deviceId: null, localBootstrap: false } : null;
   }
 
   automationCreationApprover(occurrenceId: string): string | null {

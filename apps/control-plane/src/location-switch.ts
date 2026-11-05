@@ -2,8 +2,8 @@ import {
   LOCATION_SWITCH_GUIDANCE, LOCATION_SWITCH_LIMITS, LOCATION_SWITCH_TRIGGERS, isTerminal, locationSwitchOptionId, locationSwitchRole,
   normalizeLocationSwitchRepository, parseLocationSwitchOption, runnerSupportsProtocol, sameLocationSwitchRepository, sessionRole,
   type CreateSessionRequest, type LocationSwitchAction, type LocationSwitchCandidate, type LocationSwitchPlace, type LocationSwitchRequest,
-  type LocationSwitchResult, type LocationSwitchSnapshot, type LocationSwitchUnavailable, type ProjectLocationView, type SessionView,
-  type WorkflowDecisionView,
+  type LocationSwitchResult, type LocationSwitchSnapshot, type LocationSwitchUnavailable, type ProjectLocationInspection,
+  type ProjectLocationView, type SessionView, type WorkflowDecisionView, PROJECT_LOCATION_INSPECTION_FAILURES,
 } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
@@ -17,10 +17,8 @@ export const LOCATION_SWITCH_APPROVAL_TTL_MS = 60 * 60_000;
 
 /** The verified identity of one Project Location, or its fixed non-sensitive failure (#4117's
  * shared inspection: the Location is inspected by id, in its own resolved path). */
-export type LocationInspection =
-  | { ok: true; location: { locationId: string; projectId: string; runnerId: string; workspaceId: string; repository: string; digest: string } }
-  | { ok: false; locationId: string; failure: string; reason: string };
-export type LocationInspector = (locationId: string, options: { projectId: string }) => Promise<LocationInspection>;
+export type LocationInspection = ProjectLocationInspection | { ok: false; locationId: string; failure: "no_access"; reason: string };
+export type LocationInspector = (locationId: string, options: { projectId: string }) => Promise<ProjectLocationInspection>;
 /** Creates a session as the approving person, through the ordinary creation route's ownership rules. */
 export type HandoffSessionCreator = (human: HumanPrincipal, request: CreateSessionRequest) => ServiceResult<SessionView>;
 
@@ -29,6 +27,10 @@ const ok = <T>(data: T, status = 200): ServiceResult<T> => ({ ok: true, status, 
 const bounded = (value: unknown, max: number): value is string => typeof value === "string" && value.trim().length > 0 &&
   value.length <= max && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value);
 const navigationPath = (sessionId: string) => `/sessions/~${Buffer.from(sessionId, "utf16le").toString("base64url")}`;
+/** U+2028 and U+2029 end a line for some readers although JSON leaves them unescaped. */
+const LINE_SEPARATOR_CHARACTERS = String.fromCharCode(0x2028, 0x2029);
+const LINE_SEPARATORS = new RegExp(`[${LINE_SEPARATOR_CHARACTERS}]`, "gu");
+const hasLineSeparator = (value: string) => [...LINE_SEPARATOR_CHARACTERS].some((separator) => value.includes(separator));
 
 export const LOCATION_SWITCH_ACTION_LABELS: Record<LocationSwitchAction, string> = {
   switch: "Switch and Continue",
@@ -38,14 +40,19 @@ export const LOCATION_SWITCH_ACTION_LABELS: Record<LocationSwitchAction, string>
 /** What the new session is told. The handoff is the requester's own words, shown to the person on
  * the card before they approved it; the frame around it is Wollipog's. */
 export function locationSwitchHandoffPrompt(source: SessionView, snapshot: LocationSwitchSnapshot, target: LocationSwitchCandidate): string {
+  // Only Wollipog's own facts sit inside the frame; names that people or agents chose are quoted as
+  // single-line literals, and the requester's text follows the end marker.
+  const literal = (value: string) => JSON.stringify(value).replace(LINE_SEPARATORS, (separator) => `\\u${separator.charCodeAt(0).toString(16)}`);
   return [
     `[Wollipog Location Handoff — from session ${source.id}]`,
-    `This task was handed off from session "${source.title || source.id}"` +
+    `This task was handed off from session ${literal(source.title || source.id)}` +
       (snapshot.current.repository ? `, which ran in repository ${snapshot.current.repository}` : "") +
       `, because it belongs to repository ${target.repository}. Its person approved continuing it here, in Location ` +
-      `"${target.name}" on ${target.machineName}.`,
-    `Why it belongs here: ${snapshot.reason}`,
+      `${literal(target.name)} on ${literal(target.machineName)}.`,
+    "Everything below this frame was written by the requesting session; its person read it before approving.",
     "[End Wollipog Location Handoff]",
+    "",
+    `Why it belongs here: ${snapshot.reason}`,
     "",
     snapshot.handoff,
   ].join("\n");
@@ -100,8 +107,8 @@ export class LocationSwitchService {
       const accessible = this.db.canAccessRunner(principal, location.runnerId) &&
         this.db.canAccessWorkspace(principal, location.runnerId, location.workspaceId);
       const result: LocationInspection = accessible
-        ? await this.deps.inspect(location.id, { projectId: project.id }).catch(() =>
-          ({ ok: false, locationId: location.id, failure: "read_failed", reason: "The Location could not be read on its machine." }))
+        ? await this.deps.inspect(location.id, { projectId: project.id }).catch((): LocationInspection =>
+          ({ ok: false, locationId: location.id, failure: "read_failed", reason: PROJECT_LOCATION_INSPECTION_FAILURES.read_failed }))
         : { ok: false, locationId: location.id, failure: "no_access", reason: "You don't have access to this Location's folder." };
       return [location.id, result] as const;
     }))));
@@ -178,10 +185,15 @@ export class LocationSwitchService {
     }
     const repository = normalizeLocationSwitchRepository(input.repository);
     if (!bounded(input.requestId, LOCATION_SWITCH_LIMITS.requestId) || !repository ||
-        !bounded(input.reason, LOCATION_SWITCH_LIMITS.reason) || !bounded(input.handoff, LOCATION_SWITCH_LIMITS.handoff) ||
+        !bounded(input.reason, LOCATION_SWITCH_LIMITS.reason) || /[\r\n]/u.test(input.reason) || hasLineSeparator(input.reason) ||
+        !bounded(input.handoff, LOCATION_SWITCH_LIMITS.handoff) ||
         (input.trigger !== undefined && !LOCATION_SWITCH_TRIGGERS.includes(input.trigger))) {
-      return fail(`requestId, a repository such as owner/name, a reason of at most ${LOCATION_SWITCH_LIMITS.reason} characters and a ` +
-        `task handoff of at most ${LOCATION_SWITCH_LIMITS.handoff} characters are required`, 400);
+      return fail(`requestId, a repository such as owner/name, a one-line reason of at most ${LOCATION_SWITCH_LIMITS.reason} characters ` +
+        `and a task handoff of at most ${LOCATION_SWITCH_LIMITS.handoff} characters are required`, 400);
+    }
+    // The handoff reaches a new session under Wollipog's frame, so it may not imitate one.
+    if (/^\s*\[(End )?Wollipog\b/imu.test(input.handoff) || /^\s*\[(End )?Wollipog\b/iu.test(input.reason)) {
+      return fail("The reason and handoff may not contain lines that look like Wollipog's own framing", 400);
     }
     const trigger = input.trigger ?? "early";
     const resourceKey = `location_switch:${repository.toLowerCase()}`;
@@ -232,8 +244,8 @@ export class LocationSwitchService {
     const session = requester.data!;
     const scope = this.db.sessionScope(sessionId);
     const approver = this.db.locationSwitchApprover(occurrenceId);
-    const human = scope && approver ? this.db.activeHumanPrincipal(approver, scope.organizationId) : null;
-    if (!human || !this.db.isSessionOwner(human, sessionId)) return fail("The approver no longer owns this session");
+    const human = scope && approver ? this.db.operatingHumanPrincipal(approver, scope.organizationId) : null;
+    if (!human || !this.db.isSessionOwner(human, sessionId)) return fail("The approver no longer owns this session or can no longer start sessions");
     if (this.executing.has(occurrenceId)) return fail("This Location switch is already being carried out");
     this.executing.add(occurrenceId);
     try {
