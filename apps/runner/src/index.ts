@@ -2651,6 +2651,15 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       }).then(sendUp));
       break;
     }
+    case "gitlab_merge_closures": {
+      // The child's own glab login and environment, as its agent would run the merge (#3762).
+      runCommandTask("gitlab_merge_closures", sessions.gitlabMergeClosures(msg, {
+        agentEnv: (meta) => meta.adopted && !meta.agentId
+          ? adoptedLaunchEnvironment(meta)
+          : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context),
+      }).then(sendUp));
+      break;
+    }
     case "forge_decision_action": {
       // The child's own gh and git logins and environment, as its agent would run the action (#4067).
       runCommandTask("forge_decision_action", sessions.forgeDecisionAction(msg, {

@@ -974,6 +974,23 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     }
   });
 
+  test(`a GitLab merge card shows what merging closes at width ${viewport.width} (#3762)`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    for (const [closures, expected] of [
+      ["checked", /Closes on Merge\s*gitlab\.example\.com\/platform\/wollipog#2178: “?Implements #2178: the request dock keeps its card above the keyboard\.”?\s*gitlab\.example\.com\/platform\/wollipog#2180 \(reported by GitLab\)/u],
+      ["none", /Closes on Merge\s*None/u],
+      ["declared", /Closes on Merge\s*Not checked: the runner predates this check\. Declared: gitlab\.example\.com\/platform\/wollipog#2178, gitlab\.example\.com\/platform\/wollipog#2180\./u],
+    ] as const) {
+      await page.goto(`/request-surfaces-e2e.html?scenario=workflow&forge=gitlab&closures=${closures}`);
+      await expect(card(page)).toContainText("PR Merge Approval Required");
+      if (process.env.MERGE_CLOSURES_EVIDENCE_DIR) {
+        await card(page).screenshot({ path: `${process.env.MERGE_CLOSURES_EVIDENCE_DIR}/gitlab-merge-closures-${closures}-${viewport.width}.png` });
+      }
+      await expect(card(page)).toContainText(expected);
+      await assertNoHorizontalOverflow(page, ".request-card");
+    }
+  });
+
   test(`a post-upvote extension shows both bound heads at width ${viewport.width}`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/request-surfaces-e2e.html?scenario=review-extension");
