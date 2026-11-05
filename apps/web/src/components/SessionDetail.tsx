@@ -52,6 +52,7 @@ import {
   type SourceLocation,
   type WorkspaceReference,
   type WorkspaceReferenceCandidate,
+  type WorkspaceReferenceSearchLimit,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { convertPreviewReadingState, timelineRowSource } from "../history-preview-handoff.js";
@@ -324,6 +325,7 @@ import {
 } from "../composer-commands.js";
 import { SEND_AS_TEXT_TOOLTIP, SlashCommandMenu, slashCommandOptionId } from "./SlashCommandMenu.js";
 import { WorkspaceReferencePicker, workspaceReferenceOptionId } from "./WorkspaceReferencePicker.js";
+import { rankFuzzyWorkspacePaths } from "../files-panel.js";
 import {
   captureComposerFocus,
   focusComposerAtEnd,
@@ -399,6 +401,7 @@ const OPENING_HISTORY_MAX_PAGES = 10;
 const OPENING_HISTORY_HEADROOM_PX = EARLIER_ACTIVITY_TRIGGER_PX;
 /** The history notice's details when the cache stopped short because its machine is offline. */
 const MACHINE_OFFLINE_HISTORY_ERROR = "Session activity could not finish loading while its machine is offline.";
+const NO_WORKSPACE_SEARCH_ANSWER = { query: "", truncated: false, fuzzy: false };
 
 type EarlierActivityIntent = "single-scroll" | "touch-traversal";
 
@@ -1608,7 +1611,13 @@ function SessionDetailLoaded({
   const [workspaceResults, setWorkspaceResults] = useState<WorkspaceReferenceCandidate[]>([]);
   const [workspaceSearchBusy, setWorkspaceSearchBusy] = useState(false);
   const [workspaceSearchError, setWorkspaceSearchError] = useState<string | null>(null);
-  const [workspaceSearchTruncated, setWorkspaceSearchTruncated] = useState(false);
+  // What the listed results answer: their query, and whether and how the runner matched and cut them.
+  const [workspaceSearchAnswer, setWorkspaceSearchAnswer] = useState<{
+    query: string;
+    truncated: boolean;
+    fuzzy: boolean;
+    limit?: WorkspaceReferenceSearchLimit;
+  }>(NO_WORKSPACE_SEARCH_ANSWER);
   const [activeWorkspaceResult, setActiveWorkspaceResult] = useState(0);
   const [workspaceDismissedFor, setWorkspaceDismissedFor] = useState<string | null>(null);
   const [inspectedWorkspaceReference, setInspectedWorkspaceReference] = useState<WorkspaceReference | null>(null);
@@ -5593,7 +5602,7 @@ function SessionDetailLoaded({
       setWorkspaceResults([]);
       setWorkspaceSearchBusy(false);
       setWorkspaceSearchError(null);
-      setWorkspaceSearchTruncated(false);
+      setWorkspaceSearchAnswer(NO_WORKSPACE_SEARCH_ANSWER);
       setActiveWorkspaceResult(0);
       return;
     }
@@ -5602,11 +5611,16 @@ function SessionDetailLoaded({
     // matching nothing, or as failing with the previous query's error, before it has been searched.
     setWorkspaceSearchBusy(true);
     setWorkspaceSearchError(null);
+    const query = workspaceTrigger.query;
     const timer = window.setTimeout(() => {
-      void api.searchWorkspaceReferences(sessionId, workspaceTrigger.query).then((result) => {
+      // Fuzzy, folders included (#4129). A runner or control plane that predates it answers with
+      // substring results and no `match`, which are listed as they come.
+      void api.searchWorkspaceReferences(sessionId, query, "fuzzy_with_directories").then((result) => {
         if (!current) return;
-        setWorkspaceResults(result.results);
-        setWorkspaceSearchTruncated(result.truncated);
+        const fuzzy = result.match === "fuzzy";
+        // Ranked again with full alignment, as Go to File does, so the top row is the best match.
+        setWorkspaceResults(fuzzy ? rankFuzzyWorkspacePaths(result.results, query) : result.results);
+        setWorkspaceSearchAnswer({ query, truncated: result.truncated, fuzzy, limit: result.limit });
         setActiveWorkspaceResult(0);
       }).catch((cause: unknown) => {
         if (!current) return;
@@ -7863,8 +7877,11 @@ function SessionDetailLoaded({
                   activeIndex={activeWorkspaceResult}
                   busy={workspaceSearchBusy}
                   error={workspaceSearchError}
-                  truncated={workspaceSearchTruncated}
+                  truncated={workspaceSearchAnswer.truncated}
+                  fuzzy={workspaceSearchAnswer.fuzzy}
+                  limit={workspaceSearchAnswer.limit}
                   query={workspaceTrigger?.query ?? ""}
+                  resultsQuery={workspaceSearchAnswer.query}
                   workspaceName={session.workspaceName || session.projectName || "this workspace"}
                   machineName={runnerDisp.name || "This machine"}
                   machineOnline={runnerOnline}

@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
-import type { WorkspaceReferenceCandidate } from "@wollipog/protocol";
+import type { WorkspaceReferenceCandidate, WorkspaceReferenceSearchLimit } from "@wollipog/protocol";
+import { fuzzyPathParts, type TextRange } from "../files-panel.js";
 import { ComposerListbox, ComposerListboxState } from "./ComposerListbox.js";
 import { ErrorIcon, FileIcon, FolderIcon, SearchIcon } from "./Icons.js";
 
@@ -33,16 +34,41 @@ function splitPath(candidate: WorkspaceReferenceCandidate): { name: string; fold
   return slash < 0 ? { name: path, folder: "" } : { name: path.slice(slash + 1), folder: path.slice(0, slash) };
 }
 
-/** The first case-insensitive occurrence of the query, underlined; fuzzy matches mark nothing. */
-function highlight(text: string, query: string): ReactNode {
+/** The first case-insensitive occurrence of the query, as a range to underline. */
+function substringRanges(text: string, query: string): TextRange[] {
   const needle = query.trim().toLowerCase();
   const index = needle ? text.toLowerCase().indexOf(needle) : -1;
-  if (index < 0) return text;
-  return <>
-    {text.slice(0, index)}
-    <mark>{text.slice(index, index + needle.length)}</mark>
-    {text.slice(index + needle.length)}
-  </>;
+  return index < 0 ? [] : [{ start: index, end: index + needle.length }];
+}
+
+function underlined(text: string, ranges: readonly TextRange[]): ReactNode {
+  if (!ranges.length) return text;
+  const parts: ReactNode[] = [];
+  let at = 0;
+  for (const range of ranges) {
+    parts.push(text.slice(at, range.start), <mark key={range.start}>{text.slice(range.start, range.end)}</mark>);
+    at = range.end;
+  }
+  parts.push(text.slice(at));
+  return <>{parts}</>;
+}
+
+/** A row's name and folder with what matched underlined: every matched character for a fuzzy answer,
+ * as Go to File marks them (#4129), else the first occurrence of the query in each. */
+function rowParts(candidate: WorkspaceReferenceCandidate, query: string, fuzzy: boolean): { name: ReactNode; folder: ReactNode | null } {
+  const { name, folder } = splitPath(candidate);
+  const parts = fuzzy ? fuzzyPathParts(folder ? `${folder}/${name}` : name, query) : null;
+  const nameRanges = fuzzy ? parts?.nameRanges ?? [] : substringRanges(name, query);
+  const folderRanges = fuzzy ? parts?.folderRanges ?? [] : substringRanges(folder, query);
+  return { name: underlined(name, nameRanges), folder: folder ? underlined(folder, folderRanges) : null };
+}
+
+/** Why a truncated answer is incomplete, by the cap that cut it (#4129), in Go to File's words. */
+function truncatedNote(fuzzy: boolean, limit: WorkspaceReferenceSearchLimit | undefined): string {
+  if (!fuzzy) return "More matches exist. Keep typing to narrow them.";
+  return limit === "entries"
+    ? "The workspace is too large to search in full, so some matches may be missing."
+    : "Showing the best matches only. Type more to narrow them.";
 }
 
 export function WorkspaceReferencePicker({
@@ -52,7 +78,10 @@ export function WorkspaceReferencePicker({
   busy,
   error,
   truncated,
+  fuzzy = false,
+  limit,
   query,
+  resultsQuery = query,
   workspaceName,
   machineName,
   machineOnline,
@@ -65,7 +94,13 @@ export function WorkspaceReferencePicker({
   busy: boolean;
   error: string | null;
   truncated: boolean;
+  /** The runner matched fuzzily and ranked best first (#4129); an older one matched substrings. */
+  fuzzy?: boolean;
+  /** The cap that cut a truncated fuzzy answer. */
+  limit?: WorkspaceReferenceSearchLimit;
   query: string;
+  /** The query the listed results answer, which trails `query` while a newer search runs. */
+  resultsQuery?: string;
   workspaceName: string;
   machineName: string;
   machineOnline: boolean;
@@ -107,14 +142,14 @@ export function WorkspaceReferencePicker({
       activeKey={results[activeIndex]?.path ?? null}
       getOptionProps={(candidate) => ({ "aria-label": candidate.path })}
       renderItem={(candidate) => {
-        const { name, folder } = splitPath(candidate);
+        const { name, folder } = rowParts(candidate, resultsQuery, fuzzy);
         return (
           <span className="picker-line">
             {candidate.isDirectory ? <FolderIcon size={16} /> : <FileIcon size={16} />}
-            <span className="picker-name">{highlight(name, query)}</span>
+            <span className="picker-name">{name}</span>
             {folder && (
               // Long folders lose their start, not their end: "…/nested/directory".
-              <span className="picker-path"><bdi>{highlight(folder, query)}</bdi></span>
+              <span className="picker-path"><bdi>{folder}</bdi></span>
             )}
           </span>
         );
@@ -122,7 +157,7 @@ export function WorkspaceReferencePicker({
       onActiveChange={(candidate) => onActiveIndexChange?.(indexByPath.get(candidate.path) ?? 0)}
       onSelect={onSelect}
       states={state}
-      note={showResults && truncated ? "More matches exist. Keep typing to narrow them." : undefined}
+      note={showResults && truncated ? truncatedNote(fuzzy, limit) : undefined}
       enterLabel="Insert"
     />
   );
