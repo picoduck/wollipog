@@ -493,6 +493,13 @@ function issueScopeSeedKey(rootId: string, messageDigest: string): string {
   return `scope_grant:issue_scope_seed:${rootId}:${messageDigest}`;
 }
 
+/** The seed a Custom campaign's trimmed first message starts (#4104): `pending` for a reading, or
+ * `none` when it needs none. */
+function customCampaignIssueScopeSeed(text: string): { state: "pending" | "none"; messageDigest: string } {
+  return { state: needsCampaignIssueScopeSeed(text, orchestratorIssueNumbersFromInitialPrompt(text)) ? "pending" : "none",
+    messageDigest: firstMessageDigest(text) };
+}
+
 function publicationRefusalCoordinate(sessionId: string, recommendationId: string): string {
   return recoveryCoordinate(`publication_refusal:${sessionId}:${recommendationId}`);
 }
@@ -5193,11 +5200,13 @@ export class SessionsService {
         (workspaceId !== null || this.db.getAdHocWorkspacePath(campaignController.id) === workspacePath)
       ? campaignController.orchestratorPolicy?.issueNumbers
       : undefined;
-    if (campaignController && campaignNeedsEpicScope(campaignController)) {
-      const unsupported = scopeCompatibility(this.db, campaignController);
+    // A campaign whose first message predates the epic seed gets its seed now (#4258), before the hold is read.
+    const scopeController = campaignController ? this.seedPreUpgradeCampaign(campaignController) : undefined;
+    if (scopeController && campaignNeedsEpicScope(scopeController)) {
+      const unsupported = scopeCompatibility(this.db, scopeController);
       if (unsupported) return capabilityFail(unsupported);
-      this.settleInterruptedIssueScopeSeed(campaignController);
-      if (this.db.getSession(campaignController.id)?.orchestratorPolicy?.issueScopeSeed?.state === "pending") {
+      this.settleInterruptedIssueScopeSeed(scopeController);
+      if (this.db.getSession(scopeController.id)?.orchestratorPolicy?.issueScopeSeed?.state === "pending") {
         return fail("The Decision Model is still reading this campaign's first message for the epic to seed its issue scope. Retry delegating in a moment.", 409);
       }
       return fail("Confirm the epic's authorized issue scope in Campaign Status before delegating work. Use get_campaign_issue_scope and request_campaign_issue_scope_change, then wait for human approval.", 409);
@@ -5955,13 +5964,40 @@ export class SessionsService {
    * Null otherwise. The message is read like a launch prompt: `none` when it needs no reading. */
   private firstMessageIssueScopeSeed(sessionId: string, text: string): { state: "pending" | "none"; messageDigest: string } | null {
     const root = this.db.getSession(sessionId);
-    const policy = root?.orchestratorPolicy;
     const trimmed = text.trim();
-    if (!root || !policy || !trimmed || root.parentSessionId || policy.control?.mode === "full_control" || policy.issueScopeSeed ||
-        policy.issueScope || policy.issueScopeProposalEpic !== undefined || policy.issueNumbers?.length ||
-        !this.db.sessionWasHumanCreatedOrchestrator(root.id) || this.db.initialUserMessageText(root.id) !== null) return null;
-    return { state: needsCampaignIssueScopeSeed(trimmed, orchestratorIssueNumbersFromInitialPrompt(trimmed)) ? "pending" : "none",
-      messageDigest: firstMessageDigest(trimmed) };
+    if (!root || !trimmed || !this.unseededCustomCampaign(root) || this.db.initialUserMessageText(root.id) !== null) return null;
+    return customCampaignIssueScopeSeed(trimmed);
+  }
+
+  /** A person-created Custom campaign root that could still get an epic seed: no seed, scope, epic
+   * or explicit issue list yet. Whether its first message has been recorded is the caller's test. */
+  private unseededCustomCampaign(root: SessionView): boolean {
+    const policy = root.orchestratorPolicy;
+    return Boolean(policy && !root.parentSessionId && policy.control?.mode !== "full_control" && !policy.issueScopeSeed &&
+      !policy.issueScope && policy.issueScopeProposalEpic === undefined && !policy.issueNumbers?.length &&
+      this.db.sessionWasHumanCreatedOrchestrator(root.id));
+  }
+
+  /**
+   * A Custom campaign whose first message was recorded before the epic seed existed (#4258): the
+   * build before #4216 held its delegation by reading that message through the `initialCampaignEpic`
+   * regex on every check, so the campaign carries no seed and its first message can no longer start
+   * one. Its recorded first message gets the seed a campaign started on this build would have got
+   * from it, through the same Decision Model reading (`seedCampaignIssueScope`); nothing is parsed
+   * from the text here. While that reading runs delegation waits, a seeded epic waits for the
+   * owner's scope approval, and a failed or uncertain reading leaves the seed with the owner, who
+   * approves a scope or continues without an epic. Returns the root as it now reads.
+   */
+  private seedPreUpgradeCampaign(root: SessionView): SessionView {
+    if (!this.unseededCustomCampaign(root)) return root;
+    const text = this.db.initialUserMessageText(root.id)?.trim();
+    if (!text) return root;
+    const seed = customCampaignIssueScopeSeed(text);
+    if (!this.db.beginCampaignIssueScopeSeed(root.id, seed, Date.now())) return this.db.getSession(root.id) ?? root;
+    this.log.info(JSON.stringify({ event: "campaign_issue_scope_seed_pre_upgrade", sessionId: root.id, state: seed.state }));
+    this.hub.sessionChangedById(root.id);
+    if (seed.state === "pending") this.startCampaignIssueScopeSeed(root.id, text);
+    return this.db.getSession(root.id) ?? root;
   }
 
   /** Start reading a Custom campaign's first message for its epic seed (#4104), once per root. */
@@ -11481,8 +11517,11 @@ export class SessionsService {
 
   async campaignIssueScope(sessionId: string, epic?: number, canAccess: (id: string) => boolean = () => true, resolveInitialEpic = true): Promise<ServiceResult<CampaignIssueScopeView>> {
     const rootId = this.db.campaignRootForMember(sessionId);
-    const root = rootId ? this.db.getSession(rootId) : null;
-    if (!root?.orchestratorPolicy || !canAccess(root.id)) return fail("campaign not found", 404);
+    const found = rootId ? this.db.getSession(rootId) : null;
+    if (!found?.orchestratorPolicy || !canAccess(found.id)) return fail("campaign not found", 404);
+    // Reading the scope starts a pre-upgrade campaign's seed too (#4258), so Campaign Status shows it.
+    const root = this.seedPreUpgradeCampaign(found);
+    if (!root.orchestratorPolicy) return fail("campaign not found", 404);
     this.settleInterruptedIssueScopeSeed(root);
     const compatibility = scopeCompatibility(this.db, root);
     const stored = root.orchestratorPolicy.issueScope;
