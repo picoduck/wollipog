@@ -61,6 +61,7 @@ import {
 import { dispatch as dispatchManagerTool } from "../../runner/src/session-management-mcp.js";
 import { ControlPlaneDb, campaignRequestToken } from "./db.js";
 import { WITHHELD_RUNNER_ERROR } from "./github-issue-closure.js";
+import { scopeView } from "./campaign-issue-scope.js";
 import { CAMPAIGN_WORK_LEDGER_SCHEMA } from "./campaign-work-ledger-store.js";
 import { applyClaudeReconciliation, previewClaudeReconciliation, observeReconciliationRevision } from "./claude-cost-reconciliation.js";
 import { parseRateTable } from "./usage-pricing.js";
@@ -30503,6 +30504,7 @@ test("human campaign scope recovery, additions, denial, removal and closure use 
     assert.equal(offlineView.data.revision, 1);
     assert.equal(offlineView.data.supported, false);
     assert.match(offlineView.data.compatibilityMessage!, /disconnected/);
+    assert.equal(offlineView.data.runnerDisconnected, true, "Campaign Status polls a disconnected view for reconnection (#2664)");
     const offlineProposal = await svc.proposeCampaignIssueScope(id, {...proposal,requestId:"offline",expectedRevision:1});
     assert.equal(offlineProposal.status, 409);
     assert.equal(offlineRequests, 0, "offline scope reads return saved authority without runner RPCs");
@@ -30549,6 +30551,50 @@ test("human campaign scope recovery, additions, denial, removal and closure use 
     assert.deepEqual(unsupported.capabilityRequirement,{requiredRunnerProtocolVersion:208,runnerProtocolVersion:207});
     assert.equal(db.getSession(id)!.orchestratorPolicy!.issueScope!.revision,2);
     await new Promise((resolve) => setTimeout(resolve,0));
+  } finally { db.close(); }
+});
+
+test("a legacy campaign without a saved repository shows saved numbers as unverified, never as an outside-scope mismatch (#2664)", async () => {
+  const { db, hub, svc } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    meta.agents.find((agent) => agent.id === "test-orchestrator")!.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true, permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, prompt: "Orchestrate the campaign." }, undefined, undefined, false, false, false, { defaultOwnerUserId: "owner" });
+    assert.ok(created.ok && created.data, created.error);
+    const id = created.data.id;
+    // A campaign saved before revisioned scope: numbers, but no `issueScope.repository`.
+    const legacy = db.sessionOrchestratorPolicy(id)!;
+    legacy.issueNumbers = [12];
+    delete legacy.issueScope;
+    db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(legacy), id);
+    const plan = svc.recordCampaignPlan(id, { planComplete: true, items: [
+      { key: "member", issue: { repository: "team/repo", number: 12 } },
+      { key: "stray", issue: { repository: "team/repo", number: 99 } },
+    ] });
+    assert.ok(plan.ok && plan.data, plan.error);
+    const [member, stray] = plan.data.items.map((item) => item.workItemId);
+    hub.online = false;
+    let runnerCalls = 0;
+    hub.requestHandler = () => { runnerCalls += 1; throw new Error("offline runner must not be queried"); };
+    const offline = await svc.campaignIssueScope(id);
+    assert.ok(offline.ok && offline.data, offline.error);
+    assert.equal(offline.data.repository, "", "the unknown repository is never guessed");
+    assert.deepEqual(offline.data.issueNumbers, [12], "saved membership stays readable offline");
+    assert.equal(offline.data.revision, 0);
+    assert.equal(offline.data.runnerDisconnected, true);
+    assert.deepEqual(offline.data.unverifiedWork?.map((item) => item.workItemId), [member], "a saved number in an unknown repository is unverified");
+    assert.deepEqual(offline.data.outsideScope.map((item) => item.workItemId), [stray], "a number outside the saved list is a confirmed mismatch");
+    assert.equal(runnerCalls, 0);
+    assert.equal(db.getSession(id)!.orchestratorPolicy!.issueScope, undefined, "reading never records a repository");
+    // A known repository still confirms a repository mismatch for the same number.
+    const known = scopeView(db, db.getSession(id)!, "other/repo");
+    assert.deepEqual(known.outsideScope.map((item) => item.workItemId).sort(), [member, stray].sort());
+    assert.equal(known.unverifiedWork, undefined);
+    assert.equal(scopeView(db, db.getSession(id)!, "team/repo").outsideScope.map((item) => item.workItemId).join(), stray);
   } finally { db.close(); }
 });
 

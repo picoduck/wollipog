@@ -14,6 +14,7 @@ import { closureEvidence, closureDeliveryGaps, issueEvidenceDigest } from "./cam
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { CampaignForgeObserver } from "./campaign-forge-observations.js";
 import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
+import { healthyDecisionRuntime } from "./credential-screen-test-fixture.js";
 
 /** A related open pull request as the runner reports it, without a closing reference. */
 const openPullRequest = (number: number) => ({ number, title: "Work", url: `https://github.com/team/repo/pull/${number}`, headSha: "b".repeat(40) });
@@ -62,6 +63,8 @@ function harness(full = true, maximum = 5, issues = [100]) {
     throw new Error("Unexpected runner command");
   };
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
+  // A healthy Decision Model (#4104) on a fake harness: relatedness and closure-reason checks confirm.
+  svc.setDecisionRuntime(healthyDecisionRuntime(db).runtime);
   if (full) assert.ok(svc.setCampaignControl("root", { mode: "full_control", objective: "Implement epic 100", operations: ["campaign_issue_scope", "issue_closure", "follow_up_issue_publication", "implementation_question"],
     delegatablePolicyIds: [], issueAuthority: { epics: issues, relatedFollowUps: true, maxIssues: maximum, closureReasons: ["completed", "not_planned"] } }, 1, principal).ok);
   const approve = (d: WorkflowDecisionView) => svc.resolveWorkflowDecision("root", "root", d.occurrenceId, { outcome: "approve" }, d.authority,
@@ -990,6 +993,29 @@ test("#4065 a child's title mismatch creates nothing, reaches the root as recove
     const settled = publicationRefusalRecord(h);
     assert.ok(!settled || settled.state === "resolved", "the corrected request settles the refusal");
     assert.equal(h.db.campaignRecovery.publicationRefusals("root", h.db.getSession("root")!.parentControlPolicy?.revision ?? 0).length, 0);
+  } finally { h.db.close(); }
+});
+
+// #2938 criterion 2: the reformulate_request recovery action is emitted and reaches the root as an
+// actionable instruction naming the member and the condition to correct, never the member's text.
+test("#2938 a member's correctable refusal wakes the root with an actionable reformulate_request instruction", async () => {
+  const h = harness();
+  try {
+    const recommendationId = acceptedRecommendation(h);
+    h.db.updateSessionStatus("root", "idle", 3);
+    const refused = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "publish", resourceKey: "publish",
+      resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "[Feature]: Mistitled repairs",
+        sanitizedBody: body, labels: [], recommendationId } });
+    assert.equal(refused.errorDetails?.code, "title_mismatch");
+    const record = publicationRefusalRecord(h)!;
+    const wake = nextContinuation(h);
+    assert.ok(wake, "the refusal wakes the idle root");
+    assert.match(wake.text, /Action needed: yes/u);
+    for (const fact of [`"recoveryId":"${record.id}"`, `"action":"reformulate_request"`, `"reason":"correctable_refusal"`,
+      `"admissionFailure":"title_mismatch"`, `"sessionId":"child"`, `"pending":true`]) {
+      assert.ok(wake.text.includes(fact), `the instruction carries ${fact}`);
+    }
+    assert.equal(wake.text.includes("Mistitled"), false, "the member's refused payload is not repeated to the root");
   } finally { h.db.close(); }
 });
 

@@ -5391,6 +5391,14 @@ export interface CampaignIssueScopeView {
   contextIssueNumbers?: number[];
   /** The scope grant the owner's first message established (#4102), for Campaign Status. */
   scopeGrant?: FullControlScopeGrant;
+  /** True when the view is the saved scope because the campaign runner is disconnected (#2664).
+   * Campaign Status polls while it is set, so a mounted panel recovers after reconnection. */
+  runnerDisconnected?: boolean;
+  /** Recorded work whose number is in the saved scope while the campaign repository is unknown
+   * (`repository` is empty, #2664). It is neither verified in scope nor confirmed outside it. */
+  unverifiedWork?: Array<{ workItemId: string; title: string; issue: CampaignIssueRef; sessionId: string | null }>;
+  /** Recorded work confirmed outside the scope: another repository than a known `repository`, or a
+   * number the saved scope does not hold. An unknown repository alone never places work here. */
   outsideScope: Array<{ workItemId: string; title: string; issue: CampaignIssueRef; sessionId: string | null }>;
   candidates?: Array<{ issue: CampaignIssueRef; title: string; source: "umbrella" | "sub_issue" | "member_checklist" }>;
 }
@@ -7281,7 +7289,7 @@ export interface SessionNamingConnectionTestResult {
  * `scope_grant` reads a Full Control owner's first message into a typed scope grant (#4102), and
  * `credential_screen` screens Full Control questions (#4104); the other Full Control callers add
  * their kinds here with their prompts. */
-export type DecisionKind = "probe" | "scope_grant" | "credential_screen";
+export type DecisionKind = "probe" | "scope_grant" | "credential_screen" | "follow_up_relatedness" | "closure_reason";
 
 /** Why one Decision attempt failed. The control plane, not the runner, decides what is transient:
  * see DECISION_TRANSIENT_ERROR_CLASSES. */
@@ -7375,6 +7383,8 @@ export interface DecisionModelResolvedTarget {
   driver: SessionNamingHarnessOption["driver"];
   provider: SessionNamingAccountBoundary["provider"];
   model: string;
+  /** The model's advertised display name, as Settings shows it. Absent on older records. */
+  modelName?: string;
   effort: string;
 }
 
@@ -7425,7 +7435,7 @@ export interface DecisionModelTestResult {
 export interface CampaignDecisionSubject {
   /** The session whose request was screened. */
   sessionId: string;
-  surface: "implementation_question" | "provider_question" | "tool_request" | "owner_decision";
+  surface: "implementation_question" | "provider_question" | "tool_request" | "owner_decision" | "follow_up_publication" | "issue_closure";
   /** The affected request: a workflow decision request id, or a provider request occurrence id. */
   requestId: string;
   /** The owner's classification of an uncertain or failed screen. */

@@ -236,8 +236,10 @@ export class CampaignRecoveryService {
     // A dispatched wake is unanswered only while nothing could still be answering it: the root is
     // idle with nothing pending, and neither it nor any live descendant has unfinished work in the
     // foreground, a pending Stop or background work still returning (as the web's sessionWorking).
+    // Each registered background job counts on its own too, not only the aggregate summary (#2938).
+    const liveJobs = this.db.sessionsWithLiveBackgroundJobs(sessions.map(session => session.id), now);
     const working = (session: SessionView) => ["queued", "starting", "running"].includes(session.status) ||
-      session.stopOperation?.status === "stop_pending" ||
+      session.stopOperation?.status === "stop_pending" || liveJobs.has(session.id) ||
       session.backgroundWorkState === "running" || session.backgroundWorkState === "continuation_pending";
     const quiet = root.status === "idle" && !root.pendingApproval && !working(root) &&
       sessions.slice(1).every(session => session.archived || !working(session));
