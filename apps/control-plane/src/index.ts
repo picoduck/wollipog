@@ -115,6 +115,7 @@ import {
   type CreateProjectRequest,
   type UpdateProjectRequest,
   type AddProjectLocationRequest,
+  type ProjectLocationView,
   type CreateProjectLocationRequest,
   type MoveProjectLocationRequest,
   type RenameProjectLocationRequest,
@@ -255,6 +256,7 @@ import { registerOrchestratorSettingsRoutes } from "./orchestrator-settings-rout
 import { registerReviewSettingsRoutes } from "./review-settings-route.js";
 import { ReviewSettingsService } from "./review-settings.js";
 import { registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
+import { CampaignLocations, registerCampaignLocationRoutes } from "./campaign-locations.js";
 import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosures.js";
 import { composeHostingVideoEvidence, registerHostingVideoEvidenceRoutes } from "./hosting-video-evidence.js";
 import { registerRunnerAttestationRoute } from "./runner-attestation-route.js";
@@ -1089,6 +1091,9 @@ registerOrchestratorSettingsRoutes(app, orchestratorSettings, requestPrincipal);
 registerReviewSettingsRoutes(app, new ReviewSettingsService(db), requestPrincipal);
 registerFullControlLaunchRoutes(app, { db, hub, sessions: svc, settings: orchestratorSettings, requestPrincipal, evidenceDisclosures: evidenceAuthorityDisclosures,
   videoCertification: (runnerId) => videoEvidence.launchCertification(runnerId) });
+const campaignLocations = new CampaignLocations({ db, hub, synchronize: (rootId) => svc.synchronizeCampaignIssueScope(rootId),
+  log: { warn: (message) => app.log.warn(message) } });
+registerCampaignLocationRoutes(app, { campaignLocations, requestPrincipal });
 registerHostingVideoEvidenceRoutes(app, { video: videoEvidence, requestPrincipal });
 registerArtifactUploadSettingsRoutes(app, db, hub, requestPrincipal);
 
@@ -1509,6 +1514,8 @@ app.register(async (instance) => {
         for (const projectId of db.projectIdsForRunner(runnerId)) hub.projectChangedById(projectId);
         // If this runner is a box's runner (connected through the SSH tunnel), flip it online.
         orchestrator.onRunnerRegistered(runnerId, credential.credentialId);
+        // Campaign Locations excluded only while this runner was away are inspected again (#4117).
+        void campaignLocations.runnerReconnected(runnerId);
         if (runnerSupportsProtocol(msg.protocolVersion, "campaignIssueScopeChanges")) {
           for (const campaign of db.campaignIssueScopeRootsForRunner(runnerId)) {
             void svc.synchronizeCampaignIssueScope(campaign.id);
@@ -2604,13 +2611,16 @@ app.post("/api/projects/:id/locations", async (req, reply) => {
   if (!db.canAccessWorkspace(principal, body.runnerId, body.workspaceId)) {
     return reply.code(404).send({ error: "workspace not found" });
   }
+  let added: ProjectLocationView;
   try {
-    db.addProjectLocation(id, body);
+    added = db.addProjectLocation(id, { runnerId: body.runnerId, workspaceId: body.workspaceId, addedByUserId: principal.userId });
   } catch (error) {
     return reply.code(400).send({ error: (error as Error).message });
   }
   const project = db.getProject(id)!;
   hub.projectChanged(project);
+  // Campaigns in this Project inspect it in the background (#4117); the response never waits.
+  void campaignLocations.locationAdded(added.id, principal);
   return { project: db.getProjectForPrincipal(principal, id)! };
 });
 
@@ -2642,8 +2652,9 @@ app.post("/api/projects/:id/locations/new", async (req, reply) => {
     return reply.code(browsed.status).send({ error: message });
   }
   if (!browsed.data?.path) return reply.code(502).send({ error: "the runner did not return the selected directory" });
+  let created: { id: string };
   try {
-    db.createProjectWorkspace(id, runnerId, { name, path: browsed.data.path }, Date.now(), requested.scope);
+    created = db.createProjectWorkspace(id, runnerId, { name, path: browsed.data.path }, Date.now(), requested.scope, principal.userId);
   } catch (error) {
     const message = (error as Error).message;
     // The code tells Add Location this refusal apart: after a lost reply, the retry is refused this
@@ -2655,6 +2666,8 @@ app.post("/api/projects/:id/locations/new", async (req, reply) => {
   const project = db.getProject(id)!;
   hub.runnerChanged(runnerId);
   hub.projectChanged(project);
+  const createdLocation = db.findProjectLocationForProject(id, runnerId, created.id);
+  if (createdLocation) void campaignLocations.locationAdded(createdLocation.id, principal);
   return reply.code(201).send({ project: db.getProjectForPrincipal(principal, id)! });
 });
 
@@ -2675,14 +2688,16 @@ app.post("/api/projects/:id/locations/move", async (req, reply) => {
   const affectedSessionIds = db.listSessions({ includeArchived: true })
     .filter((session) => session.projectLocationId === location.id)
     .map((session) => session.id);
+  let moved: ProjectLocationView | null;
   try {
-    db.moveProjectLocation(location.id, id);
+    moved = db.moveProjectLocation(location.id, id, Date.now(), principal.userId);
   } catch (error) {
     return reply.code(400).send({ error: (error as Error).message });
   }
   hub.projectChangedById(sourceProjectId);
   hub.projectChangedById(id);
   for (const sessionId of affectedSessionIds) hub.sessionChangedById(sessionId);
+  if (moved && sourceProjectId !== id) void campaignLocations.locationAdded(moved.id, principal);
   return { project: db.getProjectForPrincipal(principal, id)! };
 });
 

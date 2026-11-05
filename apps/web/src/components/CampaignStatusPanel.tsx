@@ -59,6 +59,7 @@ import { ChevronLeftIcon } from "./Icons.js";
 import { CampaignIssueScopePanel } from "./CampaignIssueScopePanel.js";
 import { CampaignFollowUpLimit } from "./CampaignFollowUpLimit.js";
 import { CampaignDecisionModelChecks } from "./CampaignDecisionModelChecks.js";
+import { CampaignRepositories } from "./CampaignRepositories.js";
 import { CampaignRecoveryNotice } from "./CampaignRecoveryNotice.js";
 import { Notice } from "./Notice.js";
 import { StaleContent } from "./StaleContent.js";
@@ -288,6 +289,13 @@ function AvailableCampaignStatus({
                   canEdit={availability.role === "campaign"}
                   findRequest={(occurrenceId) => findRequest({ occurrenceId, sessionId: availability.campaignSessionId })}
                   onOpenRequest={onOpenRequest}
+                />
+              )}
+              {data.summary.campaign?.repositoryBoundary && (
+                <CampaignRepositories
+                  campaignId={availability.campaignSessionId}
+                  boundary={data.summary.campaign.repositoryBoundary}
+                  canInclude={availability.role === "campaign"}
                 />
               )}
               <CampaignIssueScopePanel session={session} campaignId={availability.campaignSessionId} />
