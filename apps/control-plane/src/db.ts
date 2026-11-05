@@ -6221,7 +6221,10 @@ export class ControlPlaneDb {
       if (!page.ok) return { state: "recovery_held", recoveryIds: [] };
       for (const item of page.data.items) {
         if (handedOff.has(item.id)) continue;
-        if (item.commitment !== "committed" || !item.issue || !campaignIssueInScope(policy, item.issue)) continue;
+        // Delivery is proven in the launch repository only until per-repository gates (#4119) land:
+        // an item in another campaign repository stays the campaign's ordinary unfinished work.
+        if (item.commitment !== "committed" || !item.issue || item.issue.repository.toLowerCase() !== scope.repository.toLowerCase() ||
+            !campaignIssueInScope(policy, item.issue)) continue;
         // A never-dispatched placeholder of an epic this campaign closed from its members (#4060) is
         // finished by that closure. Any item with an attempt still needs its own delivery.
         if (item.attemptCount === 0 && !item.currentAttempt && this.memberProvenEpicClosure(campaignId, item.issue.repository, item.issue.number)) continue;
@@ -21915,7 +21918,7 @@ export class ControlPlaneDb {
     const scope = fullControl ? policy?.issueScope : undefined;
     // The same in-scope test `campaignRecoveryCompletion` applies, so no item is judged twice.
     const agentWork = facts.agentUnfinished.filter((item) => !(scope && item.origin === "original" && item.issue &&
-      campaignIssueInScope(policy ?? undefined, item.issue)));
+      item.issue.repository.toLowerCase() === scope.repository.toLowerCase() && campaignIssueInScope(policy ?? undefined, item.issue)));
     // #4067: a merged campaign branch still on the remote is cleanup the campaign owes. A pending one
     // keeps it going; one retained with a reason (a handoff to a person or an outside party on its
     // work item) is the owner's to-do, so the campaign finishes with handoffs rather than verified.
