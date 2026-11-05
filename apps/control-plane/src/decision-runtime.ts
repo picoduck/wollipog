@@ -70,12 +70,14 @@ export interface DecisionRequest {
   /** The campaign runner's own harness, which Automatic uses. */
   automaticHarness?: DecisionAutomaticHarness | null;
   /** Create the caller's one typed, person-owned request for an uncertain or failed occurrence and
-   * return its id. Called at most once per occurrence, guarded by a compare-and-set claim; the
-   * occurrence id is the natural idempotency key for the request. A throw releases the claim. */
+   * return its id. A compare-and-set claim lets only one call route an occurrence; a throw releases
+   * the claim. It must be idempotent per occurrence id: a claim interrupted by a restart is routed
+   * again, and the existing request must be returned rather than a second one created. */
   routeToHuman(occurrence: DecisionOccurrenceRecord): Promise<string | null> | string | null;
 }
 
-/** One attempt on the wire. Tests replace it with a fake harness; production uses the hub. */
+/** One attempt on the wire. It must settle within `timeoutMs`, its whole round-trip allowance,
+ * which already includes any transport margin. Tests replace it with a fake harness. */
 export type DecisionAttemptTransport = (
   runnerId: string,
   message: RunDecisionMessage,
@@ -112,7 +114,8 @@ export function decisionTransportErrorClass(error: unknown): DecisionErrorClass 
 export function hubDecisionTransport(hub: Pick<Hub, "requestFromRunner">): DecisionAttemptTransport {
   return async (runnerId, message, timeoutMs) => {
     try {
-      const result = await hub.requestFromRunner(runnerId, message.requestId, message, timeoutMs + DECISION_TRANSPORT_MARGIN_MS);
+      // The runner's own budget (message.timeoutMs) leaves the transport margin inside timeoutMs.
+      const result = await hub.requestFromRunner(runnerId, message.requestId, message, timeoutMs);
       if (result.type !== "run_decision_result") {
         return { type: "run_decision_result", requestId: message.requestId, ok: false, errorClass: "invalid_output" };
       }
@@ -174,7 +177,6 @@ export function decisionOccurrenceView(
   occurrence: DecisionOccurrenceRecord,
   attempts: readonly DecisionAttemptRecord[],
 ): DecisionOccurrenceView {
-  const priced = attempts.filter((attempt) => attempt.costUsd !== null);
   const unpriced = attempts.some((attempt) => attempt.hasUsage && attempt.costUsd === null);
   return {
     occurrenceId: occurrence.occurrenceId,
@@ -197,9 +199,7 @@ export function decisionOccurrenceView(
       outputTokens: attempts.reduce((total, attempt) => total + attempt.outputTokens, 0),
       cacheReadInputTokens: attempts.reduce((total, attempt) => total + attempt.cacheReadInputTokens, 0),
       cacheCreationInputTokens: attempts.reduce((total, attempt) => total + attempt.cacheCreationInputTokens, 0),
-      costUsd: unpriced || (!priced.length && attempts.some((attempt) => attempt.hasUsage))
-        ? null
-        : priced.reduce((total, attempt) => total + attempt.costUsd!, 0),
+      costUsd: unpriced ? null : attempts.reduce((total, attempt) => total + (attempt.costUsd ?? 0), 0),
     },
     createdAt: occurrence.createdAt,
     ...(occurrence.decidedAt !== null ? { decidedAt: occurrence.decidedAt } : {}),
@@ -320,12 +320,13 @@ export class DecisionRuntime {
     const outputSchema = decisionOutputSchema(definition);
     while (attempt < DECISION_MAX_ATTEMPTS) {
       const remaining = deadline - this.now();
-      if (remaining < DECISION_MIN_ATTEMPT_MS) break;
+      if (remaining < DECISION_MIN_ATTEMPT_MS + DECISION_TRANSPORT_MARGIN_MS) break;
       attempt++;
       const requestId = `decision_${randomUUID()}`;
       const startedAt = this.now();
       db.startDecisionAttempt(occurrence.occurrenceId, attempt, requestId, startedAt);
-      const timeoutMs = Math.min(DECISION_ATTEMPT_BUDGET_MS, remaining);
+      // The round trip, including the transport margin, ends inside the occurrence's bound.
+      const timeoutMs = Math.min(DECISION_ATTEMPT_BUDGET_MS + DECISION_TRANSPORT_MARGIN_MS, remaining);
       const raw = await this.options.transport(target.runnerId, {
         type: "run_decision",
         requestId,
@@ -335,14 +336,18 @@ export class DecisionRuntime {
         instructions: definition.instructions,
         input: rendered,
         outputSchema,
-        timeoutMs,
+        timeoutMs: timeoutMs - DECISION_TRANSPORT_MARGIN_MS,
       }, timeoutMs);
       const result = sanitizeRunDecisionResult(raw) ??
         { type: "run_decision_result" as const, requestId, ok: false, errorClass: "invalid_output" as const };
-      const validated = result.ok && result.outputText !== undefined
+      // An answer after the occurrence's bound is late, whatever it says: it never settles a verdict.
+      const late = this.now() > deadline;
+      const validated = !late && result.ok && result.outputText !== undefined
         ? validateDecisionOutput(definition, result.outputText)
         : null;
-      const errorClass: DecisionErrorClass | null = validated ? null : result.ok ? "invalid_output" : knownClass(result.errorClass);
+      const errorClass: DecisionErrorClass | null = validated
+        ? null
+        : late ? "timed_out" : result.ok ? "invalid_output" : knownClass(result.errorClass);
       db.finishDecisionAttempt(occurrence.occurrenceId, attempt, {
         latencyMs: this.now() - startedAt,
         errorClass,
@@ -367,7 +372,7 @@ export class DecisionRuntime {
       if (!TRANSIENT.has(lastClass) || attempt >= DECISION_MAX_ATTEMPTS) break;
       const wait = Math.max(this.backoffMs(attempt), result.retryAfterMs ?? 0);
       // A Retry-After or backoff that would leave no room for another attempt ends the retries.
-      if (this.now() + wait + DECISION_MIN_ATTEMPT_MS > deadline) break;
+      if (this.now() + wait + DECISION_MIN_ATTEMPT_MS + DECISION_TRANSPORT_MARGIN_MS > deadline) break;
       await this.sleep(wait);
       if (db.getDecisionOccurrence(occurrence.occurrenceId)?.state !== "pending") return;
     }
@@ -388,14 +393,19 @@ export class DecisionRuntime {
     }
     if (occurrence.state === "pending") throw new Error("the decision occurrence has no outcome yet");
     let humanRequestId = occurrence.humanRequestId;
-    if (db.claimDecisionHumanRoute(occurrenceId, this.now())) {
+    // This process runs one outcome per occurrence at a time (the in-flight map), so a claim that
+    // never finished belongs to a run that stopped mid-routing: route it again. The caller's
+    // idempotency per occurrence returns the request it may already have created.
+    const interrupted = occurrence.humanRouteClaimedAt !== null && occurrence.humanRoutedAt === null;
+    if (interrupted || db.claimDecisionHumanRoute(occurrenceId, this.now())) {
       try {
         humanRequestId = await request.routeToHuman(db.getDecisionOccurrence(occurrenceId)!);
       } catch (error) {
         db.releaseDecisionHumanRoute(occurrenceId);
         throw error;
       }
-      if (humanRequestId !== null) db.recordDecisionHumanRequest(occurrenceId, humanRequestId);
+      db.completeDecisionHumanRoute(occurrenceId, humanRequestId, this.now());
+      humanRequestId = db.getDecisionOccurrence(occurrenceId)!.humanRequestId;
     }
     return {
       outcome: "human_required",

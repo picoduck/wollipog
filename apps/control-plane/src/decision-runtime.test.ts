@@ -16,6 +16,7 @@ import {
   DECISION_PROBE_INPUTS,
   decisionInputDigests,
   decisionOutputSchema,
+  decisionRequestDigest,
   narrowToProposal,
   renderDecisionInput,
   validateDecisionOutput,
@@ -26,6 +27,7 @@ import {
   DECISION_TOTAL_BOUND_MS,
   DecisionRuntime,
   decisionOccurrenceView,
+  hubDecisionTransport,
   sanitizeRunDecisionResult,
 } from "./decision-runtime.js";
 import type { RateTable } from "./usage-pricing.js";
@@ -393,7 +395,124 @@ test("runner results are sanitized to the Decision boundary", () => {
   const view = decisionOccurrenceView({
     occurrenceId: "dec_x", organizationId: ORG, campaignSessionId: null, occurrenceKey: null, kind: "probe",
     promptVersion: "probe.v1", inputDigests: {}, inputDigest: "d", state: "pending", verdict: null, reason: null,
-    failureClass: null, fields: {}, target: null, humanRouteClaimedAt: null, humanRequestId: null, createdAt: 1, decidedAt: null,
+    failureClass: null, fields: {}, target: null, humanRouteClaimedAt: null, humanRoutedAt: null, humanRequestId: null,
+    createdAt: 1, decidedAt: null,
   }, []);
   assert.equal(view.usage.costUsd, 0);
+});
+
+test("a routing claim interrupted by a restart is routed again and links the one existing request", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const definition = DECISION_KINDS.probe;
+  // A previous run claimed the route, the caller created its request, and the process stopped before
+  // the request id was recorded.
+  db.createDecisionOccurrence({
+    occurrenceId: "dec_crashed", organizationId: ORG, campaignSessionId: null, occurrenceKey: "probe:crashed",
+    kind: "probe", promptVersion: definition.promptVersion, inputDigests: {},
+    inputDigest: decisionRequestDigest(definition, renderDecisionInput(definition, DECISION_PROBE_INPUTS)), now: Date.now(),
+  });
+  db.settleDecisionOccurrence("dec_crashed", { state: "failed", failureClass: "authentication", now: Date.now() });
+  assert.equal(db.claimDecisionHumanRoute("dec_crashed", Date.now()), true);
+  const requests = new Map<string, string>([["dec_crashed", "wfd_existing"]]);
+  let calls = 0;
+  const runtime = new DecisionRuntime({
+    db,
+    settings: { resolve: () => ({ ok: false, errorClass: "runner_incapable" }) },
+    transport: async () => { throw new Error("unexpected transport"); },
+  });
+  const decide = () => runtime.decide({
+    organizationId: ORG, kind: "probe", inputs: DECISION_PROBE_INPUTS, occurrenceKey: "probe:crashed",
+    // Idempotent per occurrence: the request created before the restart is returned, never a second.
+    routeToHuman: (occurrence) => {
+      calls++;
+      const existing = requests.get(occurrence.occurrenceId) ?? "wfd_new";
+      requests.set(occurrence.occurrenceId, existing);
+      return existing;
+    },
+  });
+  const outcome = await decide();
+  assert.equal(outcome.outcome === "human_required" && outcome.humanRequestId, "wfd_existing");
+  assert.equal(calls, 1);
+  // Once routing finished it is never repeated.
+  const again = await decide();
+  assert.equal(again.outcome === "human_required" && again.humanRequestId, "wfd_existing");
+  assert.equal(calls, 1);
+  assert.equal(requests.size, 1);
+});
+
+test("a probe routed to nobody is finished and never routed again", async () => {
+  const run = harness([failure("refused")]);
+  let calls = 0;
+  const request = () => run.runtime.decide({
+    organizationId: ORG, kind: "probe", inputs: DECISION_PROBE_INPUTS, occurrenceKey: "probe:nobody",
+    routeToHuman: () => { calls++; return null; },
+  });
+  await request();
+  const again = await request();
+  assert.equal(again.outcome === "human_required" && again.humanRequestId, null);
+  assert.equal(calls, 1);
+});
+
+test("the production transport's margin stays inside the occurrence bound, and a late verdict never settles", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const start = 1_000_000;
+  let clock = start;
+  let calls = 0;
+  const runnerBudgets: number[] = [];
+  const transport = hubDecisionTransport({
+    requestFromRunner: async (_runnerId, requestId, message, timeoutMs) => {
+      runnerBudgets.push((message as RunDecisionMessage).timeoutMs);
+      // Every round trip uses its whole allowance before answering.
+      clock += timeoutMs!;
+      calls++;
+      return calls < 3
+        ? { type: "run_decision_result", requestId, ok: false, errorClass: "timed_out" }
+        : { type: "run_decision_result", requestId, ok: true, outputText: JSON.stringify({ verdict: "confirm", reason: "match" }) };
+    },
+  });
+  const runtime = new DecisionRuntime({
+    db,
+    settings: { resolve: () => ({ ok: true, target: TARGET }) },
+    transport,
+    now: () => clock,
+    sleep: async (ms) => { clock += ms; },
+    random: () => 0.5,
+  });
+  const outcome = await runtime.decide({ organizationId: ORG, kind: "probe", inputs: DECISION_PROBE_INPUTS, routeToHuman: () => null });
+  assert.ok(clock - start <= DECISION_TOTAL_BOUND_MS, `elapsed ${clock - start} ms`);
+  assert.ok(runnerBudgets.every((budget) => budget > 0 && budget <= 30_000));
+  // Whatever the last attempt answered, the outcome respects the bound.
+  if (outcome.outcome === "verdict") assert.ok(clock - start <= DECISION_TOTAL_BOUND_MS);
+});
+
+test("a valid answer that arrives after the occurrence's bound is discarded as late", async () => {
+  const run = harness([async () => {
+    run.advance(DECISION_TOTAL_BOUND_MS);
+    return verdict("confirm") as Partial<RunDecisionResultMessage>;
+  }]);
+  const outcome = await run.decide();
+  assert.equal(outcome.outcome, "human_required");
+  assert.equal(outcome.outcome === "human_required" && outcome.failureClass, "timed_out");
+  const view = run.runtime.view(outcome.occurrenceId)!;
+  assert.equal(view.verdict, undefined);
+  assert.deepEqual(view.attempts.map((attempt) => attempt.errorClass), ["timed_out"]);
+  assert.equal(view.usage.outputTokens, 20, "the late attempt's usage is still recorded");
+});
+
+test("campaign usage is unknown when any call with usage is unpriced", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.createDecisionOccurrence({
+    occurrenceId: "dec_mixed", organizationId: ORG, campaignSessionId: "campaign", occurrenceKey: null, kind: "probe",
+    promptVersion: "probe.v1", inputDigests: {}, inputDigest: "digest", now: 1,
+  });
+  for (const attempt of [1, 2]) {
+    db.startDecisionAttempt("dec_mixed", attempt, `r${attempt}`, 1);
+    db.finishDecisionAttempt("dec_mixed", attempt, { latencyMs: 1, errorClass: null, usage: USAGE, costUsd: attempt === 1 ? 0.01 : null });
+  }
+  const usage = db.campaignDecisionUsage("campaign");
+  assert.equal(usage.costUsd, null);
+  assert.equal(usage.unpricedCalls, 1);
+  assert.equal(decisionOccurrenceView(db.getDecisionOccurrence("dec_mixed")!, db.listDecisionAttempts("dec_mixed")).usage.costUsd, null,
+    "the campaign total and the occurrence view agree");
+  assert.equal(db.campaignDecisionUsage("no-calls").costUsd, 0);
 });

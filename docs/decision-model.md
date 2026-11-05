@@ -58,7 +58,8 @@ const outcome = await decisionRuntime.decide({
 
 - The occurrence is created before the first attempt. An `occurrenceKey` makes the call idempotent:
   a repeated or concurrent call joins the same occurrence.
-- At most `DECISION_MAX_ATTEMPTS` (3) attempts inside `DECISION_TOTAL_BOUND_MS` (90 s). Transient
+- At most `DECISION_MAX_ATTEMPTS` (3) attempts inside `DECISION_TOTAL_BOUND_MS` (90 s), transport
+  margins included. An answer that arrives after the bound is discarded as `timed_out`. Transient
   classes (`DECISION_TRANSIENT_ERROR_CLASSES`: timeout, transport, rate limit, overload, invalid
   output and unclassified provider failure) are retried with exponential backoff and equal jitter. A
   provider `Retry-After` replaces a shorter backoff, and retries stop when it would leave no room for
@@ -73,8 +74,9 @@ const outcome = await decisionRuntime.decide({
 An `uncertain` or failed occurrence calls `routeToHuman` exactly once, guarded by a compare-and-set
 claim. The caller creates its one typed, person-owned request there. For scope, that is approval of
 the Orchestrator's proposal. If the callback throws, the claim is released so a later call can
-create the request. Use the occurrence ID as the request's idempotency key. Nothing ever falls back
-to text parsing.
+create the request. A claim that a restart interrupted before routing finished is routed again, so
+the callback must be idempotent per occurrence ID: return the request it already created instead of
+creating a second one. Nothing ever falls back to text parsing.
 
 Only `outcome: "verdict"` may be acted on, and only to narrow or confirm. No verdict can raise a
 ceiling, change a repository or grant an operation; callers enforce that before acting, for example

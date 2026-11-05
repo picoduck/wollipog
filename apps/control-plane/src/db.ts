@@ -2965,6 +2965,7 @@ CREATE TABLE IF NOT EXISTS decision_occurrences (
   fields                 TEXT,
   target                 TEXT,
   human_route_claimed_at INTEGER,
+  human_routed_at        INTEGER,
   human_request_id       TEXT,
   created_at             INTEGER NOT NULL,
   decided_at             INTEGER,
@@ -5286,6 +5287,7 @@ interface DecisionOccurrenceRow {
   fields: string | null;
   target: string | null;
   human_route_claimed_at: number | null;
+  human_routed_at: number | null;
   human_request_id: string | null;
   created_at: number;
   decided_at: number | null;
@@ -5308,6 +5310,9 @@ export interface DecisionOccurrenceRecord {
   fields: Record<string, unknown>;
   target: DecisionModelResolvedTarget | null;
   humanRouteClaimedAt: number | null;
+  /** Set once the caller's routing finished, with or without a request. A claim without it was
+   * interrupted and is routed again. */
+  humanRoutedAt: number | null;
   humanRequestId: string | null;
   createdAt: number;
   decidedAt: number | null;
@@ -12283,7 +12288,7 @@ export class ControlPlaneDb {
    * can create the one request instead of the occurrence being left with none. */
   releaseDecisionHumanRoute(occurrenceId: string): void {
     this.stmt(
-      "UPDATE decision_occurrences SET human_route_claimed_at=NULL WHERE occurrence_id=? AND human_request_id IS NULL",
+      "UPDATE decision_occurrences SET human_route_claimed_at=NULL WHERE occurrence_id=? AND human_routed_at IS NULL",
     ).run(occurrenceId);
   }
 
@@ -12382,7 +12387,8 @@ export class ControlPlaneDb {
       outputTokens: Number(row.output_tokens),
       cacheReadInputTokens: Number(row.cache_read_tokens),
       cacheCreationInputTokens: Number(row.cache_creation_tokens),
-      costUsd: row.cost_usd === null ? null : Number(row.cost_usd),
+      // One unpriced call makes the total unknown: a partial sum is never reported as the cost.
+      costUsd: Number(row.unpriced) > 0 ? null : Number(row.cost_usd ?? 0),
       unpricedCalls: Number(row.unpriced),
     };
   }
@@ -12493,11 +12499,12 @@ export class ControlPlaneDb {
     ).run(now, occurrenceId).changes) === 1;
   }
 
-  recordDecisionHumanRequest(occurrenceId: string, requestId: string): boolean {
+  /** Record that the caller's routing finished, linking its request when it created one. */
+  completeDecisionHumanRoute(occurrenceId: string, requestId: string | null, now: number): boolean {
     return Number(this.stmt(
-      `UPDATE decision_occurrences SET human_request_id=?
-       WHERE occurrence_id=? AND human_route_claimed_at IS NOT NULL AND human_request_id IS NULL`,
-    ).run(requestId, occurrenceId).changes) === 1;
+      `UPDATE decision_occurrences SET human_request_id=COALESCE(human_request_id, ?), human_routed_at=?
+       WHERE occurrence_id=? AND human_route_claimed_at IS NOT NULL AND human_routed_at IS NULL`,
+    ).run(requestId, now, occurrenceId).changes) === 1;
   }
 
   private decisionOccurrenceFromRow(row: DecisionOccurrenceRow): DecisionOccurrenceRecord {
@@ -12529,6 +12536,7 @@ export class ControlPlaneDb {
       fields,
       target,
       humanRouteClaimedAt: row.human_route_claimed_at,
+      humanRoutedAt: row.human_routed_at,
       humanRequestId: row.human_request_id,
       createdAt: Number(row.created_at),
       decidedAt: row.decided_at === null ? null : Number(row.decided_at),
