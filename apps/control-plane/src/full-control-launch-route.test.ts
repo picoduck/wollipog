@@ -4,7 +4,7 @@ import Fastify from "fastify";
 import {
   CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CONTROLLED_REVIEW_PROFILE, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, WORKFLOW_DECISION_CATEGORIES,
   campaignWorkflowOwner, SCOPE_GRANT_DEFAULT_SELECTION_COUNT,
-  type CampaignIssueScopeSnapshot, type FullControlScopeGrant, type CampaignLaunchInspectionResult, type CampaignLaunchPreflight, type CampaignLaunchProposal, type ControlledReviewCapability,
+  type CampaignIssueFacts, type CampaignIssueScopeRequest, type CampaignIssueScopeSnapshot, type FullControlScopeGrant, type CampaignLaunchInspectionResult, type CampaignLaunchPreflight, type CampaignLaunchProposal, type ControlledReviewCapability,
   type CampaignWorkItemDetail, type ControlPlaneToRunner, type CreateSessionRequest, type FullControlFirstMessageScope, type FullControlLaunchRequest, type GithubIssueClosureSnapshot, type RunnerMetadata, type RunnerRuntimeInfo,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
@@ -78,7 +78,11 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
     // The fixture runner acknowledges each durable prompt it receives, as a live runner does.
     ackDurable: true,
     // Each epic's sub-issues, read as the runner reads them; an epic not listed has none.
-    epics: new Map<number, number[]>() };
+    epics: new Map<number, number[]>(),
+    // Issue facts a v291 runner reports when asked (#4103): open with no labels unless set here. A
+    // pull request is reported as one, and refuses a read that does not ask for facts.
+    facts: new Map<number, Partial<Pick<CampaignIssueFacts, "state" | "labels" | "assignees" | "title" | "bodyExcerpt">>>(),
+    pullRequests: new Set<number>() };
   let receipts: ((message: Extract<Parameters<SessionsService["onDurablePromptReceipt"]>[1], { type: "durable_session_command_result" }>) => void) | null = null;
   hub.sendToRunner = (runnerId, message) => {
     sent.push(message);
@@ -93,16 +97,21 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
       queueMicrotask(() => receipts?.({ ...acknowledge, revision: (db.getSessionPromptCommand(message.commandId)?.revision ?? 0) + 1 }));
     }
     if (message.type === "campaign_issue_scope" && (message.operation === "inspect" || message.operation === "synchronize")) {
+      const report = message.operation === "inspect" && message.facts === true;
       const requested = message.operation === "inspect" ? message.issues ?? [] : [];
       const epic = message.operation === "inspect" ? message.epic : undefined;
       const members = epic === undefined ? [] : issues.epics.get(epic) ?? [];
       const candidate = (n: number, source: "umbrella" | "sub_issue" | "member_checklist") =>
         ({ issue: { repository: issues.repository!, number: n }, title: `Issue ${n}`, source });
+      const refused = (n: number) => issues.notIssues.has(n) || !report && issues.pullRequests.has(n);
+      const issueFacts = report ? requested.map((n): CampaignIssueFacts => ({ number: n, kind: issues.pullRequests.has(n) ? "pull_request" : "issue",
+        state: "open", labels: [], assignees: [], title: `Issue ${n}`, bodyExcerpt: "", ...issues.facts.get(n) })) : undefined;
       const answer = message.operation === "synchronize" ? { ok: true, repository: "owner/repo", revision: message.scope.revision }
-        : issues.repository && ![...requested, ...members, ...epic === undefined ? [] : [epic]].some((n) => issues.notIssues.has(n))
+        : issues.repository && ![...requested, ...members, ...epic === undefined ? [] : [epic]].some(refused)
           ? { ok: true, repository: issues.repository, candidates: [...epic === undefined ? [] : [candidate(epic, "umbrella")],
             ...members.map((n) => candidate(n, "sub_issue")),
-            ...requested.filter((n) => n !== epic && !members.includes(n)).map((n) => candidate(n, "member_checklist"))] }
+            ...requested.filter((n) => n !== epic && !members.includes(n) && !issues.pullRequests.has(n)).map((n) => candidate(n, "member_checklist"))],
+            ...(issueFacts ? { issueFacts } : {}) }
           : { ok: false };
       const respond = () => hub.resolveRunnerRequest({ type: "campaign_issue_scope_result", requestId: message.requestId,
         sessionId: message.sessionId, ...answer }, "r");
@@ -1645,6 +1654,126 @@ test("a selection grant's Orchestrator proposal goes to the owner until the Deci
       additions: [{ repository: "owner/repo", number: 13 }], removals: [], explanation: "One more" });
     assert.equal(refused.ok, false);
     assert.equal(refused.errorDetails?.code, "lineage_missing");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a selection proposal's deterministic floors refuse in order, each with its fixed code and no model call (#4103)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    // Another active campaign holds #43 in its scope.
+    f.decision.state.answer = () => grantVerdict({ explicit: issues(43) });
+    const { id: other } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, other, "Fix #43")).ok, true);
+    assert.deepEqual(f.db.getSession(other)!.orchestratorPolicy!.issueScope!.issueNumbers, [43]);
+
+    f.decision.state.answer = () => grantVerdict({ explicit: issues(12), selectionRequested: true, selectionCount: 2, selectionCriteria: "highest priority" });
+    const { id } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix #12, then find the 2 highest-priority issues and fix them")).ok, true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12]);
+    f.issues.pullRequests.add(41);
+    f.issues.facts.set(42, { state: "closed", labels: ["security"] });
+    f.issues.facts.set(44, { labels: ["Security"] });
+    f.db.upsertGovernancePolicy({ policyId: "security-issues", name: "Security issues stay mine", effect: "ask", priority: 1, enabled: true,
+      scope: {}, conditions: { humanRequired: true, issueLabels: ["security"] } }, Date.now());
+    const occurrences = () => f.db.listCampaignDecisionOccurrences(id).length;
+    const before = occurrences();
+    const pending = () => f.db.unconsumedWorkflowDecisionsForController(id).filter((d) => d.category === "campaign_issue_scope");
+    let revision = f.db.getSession(id)!.orchestratorPolicy!.issueScope!.revision;
+    const propose = (numbers: Array<number | { repository: string; number: number }>, extra: Partial<CampaignIssueScopeRequest> = {}) =>
+      f.sessions.proposeCampaignIssueScope(id, { requestId: randomUUID(), expectedRevision: revision,
+        additions: numbers.map((n) => typeof n === "number" ? { repository: "owner/repo", number: n } : n), removals: [],
+        explanation: "Ranked by priority label and age.", lineage: { kind: "selection" }, ...extra });
+    const refusedWith = async (numbers: Parameters<typeof propose>[0], details: Record<string, unknown>, extra: Partial<CampaignIssueScopeRequest> = {}) => {
+      const refused = await propose(numbers, extra);
+      assert.equal(refused.ok, false, `${JSON.stringify(numbers)} should be refused`);
+      assert.deepEqual(refused.errorDetails, details);
+    };
+
+    await refusedWith([45], { code: "selection_additions_only" }, { removals: [{ repository: "owner/repo", number: 12 }] });
+    await refusedWith([{ repository: "other/repo", number: 40 }], { code: "repository_outside_boundary" });
+    await refusedWith([45, 41], { code: "not_an_issue", issue: 41 });
+    // A closed issue is refused as closed before its Human Required label is read.
+    await refusedWith([42], { code: "issue_not_open", issue: 42 });
+    await refusedWith([12], { code: "already_in_scope", issue: 12 });
+    await refusedWith([43], { code: "other_campaign_scope", issue: 43 });
+    await refusedWith([45, 46, 47], { code: "selection_count_exhausted", count: 2, admitted: 0, requested: 3 });
+    await refusedWith([44], { code: "human_required_label", issue: 44 });
+    // Every label counts, not only the first fifty (#4215 review).
+    f.issues.facts.set(48, { labels: [...Array.from({ length: 50 }, (_, i) => `area-${i}`), "security"] });
+    await refusedWith([48], { code: "human_required_label", issue: 48 });
+    // A fact out of its bounds verifies nothing: the proposal is not admitted on a partial label list.
+    f.issues.facts.set(49, { labels: Array.from({ length: 101 }, (_, i) => `area-${i}`) });
+    const partial = await propose([49]);
+    assert.equal(partial.ok, false);
+    assert.equal(partial.status, 409);
+    assert.equal(occurrences(), before, "no floor calls the Decision Model");
+    assert.equal(pending().length, 0, "no floor refusal creates a request");
+
+    // Two issues that pass every floor go to the owner (until the Decision Model reviews them), and
+    // a proposal without lineage takes the same route.
+    const passed = await propose([45, 46], { lineage: undefined });
+    assert.equal(passed.ok, true, passed.error ?? "");
+    assert.equal(passed.data!.authority, "human");
+    const snapshot = passed.data!.resourceSnapshot as CampaignIssueScopeSnapshot;
+    assert.deepEqual(snapshot.lineage, { kind: "selection" });
+    assert.equal(snapshot.grantReview!.cause, "selection");
+    assert.equal(f.sessions.resolveWorkflowDecision(id, id, passed.data!.occurrenceId, { outcome: "approve" }, "human",
+      { kind: "human", id: f.human.userId }, () => true).ok, true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12, 45, 46]);
+    revision = f.db.getSession(id)!.orchestratorPolicy!.issueScope!.revision;
+    // The selection's count is spent: a mid-run addition is refused by the count floor.
+    await refusedWith([47], { code: "selection_count_exhausted", count: 2, admitted: 2, requested: 1 });
+    // Removing a selected issue never gives its slot back.
+    const removal = await f.sessions.proposeCampaignIssueScope(id, { requestId: "remove-46", expectedRevision: revision, additions: [],
+      removals: [{ repository: "owner/repo", number: 46 }], explanation: "Fixed elsewhere." });
+    assert.equal(removal.ok, true, removal.error ?? "");
+    assert.equal(f.sessions.resolveWorkflowDecision(id, id, removal.data!.occurrenceId, { outcome: "approve" }, "orchestrator",
+      { kind: "agent", id }, () => true).ok, true);
+    revision = f.db.getSession(id)!.orchestratorPolicy!.issueScope!.revision;
+    await refusedWith([47], { code: "selection_count_exhausted", count: 2, admitted: 2, requested: 1 });
+    assert.equal(occurrences(), before);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("selection lineage without a selection to fill: refused under a healthy grant, the owner's under a failed one (#4103)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    f.decision.state.answer = () => grantVerdict({ explicit: issues(12) });
+    const { id: named } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, named, "Fix #12")).ok, true);
+    const refused = await f.sessions.proposeCampaignIssueScope(named, { requestId: "selection", expectedRevision: 2,
+      additions: [{ repository: "owner/repo", number: 13 }], removals: [], explanation: "One more", lineage: { kind: "selection" } });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.errorDetails?.code, "selection_not_granted");
+
+    f.decision.state.answer = () => ({ ok: false, errorClass: "authentication" });
+    const { id: failed } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, failed, "Fix the worst bug")).ok, true);
+    const owner = await f.sessions.proposeCampaignIssueScope(failed, { requestId: "selection", expectedRevision: 2,
+      additions: [{ repository: "owner/repo", number: 13 }], removals: [], explanation: "The worst bug", lineage: { kind: "selection" } });
+    assert.equal(owner.ok, true, owner.error ?? "");
+    assert.equal(owner.data!.authority, "human");
+    assert.equal((owner.data!.resourceSnapshot as CampaignIssueScopeSnapshot).grantReview!.cause, "grant_failed");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a runner that cannot report issue facts leaves the open and label floors unverified, so a selection goes to the owner (#4103)", async () => {
+  const f = fixture({ protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueFacts - 1 });
+  const { server } = await app(f);
+  try {
+    f.decision.state.answer = () => grantVerdict({ selectionRequested: true, selectionCount: 2, selectionCriteria: "highest priority" });
+    const { id } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Find the 2 highest-priority issues and fix them")).ok, true);
+    const proposed = await f.sessions.proposeCampaignIssueScope(id, { requestId: "old-runner", expectedRevision: 2,
+      additions: [{ repository: "owner/repo", number: 30 }], removals: [], explanation: "The highest-priority issue", lineage: { kind: "selection" } });
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "human");
+    const inspections = f.sent.filter((message): message is Extract<ControlPlaneToRunner, { type: "campaign_issue_scope" }> =>
+      message.type === "campaign_issue_scope" && message.operation === "inspect" && (message.issues ?? []).includes(30));
+    assert.ok(inspections.length > 0 && inspections.every((message) => message.operation === "inspect" && message.facts === undefined),
+      "an older runner is never asked for facts");
   } finally { await server.close(); f.db.close(); }
 });
 

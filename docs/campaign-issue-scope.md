@@ -198,6 +198,31 @@ still in scope, published payload matching exactly, and scope plus reservations 
 The admission evidence names which kind it was. Each Orchestrator refusal returns a fixed sentence
 and a bounded `code`, such as `publication_approver_not_owner`, `origin_outside_scope` or
 `lineage_missing`. A campaign owner can still propose any change from Campaign Status.
+
+When the owner's first message asked the campaign to choose issues (a scope grant with a selection,
+#4102), the Orchestrator proposes the issues it chose with `lineage: {kind: "selection"}` and its
+ranking as the `explanation` (#4103); under such a grant a proposal without lineage takes the same
+route, and selection lineage under a grant without a selection is refused as `selection_not_granted`.
+A selection proposal adds issues only (`selection_additions_only`). Deterministic floors then run in
+order, and the first that fails refuses the proposal with its code and no Decision Model call:
+
+1. `repository_outside_boundary`: every addition is in a repository in the campaign's boundary.
+2. `not_an_issue`, `issue_not_open`: a v291 runner reads each number with `facts` and reports it as
+   an open issue, not a pull request.
+3. `already_in_scope`: none is in this scope.
+4. `other_campaign_scope`: no other active root campaign names it in its scope or holds a committed
+   work item for it.
+5. `selection_count_exhausted`, `capacity_exhausted`: the issues applied selection changes already
+   added plus this proposal stay within the grant's selection count, counted once and never given
+   back by a removal, and the scope plus publication reservations stay within Maximum Issues.
+6. `human_required_label`: no enabled Human Required ask rule with `conditions.issueLabels` (matched
+   case-insensitively, narrowed only by organization, machine, workspace and agent selectors) names
+   one of the issue's labels. Such a rule never matches a tool request.
+
+A runner older than v291 reports no facts, so floors 2 and 6 stay unverified and the proposal goes to
+the owner. A proposal that passes every floor is the owner's one typed approval, with
+`grantReview.cause: "selection"`, until the Decision Model reviews selection proposals.
+
 The server binds lineage evidence, rationale, expected revision, affected assignments, related
 active children and affected grants into the snapshot. Root standing authorization resolves and
 consumes that exact occurrence atomically; the grants it lists and their evidence receipts are
