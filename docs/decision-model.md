@@ -44,17 +44,32 @@ against the kind's schema; properties outside it are ignored and never stored.
 `DecisionRuntime.decide()` in `apps/control-plane/src/decision-runtime.ts` is the only entry point.
 
 ```ts
-// `scope_grant` is the kind #4102 adds; only `probe` exists today.
+// A kind with untrusted data, such as #4103's scope review, passes it as quoted `data` fields.
 const outcome = await decisionRuntime.decide({
   organizationId,
-  kind: "scope_grant",
+  kind: "scope_review",
   campaignSessionId: rootId,
-  occurrenceKey: `scope_grant:${rootId}:${revision}`,
+  occurrenceKey: `scope_review:${rootId}:${proposalId}`,
   automaticHarness: { runnerId, agentId, driver },
   inputs: { ownerMessage, data: { candidates: JSON.stringify(facts) } },
   routeToHuman: (occurrence) => createTypedRequest(occurrence.occurrenceId),
 });
 ```
+
+### Scope Grant
+
+`scope_grant` (#4102) reads a Full Control owner's exact first message and nothing else: no data
+fields, no tools, no repository or issue content. Its fields are `explicit`, `ranges` and `context`
+(each repository-qualified, with an empty repository meaning the campaign's own), the selection
+(`selectionRequested`, `selectionRepository`, `selectionCount` with 0 for none stated,
+`selectionCriteria`, `selectionConstraints`) and `narrowsOperations` with `operations`. Array items
+may be objects of scalars; every property is required and nothing outside the schema is kept.
+
+`apps/control-plane/src/scope-grant.ts` holds the floors that run on the verdict, and
+`docs/full-control-launch-preparation.md` describes how the grant establishes the boundary. Its
+routing creates no request at the time of the call: the one typed request is the owner's approval
+of the Orchestrator's first scope proposal, which `linkDecisionHumanRequest` then records on the
+occurrence.
 
 - The occurrence is created before the first attempt. An `occurrenceKey` makes the call idempotent:
   a repeated or concurrent call joins the same occurrence.

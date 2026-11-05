@@ -1124,6 +1124,7 @@ const refreshCampaignForge = (campaignId: string, refs: readonly CampaignPullReq
   });
 });
 svc.campaignForgeRefresh = refreshCampaignForge;
+svc.decisionRuntime = decisionRuntime;
 svc.campaignForgeReadNow = (campaignId, refs) => campaignForgeObserver.readNow(campaignId, refs);
 registerCampaignStatusRoutes(app, {
   db,

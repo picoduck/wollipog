@@ -146,21 +146,27 @@ export function firstMessageIssues(boundary: CampaignAuthorityBoundary, issueNum
  * naming those issues derives, never below what was authorized; an explicit ceiling never
  * changes, and a missing record counts as explicit. A derived Maximum Issues also leaves room for
  * `epicMembers`, the runner-verified members of target epics the message names (#4061), so the
- * Orchestrator's epic-lineage addition of them fits; it never counts toward follow-ups. */
+ * Orchestrator's epic-lineage addition of them fits; it never counts toward follow-ups.
+ *
+ * A scope grant (#4102) adds its selection count to a derived Maximum Issues the same way, never to
+ * follow-up room, and its operations replace the launch's only as their intersection. */
 export function firstMessageBoundary(boundary: CampaignAuthorityBoundary, followUps: "recommend_only" | "execute_approved",
   issueNumbers: number[], objective: string, revision: number, issueScopeRevision: number, now: number,
-  derived: FullControlDerivedLimits = { acceptedFollowUps: false, maxIssues: false }, epicMembers: readonly number[] = []): CampaignAuthorityBoundary {
+  derived: FullControlDerivedLimits = { acceptedFollowUps: false, maxIssues: false }, epicMembers: readonly number[] = [],
+  grant: { selectionCount?: number; operations?: readonly CampaignAuthorityOperation[] } = {}): CampaignAuthorityBoundary {
   const derivedFollowUps = followUps === "execute_approved" ? Math.min(MAX_DERIVED_FOLLOW_UPS, Math.max(1, issueNumbers.length)) : 0;
   const budget = boundary.budgetAuthority;
   // An explicit limit, including No Limit (omitted), is kept as the Human set it (#2940).
   const acceptedFollowUps = derived.acceptedFollowUps ? Math.max(budget?.acceptedFollowUps ?? 0, derivedFollowUps) : budget?.acceptedFollowUps;
   const issues = boundary.issueAuthority;
   // With no follow-up limit, a derived issue limit leaves room up to its ceiling.
-  const room = new Set(epicMembers.filter((n) => !issueNumbers.includes(n))).size;
+  const room = new Set(epicMembers.filter((n) => !issueNumbers.includes(n))).size + (grant.selectionCount ?? 0);
   const maxIssues = issues && (derived.maxIssues
     ? Math.min(100, Math.max(issues.maxIssues, acceptedFollowUps === undefined ? 100 : issueNumbers.length + room + acceptedFollowUps)) : issues.maxIssues);
   const { acceptedFollowUps: _previous, ...rest } = budget ?? {};
-  return structuredClone({ ...boundary, objective, revision, issueScopeRevision, authorizedAt: now,
+  // Narrowing only: an operation the launch did not grant never enters the boundary.
+  const operations = grant.operations ? boundary.operations.filter((operation) => grant.operations!.includes(operation)) : boundary.operations;
+  return structuredClone({ ...boundary, objective, revision, issueScopeRevision, authorizedAt: now, operations,
     ...(budget ? { budgetAuthority: { ...rest, ...(acceptedFollowUps === undefined ? {} : { acceptedFollowUps }) } as CampaignBudgetAuthority } : {}),
     ...(issues ? { issueAuthority: { ...issues, epics: [...issueNumbers], maxIssues: maxIssues! } } : {}) });
 }
