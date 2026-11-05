@@ -11673,7 +11673,7 @@ export class SessionsService {
       if (!created.ok || !created.data) throw new Error(created.error ?? "the owner's scope approval could not be created");
       return created.data.occurrenceId;
     };
-    const occurrenceKey = scopeReviewKey(sessionId, request.expectedRevision, snapshot.additions, grantDigest);
+    const occurrenceKey = scopeReviewKey(sessionId, boundary.revision, request.expectedRevision, snapshot.additions, grantDigest);
     // A repeat of the same issues at this revision reads the review's outcome rather than asking
     // again: its rationale or facts may differ, and only the first proposal was reviewed. A review
     // still running with other inputs is waited for, within the runtime's own bound; one past that
@@ -11726,22 +11726,30 @@ export class SessionsService {
     }
     this.db.recordSelectionProposal({ occurrenceId: outcome.occurrenceId, campaignSessionId: sessionId, issues: titled,
       explanation: snapshot.explanation }, Date.now());
+    // A request something else retired without deciding it (revoked, superseded or withdrawn) is
+    // never handed back: it can no longer be applied.
+    const live = (d: WorkflowDecisionView | null): d is WorkflowDecisionView => Boolean(d) && ["pending", "approved", "consumed", "denied"].includes(d!.status);
     if (outcome.outcome === "human_required") {
       const owned = outcome.humanRequestId ? this.db.workflowDecisionByOccurrence(outcome.humanRequestId) : null;
-      return owned ? ok(owned) : fail("The owner's scope approval for this selection could not be created. Refresh Campaign Status and propose again.", 409);
+      if (live(owned)) return ok(owned);
+      // The owner's request for this occurrence was retired: ask them again, once.
+      const occurrence = this.db.getDecisionOccurrence(outcome.occurrenceId);
+      if (!occurrence) return fail("The owner's scope approval for this selection could not be created. Refresh Campaign Status and propose again.", 409);
+      return ownerRequest({ ...selection, cause: occurrence.state === "uncertain" ? "selection_uncertain" : "selection_failed",
+        reviewOccurrenceId: occurrence.occurrenceId, reason: occurrence.state === "uncertain" ? occurrence.reason ?? undefined : undefined,
+        ...(occurrence.failureClass ? { failureClass: occurrence.failureClass as DecisionErrorClass } : {}) });
     }
     if (outcome.verdict === "refuse") {
       log("refused", { reason: "selection_refused", reviewOccurrenceId: outcome.occurrenceId });
       return { ok: false, status: 409, error: "The Decision Model found that this proposal does not fit what the owner asked for. " +
         "Propose a different issue; the reason says why.", errorDetails: { code: "selection_refused", reason: outcome.reason, occurrenceId: outcome.occurrenceId } };
     }
-    // Admit: one scope change per review occurrence, Orchestrator-owned through the server's
-    // admission evidence. A repeated proposal returns the change this occurrence already created.
-    const linked = this.db.selectionProposal(outcome.occurrenceId)?.workflowOccurrenceId;
-    if (linked) {
-      const existing = this.db.workflowDecisionByOccurrence(linked);
-      if (existing) return ok(existing);
-    }
+    // Admit: one live scope change per review occurrence, Orchestrator-owned through the server's
+    // admission evidence. A repeated proposal returns the change this occurrence already created; one
+    // retired before it was applied is replaced, which admits nothing twice.
+    const linked = this.db.selectionProposal(outcome.occurrenceId)?.workflowOccurrenceId ?? null;
+    const existingAdmission = linked ? this.db.workflowDecisionByOccurrence(linked) : null;
+    if (existingAdmission && live(existingAdmission)) return ok(existingAdmission);
     const current = this.db.getSession(sessionId);
     const currentBoundary = current && issueBoundary(current);
     if (!current || !currentBoundary || currentBoundary.revision !== boundary.revision ||
@@ -11755,7 +11763,7 @@ export class SessionsService {
     const created = this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: `campaign_issue_scope:${sessionId}`,
       resourceSnapshot: admittedSnapshot }, canAccess, { trustedIssueScope: true });
     if (created.ok && created.data) {
-      if (!this.db.linkSelectionProposalDecision(outcome.occurrenceId, created.data.occurrenceId)) {
+      if (!this.db.linkSelectionProposalDecision(outcome.occurrenceId, created.data.occurrenceId, linked)) {
         // Another call of the same proposal linked first: its scope change is the one.
         const winner = this.db.selectionProposal(outcome.occurrenceId)?.workflowOccurrenceId;
         const existing = winner ? this.db.workflowDecisionByOccurrence(winner) : null;

@@ -68,13 +68,15 @@ export function scopeGrantDigest(grant: FullControlScopeGrant): string {
   return sha256(JSON.stringify(grant));
 }
 
-/** One review per campaign, scope revision, grant and set of additions. A repeated proposal of the
- * same issues at the same revision joins the recorded occurrence whatever its rationale says: it
- * returns the same verdict, the same owner request or the same scope change, so neither a retry nor a
- * reworded rationale can admit twice or ask the owner twice. A new scope revision reviews afresh. */
-export function scopeReviewKey(rootId: string, revision: number, additions: readonly number[], grantDigest: string): string {
+/** One review per campaign, boundary revision, scope revision, grant and set of additions. A
+ * repeated proposal of the same issues under the same authority joins the recorded occurrence
+ * whatever its rationale says: it returns the same verdict, the same owner request or the same scope
+ * change, so neither a retry nor a reworded rationale can admit twice or ask the owner twice. A new
+ * scope revision, or any re-authorization (such as the owner changing the selection count, which
+ * revokes outstanding decisions), reviews afresh. */
+export function scopeReviewKey(rootId: string, boundaryRevision: number, revision: number, additions: readonly number[], grantDigest: string): string {
   const subject = sha256(JSON.stringify({ additions: [...additions].sort((a, b) => a - b), grantDigest })).slice(0, 32);
-  return `scope_review:${rootId}:${revision}:${subject}`;
+  return `scope_review:${rootId}:${boundaryRevision}:${revision}:${subject}`;
 }
 
 /** What a reviewed selection proposal led to, for Campaign Status. */

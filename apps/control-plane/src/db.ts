@@ -12528,11 +12528,15 @@ export class ControlPlaneDb {
       VALUES (?, ?, ?, ?, ?)`).run(input.occurrenceId, input.campaignSessionId, JSON.stringify(input.issues), input.explanation, now);
   }
 
-  /** Link an admitted review to the one scope change it created, by compare-and-set: an occurrence
-   * admits at most one scope change. */
-  linkSelectionProposalDecision(occurrenceId: string, workflowOccurrenceId: string): boolean {
-    return Number(this.stmt(`UPDATE campaign_selection_proposals SET workflow_occurrence_id=?
-      WHERE occurrence_id=? AND workflow_occurrence_id IS NULL`).run(workflowOccurrenceId, occurrenceId).changes) > 0;
+  /** Link an admitted review to the one live scope change it created, by compare-and-set on the
+   * link it replaces (`previous`, null for the first): an occurrence holds one scope change at a
+   * time, and only one retired before it was applied is ever replaced. */
+  linkSelectionProposalDecision(occurrenceId: string, workflowOccurrenceId: string, previous: string | null = null): boolean {
+    return Number((previous === null
+      ? this.stmt(`UPDATE campaign_selection_proposals SET workflow_occurrence_id=?
+        WHERE occurrence_id=? AND workflow_occurrence_id IS NULL`).run(workflowOccurrenceId, occurrenceId)
+      : this.stmt(`UPDATE campaign_selection_proposals SET workflow_occurrence_id=?
+        WHERE occurrence_id=? AND workflow_occurrence_id=?`).run(workflowOccurrenceId, occurrenceId, previous)).changes) > 0;
   }
 
   selectionProposal(occurrenceId: string): { campaignSessionId: string; issues: Array<{ repository: string; number: number; title: string }>;

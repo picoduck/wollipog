@@ -1974,7 +1974,7 @@ test("a repeat with other inputs joins a review still running, and a review a st
     // and routed to the owner once; a repeat returns that request.
     f.decision.state.review = () => reviewVerdict("admit");
     const grant = grantOf(f, c.id);
-    const key = scopeReviewKey(c.id, c.revision(), [31], scopeGrantDigest(grant));
+    const key = scopeReviewKey(c.id, boundaryOf(f, c.id).revision, c.revision(), [31], scopeGrantDigest(grant));
     f.db.createDecisionOccurrence({ occurrenceId: "dec_abandoned", organizationId: f.human.organizationId, campaignSessionId: c.id,
       occurrenceKey: key, kind: "scope_review", promptVersion: "scope_review.v1", inputDigests: {}, inputDigest: "0".repeat(64),
       now: Date.now() - 10 * 60_000 });
@@ -1988,6 +1988,43 @@ test("a repeat with other inputs joins a review still running, and a review a st
     const repeat = await c.propose([31], "Once more.");
     assert.equal(repeat.data!.occurrenceId, owner.data!.occurrenceId);
     assert.equal(f.decision.reviewCalls.length, 1, "the abandoned review is not run again");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("after the owner changes the selection count and back, a re-proposal gets a live admission or owner request, never the revoked one (#4238 review)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const c = await selectionCampaign(f, server, 3);
+    const policyRevision = () => f.db.getSession(c.id)!.parentControlPolicy!.revision;
+    const roundTrip = () => {
+      for (const count of [4, 3]) {
+        const changed = f.sessions.setScopeGrantSelectionCount(c.id, { count, expectedRevision: policyRevision() }, f.human);
+        assert.equal(changed.ok, true, changed.error ?? "");
+      }
+    };
+    // Admitted, not yet applied; the owner's count changes revoke it.
+    const admitted = await c.propose([30]);
+    assert.equal(admitted.data!.authority, "orchestrator");
+    roundTrip();
+    assert.equal(f.db.workflowDecisionByOccurrence(admitted.data!.occurrenceId)!.status, "revoked");
+    const again = await c.propose([30]);
+    assert.equal(again.ok, true, again.error ?? "");
+    assert.notEqual(again.data!.occurrenceId, admitted.data!.occurrenceId);
+    assert.equal(again.data!.status, "pending");
+    assert.equal(c.apply(again.data!.occurrenceId).ok, true, "the new admission applies");
+
+    // The owner's pending request is revoked the same way; a re-proposal asks them again, once.
+    f.decision.state.review = () => reviewVerdict("uncertain", "Unclear whether this fits.");
+    const owner = await c.propose([31]);
+    assert.equal(owner.data!.authority, "human");
+    roundTrip();
+    assert.equal(f.db.workflowDecisionByOccurrence(owner.data!.occurrenceId)!.status, "revoked");
+    const asked = await c.propose([31]);
+    assert.equal(asked.ok, true, asked.error ?? "");
+    assert.notEqual(asked.data!.occurrenceId, owner.data!.occurrenceId);
+    assert.equal(asked.data!.status, "pending");
+    assert.deepEqual(c.ownerRequests().map((d) => d.occurrenceId), [asked.data!.occurrenceId]);
   } finally { await server.close(); f.db.close(); }
 });
 
