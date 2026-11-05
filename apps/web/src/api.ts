@@ -429,11 +429,6 @@ export function createApiClient(transport: ApiTransport) {
   testDecisionModel: () =>
     req<import("@wollipog/protocol").DecisionModelTestResult>("/api/decision-model/test", { method: "POST" }),
 
-  /** Decision calls that served a campaign, with their own usage, apart from worker cost. */
-  campaignDecisions: (sessionId: string) =>
-    req<import("@wollipog/protocol").CampaignDecisionsResponse>(
-      `/api/sessions/${encodeURIComponent(sessionId)}/campaign/decisions`,
-    ),
 
   /** Refetches the model rate table ahead of its daily TTL so newly released models get priced. */
   refreshUsagePricing: () => req<{ pricing: UsagePricingStatus }>("/api/usage/pricing/refresh", { method: "POST" }),
@@ -1221,6 +1216,9 @@ export function createApiClient(transport: ApiTransport) {
     req<import("@wollipog/protocol").CampaignIssueScopeView>(`/api/sessions/${encodeURIComponent(id)}/campaign/issue-scope${epic === undefined ? "" : `?epic=${epic}`}`, { signal }),
   proposeCampaignIssueScope: (id: string, proposal: import("@wollipog/protocol").CampaignIssueScopeRequest) =>
     req<import("@wollipog/protocol").WorkflowDecisionView>(`/api/sessions/${encodeURIComponent(id)}/campaign/issue-scope/proposals`, { method: "POST", body: JSON.stringify(proposal) }),
+  /** The campaign's Decision Model checks (#4101, #4104), each beside the request it affected. */
+  campaignDecisions: (id: string, signal?: AbortSignal) =>
+    req<import("@wollipog/protocol").CampaignDecisionsResponse>(`/api/sessions/${encodeURIComponent(id)}/campaign/decisions`, { signal }),
   /** Campaign Status (#2417). `id` may be the campaign root session or any member. */
   campaignWorkItems: (id: string, query: string, signal?: AbortSignal) =>
     req<CampaignWorkItemsPage>(`/api/sessions/${encodeURIComponent(id)}/campaign/work-items?${query}`, { signal }),

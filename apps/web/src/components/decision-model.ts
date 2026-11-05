@@ -1,8 +1,10 @@
 import type {
   DecisionErrorClass,
+  DecisionModelResolvedTarget,
   DecisionModelSettingsView,
   DecisionModelTestResult,
   DecisionOccurrenceView,
+  DecisionUsageView,
 } from "@wollipog/protocol";
 import { effortLabel } from "../format.js";
 import type { SelectOption } from "./ui/ChoiceControls.js";
@@ -77,6 +79,11 @@ export function decisionFailureText(failure: DecisionErrorClass | undefined): st
   return failure ? FAILURES[failure] ?? "it failed" : "it failed";
 }
 
+/** The model's display name, as Settings shows it; the id when the server recorded none. */
+export function decisionModelName(target: Pick<DecisionModelResolvedTarget, "model" | "modelName">): string {
+  return target.modelName ?? target.model;
+}
+
 function seconds(ms: number): string {
   return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} s`;
 }
@@ -93,7 +100,7 @@ export function verdictLabel(verdict: string): string {
 export function decisionTestSummary(result: DecisionModelTestResult): string {
   const occurrence = result.occurrence;
   const where = occurrence.target
-    ? ` on ${occurrence.target.harnessName} (${occurrence.target.model}, ${effortLabel(occurrence.target.effort)} effort)`
+    ? ` on ${occurrence.target.harnessName} (${decisionModelName(occurrence.target)}, ${effortLabel(occurrence.target.effort)} effort)`
     : "";
   const facts = `${seconds(result.latencyMs)}, ${attempts(occurrence.attempts.length)}${where}.`;
   if (occurrence.state === "decided" || occurrence.state === "uncertain") {
@@ -110,7 +117,12 @@ export function decisionOutcomeText(decision: DecisionOccurrenceView): string {
   return `No verdict (${decisionFailureText(decision.failureClass)}): the owner decides`;
 }
 
-export function decisionCostText(usage: { costUsd: number | null; inputTokens: number; outputTokens: number }): string {
-  const tokens = `${(usage.inputTokens + usage.outputTokens).toLocaleString("en-US")} tokens`;
+/** Every token the provider processed: uncached input, cache reads, cache writes and output. */
+export function decisionTokenTotal(usage: Pick<DecisionUsageView, "inputTokens" | "outputTokens" | "cacheReadInputTokens" | "cacheCreationInputTokens">): number {
+  return usage.inputTokens + usage.cacheReadInputTokens + usage.cacheCreationInputTokens + usage.outputTokens;
+}
+
+export function decisionCostText(usage: DecisionUsageView): string {
+  const tokens = `${decisionTokenTotal(usage).toLocaleString("en-US")} tokens`;
   return usage.costUsd === null ? `${tokens}, cost unknown` : `${tokens}, $${usage.costUsd.toFixed(4)}`;
 }

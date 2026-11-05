@@ -48,6 +48,7 @@ import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-t
 import { MINUTE, campaignProjection, forgeObservation, itemDetail, itemSummary, knownCost, workSummary } from "./campaign-status-fixtures.js";
 import "../styles.css";
 import { campaignRecoveryFixture } from "./campaign-recovery-fixtures.js";
+import { campaignDecisionsFixture } from "./decision-model-fixtures.js";
 
 declare global {
   interface Window {
@@ -496,8 +497,8 @@ const client = {
   },
 
   childSessions: () => Promise.reject(new ApiError("No registry in this fixture.", 404)),
-  // No Decision Model calls in this campaign, so its Campaign Status section stays hidden (#4101).
-  campaignDecisions: async (id: string) => ({ campaignSessionId: id, decisions: [],
+  // `decisions=1` shows three Decision Model calls; otherwise there are none and the section stays hidden (#4101).
+  campaignDecisions: async (id: string) => params.get("decisions") === "1" ? campaignDecisionsFixture(id) : ({ campaignSessionId: id, decisions: [],
     usage: { calls: 0, inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUsd: 0, unpricedCalls: 0 } }),
   campaignWorkItems: async (_id: string, query: string) => {
     queries.push(query);

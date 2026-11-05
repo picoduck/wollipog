@@ -7217,6 +7217,8 @@ export interface DecisionModelResolvedTarget {
   driver: SessionNamingHarnessOption["driver"];
   provider: SessionNamingAccountBoundary["provider"];
   model: string;
+  /** The model's advertised display name, as Settings shows it. Absent on older records. */
+  modelName?: string;
   effort: string;
 }
 

@@ -5638,6 +5638,19 @@ body.shell-dock-dragging * {
   gap: var(--space-6);
   min-width: 0;
 }
+/* Campaign Status › Decision Model (#4101): one group per decision with a rule above it, so one
+   decision's outcome, model and usage never read as the next one's. */
+.campaign-decision-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.campaign-decision-item {
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--border);
+}
+.campaign-decision-item:last-child { border-bottom: 1px solid var(--border); }
 .campaign-detail-list {
   display: grid;
   gap: var(--space-1);

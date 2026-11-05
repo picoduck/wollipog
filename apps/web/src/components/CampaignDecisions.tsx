@@ -2,15 +2,19 @@ import React, { useEffect, useId, useState } from "react";
 import type { CampaignDecisionsResponse } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { effortLabel } from "../format.js";
-import { decisionCostText, decisionOutcomeText, verdictLabel } from "./decision-model.js";
+import { decisionCostText, decisionModelName, decisionOutcomeText, verdictLabel } from "./decision-model.js";
 
 const SHOWN = 10;
 const REFRESH_MS = 60_000;
+/** Kinds Campaign Status shows in their own section, beside the request they affected: the
+ * Question Screen's credential checks (#4104). They are not listed here a second time. */
+const OWN_SECTION_KINDS: ReadonlySet<string> = new Set(["credential_screen"]);
 
 /**
- * Campaign Status › Decision Model (#4101): the campaign's Decision calls, each with its verdict and
- * reason, and their usage, which is kept apart from the campaign's worker cost. Hidden until the
- * campaign has a decision; a read that fails leaves the rest of Campaign Status as it is.
+ * Campaign Status › Decision Model (#4101): the campaign's Decision calls, each as its own group
+ * with its outcome and reason, the model it ran on and its usage, which is kept apart from the
+ * campaign's worker cost. Hidden until the campaign has a decision; a read that fails leaves the
+ * rest of Campaign Status as it is.
  */
 export function CampaignDecisions({ campaignId }: { campaignId: string }) {
   const api = useApi();
@@ -18,23 +22,24 @@ export function CampaignDecisions({ campaignId }: { campaignId: string }) {
   const [data, setData] = useState<CampaignDecisionsResponse | null>(null);
 
   useEffect(() => {
-    let live = true;
+    const controller = new AbortController();
     const load = () => {
-      void Promise.resolve().then(() => api.campaignDecisions(campaignId)).then((next) => {
-        if (live) setData(next);
+      void Promise.resolve().then(() => api.campaignDecisions(campaignId, controller.signal)).then((next) => {
+        if (!controller.signal.aborted) setData(next);
       }).catch(() => { /* Decisions are supplementary: keep the last answer, or none. */ });
     };
     setData(null);
     load();
     const timer = window.setInterval(load, REFRESH_MS);
     return () => {
-      live = false;
+      controller.abort();
       window.clearInterval(timer);
     };
   }, [api, campaignId]);
 
-  if (!data || !data.decisions.length) return null;
-  const hidden = data.decisions.length - SHOWN;
+  const decisions = data?.decisions.filter((decision) => !OWN_SECTION_KINDS.has(decision.kind)) ?? [];
+  if (!data || !decisions.length) return null;
+  const hidden = decisions.length - SHOWN;
   return (
     <section className="campaign-status-handoffs" aria-labelledby={headingId}>
       <h3 id={headingId} className="section-title">Decision Model</h3>
@@ -42,9 +47,9 @@ export function CampaignDecisions({ campaignId }: { campaignId: string }) {
         {data.usage.calls} {data.usage.calls === 1 ? "call" : "calls"}, {decisionCostText(data.usage)}. Not counted in the
         campaign's cost. Decision inputs go to the selected agent's provider.
       </p>
-      <ul className="campaign-detail-list">
-        {data.decisions.slice(0, SHOWN).map((decision) => (
-          <li key={decision.occurrenceId}>
+      <ul className="campaign-decision-list" aria-label="Decisions">
+        {decisions.slice(0, SHOWN).map((decision) => (
+          <li key={decision.occurrenceId} className="campaign-decision-item">
             <dl className="facts">
               <div><dt>Decision</dt><dd>{verdictLabel(decision.kind)}</dd></div>
               <div>
@@ -58,7 +63,7 @@ export function CampaignDecisions({ campaignId }: { campaignId: string }) {
                 <div>
                   <dt>Model</dt>
                   <dd>
-                    {decision.target.model}, {effortLabel(decision.target.effort)} effort
+                    {decisionModelName(decision.target)}, {effortLabel(decision.target.effort)} effort
                     <span className="campaign-status-meta">
                       {decision.target.harnessName} on {decision.target.machineName}
                       {decision.target.source === "automatic" ? " (Automatic)" : ""}
