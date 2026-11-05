@@ -8,7 +8,7 @@ import path from "node:path";
 import net from "node:net";
 import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
-import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslAgentControlRelayArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, wslProviderPidfile, type AgentProcess } from "./spawn.js";
+import { buildBwrapArgs, bwrapPathWritable, bwrapTemporaryEnvironment, buildCloudArgs, buildContainerArgs, buildWslAgentControlRelayArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, wslProviderPidfile, type AgentProcess } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { WSL_BWRAP_LAUNCHER_PATH } from "./wsl-bwrap-launcher.js";
 import { captureLiveProcess, runFixtureCleanup, terminateOriginalProcess, waitForOriginalProcessToStop, type PosixProcessIdentity } from "../test-support/posix-process.js";
@@ -516,6 +516,95 @@ test("buildBwrapArgs hides the hook state directory last and re-exposes only the
     backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "inherit",
   });
   assert.equal(unmasked.includes("--remount-ro"), false, "no mask requested, no mask rendered");
+});
+
+/** A Codex App Server bwrap boundary as the runner resolves it, with a host-shaped runtime. */
+async function codexBwrapIsolation() {
+  const isolation = await resolveExecutionIsolation({ mode: "bwrap", network: "inherit" }, { kind: "native" }, {
+    platform: "linux", uid: () => 1000, nativeHome: () => "/home/me",
+    resolveNative: async () => ({ path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] } }),
+    mkdirNative: async () => {},
+  }, {
+    driver: "codex-app-server", dataDir: "/var/lib/wollipog", env: {}, sessionId: "s-codex", cwd: "/work/tree",
+    readOnlyPaths: [], guardStateMask: { directory: "/var/lib/wollipog/hooks/k", readable: [] },
+  });
+  assert.ok(isolation?.backend === "bwrap");
+  return isolation;
+}
+
+test("bwrapPathWritable follows bwrap's last-mount-wins order over the generated Codex arguments", async () => {
+  const args = buildBwrapArgs({ command: "/usr/bin/codex", args: ["app-server"], cwd: "/work/tree" }, {
+    ...await codexBwrapIsolation(),
+    readOnlyBinds: ["/work/tree/.git"],
+  });
+  for (const [path, writable] of [
+    ["/tmp", true],
+    ["/tmp/", true],
+    ["/work/tree", true],
+    ["/work/tree/node_modules/.cache", true],
+    ["/home/me/.codex/sessions", true],
+    // #4150: the runner's own TMPDIR lives in its data directory, which only the root bind covers.
+    ["/var/lib/wollipog/runner/helper-staging", false],
+    ["/home/me/.codex", false],
+    ["/work/tree/.git", false],
+    ["/var/lib/wollipog/hooks/k", false],
+    // The private /tmp starts empty, so a host directory below it does not exist inside.
+    ["/tmp/runner-scratch", false],
+    ["/dev/shm", false],
+    ["/proc/self", false],
+    ["relative/tmp", false],
+  ] as const) {
+    assert.equal(bwrapPathWritable(args, path), writable, path);
+  }
+  assert.equal(bwrapPathWritable(["--ro-bind", "/", "/", "--overlay-src", "/a", "--tmpfs", "/tmp"], "/tmp"), false,
+    "an option outside the model is never read as proof of a writable path");
+  assert.equal(bwrapPathWritable(["--bind", "/", "/", "--", "/bin/sh", "--tmpfs", "/data"], "/data/x"), true,
+    "the command after -- is not a bwrap option");
+});
+
+test("bwrapTemporaryEnvironment points only an unwritable temporary directory at the private /tmp", async () => {
+  const args = buildBwrapArgs({ command: "/usr/bin/codex", args: ["app-server"], cwd: "/work/tree" }, await codexBwrapIsolation());
+  const overrides = bwrapTemporaryEnvironment({
+    TMPDIR: "/var/lib/wollipog/runner/helper-staging", TMP: "/work/tree/.scratch", HOME: "/home/me",
+  }, args);
+  assert.deepEqual(overrides, { TMPDIR: "/tmp" });
+  // The regression the issue asks for: $TMPDIR, as the provider will see it, is writable.
+  assert.equal(bwrapPathWritable(args, overrides.TMPDIR!), true);
+  assert.deepEqual(bwrapTemporaryEnvironment({ TMPDIR: "/work/tree" }, args), {},
+    "an Orchestrator's writable scratch cwd stays its TMPDIR");
+  assert.deepEqual(bwrapTemporaryEnvironment({}, args), {}, "an unset TMPDIR already resolves to /tmp");
+  assert.deepEqual(bwrapTemporaryEnvironment({ TMPDIR: "", TEMP: "/var/tmp" }, args), { TMPDIR: "/tmp", TEMP: "/tmp" });
+});
+
+test("spawnAgent hands a bwrap provider a writable TMPDIR instead of the runner's read-only one", {
+  skip: process.platform !== "linux" && "bwrap launches are Linux-only",
+}, async () => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "wollipog-bwrap-tmpdir-")));
+  // A stand-in for bwrap that reports the environment it was launched with and ignores its argv.
+  const report = path.join(root, "report-env.js");
+  await fs.writeFile(report, "process.stdout.write(JSON.stringify({ TMPDIR: process.env.TMPDIR, TMP: process.env.TMP }));");
+  try {
+    const child = spawnAgent({
+      command: "/usr/bin/codex", args: ["app-server"], cwd: root, windowsShell: false,
+      env: { TMPDIR: "/var/lib/wollipog/runner/helper-staging", TMP: root },
+      isolation: { backend: "bwrap", command: process.execPath, args: [report], network: "inherit" },
+    });
+    child.stdin.end();
+    let out = "";
+    let err = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (text: string) => (out += text));
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (text: string) => (err += text));
+    const code = await new Promise<number | null>((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", resolve);
+    });
+    assert.equal(code, 0, err);
+    assert.deepEqual(JSON.parse(out), { TMPDIR: "/tmp", TMP: root });
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });
 
 test("spawnAgent scrubs inherited env keys but explicit env still wins", async () => {

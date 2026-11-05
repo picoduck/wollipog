@@ -71,6 +71,7 @@ import { useInstanceScope } from "../instance-scope.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
 import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
 import { projectAvailabilityLabel } from "../project-management.js";
+import { folderName } from "../run-dialog-choices.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { FieldError } from "./FieldError.js";
 import { FieldWarning } from "./FieldWarning.js";
@@ -1304,19 +1305,22 @@ export function NewSessionDialog({
   );
 
   // Each location is its machine, with its status and folder on the second line. An unavailable one
-  // stays choosable so its reason can be read, and choosing it marks the field invalid (§8.5).
+  // stays choosable so its reason can be read, and choosing it marks the field invalid (§8.5). A
+  // location renamed in its project (#4151) leads with that name.
   const locationMachineCounts = new Map<string, number>();
   for (const location of selectedProject?.locations ?? []) {
     locationMachineCounts.set(location.runnerId, (locationMachineCounts.get(location.runnerId) ?? 0) + 1);
   }
   const locationOptions: SelectOption<string>[] = (selectedProject?.locations ?? []).map((location) => {
     const machine = machineName(location.runnerId);
-    const folder = location.path.split(/[\\/]+/u).filter(Boolean).at(-1) ?? location.path;
+    const named = location.nameSource === "user";
     return {
       value: location.id,
-      label: machine,
+      label: named ? `${location.name} on ${machine}` : machine,
       description: `${projectAvailabilityLabel(liveLocationAvailability(location, runners))} · ${startTruncatedPath(location.path)}`,
-      ...((locationMachineCounts.get(location.runnerId) ?? 0) > 1 ? { selectedLabel: `${machine} · ${folder}` } : {}),
+      ...(!named && (locationMachineCounts.get(location.runnerId) ?? 0) > 1
+        ? { selectedLabel: `${machine} · ${folderName(location.path)}` }
+        : {}),
     };
   });
   const locationError = selectedLocationProblem ?? (fieldProblem?.field === "location" ? fieldProblem.message : null);

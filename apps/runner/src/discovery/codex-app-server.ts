@@ -120,6 +120,8 @@ export function interpretCodexAppServerProbe(version: string | undefined, result
     verification: "help-and-version",
     contractFingerprint: CODEX_APP_SERVER_CONTRACT_FINGERPRINT,
     sessionNaming: versionAtLeast(version, MIN_VERIFIED_CODEX_SESSION_NAMING_VERSION),
+    // Decision calls use the same ephemeral no-tool contract and its turn-level `outputSchema`.
+    decisionCalls: versionAtLeast(version, MIN_VERIFIED_CODEX_SESSION_NAMING_VERSION),
     orchestratorApproval: versionAtLeast(version, MIN_VERIFIED_CODEX_ORCHESTRATOR_APPROVAL_VERSION)
       ? { status: "supported" }
       : {

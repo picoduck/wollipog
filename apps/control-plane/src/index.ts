@@ -116,6 +116,7 @@ import {
   type AddProjectLocationRequest,
   type CreateProjectLocationRequest,
   type MoveProjectLocationRequest,
+  type RenameProjectLocationRequest,
   type GitActionRequest,
   type GovernancePolicy,
   type OnboardingInfo,
@@ -235,6 +236,9 @@ import {
   SessionNamingSettings,
 } from "./session-naming-settings.js";
 import { registerSessionNamingRoutes } from "./session-naming-route.js";
+import { registerDecisionModelRoutes } from "./decision-model-route.js";
+import { DecisionModelSettings } from "./decision-model-settings.js";
+import { DecisionRuntime, hubDecisionTransport, sanitizeRunDecisionResult } from "./decision-runtime.js";
 import { WorkflowEventRetention } from "./workflow-event-retention.js";
 import { registerWorkflowEventRetentionRoutes } from "./workflow-event-retention-route.js";
 import { ArchivedHistoryRetention } from "./archived-history-retention.js";
@@ -1015,6 +1019,13 @@ app.post("/api/public/push-receipt", async (req, reply) => {
 });
 
 const sessionNamingSettings = new SessionNamingSettings(db, process.env, hub);
+const decisionModelSettings = new DecisionModelSettings(db);
+const decisionRuntime = new DecisionRuntime({
+  db,
+  settings: decisionModelSettings,
+  transport: hubDecisionTransport(hub),
+  rateTable: () => usagePricing.current(),
+});
 const agentHarnessDefaultsSettings = new AgentHarnessDefaultsSettings(db);
 const orchestratorSettings = new OrchestratorSettings(db);
 
@@ -1063,6 +1074,7 @@ if (VIDEO_FRAME_VALIDATION_SESSION_ID) {
 }
 
 registerSessionNamingRoutes(app, sessionNamingSettings, requestPrincipal);
+registerDecisionModelRoutes(app, { settings: decisionModelSettings, runtime: decisionRuntime, requestPrincipal });
 const archivedHistoryRetention = new ArchivedHistoryRetention(db, { env: process.env, log: app.log, hub });
 registerArchivedHistoryRetentionRoutes(app, archivedHistoryRetention, requestPrincipal);
 const mutationAuditArchiveRetention = new MutationAuditArchiveRetention(db, { env: process.env, log: app.log });
@@ -1806,6 +1818,19 @@ app.register(async (instance) => {
           ok: false,
           code: "invalid_result",
           phase: "output_validation",
+        }, runnerId!);
+        break;
+      }
+      case "run_decision_result": {
+        if (!runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "decisionModel")) {
+          app.log.warn(`runner ${runnerId} sent a Decision result without negotiated support`);
+          break;
+        }
+        hub.resolveRunnerRequest(sanitizeRunDecisionResult(msg) ?? {
+          type: "run_decision_result",
+          requestId: msg.requestId,
+          ok: false,
+          errorClass: "invalid_output",
         }, runnerId!);
         break;
       }
@@ -2676,6 +2701,28 @@ app.delete("/api/projects/:id/locations/:locationId", async (req, reply) => {
   for (const session of db.listSessions({ includeArchived: true })) {
     if (session.projectId === id) hub.sessionChanged(session, false);
   }
+  return { project: db.getProjectForPrincipal(principal, id)! };
+});
+
+// Rename a Location within this Project (#4151): its label here only. The workspace, its folder, and
+// the same workspace's Locations in other Projects keep their names, so the machine need not be online.
+app.patch("/api/projects/:id/locations/:locationId", async (req, reply) => {
+  const { id, locationId } = req.params as { id: string; locationId: string };
+  const principal = requestHuman(req);
+  if (!principal) return reply.code(403).send({ error: "human identity is required" });
+  if (!manageableProject(req, id)) return reply.code(404).send({ error: "project not found" });
+  const location = db.projectLocation(locationId);
+  if (!location || location.projectId !== id) {
+    return reply.code(404).send({ error: "project location not found" });
+  }
+  const name = projectName((req.body as Partial<RenameProjectLocationRequest> | undefined)?.name);
+  if (!name) {
+    return reply.code(400).send({ error: "Enter a location name of 1–120 characters, without control characters." });
+  }
+  if (!db.renameProjectLocation(id, locationId, name)) {
+    return reply.code(404).send({ error: "project location not found" });
+  }
+  hub.projectChangedById(id);
   return { project: db.getProjectForPrincipal(principal, id)! };
 });
 

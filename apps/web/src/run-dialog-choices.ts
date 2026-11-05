@@ -101,9 +101,14 @@ export function folderName(path: string): string {
   return path.split(/[\\/]+/u).filter(Boolean).at(-1) ?? path;
 }
 
+/** What a Location is called in its Project: the name someone gave it there (#4151), else its folder. */
+export function locationLabel(location: Pick<ProjectLocationView, "name" | "nameSource" | "path">): string {
+  return location.nameSource === "user" ? location.name : folderName(location.path);
+}
+
 export interface RunLocationOption {
   value: string;
-  /** "<folder> on <Machine>"; the folder alone when this device cannot name its Machine. */
+  /** "<label> on <Machine>"; the label alone when this device cannot name its Machine. */
   label: string;
   /** The full path. */
   description: string;
@@ -112,8 +117,8 @@ export interface RunLocationOption {
 }
 
 /**
- * A Project's Locations as "<folder> on <Machine>" with the full path below. One that cannot host
- * the run stays listed, disabled with its reason. Machines are named by `machineNames`, which never
+ * A Project's Locations as "<label> on <Machine>" (`locationLabel`) with the full path below. One
+ * that cannot host the run stays listed, disabled with its reason. Machines are named by `machineNames`, which never
  * falls back to a connection id (#2978).
  */
 export function runLocationOptions(
@@ -123,11 +128,11 @@ export function runLocationOptions(
 ): RunLocationOption[] {
   return project.locations.map((location) => {
     const machine = machineNames.get(location.runnerId);
-    const folder = folderName(location.path);
+    const label = locationLabel(location);
     const disabledReason = runLocationUnavailableReason(location, runners, machine);
     return {
       value: location.id,
-      label: machine ? `${folder} on ${machine}` : folder,
+      label: machine ? `${label} on ${machine}` : label,
       description: location.path,
       ...(disabledReason ? { disabled: true, disabledReason } : {}),
     };
