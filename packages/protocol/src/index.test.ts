@@ -120,7 +120,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 294);
+  assert.equal(PROTOCOL_VERSION, 300);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -358,8 +358,11 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 294", () => {
-  assert.equal(PROTOCOL_VERSION, 294);
+test("PROTOCOL_VERSION is 300", () => {
+  assert.equal(PROTOCOL_VERSION, 300);
+  // A v294 runner cannot report the closing references of a GitLab merge (#3762).
+  assert.equal(runnerSupportsProtocol(294, "gitlabMergeClosingReferences"), false);
+  assert.equal(runnerSupportsProtocol(295, "gitlabMergeClosingReferences"), true);
   // Selection floors read issue facts from a v291 runner (#4103).
   assert.equal(runnerSupportsProtocol(290, "campaignIssueFacts"), false);
   assert.equal(runnerSupportsProtocol(291, "campaignIssueFacts"), true);
@@ -375,8 +378,8 @@ test("PROTOCOL_VERSION is 294", () => {
   assert.equal(runnerSupportsProtocol(284, "forgeDecisionActions"), true);
   assert.equal(runnerSupportsProtocol(287, "campaignRepositoryBoundary"), false);
   assert.equal(runnerSupportsProtocol(288, "campaignRepositoryBoundary"), true);
-  assert.equal(runnerSupportsProtocol(293, "campaignRepositoryAddition"), false);
-  assert.equal(runnerSupportsProtocol(294, "campaignRepositoryAddition"), true);
+  assert.equal(runnerSupportsProtocol(299, "campaignRepositoryAddition"), false);
+  assert.equal(runnerSupportsProtocol(300, "campaignRepositoryAddition"), true);
   // Every name Git accepts is tracked, including `+`, `#` and non-ASCII (#4067).
   for (const name of ["agent/s_f0be1d3165d8", "fix/4067-branches", "release/v0.33.0", "feature/foo+bar", "fix/issue#4067", "ok/é"]) {
     assert.equal(forgeActionBranchName(name), true, name);

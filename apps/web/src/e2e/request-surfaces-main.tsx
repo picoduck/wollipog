@@ -755,12 +755,37 @@ function toolCallsRequest(): PendingApproval {
 
 // `closures=checked` gives the `workflow` merge a runner's closing-reference read with one declared
 // closure, `closures=none` a read that found none, and `closures=declared` a declaration from a
-// runner that predates the check (#3713). Without it, the merge has neither.
+// runner that predates the check (#3713). Without it, the merge has neither. `forge=gitlab` makes it
+// a GitLab merge request with the same variants, read by GitLab's closing pattern (#3762).
 const closuresParam = query.get("closures");
+const gitlabMerge = query.get("forge") === "gitlab";
+const GITLAB_PROJECT = "gitlab.example.com/platform/wollipog";
 
 function workflowRequest(): PendingApproval {
   const extension = scenario === "review-extension";
   const declared = closuresParam === "checked" || closuresParam === "declared";
+  if (!extension && gitlabMerge) {
+    const issue = (n: number) => `${GITLAB_PROJECT}#${n}`;
+    return {
+      requestId: "merge-occurrence", occurrenceId: "merge-occurrence", kind: "workflow_decision", title: "PR Merge Approval Required",
+      options: [{ optionId: "approve", name: "Approve", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }],
+      workflowDecision: {
+        requestId: "merge-request", occurrenceId: "merge-occurrence", sessionId: "dock-session", controllingSessionId: "parent",
+        category: "pr_merge", resourceKey: `${GITLAB_PROJECT}!2179`,
+        resourceSnapshot: {
+          category: "pr_merge", repository: GITLAB_PROJECT, pullRequest: 2179, headSha: "c0ffee".repeat(6) + "c0ff", reviewResult: "merge",
+          requiredChecks: { headSha: "c0ffee".repeat(6) + "c0ff", status: "passed", checkedAt: 1, checks: [] },
+          mergeMethod: "merge_train", squash: true, removeSourceBranch: true,
+          ...(declared ? { intendedClosures: [issue(2178), issue(2180)] } : {}),
+        },
+        ...(closuresParam === "checked" ? { closingReferenceCheck: { checkedAt: 1, closures: [
+          { issue: issue(2178), sources: ["description", "linked"], excerpt: "Implements #2178: the request dock keeps its card above the keyboard." },
+          { issue: issue(2180), sources: ["linked"] },
+        ] } } : closuresParam === "none" ? { closingReferenceCheck: { checkedAt: 1, closures: [] } } : {}),
+        resourceDigest: "d".repeat(64), policyRevision: 1, authority: "human", status: "pending", createdAt: Date.now() - 3 * 60_000,
+      },
+    };
+  }
   return {
     requestId: "merge-occurrence",
     occurrenceId: "merge-occurrence",
