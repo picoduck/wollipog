@@ -168,7 +168,7 @@ function Fixture() {
       <section className="card" style={{ padding: 16, display: "grid", gap: 12 }}>
         <strong>Prompt Composer</strong>
         <ComposerAttachments images={attachments} onRemove={(index) => setAttachments((current) => current.filter((_, i) => i !== index))} />
-        <div style={{ position: "relative", marginTop: after ? 240 : 0 }}>
+        <div style={{ position: "relative", marginTop: after ? (searchQuery ? 380 : 240) : 0 }}>
           {after && (
             <WorkspaceReferencePicker
               listboxId="workspace-evidence-picker"
