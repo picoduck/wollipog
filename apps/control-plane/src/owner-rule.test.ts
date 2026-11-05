@@ -35,7 +35,7 @@ function harness(options: { mode?: "full_control" | "custom"; videoFrameReviewCa
     : { ...HUMAN_ONLY_PARENT_CONTROL_POLICY };
   for (const id of ["root", "child"]) {
     db.createSession({ id, runnerId: "r", workspaceId: "w", agentId: "codex", title: id, useWorktree: false, driver: "claude-code", now: 1, config: {},
-      ...(id === "root" ? { role: "orchestrator", orchestratorPolicy: policy, parentControlPolicy: { revision: 1, decisions } }
+      ...(id === "root" ? { role: "orchestrator", orchestratorPolicy: policy, parentControlPolicy: { decisions } }
         : { parentSessionId: "root" }) });
     db.updateSessionStatus(id, "running", 2);
   }
