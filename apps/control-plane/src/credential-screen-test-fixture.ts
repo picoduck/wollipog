@@ -2,10 +2,12 @@ import type { DecisionErrorClass, DecisionKind, DecisionModelResolvedTarget, Run
 import type { ControlPlaneDb } from "./db.js";
 import { DECISION_KINDS } from "./decision-kinds.js";
 import { DecisionRuntime } from "./decision-runtime.js";
+import { EMPTY_GRANT } from "./scope-grant-test-fixture.js";
 
-/** One fake attempt: a verdict, or a typed failure. No test calls a real provider. */
+/** One fake attempt: a verdict (with a kind's typed fields, such as a scope grant's), or a typed
+ * failure. No test calls a real provider. */
 export type FakeDecisionStep =
-  | { verdict: string; reason?: string }
+  | { verdict: string; reason?: string; fields?: Record<string, unknown> }
   | { errorClass: DecisionErrorClass; retryAfterMs?: number };
 
 /** One fake question-screen attempt. */
@@ -27,11 +29,13 @@ const TARGET: DecisionModelResolvedTarget = {
   driver: "claude-code", provider: "claude", model: "haiku", effort: "low",
 };
 
-/** The verdict a healthy model gives each #4104 kind when nothing is wrong: it confirms. */
+/** The verdict a healthy model gives each #4104 kind when nothing is wrong: it confirms. A scope
+ * grant's healthy default names nothing (`EMPTY_GRANT`), so a Custom epic seed holds nothing. */
 export const HEALTHY_VERDICTS: Partial<Record<DecisionKind, string>> = {
   credential_screen: "discusses",
   follow_up_relatedness: "related",
   closure_reason: "fits",
+  scope_grant: "grant",
 };
 
 /** Which kind one attempt is for: every kind has its own fixed instructions. */
@@ -66,9 +70,10 @@ export function fakeDecisionRuntime(db: ControlPlaneDb,
       calls.push(message);
       clock += 100;
       const step = await answer(message, message.attempt);
+      const fields = message.instructions === DECISION_KINDS.scope_grant.instructions ? { ...EMPTY_GRANT } : {};
       return "verdict" in step
         ? { type: "run_decision_result", requestId: message.requestId, ok: true, provider: "claude", model: "claude-haiku-4-5",
-          outputText: JSON.stringify({ verdict: step.verdict, reason: step.reason ?? `The fake model answered ${step.verdict}.` }),
+          outputText: JSON.stringify({ verdict: step.verdict, reason: step.reason ?? `The fake model answered ${step.verdict}.`, ...fields, ...step.fields }),
           usage: { inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } }
         : { type: "run_decision_result", requestId: message.requestId, ok: false, errorClass: step.errorClass,
           ...(step.retryAfterMs !== undefined ? { retryAfterMs: step.retryAfterMs } : {}) };

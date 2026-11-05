@@ -1,9 +1,23 @@
 # Campaign Issue Scope
 
 Campaign issue authority is independent of the campaign work ledger. Initial explicit issue lists retain
-their existing finite authorization. Epic wording and requests for an issue's children seed membership
+their existing finite authorization. An epic a Custom campaign's first message names seeds membership
 proposals, never automatic authorization. An epic campaign cannot create delegated sessions until
 its issue scope is authorized. Custom campaigns require the existing human approval.
+
+The epic seed comes from the Decision Model, not from a regular expression (#4104, see
+[Custom Epic Seed](decision-model.md#custom-epic-seed-issue_scope_seed-4104)). A first message that
+writes a digit string but names no explicit issue list gets a pending seed (`issueScopeSeed`), and
+delegation waits while it is pending. One `scope_grant` reading then decides it:
+
+| Reading | Seed | Delegation |
+|---|---|---|
+| Exactly one named issue, no range or selection, and the runner reads members for it | `seeded`: the issue is `issueScopeProposalEpic`, and the scope inspection starts from its members | Waits for the person's scope approval |
+| No issue named, several, a range or a selection, or a named issue without members | `none` | Proceeds |
+| Failed, uncertain, a floor dropped the named issue, or the runner couldn't read it | `owner`: no seed | Waits for the person's scope approval |
+
+A seed left pending with no reading in flight (a control-plane restart) settles as `owner`. A message
+without digits makes no Decision call.
 
 Campaign Status exposes Authorized Issue Scope, revision, and recorded work outside authority. A campaign
 owner can inspect an epic's umbrella and members, select candidates, and request exact additions/removals.

@@ -67,6 +67,26 @@ for (const [label, viewport] of [["1440", { width: 1440, height: 900 }], ["390",
   });
 }
 
+for (const [label, viewport] of [["1440", { width: 1440, height: 900 }], ["390", { width: 390, height: 844 }]] as const) {
+  test(`a Custom campaign's epic seed reads beside the other checks (${label}px)`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&checks=1&seed=1");
+    const section = page.getByRole("region", { name: "Decision Model Checks" });
+    const items = section.locator("li");
+    await expect(items).toHaveCount(6);
+    await expect(items.nth(4)).toContainText("Epic Seed");
+    await expect(items.nth(4)).toContainText("Message Read");
+    await expect(items.nth(4)).toContainText("An epic it names seeds the issue scope you approve; otherwise nothing waits.");
+    await expect(items.nth(5)).toContainText("Waiting for you to approve the campaign's issue scope.");
+    await expect(items.nth(5)).toContainText("Provider Overloaded");
+    for (const index of [4, 5]) await expect(items.nth(index).getByRole("button")).toHaveText(["Open Session"]);
+    await items.nth(4).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath(`epic-seed-${label}.png`) });
+    const geometry = await section.evaluate((element) => ({ clientWidth: element.clientWidth, scrollWidth: element.scrollWidth }));
+    expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
+  });
+}
+
 test("Campaign Status shows no Decision Model Checks before the Decision Model screens anything", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=campaign");
   await expect(page.locator(".campaign-status-summary")).toBeVisible();

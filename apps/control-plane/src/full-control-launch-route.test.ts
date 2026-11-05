@@ -1161,10 +1161,13 @@ test("a Full Control launch with no task starts idle, and its owner's first mess
 
     f.issues.notIssues.add(3); // A pull request: GitHub does not read it as an issue.
     // Only references the message asks the campaign to act on become scope (#3920): background and
-    // negated ones are verified the same way and kept as context, with no authority.
+    // negated ones are verified the same way and kept as context, with no authority. The Decision
+    // Model reads which is which (#4104); this is the reading a healthy model gives.
     const text = "Ship #12 and owner/repo#7.\nAlso fix https://github.com/owner/repo/issues/9, but not other/repo#5,\n" +
       "https://github.com/owner/repo/pull/8 or https://github.com/other/repo/issues/6; #3 was the earlier pull request.\n" +
       "See #20 for background, and don't touch #21 (another campaign has it).";
+    f.decision.state.answer = () => grantVerdict({ explicit: [...issues(12, 9), { repository: "owner/repo", number: 7 }],
+      context: [...issues(3, 20, 21), { repository: "other/repo", number: 5 }] });
     const before = f.sent.length;
     const result = await f.sessions.promptFromHuman(f.human, id, text);
     assert.equal(result.ok, true, result.error ?? "the first message was delivered");
@@ -1227,6 +1230,8 @@ test("a first message's background reference gets no scope or epic; Campaign Sta
     const text = "Use the orchestrate-issues skill to fix the decision-lifecycle findings in owner/repo: #31, #32 and #33. " +
       "Each issue specifies its acceptance criteria. Commands: the command guard refuses heredocs and pipelines that name " +
       "the state directory (#90). The acceptance test for #91 is handled elsewhere.";
+    // The Decision Model reads which references the message asks for (#4104); the test scripts that reading.
+    f.decision.state.answer = () => grantVerdict({ explicit: issues(31, 32, 33), context: issues(90, 91) });
     assert.equal((await f.sessions.promptFromHuman(f.human, id, text)).ok, true);
     let root = f.db.getSession(id)!;
     assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, [31, 32, 33]);
@@ -1309,6 +1314,7 @@ test("a first message's range scopes each verified issue, and a derived limit le
 
     // An issue in a range that is not an issue of the repository drops out like any unverified reference.
     f.issues.notIssues.add(52);
+    f.decision.state.answer = () => grantVerdict({ ranges: [{ repository: "", first: 51, last: 54 }], context: issues(55, 56) });
     const { id: ranged } = await firstMessageLaunch(f, server);
     assert.equal((await f.sessions.promptFromHuman(f.human, ranged, "Fix #51 through #54. See #55..#56.")).ok, true);
     assert.deepEqual(f.db.getSession(ranged)!.orchestratorPolicy!.issueScope!.issueNumbers, [51, 53, 54]);
@@ -1520,6 +1526,38 @@ for (const [name, answer, attempts, expected] of [
     } finally { await server.close(); f.db.close(); }
   });
 }
+
+test("a transient Decision failure that succeeds on retry grants the first message's scope with no owner request (#4104)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    f.decision.state.answer = (_text, attempt) => attempt === 1 ? { ok: false, errorClass: "rate_limited" } : grantVerdict({ explicit: issues(12) });
+    const { id } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix #12. See #20.")).ok, true);
+    assert.equal(f.decision.calls.length, 2, "one retry");
+    const grant = grantOf(f, id);
+    assert.equal(grant.status, "granted");
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12]);
+    assert.equal(f.db.getDecisionOccurrence(grant.occurrenceId!)!.humanRequestId, null, "nobody is asked");
+    assert.equal(f.db.unconsumedWorkflowDecisionsForController(id).length, 0);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("the same first message sent twice at once is read once: one occurrence and one verdict (#4104)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    const text = "Fix #12.";
+    const results = await Promise.all([f.sessions.promptFromHuman(f.human, id, text), f.sessions.promptFromHuman(f.human, id, text)]);
+    assert.ok(results.some((result) => result.ok), results.map((result) => result.error).join("; "));
+    const occurrences = f.db.listCampaignDecisionOccurrences(id).filter((occurrence) => occurrence.kind === "scope_grant");
+    assert.equal(occurrences.length, 1, "a duplicate joins the same occurrence");
+    assert.equal(occurrences[0]!.state, "decided");
+    assert.equal(f.decision.calls.length, 1, "one verdict is recorded, never two");
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12]);
+  } finally { await server.close(); f.db.close(); }
+});
 
 test("after a failed grant, reauthorizing with an explicit Maximum Issues ends the owner's approval growing the limit (#4102 review)", async () => {
   const f = fixture();
@@ -2300,6 +2338,7 @@ test("context-only references stay disjoint from the scope, survive delivery, an
 
     // Through the real path: the explicit limit of one keeps #13 out of scope, so it is context with #14.
     const next = "Fix #12 and #13. See #14.";
+    f.decision.state.answer = () => grantVerdict({ explicit: issues(12, 13), context: issues(14) });
     assert.equal((await f.sessions.promptFromHuman(f.human, id, next)).ok, true);
     const policy = f.db.getSession(id)!.orchestratorPolicy!;
     assert.deepEqual(policy.issueScope!.issueNumbers, [12]);

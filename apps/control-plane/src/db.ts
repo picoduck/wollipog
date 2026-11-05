@@ -2991,7 +2991,7 @@ CREATE TABLE IF NOT EXISTS campaign_decision_subjects (
   campaign_session_id TEXT NOT NULL,
   session_id          TEXT NOT NULL,
   surface             TEXT NOT NULL CHECK (surface IN ('implementation_question','provider_question','tool_request','owner_decision',
-                        'follow_up_publication','issue_closure')),
+                        'follow_up_publication','issue_closure','issue_scope_seed')),
   request_id          TEXT NOT NULL,
   classification      TEXT CHECK (classification IN ('decline','orchestrator')),
   classified_by       TEXT,
@@ -5808,15 +5808,16 @@ function preserveCampaignFollowUpOrigins(db: DatabaseSync): void {
 }
 
 /**
- * Admit the follow-up relatedness and closure-reason subjects (#4104 Slice B). A table written by
- * the question screen's release checked its surface against the four question surfaces; SQLite
- * cannot alter a CHECK, so that table is rebuilt with the wider check. Every row is preserved.
+ * Admit every current subject surface (#4104): the follow-up relatedness and closure-reason subjects
+ * (Slice B) and the Custom epic seed (Slice C). A table written by an earlier release checked its
+ * surface against fewer surfaces; SQLite cannot alter a CHECK, so that table is rebuilt with the
+ * wider check. Every row is preserved.
  */
 function widenCampaignDecisionSubjects(db: DatabaseSync): void {
   const schema = db.prepare(
     "SELECT sql FROM sqlite_master WHERE type='table' AND name='campaign_decision_subjects'",
   ).get() as { sql?: string } | undefined;
-  if (!schema?.sql || schema.sql.includes("'issue_closure'")) return;
+  if (!schema?.sql || schema.sql.includes("'issue_scope_seed'")) return;
   db.exec("PRAGMA foreign_keys = OFF;");
   try {
     db.exec("BEGIN;");
@@ -5826,7 +5827,7 @@ function widenCampaignDecisionSubjects(db: DatabaseSync): void {
         campaign_session_id TEXT NOT NULL,
         session_id          TEXT NOT NULL,
         surface             TEXT NOT NULL CHECK (surface IN ('implementation_question','provider_question','tool_request','owner_decision',
-                              'follow_up_publication','issue_closure')),
+                              'follow_up_publication','issue_closure','issue_scope_seed')),
         request_id          TEXT NOT NULL,
         classification      TEXT CHECK (classification IN ('decline','orchestrator')),
         classified_by       TEXT,
@@ -17273,6 +17274,20 @@ export class ControlPlaneDb {
     ).run(JSON.stringify(policy), now, id, previous);
     if (Number(result.changes) === 1) return unique;
     return this.sessionOrchestratorPolicy(id)?.issueNumbers ?? null;
+  }
+
+  /** Settle a Custom campaign's pending epic seed (#4104), compare-and-set on the policy: only a seed
+   * still pending for this exact message changes, and only `seeded` names the epic. A scope a person
+   * approved meanwhile keeps the seed pending forever; it holds nothing once a scope exists. */
+  settleCampaignIssueScopeSeed(id: string, messageDigest: string,
+    next: { state: "seeded"; epic: number; occurrenceId: string } | { state: "none" | "owner"; occurrenceId?: string }, now: number): boolean {
+    const policy = this.sessionOrchestratorPolicy(id);
+    if (!policy || policy.issueScope || policy.issueScopeSeed?.state !== "pending" || policy.issueScopeSeed.messageDigest !== messageDigest) return false;
+    const previous = JSON.stringify(policy);
+    policy.issueScopeSeed = { state: next.state, messageDigest, ...(next.occurrenceId ? { occurrenceId: next.occurrenceId } : {}) };
+    if (next.state === "seeded") policy.issueScopeProposalEpic = next.epic;
+    return Number(this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=? AND orchestrator_policy=?")
+      .run(JSON.stringify(policy), now, id, previous).changes) === 1;
   }
 
   campaignIssueScopeRootsForRunner(runnerId: string): SessionView[] {
@@ -34010,6 +34025,11 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
   value.delegation.decisions = decisions;
   behavior.childHarness = childHarness;
   if (value.issueScopeProposalEpic !== undefined && (!Number.isSafeInteger(value.issueScopeProposalEpic) || value.issueScopeProposalEpic < 1)) return null;
+  const seed = value.issueScopeSeed as unknown as Record<string, unknown> | undefined;
+  if (seed !== undefined && !(seed && ["pending", "seeded", "none", "owner"].includes(seed.state as string) &&
+      typeof seed.messageDigest === "string" && /^[a-f0-9]{64}$/.test(seed.messageDigest) &&
+      (seed.occurrenceId === undefined || typeof seed.occurrenceId === "string") &&
+      (seed.state === "seeded") === (value.issueScopeProposalEpic !== undefined))) return null;
   if (value.issueScope && (typeof value.issueScope.repository !== "string" || !campaignRepositoryLocation(value.issueScope.repository) ||
       !Array.isArray(value.issueScope.issueNumbers) || value.issueScope.issueNumbers.length > 100 ||
       value.issueScope.issueNumbers.some((n) => !Number.isSafeInteger(n) || n < 1) ||

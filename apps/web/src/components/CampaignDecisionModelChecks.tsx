@@ -6,9 +6,12 @@ import { BusyButton } from "./ui/BusyButton.js";
 
 type CampaignDecision = CampaignDecisionsResponse["decisions"][number];
 
-/** The Full Control checks shown here (#4104): the question screen, follow-up relatedness and
- * closure-reason choice. Other kinds have their own place in Campaign Status. */
+/** The checks shown here (#4104): the question screen, follow-up relatedness, closure-reason choice
+ * and a Custom campaign's epic seed. Other kinds, such as Full Control's scope grant, have their own
+ * place in Campaign Status. */
 const SHOWN_KINDS: ReadonlySet<DecisionKind> = new Set<DecisionKind>(["credential_screen", "follow_up_relatedness", "closure_reason"]);
+const shown = (decision: CampaignDecision) => SHOWN_KINDS.has(decision.kind) ||
+  decision.kind === "scope_grant" && decision.subject?.surface === "issue_scope_seed";
 
 const SURFACE_LABELS: Record<NonNullable<CampaignDecision["subject"]>["surface"], string> = {
   implementation_question: "Implementation Question",
@@ -17,6 +20,7 @@ const SURFACE_LABELS: Record<NonNullable<CampaignDecision["subject"]>["surface"]
   owner_decision: "Owner Decision",
   follow_up_publication: "Follow-Up Publication",
   issue_closure: "Issue Closure",
+  issue_scope_seed: "Epic Seed",
 };
 
 const VERDICT_LABELS: Record<string, string> = {
@@ -26,6 +30,7 @@ const VERDICT_LABELS: Record<string, string> = {
   unrelated: "Unrelated",
   fits: "Reason Fits",
   does_not_fit: "Reason Doesn't Fit",
+  grant: "Message Read",
   uncertain: "Uncertain",
 };
 
@@ -56,8 +61,17 @@ function checkOutcomeText(decision: CampaignDecision): string {
   return closure ? "Waiting for you to decide the closure." : "Waiting for you to decide the publication.";
 }
 
+/** What a Custom campaign's epic seed did: a named epic seeds the scope the owner approves, and a
+ * reading that failed or was unsure leaves that scope to them with no seed. */
+function seedOutcomeText(decision: CampaignDecision): string {
+  if (decision.state === "pending") return "Work waits to be delegated until the check finishes.";
+  if (decision.state === "decided") return "An epic it names seeds the issue scope you approve; otherwise nothing waits.";
+  return "Waiting for you to approve the campaign's issue scope.";
+}
+
 /** What the screen's outcome did to the request it affected, in the order it happened. */
 function outcomeText(decision: CampaignDecision): string {
+  if (decision.kind === "scope_grant") return seedOutcomeText(decision);
   if (decision.kind !== "credential_screen") return checkOutcomeText(decision);
   const classification = decision.subject?.classification;
   const ownerDecision = decision.subject?.surface === "owner_decision";
@@ -96,7 +110,7 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
   useEffect(() => {
     const controller = new AbortController();
     api.campaignDecisions(sessionId, controller.signal).then((response) => {
-      setDecisions(response.decisions.filter((decision) => SHOWN_KINDS.has(decision.kind)));
+      setDecisions(response.decisions.filter(shown));
       setLoadError(null);
     }).catch((cause: unknown) => {
       if (controller.signal.aborted) return;
@@ -125,8 +139,8 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
       <h3 id={headingId} className="section-title">Decision Model Checks</h3>
       <p className="section-note">
         The Decision Model checks whether a question asks for a credential, sign-in or access, whether a follow-up
-        belongs to the work you asked for, and whether a closure's reason fits its issue. When it can't tell, the
-        request waits for you; nobody asks you for a value.
+        belongs to the work you asked for, whether a closure's reason fits its issue, and which epic a campaign's
+        first message names. When it can't tell, the request waits for you; nobody asks you for a value.
       </p>
       {loadError && <Notice tone="danger" compact role="alert" title="Couldn't Load Decision Model Checks">{loadError}</Notice>}
       {actionError && <Notice tone="danger" compact role="alert" title="Couldn't Classify the Question">{actionError}</Notice>}
