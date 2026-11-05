@@ -199,6 +199,7 @@ for (const [state, label] of [["wake_pending", "Merge Queue Wake Pending"], ["lo
     }, { status: "idle", pullRequestWatch: watch });
     const row = page.locator(".inbox-row").filter({ hasText: "Review Session" }).first();
     if (ASSERT) await expect(row.getByLabel(`Status: ${label}`)).toBeVisible();
+    await row.scrollIntoViewIfNeeded();
     await capture(page, `list-${state}-1280-light`);
   });
 }
