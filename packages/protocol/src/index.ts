@@ -890,13 +890,13 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      worktree of the target repository, carries the provider conversation over and continues.
 //      Snapshots carry `locationSwitch` (pending or failed); the control plane moves the session
 //      row only under a consumed switch naming exactly that Location.
-// 292: campaign repository additions (#4117). A campaign root asks its owner to add one Project
+// 294: campaign repository additions (#4117). A campaign root asks its owner to add one Project
 //      Location's repository with request_campaign_repository_addition (`wollipog campaign
 //      repository-addition`); the control plane inspects the Location first and creates a
 //      human-owned `campaign_repository_addition` decision, and the root carries out the exact
 //      approved Location with execute_campaign_repository_addition. Older runners and control
-//      planes refuse the tools by name. (290 and 291 are claimed by open pull requests.)
-export const PROTOCOL_VERSION = 292;
+//      planes refuse the tools by name. (290 to 293 are claimed by open pull requests.)
+export const PROTOCOL_VERSION = 294;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1452,8 +1452,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   capacityLockDiagnostics: 137,
   /** v288 validates a Full Control boundary's `repositories` list (#4117). */
   campaignRepositoryBoundary: 288,
-  /** v292 asks for and carries out a campaign repository addition (#4117). */
-  campaignRepositoryAddition: 292,
+  /** v294 asks for and carries out a campaign repository addition (#4117). */
+  campaignRepositoryAddition: 294,
 } as const;
 
 /* ========================================================================== */

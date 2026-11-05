@@ -120,7 +120,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 292);
+  assert.equal(PROTOCOL_VERSION, 294);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -358,8 +358,8 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 292", () => {
-  assert.equal(PROTOCOL_VERSION, 292);
+test("PROTOCOL_VERSION is 294", () => {
+  assert.equal(PROTOCOL_VERSION, 294);
   // A regular session's Location switch needs a v287 runner and control plane (#4138), and
   // Switch and Continue of the live session a v289 runner.
   assert.equal(runnerSupportsProtocol(286, "sessionLocationSwitch"), false);
@@ -372,8 +372,8 @@ test("PROTOCOL_VERSION is 292", () => {
   assert.equal(runnerSupportsProtocol(284, "forgeDecisionActions"), true);
   assert.equal(runnerSupportsProtocol(287, "campaignRepositoryBoundary"), false);
   assert.equal(runnerSupportsProtocol(288, "campaignRepositoryBoundary"), true);
-  assert.equal(runnerSupportsProtocol(291, "campaignRepositoryAddition"), false);
-  assert.equal(runnerSupportsProtocol(292, "campaignRepositoryAddition"), true);
+  assert.equal(runnerSupportsProtocol(293, "campaignRepositoryAddition"), false);
+  assert.equal(runnerSupportsProtocol(294, "campaignRepositoryAddition"), true);
   // Every name Git accepts is tracked, including `+`, `#` and non-ASCII (#4067).
   for (const name of ["agent/s_f0be1d3165d8", "fix/4067-branches", "release/v0.33.0", "feature/foo+bar", "fix/issue#4067", "ok/é"]) {
     assert.equal(forgeActionBranchName(name), true, name);
