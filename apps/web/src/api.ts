@@ -38,6 +38,7 @@ import type {
   CreateWorkspaceReferenceRequest,
   AddProjectLocationRequest,
   CreateProjectLocationRequest,
+  RenameProjectLocationRequest,
   CreateTranscriptShareRequest,
   CreateTranscriptShareResult,
   CreateWorkflowDefinitionRequest,
@@ -534,6 +535,12 @@ export function createApiClient(transport: ApiTransport) {
     req<ProjectResponse>(
       `/api/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(locationId)}`,
       { method: "DELETE" },
+    ),
+
+  renameProjectLocation: (projectId: string, locationId: string, name: string) =>
+    req<ProjectResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(locationId)}`,
+      { method: "PATCH", body: JSON.stringify({ name } satisfies RenameProjectLocationRequest) },
     ),
 
   setDefaultProjectLocation: (projectId: string, locationId: string) =>

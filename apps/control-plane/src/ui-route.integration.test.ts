@@ -1401,13 +1401,14 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     sessionReminders: true,
     indefiniteSessionReminders: true,
     worktreeSetupConfig: true,
+    renameProjectLocations: true,
     orchestratorRole: true,
     sessionRoleConversion: true,
   });
   const initialProjects = snapshot.projects as Array<{
     id: string;
     name: string;
-    locations: Array<{ id: string; runnerId: string; workspaceId: string }>;
+    locations: Array<{ id: string; name: string; runnerId: string; workspaceId: string }>;
   }>;
   assert.deepEqual(initialProjects.map((project) => project.name), [
     "Alice Private Project",
@@ -2445,6 +2446,24 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   };
   assert.equal(sourceAfterSharing.project.locations.some((location) => location.id === sharedLocation.id), true);
 
+  // A shared workspace's Location is renamed in one Project only, and connected clients hear of it (#4151).
+  const renameSharedLink = await ownerFetch(`/api/projects/${createdProject.id}/locations/${addedLink.id}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "Durable Checkout" }),
+  });
+  assert.equal(renameSharedLink.status, 200);
+  await uiInbox.take((message) => message.type === "project_upsert" && message.project.id === createdProject.id &&
+    message.project.locations.some((location) => location.id === addedLink.id && location.name === "Durable Checkout"));
+  const sourceAfterRename = await (await ownerFetch(`/api/projects/${initialWorkspaceProject.id}`)).json() as {
+    project: { locations: Array<{ id: string; name: string }> };
+  };
+  assert.equal(
+    sourceAfterRename.project.locations.find((location) => location.id === sharedLocation.id)?.name,
+    sharedLocation.name,
+    "the same workspace keeps its label in the other Project",
+  );
+
   const noProjectResponse = await ownerFetch("/api/sessions/session-target/project", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -2990,6 +3009,45 @@ test("legacy workspace rename cannot bypass durable Project management authority
       headers: { authorization: `Bearer ${operatorToken}` },
     })).json()) as { project: { name: string } }).project.name,
     "Organization Workspace",
+  );
+
+  // Renaming a Location (#4151) needs Project management, and only reaches this Project's own
+  // Locations. The runner never connects here, so every rename below is made while it is offline.
+  const locationPath = (projectId: string, locationId: string) => `/api/projects/${projectId}/locations/${locationId}`;
+  const renameBody = (name: string) => ({ method: "PATCH", body: JSON.stringify({ name }) });
+  const deniedLocationRename = await fetch(`${httpBase}${locationPath(project.id, location.id)}`, {
+    ...renameBody("Unauthorized Location"),
+    headers: operatorHeaders,
+  });
+  assert.equal(deniedLocationRename.status, 404, "viewing a Project does not grant renaming its Locations");
+  const crossProjectRename = await fetch(`${httpBase}${locationPath(operatorProject.id, location.id)}`, {
+    ...renameBody("Borrowed Location"),
+    headers: operatorHeaders,
+  });
+  assert.equal(crossProjectRename.status, 404, "a managed Project cannot name another Project's Location");
+  const ownerCrossProjectRename = await ownerFetch(locationPath(inaccessible.id, location.id), {
+    ...renameBody("Borrowed Location"),
+    headers: { "content-type": "application/json" },
+  });
+  assert.equal(ownerCrossProjectRename.status, 404);
+  const blankLocationRename = await ownerFetch(locationPath(project.id, location.id), {
+    ...renameBody(" \t "),
+    headers: { "content-type": "application/json" },
+  });
+  assert.equal(blankLocationRename.status, 400);
+  assert.match((await blankLocationRename.json() as { error: string }).error, /Enter a location name/);
+  const ownerLocationRename = await ownerFetch(locationPath(project.id, location.id), {
+    ...renameBody("  Main Checkout  "),
+    headers: { "content-type": "application/json" },
+  });
+  assert.equal(ownerLocationRename.status, 200);
+  const renamedProject = (await ownerLocationRename.json() as {
+    project: { name: string; locations: Array<{ id: string; name: string; nameSource?: string; path: string; isDefault: boolean }> };
+  }).project;
+  assert.equal(renamedProject.name, "Organization Workspace", "the Project keeps its name");
+  assert.deepEqual(
+    renamedProject.locations.map(({ id, name, nameSource, path, isDefault }) => ({ id, name, nameSource, path, isDefault })),
+    [{ id: location.id, name: "Main Checkout", nameSource: "user", path: "/workspace", isDefault: true }],
   );
 
   const ownerRename = await ownerFetch(

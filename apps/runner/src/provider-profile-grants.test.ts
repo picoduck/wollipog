@@ -37,6 +37,19 @@ const GRANT = "2a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
 const OTHER_GRANT = "3a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
 const STALE_GRANT = "4a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
 
+test("unverifiable ancestry remains unusable even with a known active profile grant (#4175)", () => {
+  const account: RunnerProviderAccount = {
+    id: "a", label: "A", provider: "claude", directory: "/synthetic/a", profileId: PROFILE,
+  };
+  for (const cause of ["ancestry", "marker"] as const) {
+    const grants = new ProviderProfileGrants({ controlPlaneInstanceId: INSTANCE, accounts: () => [account],
+      readMarker: () => ({ state: "unverifiable", cause }) });
+    grants.synchronize(225, [{ grantId: GRANT, profileId: PROFILE, status: "active" }]);
+    assert.equal(grants.usable(account), false, cause);
+    assert.deepEqual(grants.accountProfile(account), { id: PROFILE, access: "not_granted" });
+  }
+});
+
 function marker(grants: Array<[string, string]>, profileId = PROFILE): ProviderProfileMarker {
   return {
     version: 1, kind: "wollipog-provider-profile", profileId, provider: "claude", createdAt: "2026-10-16T00:00:00.000Z",

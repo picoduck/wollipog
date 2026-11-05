@@ -11,7 +11,7 @@
 import { spawn, type ChildProcessByStdio, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import type { Readable, Writable } from "node:stream";
 import { posix, win32 } from "node:path";
 import type { AgentContext } from "@wollipog/protocol";
@@ -441,6 +441,89 @@ export function buildBwrapArgs(opts: Pick<SpawnAgentOptions, "command" | "args" 
   ];
 }
 
+const BWRAP_FLAGS = new Set([
+  "--die-with-parent", "--new-session", "--unshare-all", "--unshare-user", "--unshare-user-try",
+  "--unshare-ipc", "--unshare-pid", "--unshare-net", "--unshare-uts", "--unshare-cgroup",
+  "--unshare-cgroup-try", "--share-net", "--as-pid-1", "--clearenv", "--disable-userns",
+  "--assert-userns-disabled",
+]);
+/** Options that take operands but leave the mount table alone (`--dir` and `--symlink` create an
+ * entry in whichever mount already covers it, so they cannot change what is writable). */
+const BWRAP_NON_MOUNT_OPTIONS = new Map([
+  ["--chdir", 1], ["--unsetenv", 1], ["--uid", 1], ["--gid", 1], ["--hostname", 1], ["--dir", 1],
+  ["--perms", 1], ["--size", 1], ["--cap-add", 1], ["--cap-drop", 1], ["--setenv", 2],
+  ["--symlink", 2], ["--chmod", 2], ["--file", 2],
+]);
+/** `empty` mounts start with nothing in them, so only their own target exists afterwards. */
+const BWRAP_MOUNTS = new Map<string, { operands: 1 | 2; writable: boolean; empty?: true }>([
+  ["--bind", { operands: 2, writable: true }], ["--bind-try", { operands: 2, writable: true }],
+  ["--dev-bind", { operands: 2, writable: true }], ["--dev-bind-try", { operands: 2, writable: true }],
+  ["--ro-bind", { operands: 2, writable: false }], ["--ro-bind-try", { operands: 2, writable: false }],
+  ["--bind-data", { operands: 2, writable: false }], ["--ro-bind-data", { operands: 2, writable: false }],
+  ["--tmpfs", { operands: 1, writable: true, empty: true }], ["--dev", { operands: 1, writable: false }],
+  ["--proc", { operands: 1, writable: false }], ["--mqueue", { operands: 1, writable: false }],
+  ["--remount-ro", { operands: 1, writable: false }],
+]);
+
+const bwrapMountPath = (path: string) => posix.normalize(path).replace(/(.)\/+$/u, "$1");
+
+/** Whether `path` is an existing writable directory location inside the sandbox the given bwrap
+ * options describe. bwrap applies mounts in argv order and a later mount covers everything below
+ * its target, so the last mount containing the path decides; `--remount-ro` makes its target and
+ * every mount under it read-only. A path below a fresh tmpfs does not exist there, so it does not
+ * count. An option this model does not know answers `false`: callers treat that as "not proven". */
+export function bwrapPathWritable(options: readonly string[], path: string): boolean {
+  if (!posix.isAbsolute(path)) return false;
+  const target = bwrapMountPath(path);
+  const contains = (mount: string) => mount === "/" || target === mount || target.startsWith(`${mount}/`);
+  let writable = false;
+  for (let index = 0; index < options.length && options[index] !== "--";) {
+    const option = options[index]!;
+    if (BWRAP_FLAGS.has(option)) { index += 1; continue; }
+    const skipped = BWRAP_NON_MOUNT_OPTIONS.get(option);
+    if (skipped) { index += 1 + skipped; continue; }
+    const mount = BWRAP_MOUNTS.get(option);
+    if (!mount) return false;
+    const destination = options[index + mount.operands];
+    if (destination === undefined || !posix.isAbsolute(destination)) return false;
+    const mounted = bwrapMountPath(destination);
+    if (contains(mounted)) writable = mount.writable && (!mount.empty || target === mounted);
+    index += 1 + mount.operands;
+  }
+  return writable;
+}
+
+/** Temporary-directory variables POSIX tools read, `TMPDIR` first. */
+const POSIX_TEMP_ENV = ["TMPDIR", "TMP", "TEMP"] as const;
+
+/**
+ * Point each set temporary-directory variable that the sandbox leaves read-only at its private
+ * `/tmp` (#4150). A runner whose own `TMPDIR` is a host directory outside every writable bind would
+ * otherwise hand that path to the provider, and Codex's inner sandbox panics taking its
+ * `$TMPDIR/codex-bwrap-synthetic-mount-targets-<uid>/lock`. A writable value (an Orchestrator's
+ * scratch cwd, say) is kept. The private `/tmp` is what an unset `TMPDIR` already resolves to, so
+ * this is the same per-sandbox location every launch without an inherited `TMPDIR` uses.
+ */
+export function bwrapTemporaryEnvironment(
+  env: Readonly<Record<string, string | undefined>>,
+  options: readonly string[],
+): Record<string, string> {
+  const overrides: Record<string, string> = {};
+  for (const key of POSIX_TEMP_ENV) {
+    const value = env[key];
+    if (value === undefined) continue;
+    const spellings = [value];
+    try {
+      const real = realpathSync(value);
+      if (real !== value) spellings.push(real);
+    } catch {
+      // A missing directory is judged by its lexical path; the provider creates it if it can.
+    }
+    if (!spellings.every((spelling) => bwrapPathWritable(options, spelling))) overrides[key] = "/tmp";
+  }
+  return overrides;
+}
+
 /**
  * Argv for a WSL-bridged launch. Exported for tests.
  *
@@ -516,6 +599,8 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
   let shell = isWindows && opts.windowsShell !== false;
   let wslReap: WslReapInfo | undefined;
   let isolationEnv: Record<string, string> = {};
+  /** The options of a native bwrap launch, without the binary's own launch prefix. */
+  let bwrapOptions: string[] | undefined;
   let explicitEnv = withoutRunnerOnlyEnv(opts.env);
   let bridge = (opts.isolation?.backend === "bwrap" || opts.isolation?.backend === "wsl-bwrap")
     ? opts.isolation.wslAgentControl : undefined;
@@ -560,6 +645,7 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
   if (opts.isolation) {
     if (opts.isolation.backend === "bwrap") {
       args = buildBwrapArgs({ command: file, args, cwd: opts.cwd }, opts.isolation);
+      bwrapOptions = args.slice(opts.isolation.args.length);
       file = opts.isolation.command;
       shell = false;
     } else if (opts.isolation.backend === "wsl-bwrap") {
@@ -768,6 +854,7 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
     descendantMarker ? { [DESCENDANT_MARKER_ENV]: descendantMarker } : {},
     worktreeDescendantMarker ? { [WORKTREE_DESCENDANT_MARKER_ENV]: worktreeDescendantMarker } : {},
   ]);
+  if (bwrapOptions) Object.assign(launchEnv, bwrapTemporaryEnvironment(launchEnv, bwrapOptions));
   if (opts.claudeNamespaceProvider && opts.isolation?.backend === "bwrap" &&
       opts.context?.kind !== "wsl" && opts.descendantOwner) {
     return spawnClaudeNamespaceProvider(

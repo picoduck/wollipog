@@ -20,7 +20,8 @@ import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosu
 import { composeHostingVideoEvidence } from "./hosting-video-evidence.js";
 import { syntheticInspectedVideoRuns, syntheticMediaReviewerAttestation, syntheticVideoReviewerTarget } from "./video-live-validation-test-fixture.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
-import { inspectCampaignWorkspace, registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
+import { registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
+import { inspectCampaignWorkspace } from "./project-location-inspection.js";
 import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS } from "@wollipog/protocol";
 import type { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";

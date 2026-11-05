@@ -866,7 +866,7 @@ test("worktree inspection gates archival, while Retain verification supports leg
         assert.equal(db.getSession(worker)?.archived, false, "no unavailable inspection archives a child");
         assert.equal(sentToRunner.length, sentBefore, "no worktree action is sent without supported online inspection");
         if (completion === "stop_and_archive") assert.match(result.error!,
-          unavailable === "legacy" ? /campaign worktree inspection/u : /runner is offline/u);
+          unavailable === "legacy" ? /unsupported_capability/u : /runner_offline/u);
       } finally {
         await close();
       }
@@ -899,7 +899,7 @@ test("AC14 (pending cleanup): a verified child's refused worktree retirement is 
     setRunnerReply((message, hub) => {
       if (message.type === "git_action") hub.resolveRunnerRequest({ type: "git_result", requestId: message.requestId,
         ok: true, data: { status: { branch: "fix/cleanup", hasChanges: true, ahead: 0, remoteUrl: null,
-          changedPathCount: 10, files: [{ path: "report.md", status: "??" }, { path: "tracked.txt", status: "M" }] } } });
+          changedPathCount: 10, filesTruncated: true, files: [{ path: "report.md", status: "??" }, { path: "tracked.txt", status: "M" }] } } });
     });
     const dirty = await svc.verifyCampaignChildWithHistory(root, {
       childSessionId: worker, reportEventSeq: seq, followUpsAccounted: true,
