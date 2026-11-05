@@ -5,10 +5,11 @@ import { delimiter, join } from "node:path";
 import test from "node:test";
 import vm from "node:vm";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
-import { browserShards } from "../playwright.shards.ts";
+import { browserShards, BROWSER_SHARD_COUNT } from "../playwright.shards.ts";
 
 const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
 const evidence = JSON.parse(readFileSync(new URL("./fixtures/browser-ci-timings.json", import.meta.url), "utf8"));
+const currentEvidence = JSON.parse(readFileSync(new URL("./fixtures/browser-ci-ten-shard-timings.json", import.meta.url), "utf8"));
 const paths = ["Install Playwright Browser", "Install Playwright System Dependencies"];
 // Failure-only steps after the suite: the sanitized synthetic captures, and the linux settings-rows
 // baselines a failed comparison regenerates (#3215). Each skips on success.
@@ -75,7 +76,7 @@ function assertFullShardCoverage(rows) {
   }
 }
 
-function budgetAccounting(source, rows = evidence.samples) {
+function budgetAccounting(source, rows = currentEvidence.samples) {
   const job = browserJob(source);
   const budget = Number(job.match(/^    timeout-minutes: (\d+)$/m)?.[1]) * 60;
   assert.ok(Number.isSafeInteger(budget) && budget > 0, "browser job needs a finite budget");
@@ -159,13 +160,19 @@ test("recent sizing evidence covers five natural full runs and rejects incomplet
 });
 
 test("browser budget covers either bounded install path, measured remainder, enforcement and three minutes spare", () => {
+  const run = currentEvidence.completeRunAttempts.at(-1);
+  assert.equal(run.shardCount, BROWSER_SHARD_COUNT);
+  assert.deepEqual(currentEvidence.samples.filter((row) => row.runId === run.runId)
+    .map((row) => row.shard).sort((a, b) => a - b), Array.from({ length: BROWSER_SHARD_COUNT }, (_, i) => i + 1));
+  assert.equal(measuredRemainder(currentEvidence.samples), 1112);
+  assert.ok(currentEvidence.samples.some((row) => row.shard === 1 && row.productionSeconds > 0));
   const result = budgetAccounting(workflow);
-  assert.deepEqual(result, { budget: 4500, install: 720, cache: 480, remainder: 2460, enforcement: 180, diagnostics: 480, required: 4500 });
+  assert.deepEqual(result, { budget: 3180, install: 720, cache: 480, remainder: 1120, enforcement: 180, diagnostics: 480, required: 3160 });
   const timedOut = evidence.samples.find((row) => row.firstAttemptTimedOut);
   assert.ok(timedOut);
   assert.ok(timedOut.firstInstallSeconds - 360 <= enforcementSecondsPerAttempt,
     "the sizing assumption must cover the observed enforcement overrun");
-  for (const row of evidence.samples) {
+  for (const row of currentEvidence.samples) {
     assert.ok(result.budget - result.install - result.cache - result.enforcement - result.diagnostics - row.nonInstallSeconds >= reserveSeconds,
       `run ${row.runId} shard ${row.shard}: near-bound recovered setup must leave the full remaining workload its reserve`);
   }
@@ -190,7 +197,7 @@ test("redistributed sizing retains the measured floor and accounts for the bound
 });
 
 test("lost margin is detected for reduced job budgets or longer first and retry limits on either path", () => {
-  for (const minutes of [25, 40, 48, 49, 50, 55, 58, 59, 67, 68, 74]) {
+  for (const minutes of [25, 40, 48, 49, 50, 51, 52]) {
     assert.throws(() => budgetAccounting(withBudget(minutes)), /must cover/, `${minutes}m is insufficient`);
   }
   for (const name of [...paths.flatMap((name) => [name, `Retry ${name}`]), ...systemCacheSteps]) {
@@ -204,11 +211,11 @@ test("lost margin is detected for reduced job budgets or longer first and retry 
 
 test("omitting production or cleanup fails accounting while queue wait cannot consume the active budget", () => {
   for (const phase of ["productionSeconds", "cleanupSeconds"]) {
-    const rows = structuredClone(evidence.samples);
+    const rows = structuredClone(currentEvidence.samples);
     rows.find((row) => row[phase] > 0)[phase] = 0;
     assert.throws(() => budgetAccounting(workflow, rows), /must be accounted for/);
   }
-  const queued = evidence.samples.map((row) => ({ ...row, queueSeconds: 86_400 }));
+  const queued = currentEvidence.samples.map((row) => ({ ...row, queueSeconds: 86_400 }));
   assert.deepEqual(budgetAccounting(workflow, queued), budgetAccounting(workflow));
 });
 

@@ -531,23 +531,15 @@ jobs:
     needs: [suite_plan, merge_group_gate]
     name: Browser End-to-End Tests
     runs-on: ubuntu-24.04
-    # A recovered install timeout plus passing tests exhausted the old budget (#2700).
-    # Remeasured 2026-10-18: 25 jobs across five recent natural main/merge-group runs,
-    # Runs: 39135469681, 39138757428, 39141574932, 39142428503, 39142667230.
-    # Per-shard non-install maxima (1–5): 1731 / 1731 / 1585 / 1910 / 2016s.
-    # Maximum non-install remainder: 2016s (previous envelope: 1448s),
-    # including other setup, suite, shard-1 production checks and cleanup; queue wait excluded.
-    # Cache-hit OR cache-miss path: two six-minute attempts, not both exclusive paths.
-    # #3628 natural sample through 2026-11-02: job 125302223524 measured 2453s
-    # non-install work. Latest complete group 41465192009 remeasures all five shards.
-    # 720s attempts + 2460s rounded remainder + 480s cache/verify + 180s enforcement
-    # + 480s failure diagnostics + 180s reserve = 4500s, rounded to 75m (4500s).
-    # Residual reserve is 180s in that historical five-job model. Ten whole-file projects
-    # are under evaluation; retain this cap only until their first coherent phase measurement.
-    # Before delivery recalculate against actual ten-shard phases, not a divided old maximum.
-    # scripts/workflow-browser-budget.test.mjs derives this from bounded phases and evidence.
-    # docs/ci-browser-shards-2026-11-02.md records natural-run comparison and uncertainty.
-    timeout-minutes: 75
+    # #3628: ten-shard PR run 42054331358 measured all ten coherent browser jobs.
+    # Job 127342213238: maximum non-install remainder 1112s; round upward to 1120s.
+    # Includes setup, development, shard-1 production and cleanup; queue wait excluded.
+    # Cache-hit OR cache-miss: two six-minute install attempts, not both exclusive paths.
+    # 720s attempts + 1120s remainder + 480s cache/verify + 180s enforcement
+    # + 480s failure diagnostics + 180s reserve = 3160s; 53m cap = 3180s.
+    # Residual reserve: 200s. This is measured sizing, not a hosted duration guarantee.
+    # scripts/workflow-browser-budget.test.mjs derives the bound; see the dated ten-shard report.
+    timeout-minutes: 53
     strategy:
       # Every shard reports. With fail-fast the first real failure cancels its siblings, and the
       # aggregator below reads a cancelled job as a budget hit — so one broken test would be

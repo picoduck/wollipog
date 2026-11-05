@@ -1,9 +1,14 @@
 # Browser CI Budget
 
-The [ten-project evaluation](ci-browser-ten-shards-2026-11-05.md) provisionally
-retains the current 75-minute cap from the November 2 reconciliation. Historical
-five-shard models below cannot establish a ten-shard budget; actual candidate
-phases must replace the sizing floor before delivery.
+The [ten-project evaluation](ci-browser-ten-shards-2026-11-05.md) uses a
+**53-minute Chromium cap**, derived from all ten coherent jobs of run 42054331358.
+Job 127342213238 measured maximum non-install 1112s; round upward to 1120s.
+`720 + 1120 + 480 + 180 + 480 + 180 = 3160s <= 3180s`, retaining 200s residual
+reserve. Production/setup/cleanup are included; runner wait and timestamp-conflict
+allocation are excluded. The current fixture is
+`scripts/fixtures/browser-ci-ten-shard-timings.json`. Historical five-shard models
+below remain provenance, not today's deadline. Later measured workload/setup
+changes require recalculation; no hosted guarantee is implied.
 
 The [November 2 natural-run reconciliation](ci-browser-shards-2026-11-02.md)
 extends evidence through 2026-11-02T15:00:00Z (1012 first attempts, 44 reruns).
