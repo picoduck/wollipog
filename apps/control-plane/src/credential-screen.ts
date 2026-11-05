@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   credentialScreenQuestionText,
   credentialScreenToolText,
@@ -8,6 +8,7 @@ import {
 } from "@wollipog/protocol";
 import type { ControlPlaneDb, DecisionOccurrenceRecord } from "./db.js";
 import type { DecisionRuntime } from "./decision-runtime.js";
+import { DECISION_KINDS, DecisionInputError, decisionInputDigests } from "./decision-kinds.js";
 import type { DecisionAutomaticHarness } from "./decision-model-settings.js";
 
 /**
@@ -43,21 +44,17 @@ export function ownerDecisionScreenData(form: { question: string; options: Array
   });
 }
 
-/** Longest request text sent for one screen, well inside the Decision input bound. A tool's input
- * can be a whole file; what it asks of the approver is never past this point. */
-const SCREEN_TEXT_MAX_CHARS = 16_000;
-const bounded = (text: string) => text.length > SCREEN_TEXT_MAX_CHARS
-  ? { text: text.slice(0, SCREEN_TEXT_MAX_CHARS), truncated: true } : { text };
-
-/** A provider question's or tool request's screen data, or null for anything else. */
+/** A provider question's or tool request's screen data, or null for anything else. The text is
+ * never truncated: a verdict on a prefix would admit whatever follows it. Text too large for one
+ * Decision input fails closed in screenCredentialRequest. */
 export function genericRequestScreenData(request: PendingApproval): { surface: CredentialScreenSurface; data: string } | null {
   if (request.kind === "question") {
     return request.questions?.length
-      ? { surface: "provider_question", data: credentialScreenData("provider_question", bounded(credentialScreenQuestionText(request.questions))) }
+      ? { surface: "provider_question", data: credentialScreenData("provider_question", { text: credentialScreenQuestionText(request.questions) }) }
       : null;
   }
   if (request.kind === undefined || request.kind === "permission" || request.kind === "policy_hook") {
-    return { surface: "tool_request", data: credentialScreenData("tool_request", bounded(credentialScreenToolText(request))) };
+    return { surface: "tool_request", data: credentialScreenData("tool_request", { text: credentialScreenToolText(request) }) };
   }
   return null;
 }
@@ -109,24 +106,53 @@ export interface CredentialScreenInput {
   routeToHuman?: (occurrence: DecisionOccurrenceRecord) => string | null;
 }
 
+/** Record an occurrence that could not be rendered for the model as a failed one, with no attempt
+ * sent and the person-owned route already taken, so it reads as `review` like any other failure. */
+function failOversizedScreen(db: ControlPlaneDb, input: CredentialScreenInput, occurrenceKey: string,
+  inputs: { data: Record<string, string> }, at: number): string {
+  const definition = DECISION_KINDS.credential_screen;
+  const { occurrence, created } = db.createDecisionOccurrence({
+    occurrenceId: `dec_${randomUUID()}`, organizationId: input.organizationId, campaignSessionId: input.campaignSessionId,
+    occurrenceKey, kind: definition.kind, promptVersion: definition.promptVersion, inputDigests: decisionInputDigests(inputs),
+    inputDigest: createHash("sha256").update(`${definition.kind}\n${definition.promptVersion}\noversized\n${input.data}`, "utf8").digest("hex"),
+    now: at,
+  });
+  if (created) {
+    db.settleDecisionOccurrence(occurrence.occurrenceId, { state: "failed", failureClass: "configuration", now: at });
+  }
+  if (db.claimDecisionHumanRoute(occurrence.occurrenceId, at)) db.completeDecisionHumanRoute(occurrence.occurrenceId, null, at);
+  return occurrence.occurrenceId;
+}
+
 /** Screen one request occurrence on the Decision Model and return its fact. The audit records the
  * occurrence and its subject; the reason stays in the audit, never in the returned fact. */
 export async function screenCredentialRequest(db: ControlPlaneDb, runtime: DecisionRuntime, input: CredentialScreenInput, now: () => number = Date.now): Promise<CredentialScreenFact> {
   const subject = (occurrenceId: string) => db.recordCampaignDecisionSubject({ occurrenceId, campaignSessionId: input.campaignSessionId,
     sessionId: input.sessionId, surface: input.surface, requestId: input.requestId }, now());
-  const outcome = await runtime.decide({
-    organizationId: input.organizationId,
-    kind: "credential_screen",
-    campaignSessionId: input.campaignSessionId,
-    occurrenceKey: credentialScreenKey(input.surface, input.sessionId, input.requestId, input.data),
-    automaticHarness: input.automaticHarness,
-    inputs: { data: { request: input.data } },
-    routeToHuman: (occurrence) => {
-      subject(occurrence.occurrenceId);
-      return input.routeToHuman?.(occurrence) ?? null;
-    },
-  });
-  subject(outcome.occurrenceId);
+  const occurrenceKey = credentialScreenKey(input.surface, input.sessionId, input.requestId, input.data);
+  const inputs = { data: { request: input.data } };
+  let occurrenceId: string;
+  try {
+    occurrenceId = (await runtime.decide({
+      organizationId: input.organizationId,
+      kind: "credential_screen",
+      campaignSessionId: input.campaignSessionId,
+      occurrenceKey,
+      automaticHarness: input.automaticHarness,
+      inputs,
+      routeToHuman: (occurrence) => {
+        subject(occurrence.occurrenceId);
+        return input.routeToHuman?.(occurrence) ?? null;
+      },
+    })).occurrenceId;
+  } catch (error) {
+    if (!(error instanceof DecisionInputError)) throw error;
+    // Text too large for one Decision input is never screened by a prefix: it fails closed as an
+    // audited, non-transient failure, so the owner classifies the whole request (#4104).
+    occurrenceId = failOversizedScreen(db, input, occurrenceKey, inputs, now());
+  }
+  subject(occurrenceId);
+  const outcome = { occurrenceId };
   const occurrence = db.getDecisionOccurrence(outcome.occurrenceId);
   return credentialScreenFact(occurrence, db.campaignDecisionSubject(outcome.occurrenceId)?.classification);
 }
