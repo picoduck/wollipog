@@ -135,7 +135,7 @@ handoff is revoked when anyone tries to use it. Both routes need a v281 root run
 plane, exist only for a Full Control root, and refuse a question that asks for a credential value.
 Custom campaigns are unchanged.
 
-An owner rule (#4137, v295) is the requester's route for the same thing. `request_workflow_decision`
+An owner rule (#4137, v296) is the requester's route for the same thing. `request_workflow_decision`
 accepts an optional `ownerRule` (`source`: the installed or user-authored file, at most 256 ASCII
 path characters; `quote`: the requirement, one line of at most 1000 characters without control or
 invisible formatting characters). Oversize or malformed values are refused, never truncated. The

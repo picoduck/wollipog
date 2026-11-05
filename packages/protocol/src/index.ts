@@ -896,15 +896,15 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      A pull request is reported there instead of failing the read. The control plane's
 //      selection floors read these facts; an older runner reports none, so its selection
 //      proposals take the owner's route. (290 is claimed by an open pull request.)
-// 295: an owner rule on a typed workflow decision (#4137). request_workflow_decision
+// 296: an owner rule on a typed workflow decision (#4137). request_workflow_decision
 //      (`wollipog decision request --owner-rule-source/--owner-rule-quote`) accepts an optional,
 //      bounded `ownerRule` naming the installed or user-authored file, and the quoted requirement,
 //      that keeps the gate for a person. The occurrence is created human-owned (`owner_kept`)
 //      under any mode, grant or category; later requests for the same resource stay the person's,
 //      and Campaign Status lists it under Waiting for You with the rule. A runner refuses the field
-//      against an older control plane, which would drop it. (290, 292, 293 and 294 are claimed by
+//      against an older control plane, which would drop it. (290 and 292 to 295 are claimed by
 //      open pull requests.)
-export const PROTOCOL_VERSION = 295;
+export const PROTOCOL_VERSION = 296;
 
 export * from "./campaign-authority.js";
 export * from "./workflow-decision-owner-rule.js";
@@ -1294,10 +1294,10 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * and a one-way handoff of an Orchestrator-owned occurrence to that owner. Checked against the
    * root's runner by the control plane and against the control plane by the runner. */
   ownerDecisions: 281,
-  /** v295 (#4137): `ownerRule` on request_workflow_decision. Checked against the control plane by
+  /** v296 (#4137): `ownerRule` on request_workflow_decision. Checked against the control plane by
    * the runner, because an older control plane ignores the field and would let the Orchestrator
    * decide a gate its owner kept. */
-  workflowDecisionOwnerRule: 295,
+  workflowDecisionOwnerRule: 296,
   /** (#4138) A regular session's request_location_switch, checked against the requester's runner by
    * the control plane and against the control plane by the runner. */
   sessionLocationSwitch: 287,
@@ -3175,7 +3175,7 @@ export interface CampaignOwnerDecision {
   summary: string;
   /** The root handed an Orchestrator-owned occurrence to the owner, rather than asking anew. */
   handedOff: boolean;
-  /** v295 (#4137): the installed or user-authored rule that keeps it for the owner, when the
+  /** v296 (#4137): the installed or user-authored rule that keeps it for the owner, when the
    * requester named one. */
   ownerRule?: import("./workflow-decision-owner-rule.js").WorkflowDecisionOwnerRule;
   createdAt: number;
@@ -5799,7 +5799,7 @@ export interface WorkflowDecisionView {
    * owner. One way: it stays the person's, and so does every later request for the same resource
    * in the campaign. Only a person resolves it. */
   ownerHandoff?: { bySessionId: string; at: number; reason: string };
-  /** v295 (#4137): the installed or user-authored rule that keeps this occurrence for a person,
+  /** v296 (#4137): the installed or user-authored rule that keeps this occurrence for a person,
    * named by its requester or carried over from an earlier occurrence for the same resource. The
    * occurrence was created human-owned (`owner_kept`); only a person resolves it. */
   ownerRule?: import("./workflow-decision-owner-rule.js").WorkflowDecisionOwnerRule;
@@ -5832,7 +5832,7 @@ export interface CreateWorkflowDecisionRequest {
    * that would supersede a person-owned follow-up publication is refused instead (#4066). */
   resourceKey: string;
   resourceSnapshot: WorkflowDecisionResourceSnapshot;
-  /** v295 (#4137): an installed or user-authored rule keeps this gate for a person. The occurrence
+  /** v296 (#4137): an installed or user-authored rule keeps this gate for a person. The occurrence
    * is created human-owned under any mode or grant; it can only narrow authority. Bounded and
    * refused, never truncated, when oversize. Reusing a requestId with a different rule fails. */
   ownerRule?: import("./workflow-decision-owner-rule.js").WorkflowDecisionOwnerRule;

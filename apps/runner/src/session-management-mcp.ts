@@ -707,7 +707,7 @@ async function ownerDecisionCompatibilityError(deps: McpDeps): Promise<ToolResul
       "Update Wollipog; nothing reached the owner."), required, actual);
 }
 
-/** A pre-v295 control plane ignores `ownerRule` (#4137), so the decision would keep the owner its
+/** A pre-v296 control plane ignores `ownerRule` (#4137), so the decision would keep the owner its
  * policy names and the Orchestrator could decide a gate its owner kept. Refuse before sending. */
 async function ownerRuleCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
   const required = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule;
@@ -2454,7 +2454,7 @@ export const TOOLS: McpTool[] = [
         resourceSnapshot: WORKFLOW_DECISION_RESOURCE_SCHEMA,
         ownerRule: {
           type: "object",
-          description: "When an installed skill or user-authored instruction keeps this gate for a person, name it here: the decision is created human-owned under any mode or grant, so only the owner decides it, and its card shows the rule. It can never give the Orchestrator a decision. Requires control plane v295.",
+          description: "When an installed skill or user-authored instruction keeps this gate for a person, name it here: the decision is created human-owned under any mode or grant, so only the owner decides it, and its card shows the rule. It can never give the Orchestrator a decision. Requires control plane v296.",
           properties: {
             source: { type: "string", minLength: 1, maxLength: WORKFLOW_DECISION_OWNER_RULE_SOURCE_MAX_CHARS,
               description: "The file that keeps the gate, such as ~/.claude/skills/issue-workflow/SKILL.md; letters, digits and ._~/\\@+:- without spaces" },

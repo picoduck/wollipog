@@ -120,7 +120,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 295);
+  assert.equal(PROTOCOL_VERSION, 296);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -358,10 +358,10 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 295", () => {
-  assert.equal(PROTOCOL_VERSION, 295);
-  // An owner rule on a typed decision needs a v295 control plane (#4137).
-  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule, 295);
+test("PROTOCOL_VERSION is 296", () => {
+  assert.equal(PROTOCOL_VERSION, 296);
+  // An owner rule on a typed decision needs a v296 control plane (#4137).
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule, 296);
   // Selection floors read issue facts from a v291 runner (#4103).
   assert.equal(runnerSupportsProtocol(290, "campaignIssueFacts"), false);
   assert.equal(runnerSupportsProtocol(291, "campaignIssueFacts"), true);

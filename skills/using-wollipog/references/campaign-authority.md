@@ -38,7 +38,7 @@ only as prose:
 - The requester, usually a child, still files the exact typed decision, such as `pr_merge`, with
   `request_workflow_decision`, and names the rule in `ownerRule`: `source` is the file and `quote`
   the requirement, on one line (CLI `--owner-rule-source` and `--owner-rule-quote`; control plane
-  v295). The occurrence is created human-owned (`owner_kept`) under any mode, grant or category. It
+  v296). The occurrence is created human-owned (`owner_kept`) under any mode, grant or category. It
   reaches the owner's Inbox and Campaign Status under Waiting for You with the rule, and every later
   request for the same resource stays the owner's. `ownerRule` only narrows authority.
 - A Full Control root hands an occurrence already filed without the rule to the owner with

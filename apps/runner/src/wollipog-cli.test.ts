@@ -1408,7 +1408,7 @@ test("CLI typed-decision help is discoverable and malformed or cross-session com
     "get_workflow_decision", "consume_workflow_decision", "reconcile_workflow_decision",
     "decision withdraw", "withdraw_workflow_decision", "protocol v269",
     "decision ask-owner", "decision hand-to-owner", "request_owner_decision", "hand_workflow_decision_to_owner", "protocol v281",
-    "--owner-rule-source", "--owner-rule-quote", "protocol v295", "only in prose",
+    "--owner-rule-source", "--owner-rule-quote", "protocol v296", "only in prose",
     "protocol v153", "cannot resolve its own decision",
   ]) assert.ok(topic.stdout.includes(text), `decision help omits ${text}`);
 
@@ -1477,7 +1477,7 @@ test("CLI typed decisions fail closed before their protocol capability", async (
   assert.equal(calls, 1, "an old control plane receives only the compatibility probe");
 });
 
-test("CLI forwards an owner rule on a decision request and refuses it before protocol v295 (#4137)", async () => {
+test("CLI forwards an owner rule on a decision request and refuses it before protocol v296 (#4137)", async () => {
   const calls: Array<{ url: string; body?: string }> = [];
   let version = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule;
   const fetch: McpFetch = async (url, init) => {

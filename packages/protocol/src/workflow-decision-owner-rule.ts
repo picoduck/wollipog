@@ -1,5 +1,5 @@
 /**
- * v295 (#4137): the installed or user-authored rule that keeps a typed workflow decision for a
+ * v296 (#4137): the installed or user-authored rule that keeps a typed workflow decision for a
  * person. A requester names it on `request_workflow_decision`; the occurrence is then created
  * human-owned (`owner_kept`) under any mode, grant or category. It only ever narrows authority, and
  * it is a claim the requester makes, never something anyone can rely on to grant one.
