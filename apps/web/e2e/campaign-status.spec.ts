@@ -210,6 +210,21 @@ for (const theme of ["dark", "light"] as const) {
       await expect(section.getByRole("button", { name: "Include Shared Docs in Campaign" })).toHaveCount(0);
       if (REPOSITORIES_EVIDENCE_DIR) await section.screenshot({ path: `${REPOSITORIES_EVIDENCE_DIR}/repositories-included-${device}-${theme}.png` });
     });
+
+    test(`a Custom campaign's repository list shows no boundary revision on a ${device} ${theme} viewport (#4117)`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.goto(`/campaign-status-e2e.html?scenario=campaign&repositories=custom&theme=${theme}`);
+      const section = page.locator("section.campaign-detail-section", { has: page.locator("h3", { hasText: /^Repositories$/ }) });
+      await expect(section.locator("dt")).toHaveText(["picoduck/wollipog", "picoduck/shared-docs"]);
+      await expect(section).toContainText("Joined after launch.");
+      await expect(section).not.toContainText("Boundary Revision");
+      await section.scrollIntoViewIfNeeded();
+      await assertNoHorizontalOverflow(page, ".campaign-status");
+      if (REPOSITORIES_EVIDENCE_DIR) {
+        await section.screenshot({ path: `${REPOSITORIES_EVIDENCE_DIR}/repositories-custom-${device}-${theme}.png` });
+        if (device === "desktop") await page.screenshot({ path: `${REPOSITORIES_EVIDENCE_DIR}/repositories-custom-viewport-${theme}.png` });
+      }
+    });
   }
 }
 

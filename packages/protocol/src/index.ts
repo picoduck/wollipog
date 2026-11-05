@@ -890,7 +890,13 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      worktree of the target repository, carries the provider conversation over and continues.
 //      Snapshots carry `locationSwitch` (pending or failed); the control plane moves the session
 //      row only under a consumed switch naming exactly that Location.
-export const PROTOCOL_VERSION = 289;
+// 292: campaign repository additions (#4117). A campaign root asks its owner to add one Project
+//      Location's repository with request_campaign_repository_addition (`wollipog campaign
+//      repository-addition`); the control plane inspects the Location first and creates a
+//      human-owned `campaign_repository_addition` decision, and the root carries out the exact
+//      approved Location with execute_campaign_repository_addition. Older runners and control
+//      planes refuse the tools by name. (290 and 291 are claimed by open pull requests.)
+export const PROTOCOL_VERSION = 292;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -998,6 +1004,7 @@ export const SESSION_NAMING_SUPERVISION_MARGIN_MS = SESSION_NAMING_TRANSPORT_MAR
 export { buildConversationHandoff, handoffDestinationError, inPlaceHandoffTurns } from "./conversation-handoff.js";
 export * from "./automation-messages.js";
 export * from "./location-switch.js";
+export * from "./campaign-repository-addition.js";
 export { PROMPT_TITLE_MAX, titleFromPrompt } from "./session-title.js";
 export { plainTextPreview } from "./plain-text-preview.js";
 export * from "./campaign-work-ledger.js";
@@ -1445,6 +1452,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   capacityLockDiagnostics: 137,
   /** v288 validates a Full Control boundary's `repositories` list (#4117). */
   campaignRepositoryBoundary: 288,
+  /** v292 asks for and carries out a campaign repository addition (#4117). */
+  campaignRepositoryAddition: 292,
 } as const;
 
 /* ========================================================================== */
@@ -2839,8 +2848,12 @@ export type DelegatableWorkflowDecisionCategory = typeof WORKFLOW_DECISION_CATEG
 /** `location_switch` (#4138): a regular session's request to continue its task in another Project
  * Location of the repository it belongs to. Created only through request_location_switch; only the
  * session's owner decides it, and the requester executes the exact approved target. */
+/** `campaign_repository_addition` (#4117): an Orchestrator's request to add one Project Location's
+ * repository to its campaign. Created only through request_campaign_repository_addition after the
+ * server inspects that Location; always the campaign owner's, in Full Control and Custom alike, and
+ * the Orchestrator carries out only the exact approved Location. */
 export type WorkflowDecisionCategory = DelegatableWorkflowDecisionCategory | "issue_closure" | "campaign_issue_scope" | "automation_creation" |
-  "campaign_follow_up_admission" | "owner_decision" | "location_switch";
+  "campaign_follow_up_admission" | "owner_decision" | "location_switch" | "campaign_repository_addition";
 export type WorkflowDecisionAuthority = "human" | "orchestrator";
 
 export type ParentControlDecisionPolicy = Record<DelegatableWorkflowDecisionCategory, WorkflowDecisionAuthority>;
@@ -3016,6 +3029,9 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   pendingLocations?: import("./project-location-inspection.js").CampaignPendingLocation[];
   /** The Locations that joined the boundary after launch, newest last, bounded (#4117). */
   locationJoins?: import("./project-location-inspection.js").CampaignLocationJoin[];
+  /** A Custom campaign's repositories (#4117): its own Location's repository first, then those its
+   * owner approved adding. Full Control keeps them in its authority boundary instead. */
+  repositories?: import("./campaign-authority.js").CampaignBoundaryRepository[];
   /** Human initial epic request, persisted before runner echo; this is a proposal seed, never authority. */
   issueScopeProposalEpic?: number;
   /** Finite GitHub issue-write scope admitted from the initial request or an exact human-approved scope change. */
@@ -5520,6 +5536,7 @@ export const OWNER_DECISION_LIMITS = { question: 4000, material: 8000, minOption
 export type WorkflowDecisionResourceSnapshot =
   | AutomationCreationSnapshot
   | import("./location-switch.js").LocationSwitchSnapshot
+  | import("./campaign-repository-addition.js").CampaignRepositoryAdditionSnapshot
   | GithubIssueClosureSnapshot
   | CampaignIssueScopeSnapshot
   | CampaignFollowUpAdmissionSnapshot
@@ -5715,6 +5732,8 @@ export interface WorkflowDecisionView {
   automationCreationResult?: AutomationCreationResult;
   /** (#4138) Where an approved Location switch continued the task. */
   locationSwitchResult?: import("./location-switch.js").LocationSwitchResult;
+  /** (#4117) What an approved repository addition did once its Orchestrator carried it out. */
+  campaignRepositoryAdditionResult?: import("./campaign-repository-addition.js").CampaignRepositoryAdditionResult;
   /** v242 (#3713): what the child's runner read from GitHub when a GitHub merge was requested.
    * Absent when the runner predates the check, so the closures it would make are unknown. */
   closingReferenceCheck?: PullRequestClosingReferenceCheck;

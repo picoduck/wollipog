@@ -49,7 +49,7 @@ export interface CampaignLocationJoin {
   repository: string;
   revision: number;
   at: number;
-  source: "owner_added" | "runner_reconnected" | "owner_included";
+  source: "owner_added" | "runner_reconnected" | "owner_included" | "addition_approved";
 }
 
 export const CAMPAIGN_LOCATION_JOINS_MAX = 50;

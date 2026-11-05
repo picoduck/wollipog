@@ -351,6 +351,20 @@ const projectionFor = (rev: number) => campaignProjection(
         ...(included ? [{ locationId: "loc_shared", name: "Shared Docs", repository: "picoduck/shared-docs", revision: 7, at: NOW, source: "owner_included" as const }] : []),
       ],
     } } : {}),
+    // `repositories=custom`: a Custom campaign's list, extended by an approved repository addition;
+    // it has no authority boundary, so no revision (#4117).
+    ...(params.get("repositories") === "custom" ? { repositoryBoundary: {
+      revision: 0,
+      repositories: [
+        { repository: "picoduck/wollipog", locations: [
+          { locationId: "loc_laptop", name: "Wollipog on Laptop", availability: "available" as const, isDefault: true }] },
+        { repository: "picoduck/shared-docs", locations: [
+          { locationId: "loc_shared", name: "Shared Docs", availability: "available" as const, isDefault: false }] },
+      ],
+      excludedLocations: [],
+      pendingLocations: [],
+      joins: [{ locationId: "loc_shared", name: "Shared Docs", repository: "picoduck/shared-docs", revision: 0, at: NOW, source: "addition_approved" as const }],
+    } } : {}),
     ...(params.get("budget") === "1" ? { budget: {
       authority: { version: 1 as const, costUsd: 100, toolCalls: 2000, concurrency: 4, acceptedFollowUps: 3, accounting: "managed_workers_only" as const, unpriced: "stop" as const },
       // `estimate=1`: recorded spend includes running Claude turns' live estimates (#3196).
