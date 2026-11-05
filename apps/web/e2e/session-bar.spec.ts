@@ -1,5 +1,6 @@
 import { waitForSessionPreview } from "./session-readiness.js";
 import { expect, test, type Page } from "@playwright/test";
+import { pinWidestFace } from "./font-geometry.js";
 
 /**
  * The session bar on the shared 48px detail-bar anatomy (#2146; docs/design-system.md §4.3, §4.4,
@@ -397,12 +398,16 @@ test("at 940px a long title keeps 200px: the badge keeps its label only while it
   }
 });
 
-test("in the compact tier a long title collapses the status badge to its dot before the title drops under 200px", async ({ page }) => {
-  // 800px is inside the compact tier (761–1099px) with room enough to measure both forms.
-  await openBar(page, 800);
+test("the compact tier switches whole status labels to dots while preserving 200px of title space", async ({ page }) => {
+  // Two labels need more room than the old single badge. Exercise the full and pressured forms
+  // at distinct compact widths, including a verified wide face rather than assuming 800px fits.
+  await openBar(page, 1090);
   await page.getByRole("button", { name: "Expand Navigation" }).click();
   await signInRequired(page);
   const control = page.locator("header.session-bar .session-status-button");
+  await pinWidestFace(page, page.locator("header.session-bar"), {
+    probeText: "Awaiting Input Authentication Required",
+  });
   await setTitle(page, "Fix it");
   await expect(control).toHaveAccessibleName("Session Status: Awaiting Input, Authentication Required");
   await expect(control).not.toHaveAttribute("data-dot");
@@ -410,8 +415,10 @@ test("in the compact tier a long title collapses the status badge to its dot bef
   await expect(control).toHaveAttribute("data-compact", "");
   await expect(control.locator(".status").last()).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
   await expect(control.locator(".status").last()).toHaveText("Authentication Required");
+  await expect(control.locator(".status")).toHaveText(["Awaiting Input", "Authentication Required"]);
 
   await setTitle(page, LONG_TITLE);
+  await page.setViewportSize({ width: 800, height: 900 });
   await expect(control).toHaveAttribute("data-dot", "");
   await expect(control).toHaveAttribute("title", "Awaiting Input, Authentication Required");
   await expect(control).toHaveAccessibleName("Session Status: Awaiting Input, Authentication Required");
