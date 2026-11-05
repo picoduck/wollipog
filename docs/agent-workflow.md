@@ -148,6 +148,33 @@ Wait for merge-group CI and actual `MERGED` state. Obtain a separate typed branc
 after merge and after preserving/retargeting stacked dependents. Retire managed worktrees through
 Wollipog; report provider-exit deferrals. Parent verification, rather than idleness, attests delivery.
 
+## Child Worktree Inspection Recovery
+
+`verify_campaign_child` inspects managed worktrees before Stop and Archive. A refusal names the
+child, the worktree's position in its deduplicated managed-path inventory, and the first 12 hex
+characters of SHA-256 of the stored path. Match this against `get_session` worktrees (excluding
+attached worktrees, with a legacy selected path appended if absent). Paths and raw runner errors
+are omitted from inspection-failure diagnostics; the request ID correlates a dispatched status
+request with runner diagnostics.
+
+- `unsupported_capability`: the reported runner protocol is below the existing inspection gate;
+  use the returned required/reported protocol fields to arrange an operator-managed runner update.
+- `capability_unproven`: the runner's protocol is unknown; reconnect and inspect registration
+  before diagnosing it as outdated.
+- `runner_offline` or `timeout`: restore connectivity or investigate the status request timing out.
+- `runner_error`: inspect runner status-request diagnostics; no update is presumed.
+- `invalid_response:<reason>`: restore valid status data after checking runner/control-plane
+  compatibility. Reasons distinguish missing status, invalid counts/flags/file lists, and
+  inconsistent summaries. A valid truncated file list still refuses dirty worktrees.
+
+Missing proof records neither verification nor archival and never starts retirement. Preserve
+worktrees during recovery. Retry verification with the same completed report once inspection is
+restored; do not repeat delivery or merge. Successful verification resumes the existing managed
+retirement operation, which independently checks delivery and ownership. Do not alter an old
+child's cleanup state to bypass inspection. A hosted agent must hand any hosting-stack update to
+a separately authorized outside operator; merging this diagnostic change does not deploy it or
+prove recovery of a historical runner failure.
+
 ## Evidence and Hosting
 
 Follow explicit task/project hosting requirements and Artifact Uploads preferences. Full Control
