@@ -890,13 +890,13 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      worktree of the target repository, carries the provider conversation over and continues.
 //      Snapshots carry `locationSwitch` (pending or failed); the control plane moves the session
 //      row only under a consumed switch naming exactly that Location.
-// 290: issue facts for selection scope (#4103). A `campaign_issue_scope` inspection may ask for
-//      `facts`; a v290 runner then answers `issueFacts` for each requested number: whether it is
+// 291: issue facts for selection scope (#4103). A `campaign_issue_scope` inspection may ask for
+//      `facts`; a v291 runner then answers `issueFacts` for each requested number: whether it is
 //      an issue or a pull request, its state, labels, assignees, title and a bounded body excerpt.
 //      A pull request is reported there instead of failing the read. The control plane's
 //      selection floors read these facts; an older runner reports none, so its selection
-//      proposals take the owner's route.
-export const PROTOCOL_VERSION = 290;
+//      proposals take the owner's route. (290 is claimed by an open pull request.)
+export const PROTOCOL_VERSION = 291;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1451,8 +1451,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   capacityLockDiagnostics: 137,
   /** v288 validates a Full Control boundary's `repositories` list (#4117). */
   campaignRepositoryBoundary: 288,
-  /** v290 reports issue facts (kind, state, labels, assignees) for selection scope (#4103). */
-  campaignIssueFacts: 290,
+  /** v291 reports issue facts (kind, state, labels, assignees) for selection scope (#4103). */
+  campaignIssueFacts: 291,
 } as const;
 
 /* ========================================================================== */
@@ -5395,7 +5395,7 @@ export type CampaignIssueScopeMessage = {
   requestId: string;
   sessionId: string;
 } & ({ operation: "inspect"; epic?: number; issues?: number[]; publication?: { sanitizedTitle: string; sanitizedBody: string; labels: string[] };
-       /** v290 (#4103): also report `issueFacts` for each of `issues`. */
+       /** v291 (#4103): also report `issueFacts` for each of `issues`. */
        facts?: true } |
      { operation: "publication_inspect"; sanitizedTitle: string; sanitizedBody: string; labels: string[] } |
      { operation: "synchronize"; scope: CampaignIssueScope; control?: CampaignControl });
@@ -5423,7 +5423,7 @@ export interface CampaignIssueScopeResultMessage {
   candidates?: CampaignIssueScopeView["candidates"];
   error?: string;
   publicationDigest?: string;
-  /** v290 (#4103): the facts of each requested issue, when the inspection asked for them. */
+  /** v291 (#4103): the facts of each requested issue, when the inspection asked for them. */
   issueFacts?: CampaignIssueFacts[];
   /** Duplicate inspection searched and compared titles by their subject, without a type tag
    * (#2940). Older runners omit it: their search and comparison keep the tag, so they can miss an

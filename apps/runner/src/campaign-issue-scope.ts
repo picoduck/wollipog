@@ -32,7 +32,7 @@ const names = (values: unknown, key: string): string[] | null => {
   return read.every((value): value is string => typeof value === "string") ? read : null;
 };
 
-/** `facts` (v290, #4103) also reports each of `issues` as `issueFacts`. A pull request is then
+/** `facts` (v291, #4103) also reports each of `issues` as `issueFacts`. A pull request is then
  * reported as one rather than failing the read, and it is never a candidate. */
 export async function inspectCampaignIssueScope(run: Run, epic?: number, issues: number[] = [], publication?: { sanitizedTitle: string; sanitizedBody: string; labels: string[] },
   facts = false): Promise<{ repository: string; candidates: Candidates; issueFacts?: CampaignIssueFacts[] }> {

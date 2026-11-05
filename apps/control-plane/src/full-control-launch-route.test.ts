@@ -78,7 +78,7 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
     ackDurable: true,
     // Each epic's sub-issues, read as the runner reads them; an epic not listed has none.
     epics: new Map<number, number[]>(),
-    // Issue facts a v290 runner reports when asked (#4103): open with no labels unless set here. A
+    // Issue facts a v291 runner reports when asked (#4103): open with no labels unless set here. A
     // pull request is reported as one, and refuses a read that does not ask for facts.
     facts: new Map<number, Partial<Pick<CampaignIssueFacts, "state" | "labels" | "assignees" | "title" | "bodyExcerpt">>>(),
     pullRequests: new Set<number>() };

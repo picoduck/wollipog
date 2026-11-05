@@ -184,7 +184,7 @@ A selection proposal adds issues only (`selection_additions_only`). Deterministi
 order, and the first that fails refuses the proposal with its code and no Decision Model call:
 
 1. `repository_outside_boundary`: every addition is in a repository in the campaign's boundary.
-2. `not_an_issue`, `issue_not_open`: a v290 runner reads each number with `facts` and reports it as
+2. `not_an_issue`, `issue_not_open`: a v291 runner reads each number with `facts` and reports it as
    an open issue, not a pull request.
 3. `already_in_scope`: none is in this scope.
 4. `other_campaign_scope`: no other active root campaign names it in its scope or holds a committed
@@ -196,7 +196,7 @@ order, and the first that fails refuses the proposal with its code and no Decisi
    case-insensitively, narrowed only by organization, machine, workspace and agent selectors) names
    one of the issue's labels. Such a rule never matches a tool request.
 
-A runner older than v290 reports no facts, so floors 2 and 6 stay unverified and the proposal goes to
+A runner older than v291 reports no facts, so floors 2 and 6 stay unverified and the proposal goes to
 the owner. A proposal that passes every floor is the owner's one typed approval, with
 `grantReview.cause: "selection"`, until the Decision Model reviews selection proposals.
 
