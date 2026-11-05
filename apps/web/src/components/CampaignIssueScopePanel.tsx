@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useState } from "react";
+import React, { useEffect, useId, useRef, useState } from "react";
 import type { CampaignIssueScopeSnapshot, CampaignIssueScopeView, SessionView } from "@wollipog/protocol";
 import { browserRandomUUID } from "../browser-crypto.js";
 import { Checkbox } from "./ui/ChoiceControls.js";
@@ -45,20 +45,23 @@ export function CampaignIssueScopePanel({ session, campaignId }: { session: Sess
   const selectable = context.length > 0 && Boolean(view?.supported && view.canPropose);
   const contextLabelId = useId();
   const contextHelpId = useId();
+  const reading = useRef(false);
   useEffect(() => {
     const controller = new AbortController();
     setError(null);
+    reading.current = true;
     void api.campaignIssueScope(campaignId, undefined, controller.signal).then((next) => {
-      if (!controller.signal.aborted) { setView(next); setPending(false); setSelected([]); }
-    }).catch((e: unknown) => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : "Could not load campaign issue scope."); });
+      if (!controller.signal.aborted) { reading.current = false; setView(next); setPending(false); setSelected([]); }
+    }).catch((e: unknown) => { if (!controller.signal.aborted) { reading.current = false; setError(e instanceof Error ? e.message : "Could not load campaign issue scope."); } });
     return () => controller.abort();
   }, [api, campaignId, revision, reload]);
   // A disconnected runner leaves the revision unchanged when it returns, so poll the saved scope
-  // (no runner call) until the view verifies again (#2664). A returning tab refreshes at once.
+  // (no runner call) until the view verifies again (#2664). A returning tab refreshes at once. A
+  // poll never replaces a read still in flight: a reconnected runner's inspection can outlast it.
   const disconnected = Boolean(view?.runnerDisconnected);
   useEffect(() => {
     if (!disconnected) return;
-    const poll = () => { if (document.visibilityState !== "hidden") setReload((n) => n + 1); };
+    const poll = () => { if (document.visibilityState !== "hidden" && !reading.current) setReload((n) => n + 1); };
     const timer = window.setInterval(poll, SCOPE_RECONNECT_POLL_MS);
     document.addEventListener("visibilitychange", poll);
     return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", poll); };

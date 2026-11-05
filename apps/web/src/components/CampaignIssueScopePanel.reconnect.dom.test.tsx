@@ -40,7 +40,7 @@ const offline = (overrides: Partial<CampaignIssueScopeView> = {}) =>
 
 /** Mounts the panel over a queue of answers; the last one repeats. The panel's reconnect timer is
  * captured instead of scheduled, so a test fires it on demand. */
-async function mount(answers: Array<CampaignIssueScopeView | Error>) {
+async function mount(answers: Array<CampaignIssueScopeView | Error | Promise<CampaignIssueScopeView>>) {
   let calls = 0;
   const timers = new Map<number, { run: () => void; ms: number }>();
   let nextTimer = 1;
@@ -95,6 +95,23 @@ test("a mounted panel showing a disconnected runner's saved scope recovers after
     assert.equal(notice(panel.host, "Scope Changes Unavailable"), undefined, "the reconnected view is verified again");
     assert.ok(button(panel.host, "Request Scope Approval"));
     assert.equal(panel.timers.size, 0, "a verified view stops polling");
+  } finally { await panel.unmount(); }
+});
+
+test("a poll never cancels a reconnected runner's inspection that outlasts the interval (#2664)", async () => {
+  let finish!: (value: CampaignIssueScopeView) => void;
+  const slow = new Promise<CampaignIssueScopeView>((resolve) => { finish = resolve; });
+  const panel = await mount([offline(), slow]);
+  try {
+    await panel.tick();
+    assert.equal(panel.calls(), 2, "the first poll starts the reconnected read");
+    for (let i = 0; i < 3; i += 1) await panel.tick();
+    assert.equal(panel.calls(), 2, "polls wait for the read in flight instead of aborting it");
+    await act(async () => finish(view()));
+    await settle();
+    assert.equal(notice(panel.host, "Scope Changes Unavailable"), undefined, "the slow inspection's answer is shown");
+    assert.ok(button(panel.host, "Request Scope Approval"));
+    assert.equal(panel.timers.size, 0);
   } finally { await panel.unmount(); }
 });
 
