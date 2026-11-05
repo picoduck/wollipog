@@ -20,14 +20,14 @@ for (const width of [390, 1280]) {
       });
       const inbox = page.locator(".inbox-row").filter({ hasText: "Alpha Session" });
       await expect(inbox.getByLabel("Status: Follow-Up Queued")).toBeVisible();
-      await expect(inbox.locator(".status")).toHaveClass(/t-neutral/);
-      await expect(inbox.locator(".status")).not.toHaveClass(/pulse/);
+      await expect(inbox.locator(".status").last()).toHaveClass(/t-neutral/);
+      await expect(inbox.locator(".status").last()).not.toHaveClass(/pulse/);
       await inbox.click();
       await waitForSessionPreview(page);
       const expand = page.getByRole("button", { name: "Open Session", exact: true });
       if (await expand.isVisible()) await expand.click();
       const status = page.locator(".session-bar .session-status-button");
-      await expect(status).toHaveAccessibleName("Session Status: Follow-Up Queued");
+      await expect(status).toHaveAccessibleName("Session Status: Awaiting Prompt, Follow-Up Queued");
       await status.click();
       const dialog = page.getByRole("dialog", { name: "Session Status" });
       await expect(dialog).toContainText("An automatic retry is scheduled.");
@@ -39,7 +39,7 @@ for (const width of [390, 1280]) {
         // Foreground work is running, but it is not the turn returning the background results.
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { status: "running" });
       });
-      await expect(status).toHaveAccessibleName("Session Status: Running");
+      await expect(status).toHaveAccessibleName("Session Status: Running, Follow-Up Queued");
       await expect(detail.locator(".status")).toHaveText("Follow-Up Queued");
       await page.evaluate(() => {
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
@@ -60,7 +60,7 @@ for (const width of [390, 1280]) {
           status: "idle", backgroundFollowUp: { state: "blocked", blocker: "budget" },
         });
       });
-      await expect(status).toHaveAccessibleName("Session Status: Follow-Up Blocked");
+      await expect(status).toHaveAccessibleName("Session Status: Awaiting Prompt, Follow-Up Blocked");
       await expect(detail.locator(".status")).toHaveClass(/t-warning/);
       await expect(detail).toContainText("cost budget");
       expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);

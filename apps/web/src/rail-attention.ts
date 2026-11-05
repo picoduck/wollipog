@@ -62,8 +62,6 @@ export function machineAttention(
 export interface RailAttentionState {
   /** Sessions waiting on the user (the Sessions list's Blocked). */
   blocked: number;
-  /** Sessions whose runner stopped reporting progress (the Sessions list's Stalled). */
-  stalled: number;
   machines: MachineAttention;
 }
 
@@ -80,16 +78,8 @@ export type RailAttention =
 export function railAttention(view: GlobalViewName, state: RailAttentionState): RailAttention | null {
   if (view === "inbox") {
     const blocked = Math.max(0, state.blocked);
-    const stalled = Math.max(0, state.stalled);
-    if (blocked + stalled === 0) return null;
-    return {
-      kind: "count",
-      count: blocked + stalled,
-      // Stalled is failing rather than waiting, so one stalled session turns the total red.
-      tone: stalled > 0 ? "danger" : "warning",
-      note: [blocked > 0 ? `${blocked} waiting on you` : "", stalled > 0 ? `${stalled} stalled` : ""]
-        .filter(Boolean).join(", "),
-    };
+    if (blocked === 0) return null;
+    return { kind: "count", count: blocked, tone: "warning", note: `${blocked} waiting on you` };
   }
   if (view === "runners") {
     const offline = Math.max(0, state.machines.offlineWithActiveSessions);

@@ -296,7 +296,7 @@ test("a changed blocked result cannot claim acknowledgement success from an olde
 test("a legacy Result Blocked row offers Stop Job… for the one job still running", async () => {
   const harness = await renderHeader(blocked());
   try {
-    assert.equal(trigger().getAttribute("aria-label"), "Session Status: Result Blocked");
+    assert.equal(trigger().getAttribute("aria-label"), "Session Status: Awaiting Prompt, Result Blocked");
     await openPopover();
     const { name, button } = rowAction("Result Blocked");
     assert.equal(name, "Stop Job…");
@@ -426,7 +426,7 @@ for (const [name, overrides, options] of [
   test(`Result Blocked opens Background Work when ${name}`, async () => {
     const harness = await renderHeader(overrides, options);
     try {
-      assert.match(trigger().getAttribute("aria-label") ?? "", /^Session Status: Result Blocked/);
+      assert.match(trigger().getAttribute("aria-label") ?? "", /^Session Status: Awaiting Prompt, Result Blocked/);
       await openPopover();
       const action = rowAction("Result Blocked");
       assert.equal(action.name, "Open Background Work");
@@ -443,7 +443,7 @@ for (const [name, overrides, options] of [
 test("Result Missing's row acknowledges the missing result without asking first", async () => {
   const harness = await renderHeader(missing());
   try {
-    assert.equal(trigger().getAttribute("aria-label"), "Session Status: Result Missing");
+    assert.equal(trigger().getAttribute("aria-label"), "Session Status: Awaiting Prompt, Result Missing");
     await openPopover();
     const { name, button } = rowAction("Result Missing");
     assert.equal(name, "Acknowledge Missing Result");
@@ -509,7 +509,7 @@ test("an approval leads, Result Missing is +1, and its row still takes its step"
   const approval: PendingApproval = { requestId: "approval-1", title: "Run the tests", options: [], kind: "permission" };
   const harness = await renderHeader(missing({ status: "input_required", pendingApproval: approval }));
   try {
-    assert.equal(trigger().getAttribute("aria-label"), "Session Status: Approval Required and 1 More");
+    assert.equal(trigger().getAttribute("aria-label"), "Session Status: Awaiting Input, Approval Required and 1 More");
     assert.equal(trigger().querySelector(".session-status-more")?.textContent, "+1");
     await openPopover();
     assert.equal(rowAction("Result Missing").name, "Acknowledge Missing Result");
@@ -523,7 +523,7 @@ test("a result still on its way back stays a passive row with Open", async () =>
     backgroundDeliveries: [{ parentTurnId: "turn-1", jobCount: 1, terminalCount: 1, watchdogState: "terminal_without_continuation" }],
   }));
   try {
-    assert.equal(trigger().getAttribute("aria-label"), "Session Status: Awaiting Prompt");
+    assert.equal(trigger().getAttribute("aria-label"), "Session Status: Awaiting Prompt, Result Pending");
     await openPopover();
     assert.equal(rowAction("Result Pending").name, "Open Background Work");
   } finally {

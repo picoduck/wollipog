@@ -88,7 +88,7 @@ const SESSION_ROWS: readonly InboxListEntry[] = [
       { requestId: "q1", options: [], title: "Which database?", kind: "question" },
       { requestId: "q2", options: [], title: "Which region?", kind: "question" },
     ] } } as unknown as Partial<SessionView>), projectName: "Wollipog", unread: true },
-  { session: session("session-stalled", "Stalled: Index the Archive While the Runner Is Silent", {
+  { session: session("session-stalled", "Long Wait: Index the Archive While the Runner Is Silent", {
     status: "running", lastEventAt: SESSION_ROWS_NOW - minutes(17), ...branch("chore/archive-index") }),
     projectName: "Wollipog", unread: false },
   { session: session("session-unread", "Unread: Review the Overnight Test Failures", {
@@ -137,7 +137,7 @@ const FAMILY_ROWS: readonly InboxListEntry[] = [
     status: "input_required", lastEventAt: SESSION_ROWS_NOW - minutes(3),
     pendingApproval: { requestId: "family-ask", kind: "question", title: "Keep protocol 105 or bump to 106?", options: [] },
   } as unknown as Partial<SessionView>),
-  familyChild("family-stalled", "Stalled Child: Normalize the Allowance Window", {
+  familyChild("family-stalled", "Quiet Child: Normalize the Allowance Window", {
     status: "running", lastEventAt: SESSION_ROWS_NOW - minutes(14) }),
   familyChild("family-running", "Running Child: Add the Usage Table", {
     status: "running", lastEventAt: SESSION_ROWS_NOW - minutes(0) }),
@@ -147,7 +147,6 @@ const FAMILY_ROWS: readonly InboxListEntry[] = [
     familyChild(`family-extra-${index}`, `Extra Child ${index + 1}`, {
       status: "running", lastEventAt: SESSION_ROWS_NOW })) : []),
 ];
-const STALLED = new Set(["session-stalled", "family-stalled"]);
 const PINNED = new Set(["session-running"]);
 
 const ACTIVITY = new Map<string, SessionActivity>([
@@ -174,10 +173,10 @@ function SessionRows() {
   const sourceRows = FAMILY ? [...FAMILY_ROWS, ...rows] : rows;
   const rowsById = new Map(sourceRows.map((entry) => [entry.session.id, entry]));
   const orderedRows = QUERY.get("sort") === "1"
-    ? sortInboxSessions(sourceRows.map((entry) => entry.session), PINNED, STALLED)
+    ? sortInboxSessions(sourceRows.map((entry) => entry.session), PINNED)
       .map((ordered) => rowsById.get(ordered.id)!)
     : sourceRows;
-  const entries = FAMILY ? threadInboxRows(orderedRows, collapsed, STALLED) : orderedRows;
+  const entries = FAMILY ? threadInboxRows(orderedRows, collapsed) : orderedRows;
   const toggleThread = (sessionId: string) => setCollapsed((current) => {
     const next = new Set(current);
     if (!next.delete(sessionId)) next.add(sessionId);
@@ -191,7 +190,6 @@ function SessionRows() {
           selectedSessionId={selected}
           pinnedSessionIds={PINNED}
           activityBySession={ACTIVITY}
-          stalledSessionIds={STALLED}
           activityNow={SESSION_ROWS_NOW}
           onSelect={setSelected}
           onToggleThread={toggleThread}

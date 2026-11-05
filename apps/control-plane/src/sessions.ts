@@ -34,10 +34,12 @@ import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
-import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, ownerDecisionProtected, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, fullControlAutomaticResponse, type CampaignAuthorityEvaluation, type FullControlAutomaticResponse, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
+import { genericRequestScreenData, implementationQuestionScreenData, ownerDecisionScreenData, screenCredentialRequest, type CredentialScreenSurface } from "./credential-screen.js";
+import { DecisionRuntime, hubDecisionTransport, type DecisionOutcome } from "./decision-runtime.js";
+import { DecisionModelSettings } from "./decision-model-settings.js";
+import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, credentialFormFloor, type CredentialScreenFact, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, fullControlAutomaticResponse, type CampaignAuthorityEvaluation, type FullControlAutomaticResponse, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
 import { firstMessageTargetEpics } from "./first-message-issue-intent.js";
-import type { DecisionOutcome, DecisionRuntime } from "./decision-runtime.js";
 import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, scopeGrantCandidates, type ScopeGrantFields } from "./scope-grant.js";
 import type { CampaignScopeGrantReview, DecisionErrorClass, FullControlScopeGrant } from "@wollipog/protocol";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
@@ -58,6 +60,7 @@ import { SESSION_REVIEW_JOB_ID_PATTERN, type SessionReviewJobArtifacts, type Ses
 import { normalizeCampaignIssueScopeSnapshot, titleFromPrompt, type CampaignIssueScopeRequest, type CampaignIssueScopeView, type CampaignIssueScopeSnapshot } from "@wollipog/protocol";
 import { normalizeIssueClosureSnapshot, issueClosureActiveChildren, issueClosureFailureRefusal, issueClosureResultRefusal } from "./github-issue-closure.js";
 import { normalizeAutomationCreationSnapshot } from "./automation-creation-snapshot.js";
+import { normalizeLocationSwitchSnapshot } from "./location-switch-snapshot.js";
 import { INTENDED_CLOSURES_LIMIT, normalizeIntendedClosures, prMergeClosureMismatch, unscopedClosureRefusal, validClosingReferenceCheck } from "./pr-merge-closures.js";
 import { observeReconciliationSnapshot, reconciliationSnapshotAvailable, correctionFrame, latestReconciliationRepair, normalizeReconciledSnapshot, reconciliationRevision } from "./claude-cost-reconciliation.js";
 import type { GithubIssueClosureRequest, GithubIssueClosureResult, GithubIssueClosureSnapshot, IssueClosureProofGapNotice } from "@wollipog/protocol";
@@ -267,11 +270,16 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type ResolveWorkflowDecisionRequest,
   type WithdrawWorkflowDecisionRequest,
   type CreateOwnerDecisionRequest,
+  type CampaignDecisionSubject,
+  type ClassifyCampaignDecisionRequest,
   type HandWorkflowDecisionToOwnerRequest,
   type WorkflowDecisionOption,
   SESSION_NAMING_RUNNER_BUDGET_MS,
   SESSION_NAMING_SUPERVISION_MARGIN_MS,
   sessionRole,
+  locationSwitchRole,
+  withRepositoryMismatchGuidance,
+  type LocationSwitchRole,
   advertisesOrchestratorAdditiveRole,
   orchestratorAdditiveCapability,
   usesOrchestratorPresetPermissions,
@@ -533,7 +541,7 @@ const CAMPAIGN_REQUEST_WITHDRAWN_OUTCOME = "withdrawn";
 /** Categories only a person settles while a person owns them (#3917): their requests stay with
  * that person, so neither the requester nor an Orchestrator can withdraw one. */
 const PERSON_SETTLED_WORKFLOW_DECISION_CATEGORIES: ReadonlySet<WorkflowDecisionCategory> = new Set([
-  "issue_closure", "campaign_issue_scope", "campaign_follow_up_admission", "automation_creation",
+  "issue_closure", "campaign_issue_scope", "campaign_follow_up_admission", "automation_creation", "location_switch",
 ]);
 
 /** A request resolution a person made, or a server revocation a person's action led to, asks the
@@ -845,6 +853,12 @@ function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): strin
       ? "Act on the option your owner chose; it needs no consumption."
       : decision.status === "denied" ? "Your owner chose not to proceed with any option: do not act on this decision."
       : "Nobody answered it: ask again with request_owner_decision if you still need the owner's choice."] : []),
+    ...(decision.category === "location_switch" && !decision.withdrawal ? [decision.status === "approved"
+      ? "Call execute_location_switch (or `wollipog location-switch execute`) with this occurrenceId and its resourceDigest now; " +
+        "it carries out exactly the Location and action your owner chose. Do not continue the task here."
+      : decision.status === "denied" ? "Your owner chose Stay Here: keep working in this Location and repository, and do not ask again " +
+        "unless they tell you to. Explain what can and cannot be done from here."
+      : "The request ended unanswered: this session stays where it is."] : []),
     "The decision record is authoritative: read it with get_workflow_decision before acting. " +
       "If you have already acted on this outcome, continue from where you are.",
     "[End Wollipog Workflow Decision]",
@@ -905,6 +919,16 @@ function issueClosureNotApprovedMessage(decision: WorkflowDecisionView): string 
     "outcome \"approve\"), then call close_github_issue again with the same occurrenceId and resourceDigest.";
 }
 
+/** #4104: a question the Decision Model could not screen waits for its owner's classification. */
+const CREDENTIAL_SCREEN_CLASSIFY_FIRST = "Classify this question first in Campaign Status: Decline, or Let the Orchestrator Answer. " +
+  "Nobody answers it until then.";
+/** #4104: a screen whose outcome, even a failure, could not be recorded admits nothing. */
+const CREDENTIAL_SCREEN_UNRECORDED = "Full Control could not record a credential screen for this question, so it was not " +
+  "created. Ask again in a moment; nobody answers it until a screen is recorded.";
+/** #4104: nobody answers a request before the Decision Model has screened it. */
+const CREDENTIAL_SCREEN_STILL_SCREENING = "This request is still being screened for credential, sign-in and access requests. " +
+  "Read it again in a moment; until then it can only be declined.";
+
 /** Why a session whose ancestry the campaign walk refuses can neither request nor keep a typed
  * workflow decision (#2451). No Orchestrator can be named as its controller. */
 const MALFORMED_ANCESTRY_DECISION_REFUSAL =
@@ -919,7 +943,7 @@ const MALFORMED_ANCESTRY_AUTHORITY_REFUSAL =
 
 /** How one finished review reads in its requester's continuation (#3369). Reviewer-written text is
  * bounded to single lines (compactReviewFinding) or quoted, so it can never forge a framing line. */
-function reviewContinuationOutcome(review: ReviewSessionView): string[] {
+function reviewContinuationOutcome(review: ReviewSessionView, role: LocationSwitchRole | null = null): string[] {
   const reviewer = review.reviewer === "codex" ? "Codex Review" : "Claude Review";
   // A base-merge round (#4075) is named as one, since it uses none of the epoch's rounds.
   const round = review.round ? ` (round ${review.round.round}, epoch ${review.round.epoch}` +
@@ -944,7 +968,10 @@ function reviewContinuationOutcome(review: ReviewSessionView): string[] {
   } else if (review.state === "completed") {
     outcome = "a report that was not checked against the review contract (an older runner)";
   } else {
-    outcome = `no review: ${decisionLiteral(review.reason ?? "the review ended without a result")}`;
+    const reason = review.reason ?? "the review ended without a result";
+    // A review refused because the session is in another repository says how to recover (#4138).
+    const guidance = role ? withRepositoryMismatchGuidance(role, "review", reason).slice(reason.length) : "";
+    outcome = `no review: ${decisionLiteral(reason)}${guidance}`;
   }
   const shown = review.findings.slice(0, 20).map(compactReviewFinding);
   const atLimit = review.reason === REVIEW_ROUND_REFUSALS.roundLimit;
@@ -965,8 +992,8 @@ function reviewContinuationOutcome(review: ReviewSessionView): string[] {
   ];
 }
 
-function reviewContinuationPrompt(reviews: readonly ReviewSessionView[]): string {
-  return reviews.flatMap(reviewContinuationOutcome).join("\n");
+function reviewContinuationPrompt(reviews: readonly ReviewSessionView[], role: LocationSwitchRole | null): string {
+  return reviews.flatMap((review) => reviewContinuationOutcome(review, role)).join("\n");
 }
 
 const PULL_REQUEST_WATCH_OUTCOME_TEXT: Record<PullRequestWatchOutcome, string> = {
@@ -1081,6 +1108,10 @@ export function normalizeWorkflowDecisionSnapshot(
   if (category === "automation_creation") {
     const snapshot = normalizeAutomationCreationSnapshot(value);
     return snapshot ? ok(snapshot) : fail("automation creation requires a server-prepared exact configuration");
+  }
+  if (category === "location_switch") {
+    const snapshot = normalizeLocationSwitchSnapshot(value);
+    return snapshot ? ok(snapshot) : fail("a Location switch requires a server-inspected set of Project Locations");
   }
   if (category === "campaign_issue_scope") {
     const normalized = normalizeCampaignIssueScopeSnapshot(value);
@@ -2147,9 +2178,6 @@ export class SessionsService {
   private readonly firstMessagesInFlight = new Set<string>();
   /** The one session whose established first message is being admitted right now. */
   private firstMessageDelivery: string | null = null;
-  /** The organization's Decision Model runtime (#4101), wired by the server. Without it a Full
-   * Control first message takes the scope grant's failure route (#4102). */
-  decisionRuntime: Pick<DecisionRuntime, "decide"> | null = null;
   /** Bounded on-demand forge read, wired by the server once its observer exists. A delivered item's
    * pull requests leave the background pass, so completed closure refreshes them itself (#2940). */
   campaignForgeRefresh: ((campaignId: string, refs: readonly CampaignPullRequestRef[]) => Promise<void>) | null = null;
@@ -2158,6 +2186,11 @@ export class SessionsService {
   campaignForgeReadNow: ((campaignId: string, refs: readonly CampaignPullRequestRef[]) => Promise<ForgeReadResult[] | null>) | null = null;
   /** One in-flight excluded-pull-request read per closure occurrence; concurrent executes share it. */
   private readonly excludedClosureReads = new Map<string, Promise<boolean>>();
+  /** The Decision Model runtime (#4101) the Full Control screens use (#4104). The server shares
+   * its own; tests replace it with a fake harness. */
+  private decisionRuntime: DecisionRuntime;
+  /** Generic request screens in flight, by session and occurrence, so a restored card never starts two. */
+  private readonly credentialScreensInFlight = new Set<string>();
 
   constructor(
     private readonly db: ControlPlaneDb,
@@ -2188,6 +2221,7 @@ export class SessionsService {
     if (operatorValidationPermits && operatorValidationPermits.database !== db.raw()) throw new Error("Validation permits require the same durable database.");
     if (preparedMediaActiveStops && preparedMediaActiveStops.database !== db.raw()) throw new Error("Dedicated media Stop requires the same durable database.");
     this.mediaSessionPurposes = new MediaSessionPurposes(this.db.raw());
+    this.decisionRuntime = new DecisionRuntime({ db, settings: new DecisionModelSettings(db), transport: hubDecisionTransport(hub) });
     this.promptOutbox = new SessionPromptOutbox(this.db, this.hub, this.log,
       (now) => this.expireAutomationCreationDecisions(now));
     this.campaignRecovery = new CampaignRecoveryService(this.db, id => this.hub.sessionChangedById(id), this.log);
@@ -5844,13 +5878,13 @@ export class SessionsService {
    * runtime's time bound and retry budget. No tools, no repository and no issue content reach it.
    * Its typed, person-owned request exists only once the Orchestrator proposes a scope, so routing
    * creates none here (`proposeCampaignIssueScope` creates it and links it to the occurrence). Null
-   * when no runtime can take the call at all, which the caller treats as a failure. */
+   * when the call cannot be made at all (no organization, or inputs the runtime refuses), which the
+   * caller treats as a failure. */
   private async decideScopeGrant(session: SessionView, text: string, messageDigest: string): Promise<DecisionOutcome | null> {
-    const runtime = this.decisionRuntime;
     const organizationId = this.db.sessionScope(session.id)?.organizationId;
-    if (!runtime || !organizationId) return null;
+    if (!organizationId) return null;
     try {
-      return await runtime.decide({
+      return await this.decisionRuntime.decide({
         organizationId,
         kind: "scope_grant",
         campaignSessionId: session.id,
@@ -9706,6 +9740,12 @@ export class SessionsService {
     if (full) this.campaignRecovery.synchronize(controller as SessionView, Date.now());
     if (!controller || controller === "refused" || (!full && controller.id !== sessionId)) return false;
     const evaluation = this.genericCampaignAuthority(controller, session, request);
+    // Nobody may answer a request the Decision Model has not screened yet (#4104). The screen runs
+    // once per occurrence; its outcome settles the request through this method again.
+    if (full && evaluation.reason === "credential_screen_pending") {
+      this.startCredentialScreen(controller as SessionView, session, request);
+      return false;
+    }
     // A decline grants nothing, so it may settle a request whose provider gave no exact occurrence,
     // even while another card (a guardrail pause, a Human Required ask) is also pending.
     if (full && evaluation.owner === "orchestrator" && evaluation.disposition === "decline") {
@@ -10663,7 +10703,7 @@ export class SessionsService {
     const ids = held.map((review) => review.reviewSessionId);
     let claimed = false;
     const sent = this.prompt(
-      requesterSessionId, reviewContinuationPrompt(held), [], undefined, undefined, undefined, "session", true, {
+      requesterSessionId, reviewContinuationPrompt(held, this.repositoryMismatchRole(session)), [], undefined, undefined, undefined, "session", true, {
         admitAs: "queued" as const,
         // The durable lane is where the runner validates this trusted continuation marker.
         ...(supportsQuestionRetention ? { durable: true, reviewContinuation: true as const } : {}),
@@ -10892,6 +10932,11 @@ export class SessionsService {
     }
     if (normalized.ok && normalized.data?.category === "pr_merge" && normalized.data.mergeMethod === undefined) {
       return this.createGithubMergeDecision(sessionId, request, normalized.data, canAccess);
+    }
+    if (normalized.ok && normalized.data?.category === "implementation_question") {
+      const credentialScreen = await this.screenImplementationQuestion(sessionId, request, normalized.data);
+      if (credentialScreen === null) return fail(CREDENTIAL_SCREEN_UNRECORDED, 503);
+      return this.createWorkflowDecision(sessionId, request, canAccess, credentialScreen ? { credentialScreen } : undefined);
     }
     if (!normalized.ok || normalized.data?.category !== "ui_evidence_approval") {
       return this.createWorkflowDecision(sessionId, request, canAccess);
@@ -11716,6 +11761,8 @@ export class SessionsService {
     request: CreateWorkflowDecisionRequest,
     canAccess: (sessionId: string) => boolean = () => true,
     internal?: { trustedDerivedVideo?: boolean; videoFallbackReason?: string; trustedIssueClosure?: boolean; trustedIssueScope?: boolean; trustedPublication?: boolean; trustedAutomationCreation?: boolean;
+      /** A regular session's Location switch, inspected by LocationSwitchService (#4138). */
+      trustedLocationSwitch?: boolean;
       publicationAdmissionFailure?: CampaignPublicationAdmissionFailure;
       /** The resourceKey an admitted publication was requested under, before it was stored under its recommendation (#4066). */
       requestedResourceKey?: string;
@@ -11724,7 +11771,10 @@ export class SessionsService {
       /** #3713: the child runner's GitHub read, taken just before this request. */
       closingReferenceCheck?: PullRequestClosingReferenceCheck;
       /** A Full Control root's owner decision, checked by createOwnerDecision (#4064). */
-      trustedOwnerDecision?: boolean },
+      trustedOwnerDecision?: boolean;
+      /** #4104: the Decision Model's screen of an implementation question, taken by the async
+       * route just before this call. Without one, a Full Control question waits for its owner. */
+      credentialScreen?: CredentialScreenFact },
   ): ServiceResult<WorkflowDecisionView> {
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before requesting another decision", 409);
     if (!boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
@@ -11769,6 +11819,9 @@ export class SessionsService {
     if (normalized.data.category === "automation_creation" && !internal?.trustedAutomationCreation) {
       return fail("use request_automation_creation for a server-validated automation proposal", 403);
     }
+    if (normalized.data.category === "location_switch" && !internal?.trustedLocationSwitch) {
+      return fail("use request_location_switch: the control plane inspects the Project's Locations itself", 403);
+    }
     if (normalized.data.category === "pr_merge") {
       const snapshot = normalized.data;
       const refused = this.mergeReviewEvidenceRefusal(child, snapshot);
@@ -11802,10 +11855,20 @@ export class SessionsService {
       } };
     }
     let authority = evaluated.effectiveOwner;
+    const screenedQuestion = category === "implementation_question" &&
+      controller.session.orchestratorPolicy?.control?.mode === "full_control";
     const authorityEvaluation = evaluateCampaignAuthority(controller.session, child,
       this.db.getRunner(child.runnerId)?.protocolVersion, normalized.data, controller.policy,
       this.db.getRunner(controller.session.runnerId)?.protocolVersion, this.campaignPeerContracts(controller.session, child.id),
-      this.reviewExtensionCap(child.id, normalized.data));
+      this.reviewExtensionCap(child.id, normalized.data),
+      screenedQuestion ? internal?.credentialScreen ?? { state: "pending" } : undefined);
+    // An unscreened, uncertain or failed screen leaves the question to its owner to classify (#4104).
+    if (authorityEvaluation.reason === "credential_screen_review") authority = "human";
+    // An owner decision is already the owner's, but one whose screen failed is classified before
+    // anyone can choose one of its options.
+    if (category === "owner_decision" && internal?.credentialScreen && internal.credentialScreen.state !== "discusses") {
+      Object.assign(authorityEvaluation, { reason: "credential_screen_review", credentialScreen: { ...internal.credentialScreen, state: "review" } });
+    }
     // A refused scope change cannot be routed around through a merge's closing references (#4062):
     // the merge is refused with the issues named, rather than becoming a person's new decision.
     if (authorityEvaluation.reason === "outside_issue_scope" && authorityEvaluation.unscopedClosures?.length) {
@@ -11944,10 +12007,10 @@ export class SessionsService {
   /** A Full Control root asks its campaign's owner a decision the owner kept (#4064). The decision
    * is always the person's: no agent can answer, approve or resolve it. Its card waits on the root
    * without parking it, and the owner's choice comes back as the decision's resume prompt. */
-  createOwnerDecision(sessionId: string, request: CreateOwnerDecisionRequest,
-    canAccess: (sessionId: string) => boolean = () => true): ServiceResult<WorkflowDecisionView> {
+  async createOwnerDecision(sessionId: string, request: CreateOwnerDecisionRequest,
+    canAccess: (sessionId: string) => boolean = () => true): Promise<ServiceResult<WorkflowDecisionView>> {
     const root = this.ownerDecisionRoot(this.db.getSession(sessionId));
-    if (!root.ok) return failAs(root);
+    if (!root.ok || !root.data) return failAs(root);
     if (!request || typeof request !== "object" || Array.isArray(request) || Object.keys(request).some((key) =>
       !["requestId", "resourceKey", "question", "options", "recommendedOptionId", "material"].includes(key))) {
       return fail("an owner decision has a requestId, resourceKey, question, options, and optionally recommendedOptionId and material", 400);
@@ -11957,13 +12020,177 @@ export class SessionsService {
       ...(request.material !== undefined ? { material: request.material } : {}) };
     const normalized = normalizeWorkflowDecisionSnapshot(snapshot);
     if (!normalized.ok || normalized.data?.category !== "owner_decision") return failAs(normalized);
-    // Full Control never asks anyone for credentials or sign-in, the owner included.
-    if (ownerDecisionProtected(normalized.data)) {
-      return fail("Full Control never asks anyone for credentials, sign-in or wider access, so this owner decision was not " +
-        "created. Ask about the design without requesting a value, or continue without it.", 403);
-    }
+    // Full Control never asks anyone for credentials or sign-in, the owner included (#4104): the floor
+    // first, then the Decision Model. An uncertain or failed screen holds the decision for its owner
+    // to classify first; nobody can choose one of its options until then.
+    const refused = (): ServiceResult<WorkflowDecisionView> => fail("Full Control never asks anyone for credentials, sign-in or wider access, so this owner decision was not " +
+      "created. Ask about the design without requesting a value, or continue without it.", 403);
+    if (credentialFormFloor(normalized.data)) return refused();
+    if (!boundedDecisionString(request.requestId, 256)) return fail<WorkflowDecisionView>("requestId and resourceKey are required bounded identifiers", 400);
+    const screen = await this.screenCredentialText(root.data, sessionId, "owner_decision", request.requestId,
+      ownerDecisionScreenData(normalized.data));
+    if (screen === null) return fail<WorkflowDecisionView>(CREDENTIAL_SCREEN_UNRECORDED, 503);
+    if (screen.state === "ask") return refused();
     return this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: request.resourceKey,
-      resourceSnapshot: normalized.data }, canAccess, { trustedOwnerDecision: true });
+      resourceSnapshot: normalized.data }, canAccess, { trustedOwnerDecision: true, credentialScreen: screen });
+  }
+
+  /** Whether a Full Control request waits for its owner to classify an uncertain or failed screen. */
+  private credentialScreenReviewHeld(session: SessionView, request: PendingApproval): boolean {
+    return this.credentialScreenHold(session, request) === "credential_screen_review";
+  }
+
+  /** Why nobody may answer a Full Control request yet (#4104): its screen is still running, or it
+   * waits for its owner's classification. Null when its screen settled or none applies. */
+  private credentialScreenHold(session: SessionView, request: PendingApproval): "credential_screen_pending" | "credential_screen_review" | null {
+    const controller = this.orchestratorCampaignController(session);
+    if (!controller || controller === "refused" || controller.orchestratorPolicy?.control?.mode !== "full_control") return null;
+    const reason = this.genericCampaignAuthority(controller, session, request).reason;
+    return reason === "credential_screen_pending" || reason === "credential_screen_review" ? reason : null;
+  }
+
+  /** The owner's classification of a question the Decision Model could not screen (#4104): Decline
+   * declines it exactly as an `ask` verdict would, and Let the Orchestrator Answer leaves it to the
+   * Orchestrator. It never answers the question or carries a value. Only the campaign's owner may
+   * classify, once, and only an occurrence whose screen was uncertain or failed. */
+  classifyCampaignDecision(viewedSessionId: string, occurrenceId: string, request: ClassifyCampaignDecisionRequest,
+    actor: GovernanceActor, canAccess: (sessionId: string) => boolean = () => true): ServiceResult<CampaignDecisionSubject> {
+    if (!request || (request.classification !== "decline" && request.classification !== "orchestrator")) {
+      return fail("classification must be decline or orchestrator", 400);
+    }
+    const subject = this.db.campaignDecisionSubject(occurrenceId);
+    const occurrence = this.db.getDecisionOccurrence(occurrenceId);
+    // Campaign Status shows it on the campaign's own session and on the session it affected.
+    const campaignSessionId = subject?.campaignSessionId ?? "";
+    if (!subject || !occurrence || (viewedSessionId !== campaignSessionId && viewedSessionId !== subject.sessionId) ||
+        !canAccess(campaignSessionId) || !canAccess(subject.sessionId)) return fail("decision not found", 404);
+    if (actor.kind !== "human" || !actor.id || !this.db.campaignOwnerUser(campaignSessionId, actor.id)) {
+      return fail("Only the campaign's owner can classify a question the Decision Model could not screen", 403);
+    }
+    if (occurrence.state !== "uncertain" && occurrence.state !== "failed") {
+      return fail("the Decision Model already screened this request", 409);
+    }
+    const root = this.db.getSession(campaignSessionId);
+    const session = this.db.getSession(subject.sessionId);
+    if (!root || !session) return fail("decision not found", 404);
+    const now = Date.now();
+    if (subject.surface === "implementation_question" || subject.surface === "owner_decision") {
+      const ownerDecision = subject.surface === "owner_decision";
+      const decision = this.db.workflowDecisionByRequestId(subject.sessionId, subject.requestId);
+      if (!decision || decision.status !== "pending" || decision.authority !== "human" ||
+          decision.authorityEvaluation?.reason !== "credential_screen_review") {
+        return fail("this question no longer waits for a classification", 409);
+      }
+      if (!this.db.classifyCampaignDecision(occurrenceId, request.classification, actor.id, now)) {
+        return fail("this question was classified concurrently", 409);
+      }
+      const screen: CredentialScreenFact = { ...decision.authorityEvaluation.credentialScreen, occurrenceId,
+        state: request.classification === "decline" ? "ask" : "discusses", classifiedBy: "owner" };
+      if (request.classification === "decline") {
+        const denied = this.resolveWorkflowDecision(decision.controllingSessionId, decision.sessionId, decision.occurrenceId,
+          { outcome: "deny", childMessage: "Full Control declined this question: its owner classified it as a request for credentials, " +
+            "sign-in or access. Continue without them; the request is recorded as blocked work." },
+          "human", actor, canAccess, { credentialScreenDecline: true });
+        if (!denied.ok) return failAs(denied);
+        this.db.campaignRecovery.recordDecline(root.id, session.id, "secrets_and_sign_in",
+          recoveryCoordinate(`workflow:${session.id}:${decision.requestId}`), root.parentControlPolicy?.revision ?? 0, now);
+        this.campaignRecovery.synchronize(root, now);
+      } else {
+        const control = root.orchestratorPolicy?.control;
+        const boundaryRevision = control?.mode === "full_control" ? { boundaryRevision: control.boundary.revision } : {};
+        // An owner decision stays the owner's: classifying it only lets the owner choose an option.
+        const released = this.db.releaseCredentialScreenReview(decision.occurrenceId, ownerDecision ? "human" : "orchestrator", ownerDecision
+          ? { owner: "human", basis: "human_required", reason: "owner_kept", operation: "owner_decision", credentialScreen: screen, ...boundaryRevision }
+          : { owner: "orchestrator", basis: decision.sessionId === root.id ? "standing_authorization" : "campaign_delegation",
+            reason: "authorized_operation", operation: "implementation_question", credentialScreen: screen, ...boundaryRevision });
+        if (!released) return fail("this question changed concurrently; read it again", 409);
+        // The requester keeps waiting on the same occurrence; its card now names who answers it.
+        this.db.setPendingApproval(released.sessionId, appendPendingApproval(
+          removePendingRequest(this.db.getSession(released.sessionId)?.pendingApproval, released.occurrenceId),
+          this.workflowDecisionApproval(released)));
+        this.recordWorkflowDecisionAudit(released, "pending", actor, now, ownerDecision
+          ? "Owner classified the question: answer it themselves." : "Owner classified the question: Let the Orchestrator Answer.");
+      }
+    } else {
+      const pending = pendingRequests(session.pendingApproval).find((candidate) => (candidate.occurrenceId ?? candidate.requestId) === subject.requestId);
+      if (!pending || !this.credentialScreenReviewHeld(session, pending)) return fail("this request no longer waits for a classification", 409);
+      if (!this.db.classifyCampaignDecision(occurrenceId, request.classification, actor.id, now)) {
+        return fail("this request was classified concurrently", 409);
+      }
+      // A Decline now evaluates as an `ask` verdict, so the server declines it exactly as one.
+      const current = pendingRequests(this.db.getSession(session.id)?.pendingApproval)
+        .find((candidate) => (candidate.occurrenceId ?? candidate.requestId) === subject.requestId);
+      if (current) this.executeStandingRootRequest(session.id, current);
+      this.notifyTransition(session, session.id);
+    }
+    this.log.info(JSON.stringify({ event: "credential_screen_classified", campaignSessionId, sessionId: subject.sessionId,
+      occurrenceId, surface: subject.surface, classification: request.classification }));
+    this.publishCampaignAttentionTransition(root);
+    this.hub.sessionChangedById(session.id);
+    if (session.id !== root.id) this.hub.sessionChangedById(root.id);
+    return ok(this.db.campaignDecisionSubject(occurrenceId)!);
+  }
+
+  /** Replace the Decision Model runtime: the server's shared one, or a test's fake harness. */
+  setDecisionRuntime(runtime: DecisionRuntime): void {
+    this.decisionRuntime = runtime;
+  }
+
+  /** Screen one pending provider question or tool request on the Decision Model (#4104), then
+   * settle it: `ask` declines it as today, `discusses` leaves it to the Orchestrator, and an
+   * uncertain or failed screen makes it the owner's to classify. The request stays pending meanwhile. */
+  private startCredentialScreen(root: SessionView, session: SessionView, request: PendingApproval): void {
+    const screen = genericRequestScreenData(request);
+    const requestId = request.occurrenceId ?? request.requestId;
+    const key = `${session.id}\u0000${requestId}`;
+    if (!screen || this.credentialScreensInFlight.has(key)) return;
+    this.credentialScreensInFlight.add(key);
+    const rootBefore = this.db.getSession(root.id);
+    const sessionBefore = this.db.getSession(session.id);
+    void this.screenCredentialText(root, session.id, screen.surface, requestId, screen.data).then(() => {
+      this.credentialScreensInFlight.delete(key);
+      const current = pendingRequests(this.db.getSession(session.id)?.pendingApproval)
+        .find((candidate) => (candidate.occurrenceId ?? candidate.requestId) === requestId);
+      if (!current || this.executeStandingRootRequest(session.id, current)) return;
+      if (sessionBefore) this.notifyTransition(sessionBefore, session.id);
+      this.publishCampaignAttentionTransition(rootBefore);
+      this.hub.sessionChangedById(session.id);
+    }).catch((error: unknown) => {
+      this.credentialScreensInFlight.delete(key);
+      this.log.warn(`credential screen for ${session.id} did not settle: ${(error as Error).message}`);
+    });
+  }
+
+  /** Run the Decision Model screen of one request occurrence for a Full Control campaign (#4104).
+   * The runtime is idempotent per occurrence, so a replay joins the recorded outcome and never
+   * records a second verdict. A screen that cannot even start is a failure: the owner classifies. */
+  private async screenCredentialText(root: SessionView, sessionId: string, surface: CredentialScreenSurface,
+    requestId: string, data: string): Promise<CredentialScreenFact | null> {
+    const organizationId = this.db.sessionScope(root.id)?.organizationId;
+    // With no organization there is no audit to hold a failure for its owner to classify, so the
+    // caller refuses the request and nobody can answer it.
+    if (!organizationId) return null;
+    try {
+      // A screen the runtime cannot finish is recorded as an audited failure the owner classifies.
+      return await screenCredentialRequest(this.db, this.decisionRuntime, { organizationId, campaignSessionId: root.id, sessionId,
+        surface, requestId, data, automaticHarness: root.agentId ? { runnerId: root.runnerId, agentId: root.agentId, driver: root.driver } : null });
+    } catch (error) {
+      this.log.warn(`credential screen for ${sessionId} could not be recorded: ${(error as Error).message}`);
+      return null;
+    }
+  }
+
+  /** The typed route's screen of a Full Control implementation question, before it is admitted
+   * (#4104). Undefined when no screen applies: another mode, a request the floor declines, or a
+   * caller the inner route will refuse anyway. Null when not even a failure could be recorded. */
+  private async screenImplementationQuestion(sessionId: string, request: CreateWorkflowDecisionRequest,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "implementation_question" }>): Promise<CredentialScreenFact | null | undefined> {
+    const child = this.db.getSession(sessionId);
+    const controller = child && this.workflowDecisionController(child, "implementation_question");
+    if (!child || !controller || controller.session.orchestratorPolicy?.control?.mode !== "full_control" ||
+        !boundedDecisionString(request?.requestId, 256) || credentialFormFloor(snapshot)) return undefined;
+    return this.screenCredentialText(controller.session, sessionId, "implementation_question", request.requestId,
+      implementationQuestionScreenData(snapshot));
   }
 
   /** A Full Control root hands one pending Orchestrator-owned occurrence (#4064), its own or a
@@ -12104,6 +12331,8 @@ export class SessionsService {
     authority: WorkflowDecisionAuthority,
     actor: GovernanceActor,
     canAccess: (sessionId: string) => boolean,
+    /** #4104: the owner's Decline classification of a question the Decision Model could not screen. */
+    internal?: { credentialScreenDecline?: boolean },
   ): ServiceResult<WorkflowDecisionView> {
     if (canAccess(childSessionId)) this.expireAutomationCreationDecisions(Date.now(), childSessionId);
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
@@ -12131,6 +12360,36 @@ export class SessionsService {
       if (!resolved) return fail("Automation proposal was resolved concurrently", 409);
       this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
       this.recordWorkflowDecisionAudit(resolved, resolution.outcome === "approve" ? "allowed" : "denied", actor, now);
+      this.hub.sessionChangedById(childSessionId);
+      return ok(this.withMergeReviewEvidence(resolved));
+    }
+    // A Location switch widens what the session reaches (#4138): only its authenticated owner picks
+    // the exact Location, and Stay Here leaves its repository and permissions unchanged.
+    if (decision?.category === "location_switch") {
+      if (decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
+          parentSessionId !== childSessionId || !canAccess(childSessionId)) return fail("workflow decision not found", 404);
+      const session = this.db.getSession(childSessionId);
+      const scope = this.db.sessionScope(childSessionId);
+      const human = authority === "human" && actor.kind === "human" && actor.id && scope
+        ? this.db.operatingHumanPrincipal(actor.id, scope.organizationId) : null;
+      if (!human || !this.db.isSessionOwner(human, childSessionId)) {
+        return fail("Only this session's owner can approve a Location switch", 403);
+      }
+      const snapshot = decision.resourceSnapshot;
+      if (!session || isTerminal(session.status) || session.archived || decision.status !== "pending" ||
+          snapshot.category !== "location_switch" || resolution?.outcome === "approve" && Date.now() >= snapshot.expiresAt) {
+        return fail("This Location switch request has ended, expired, or was already answered", 409);
+      }
+      const checked = this.validateWorkflowDecisionResolution(decision, resolution);
+      if (!checked.ok) return failAs(checked);
+      const now = Date.now();
+      const oweResume = this.workflowDecisionResumeOwed(session);
+      const approve = resolution.outcome === "approve";
+      const resolved = this.db.resolveLocationSwitchDecision(occurrenceId, approve ? "approved" : "denied", human.userId, now,
+        approve ? resolution.selectedOptionId : undefined, oweResume);
+      if (!resolved) return fail("This Location switch request was answered concurrently", 409);
+      this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
+      this.recordWorkflowDecisionAudit(resolved, approve ? "allowed" : "denied", actor, now);
       this.hub.sessionChangedById(childSessionId);
       return ok(this.withMergeReviewEvidence(resolved));
     }
@@ -12183,6 +12442,11 @@ export class SessionsService {
     }
     if (decision.authority !== authority) {
       return fail(`this workflow decision requires a ${decision.authority} response`, 403);
+    }
+    // A question the Decision Model could not screen is the owner's to classify, never to answer
+    // (#4104): Decline, or Let the Orchestrator Answer, through the classification route only.
+    if (decision.authorityEvaluation?.reason === "credential_screen_review" && !internal?.credentialScreenDecline) {
+      return fail("Classify this question first: Decline, or Let the Orchestrator Answer. Nobody answers it until then.", 409);
     }
     // A decision the campaign's owner kept (#4064) is theirs alone: never an agent's, and not any
     // other person's who can open the session.
@@ -12407,6 +12671,7 @@ export class SessionsService {
     if (!decision || decision.sessionId !== sessionId) return fail("workflow decision not found", 404);
     if (decision.category === "campaign_issue_scope") return fail("Scope resolution applies and consumes the exact authorized proposal atomically", 403);
     if (decision.category === "automation_creation") return fail("use execute_automation_creation to consume and create the approved automation atomically", 403);
+    if (decision.category === "location_switch") return fail("use execute_location_switch to carry out the exact Location its owner chose", 403);
     if (decision.category === "issue_closure") return fail("use close_github_issue to consume and execute the exact approved closure", 403);
     if (decision.category === "campaign_follow_up_admission") {
       return fail("accept the follow-up again: the approval is consumed when the campaign admits exactly that follow-up", 403);
@@ -13346,7 +13611,9 @@ export class SessionsService {
     session: SessionView;
     policy: ParentControlPolicy;
   } | null {
-    if (category === "automation_creation") return {
+    // A Location switch is the regular session's own gate, always its owner's (#4138). Its service
+    // refuses Orchestrators and children before a request reaches here.
+    if (category === "automation_creation" || category === "location_switch") return {
       session: child, policy: { revision: 0, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
     };
     if (child.orchestratorPolicy?.control?.mode === "full_control" && child.parentControlPolicy &&
@@ -13387,6 +13654,14 @@ export class SessionsService {
   private customRootOwnPublication(session: SessionView): boolean {
     return sessionRole(session) === "orchestrator" && Boolean(session.parentControlPolicy) &&
       session.orchestratorPolicy?.control?.mode !== "full_control" && this.decisionControllerRoot(session) === "none";
+  }
+
+  /** How a repository mismatch refusal tells `session` to recover (#4138), or null when it cannot
+   * help: a regular session is pointed at request_location_switch only on a runner that has it. */
+  private repositoryMismatchRole(session: SessionView): LocationSwitchRole | null {
+    const role = locationSwitchRole({ role: sessionRole(session), parentSessionId: session.parentSessionId });
+    return role !== "offer" || runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "sessionLocationSwitch")
+      ? role : null;
   }
 
   /** A child's gates resolve from its parent, exactly as its campaign attention does, so a gate
@@ -13599,7 +13874,7 @@ export class SessionsService {
     decision: WorkflowDecisionView,
     options: { recordingCompletedMerge?: boolean } = {},
   ): boolean {
-    if (decision.category === "automation_creation") return decision.authority === "human" &&
+    if (decision.category === "automation_creation" || decision.category === "location_switch") return decision.authority === "human" &&
       decision.controllingSessionId === decision.sessionId;
     // A decision the owner kept (#4064) stays the person's whatever the boundary would now delegate.
     // An Orchestrator-owned occurrence for a resource the owner kept (one requested before the
@@ -13625,6 +13900,10 @@ export class SessionsService {
     // Likewise a person's review round extension stays theirs when Full Control could now own it
     // within the cap (#4075): a human decision never broadens authority.
     if (decision.category === "review_round_extension" && decision.authority === "human") return true;
+    // A question admitted for its owner's classification (#4104) stays theirs: a re-evaluation never
+    // re-screens it, so it would otherwise read as the Orchestrator's.
+    if (decision.category === "implementation_question" && decision.authority === "human" &&
+        decision.authorityEvaluation?.reason === "credential_screen_review") return true;
     if (decision.status === "approved" && this.uiEvidenceApprovalNeedsDirectRoute(decision, "approve") &&
         !this.uiEvidenceDirectRouteCurrent(controller, policy, decision)) return false;
     return this.evaluateWorkflowDecisionAuthority(
@@ -14148,8 +14427,10 @@ export class SessionsService {
       ui_evidence_approval: "UI Evidence Approval Required",
       review_round_extension: "Review Round Extension Approval Required",
       owner_decision: "Owner Decision Required",
+      location_switch: "Location Switch Approval Required",
     };
-    const options = snapshot.category === "implementation_question" || snapshot.category === "owner_decision"
+    const options = snapshot.category === "implementation_question" || snapshot.category === "owner_decision" ||
+        snapshot.category === "location_switch"
       ? [
           ...snapshot.options.map((option) => ({
             optionId: option.optionId,
@@ -14157,7 +14438,9 @@ export class SessionsService {
             description: option.description,
             kind: "allow_once" as const,
           })),
-          { optionId: "__workflow_deny__", name: "Do Not Proceed", kind: "reject_once" as const },
+          // Declining a Location switch keeps the session where it is (#4138).
+          { optionId: "__workflow_deny__", name: snapshot.category === "location_switch" ? "Stay Here" : "Do Not Proceed",
+            kind: "reject_once" as const },
         ]
       : [
           { optionId: "approve", name: "Approve", kind: "allow_once" as const },
@@ -14173,7 +14456,8 @@ export class SessionsService {
       // the root keeps working, and campaign continuations keep reaching it.
       ...(decision.sessionId === decision.controllingSessionId && decision.authority === "human" &&
         (decision.category === "owner_decision" || decision.ownerHandoff ||
-          decision.authorityEvaluation?.reason === "owner_kept") ? { async: true } : {}),
+          decision.authorityEvaluation?.reason === "owner_kept" ||
+          decision.authorityEvaluation?.reason === "credential_screen_review") ? { async: true } : {}),
       context: {
         toolName: "Typed Workflow Decision",
         input: JSON.stringify(snapshot, null, 2),
@@ -14201,11 +14485,13 @@ export class SessionsService {
       );
     }
     const snapshot = decision.resourceSnapshot;
-    if (snapshot.category === "implementation_question" || snapshot.category === "owner_decision") {
+    if (snapshot.category === "implementation_question" || snapshot.category === "owner_decision" ||
+        snapshot.category === "location_switch") {
       if (resolution.outcome === "approve" &&
           (typeof resolution.selectedOptionId !== "string" ||
             !snapshot.options.some((option) => option.optionId === resolution.selectedOptionId))) {
-        return fail(`${snapshot.category === "owner_decision" ? "an owner" : "implementation"} approval must select one offered option`, 400);
+        return fail(snapshot.category === "location_switch" ? "a Location switch approval must choose one offered Location and action"
+          : `${snapshot.category === "owner_decision" ? "an owner" : "implementation"} approval must select one offered option`, 400);
       }
       if (resolution.outcome === "deny" && resolution.selectedOptionId !== undefined) {
         return fail("a denied implementation decision cannot select an option", 400);
@@ -15303,7 +15589,12 @@ export class SessionsService {
     if (unsupported) return unsupported;
     const evaluation = this.genericCampaignAuthority(parent, child, pending);
     if (evaluation.owner !== "orchestrator") {
-      return fail("this request requires a human response", 403);
+      return fail(evaluation.reason === "credential_screen_review"
+        ? "the campaign's owner is classifying this request; nobody answers it until then" : "this request requires a human response", 403);
+    }
+    // Until the Decision Model has screened it (#4104), the Orchestrator may only decline it.
+    if (evaluation.reason === "credential_screen_pending" && resolution.action !== "deny" && resolution.action !== "dismiss") {
+      return fail("this request is still being screened for credential, sign-in and access requests; read it again in a moment", 409);
     }
     // Full Control declines credential, sign-in and access requests itself (#2940). Owning the
     // occurrence lets the Orchestrator decline it too, never approve or answer it.
@@ -15379,6 +15670,12 @@ export class SessionsService {
     }
     if (pending.expiresAt != null && pending.expiresAt <= Date.now()) return fail("question request has expired", 409);
     if (pending.kind !== "question") return fail("the pending approval is not a question", 409);
+    // Nobody answers a question before its screen settles, and one the Decision Model could not
+    // screen is classified, never answered, by its owner (#4104). Dismissing it stays available.
+    if (action === "submit" && actor.kind === "human" && !resolvedByParentSessionId) {
+      const hold = this.credentialScreenHold(session, pending);
+      if (hold) return fail(hold === "credential_screen_review" ? CREDENTIAL_SCREEN_CLASSIFY_FIRST : CREDENTIAL_SCREEN_STILL_SCREENING, 409);
+    }
     // Answers ride verbatim into the agent's updatedInput — reject anything the pending card
     // never offered (unknown keys, wrong select shape, un-offered labels) WITHOUT clearing the
     // pending state, so a bad client can't strand or spoof the ask.
@@ -15574,6 +15871,11 @@ export class SessionsService {
     if (!pending) return fail("no pending approval for this session", 409);
     if (pending.requestId !== requestId) return fail("approval request id does not match the pending one", 409);
     if (pending.expiresAt != null && pending.expiresAt <= now) return fail("approval request has expired", 409);
+    if (pending.kind !== "workflow_decision" && actor.kind === "human" &&
+        !pending.options.some((option) => option.optionId === optionId && option.kind?.startsWith("reject"))) {
+      const hold = this.credentialScreenHold(session, pending);
+      if (hold) return fail(hold === "credential_screen_review" ? CREDENTIAL_SCREEN_CLASSIFY_FIRST : CREDENTIAL_SCREEN_STILL_SCREENING, 409);
+    }
 
     if (pending.kind === "workflow_decision") {
       if (actor.kind !== "human") return fail("this workflow decision requires an authenticated human", 403);
@@ -15582,12 +15884,15 @@ export class SessionsService {
         return (decision && this.supersededWorkflowDecisionRefusal(decision)) ?? fail("workflow decision is stale or no longer pending", 409);
       }
       const snapshot = decision.resourceSnapshot;
-      const implementation = snapshot.category === "implementation_question" || snapshot.category === "owner_decision";
+      const implementation = snapshot.category === "implementation_question" || snapshot.category === "owner_decision" ||
+        snapshot.category === "location_switch";
       let deny: boolean;
-      if (snapshot.category === "implementation_question" || snapshot.category === "owner_decision") {
+      if (snapshot.category === "implementation_question" || snapshot.category === "owner_decision" ||
+          snapshot.category === "location_switch") {
         if (optionId !== null && optionId !== "__workflow_deny__" &&
             !snapshot.options.some((option) => option.optionId === optionId)) {
-          return fail(`${snapshot.category === "owner_decision" ? "owner" : "implementation"} decision option is not offered`, 409);
+          return fail(`${snapshot.category === "location_switch" ? "Location switch"
+            : snapshot.category === "owner_decision" ? "owner" : "implementation"} decision option is not offered`, 409);
         }
         deny = optionId === "__workflow_deny__" || optionId === null;
       } else {

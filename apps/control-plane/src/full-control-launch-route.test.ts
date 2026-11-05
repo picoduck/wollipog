@@ -10,6 +10,7 @@ import {
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
+import type { DecisionRuntime } from "./decision-runtime.js";
 import { OrchestratorSettings, resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { authorizeFullControl, campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
 import { firstMessageBoundary, firstMessageDigest, firstMessageObjective } from "./campaign-launch-admission.js";
@@ -116,9 +117,10 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
   const sessions = new SessionsService(db, hub, { info() {}, warn() {}, error() {} }, undefined, undefined, undefined, undefined,
     undefined, undefined, false, undefined, undefined, video?.workflowVideoApprovals, disclosures, undefined, video?.preparedMediaActiveStops);
   receipts = (message) => { sessions.onDurablePromptReceipt("r", message); };
-  // The Decision Model reads first messages through a fake harness (#4102); tests replace its answer.
+  // A healthy Decision Model on a fake harness: it reads first messages into scope grants (#4102),
+  // tests replace that answer, and it screens every question as a design subject (#4104).
   const decision = fakeScopeGrantRuntime(db);
-  sessions.decisionRuntime = decision.runtime;
+  sessions.setDecisionRuntime(decision.runtime);
   const scope = { organizationId: human.organizationId, owner: { kind: "user" as const, userId: human.userId } };
   const settings = new OrchestratorSettings(db);
   // `videoPort` also gives the launch route hosting's certification port, as index.ts does.
@@ -1572,8 +1574,9 @@ test("a runner or harness that cannot host Decision calls takes the failure rout
     assert.equal(refused.ok, false);
     assert.deepEqual(refused.errorDetails, { code: "capacity_exhausted", limit: 2, requested: 3 });
 
-    // Without any Decision runtime, the same route: never a text-parsed scope.
-    f.sessions.decisionRuntime = null;
+    // A call the runtime refuses outright (it throws before any attempt) takes the same route:
+    // never a text-parsed scope.
+    f.sessions.setDecisionRuntime({ decide: async () => { throw new Error("the Decision input is too large"); } } as unknown as DecisionRuntime);
     const { id: bare } = await firstMessageLaunch(f, server);
     assert.equal((await f.sessions.promptFromHuman(f.human, bare, "Fix #12")).ok, true);
     assert.deepEqual(f.db.getSession(bare)!.orchestratorPolicy!.issueScope!.issueNumbers, []);
@@ -1726,13 +1729,13 @@ test("Full Control never inherits Custom per-decision owners: with every toggle 
   const { server } = await app(f);
   const FIVE = ["implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval"] as const;
   const humanToggles = Object.fromEntries(FIVE.map((category) => [category, "human" as const]));
-  const assertOrchestratorOwnsFive = (id: string) => {
+  const assertOrchestratorOwnsFive = async (id: string) => {
     const root = f.db.getSession(id)!;
     for (const category of FIVE) {
       assert.equal(root.parentControlPolicy!.decisions[category], "human", `${category}'s Custom toggle is Human`);
       assert.equal(f.db.campaignProjection(id)!.decisionOwners[category], "orchestrator", `${category} is the boundary's`);
     }
-    const asked = f.sessions.createWorkflowDecision(id, { requestId: `q-${id}`, resourceKey: `q-${id}`, resourceSnapshot: {
+    const asked = await f.sessions.createWorkflowDecisionWithVideo(id, { requestId: `q-${id}`, resourceKey: `q-${id}`, resourceSnapshot: {
       category: "implementation_question", question: "Which parser should the campaign use?",
       options: [{ optionId: "a", label: "The existing one" }, { optionId: "b", label: "A new one" }] } });
     assert.equal(asked.ok, true, asked.error ?? "the decision was requested");
@@ -1751,7 +1754,7 @@ test("Full Control never inherits Custom per-decision owners: with every toggle 
     const launched = admitted.json().id as string;
     f.db.updateSessionStatus(launched, "idle", Date.now());
     assert.equal((await f.sessions.promptFromHuman(f.human, launched, "Deliver #12")).ok, true);
-    assertOrchestratorOwnsFive(launched);
+    await assertOrchestratorOwnsFive(launched);
 
     // Enable: a Custom campaign whose saved owners are all Human.
     const custom = customCampaign(f, "human-toggle-root");
@@ -1761,7 +1764,7 @@ test("Full Control never inherits Custom per-decision owners: with every toggle 
     const enabled = await server.inject({ method: "POST", url: `/api/sessions/${custom}/orchestrator-campaign/full-control`,
       headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: reviewed.digest } });
     assert.equal(enabled.statusCode, 200, enabled.body);
-    assertOrchestratorOwnsFive(custom);
+    await assertOrchestratorOwnsFive(custom);
   } finally { await server.close(); f.db.close(); }
 });
 

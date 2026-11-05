@@ -160,9 +160,9 @@ async function observe(mode: SessionDetailMode, backgroundDeliveries: Background
     const summaryBadge = summary?.querySelector<HTMLButtonElement>('[data-group="background-work"][aria-label^="Background Work: "]');
     if (summaryBadge) await act(async () => { summaryBadge.click(); });
     return {
-      sessionBar: container.querySelector("header.session-bar .session-status-button .status")?.textContent ?? null,
+      sessionBar: container.querySelector("header.session-bar .session-status-button .status:last-child")?.textContent ?? null,
       pinnedSummary: deliveryLabels(summary),
-      previewBar: container.querySelector("header.session-preview-bar .status")?.textContent ?? null,
+      previewBar: container.querySelector("header.session-preview-bar .status:last-child")?.textContent ?? null,
       opened,
     };
   } finally {
@@ -190,9 +190,9 @@ test("a pending delivery listed before a blocked one: the Sessions preview bar n
 test("with only pending deliveries the Pinned Summary names the first one and both bars keep the lifecycle", async () => {
   const expanded = await observe("expanded", [pending, delayed]);
   // A passive delivery never outranks the lifecycle on the bar (#2275); it is listed in its popover.
-  assert.equal(expanded.sessionBar, "Awaiting Prompt");
+  assert.equal(expanded.sessionBar, "Notification Pending");
   assert.deepEqual(expanded.pinnedSummary, ["Notification Pending"]);
   // The preview bar ranks the same way (#2210): the passive delivery leaves the lifecycle showing.
   const preview = await observe("preview", [pending, delayed]);
-  assert.equal(preview.previewBar, "Awaiting Prompt");
+  assert.equal(preview.previewBar, "Notification Pending");
 });

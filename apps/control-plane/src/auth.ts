@@ -103,6 +103,11 @@ const AGENT_CONTROL_API_ROUTES = new Set([
   "POST /api/sessions/:id/automation-proposals",
   "GET /api/sessions/:id/automation-proposals/:occurrenceId",
   "POST /api/sessions/:id/automation-proposals/:occurrenceId/execute",
+  // A regular session's own Location switch (#4138). Orchestrator credentials never reach it, and
+  // the service refuses child sessions.
+  "POST /api/sessions/:id/location-switch-requests",
+  "GET /api/sessions/:id/location-switch-requests/:occurrenceId",
+  "POST /api/sessions/:id/location-switch-requests/:occurrenceId/execute",
   "GET /api/compatibility",
   "GET /api/runners",
   "GET /api/sessions",

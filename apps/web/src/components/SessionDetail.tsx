@@ -1108,8 +1108,7 @@ function LiveTranscriptSkeleton({ sessionId }: { sessionId: string }) {
 
 /** Heartbeats within one busy period of one history: the same for everything but the transcript. */
 function sameActivityPeriod(previous: SessionActivity | undefined, next: SessionActivity | undefined): boolean {
-  return previous !== undefined && next !== undefined && previous.eventEpoch === next.eventEpoch &&
-    previous.busySince === next.busySince;
+  return previous !== undefined && next !== undefined && previous.eventEpoch === next.eventEpoch;
 }
 
 /**
@@ -7600,6 +7599,7 @@ function SessionDetailLoaded({
               {sentMessageReceipts}
               {transcriptRowsShown && activeTurnVisible && (
                 <WorkingIndicator
+                  connected={runnerOnline}
                   label={workingLabel}
                   progress={activeTurnProgress}
                   onRevealCurrentOperation={revealCurrentOperation}

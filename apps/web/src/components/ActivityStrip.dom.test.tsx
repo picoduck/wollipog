@@ -42,6 +42,10 @@ test("activity strip renders a thirty-minute series, named only in its compact r
   assert.equal(strip.querySelectorAll(".activity-strip-bar").length, 30);
   assert.equal(strip.querySelectorAll(".activity-strip-bar.active").length, 2);
 
+  await act(async () => root.render(<ActivityStrip activity={activity} now={now} compact animate={false} />));
+  assert.equal(container.querySelector(".activity-strip")?.classList.contains("live"), false);
+  assert.equal(container.querySelectorAll(".activity-strip-bar.active").length, 2, "historical activity remains visible");
+
   // The session detail's full-size strip stays decorative beside its own label.
   await act(async () => {
     root.render(<ActivityStrip activity={activity} now={now} />);

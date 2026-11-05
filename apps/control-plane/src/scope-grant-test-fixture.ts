@@ -5,6 +5,7 @@
  */
 import type { DecisionErrorClass, DecisionModelResolvedTarget, RunDecisionMessage, RunDecisionResultMessage } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
+import { DECISION_KINDS } from "./decision-kinds.js";
 import { DecisionRuntime } from "./decision-runtime.js";
 import { firstMessageIssueIntent, issueReferenceSpans } from "./first-message-issue-intent.js";
 import type { ScopeGrantFields } from "./scope-grant.js";
@@ -59,19 +60,26 @@ export function classifierAnswer(text: string, repository = "owner/repo"): Scope
   return grantVerdict({ explicit: issues(...intent.scope.filter((n) => !ranged.has(n))), ranges, context: issues(...intent.context) });
 }
 
-/** A runtime whose harness answers each attempt with `answer`, on the fixture runner's harness. */
+/** A runtime whose harness answers each `scope_grant` attempt with `answer`, on the fixture runner's
+ * harness. Every other kind gets `other`'s answer: by default a healthy credential screen (#4104)
+ * that reads each question as a design subject. `calls` holds only the `scope_grant` attempts;
+ * `resolution`, like the real setting, applies to every kind. */
 export function fakeScopeGrantRuntime(db: ControlPlaneDb, options: {
   answer?: (ownerMessage: string, attempt: number) => ScopeGrantAnswer;
+  other?: (message: RunDecisionMessage) => ScopeGrantAnswer;
   resolution?: { ok: false; errorClass: DecisionErrorClass };
 } = {}) {
   const calls: RunDecisionMessage[] = [];
   const state = { answer: options.answer ?? ((text: string) => classifierAnswer(text)), resolution: options.resolution };
+  const other = options.other ??
+    (() => ({ ok: true as const, outputText: JSON.stringify({ verdict: "discusses", reason: "The request discusses access as a design subject." }) }));
+  const scopeGrant = (message: RunDecisionMessage) => message.instructions === DECISION_KINDS.scope_grant.instructions;
   const runtime = new DecisionRuntime({
     db,
     settings: { resolve: () => state.resolution ?? { ok: true, target: FAKE_DECISION_TARGET } },
     transport: async (_runnerId, message) => {
-      calls.push(message);
-      const answer = state.answer(ownerMessageOf(message), message.attempt);
+      if (scopeGrant(message)) calls.push(message);
+      const answer = scopeGrant(message) ? state.answer(ownerMessageOf(message), message.attempt) : other(message);
       return { type: "run_decision_result", requestId: message.requestId, provider: "claude", model: FAKE_DECISION_TARGET.model,
         usage: { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 }, ...answer } as RunDecisionResultMessage;
     },

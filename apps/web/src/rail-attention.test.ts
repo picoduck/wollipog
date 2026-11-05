@@ -6,26 +6,23 @@ import { NO_MACHINE_ATTENTION, machineAttention, overflowAttention, railAttentio
 
 const state = (overrides: Partial<RailAttentionState> = {}): RailAttentionState => ({
   blocked: 0,
-  stalled: 0,
+
   machines: NO_MACHINE_ATTENTION,
   ...overrides,
 });
 
-test("Sessions shows one count: red with any stalled session, amber with only blocked ones", () => {
-  assert.deepEqual(railAttention("inbox", state({ blocked: 12, stalled: 3 })),
-    { kind: "count", count: 15, tone: "danger", note: "12 waiting on you, 3 stalled" });
+test("Sessions counts only concrete requests waiting on the person", () => {
   assert.deepEqual(railAttention("inbox", state({ blocked: 12 })),
     { kind: "count", count: 12, tone: "warning", note: "12 waiting on you" });
-  assert.deepEqual(railAttention("inbox", state({ stalled: 1 })),
-    { kind: "count", count: 1, tone: "danger", note: "1 stalled" });
+  assert.equal(railAttention("inbox", state()), null);
 });
 
 test("zero is never shown", () => {
   assert.equal(railAttention("inbox", state()), null);
   assert.equal(railAttention("runners", state()), null);
   // A count that went negative through a stale subtraction is still nothing, not a smaller total.
-  assert.equal(railAttention("inbox", state({ blocked: -1, stalled: 0 })), null);
-  assert.deepEqual(railAttention("inbox", state({ blocked: 2, stalled: -1 })),
+  assert.equal(railAttention("inbox", state({ blocked: -1, })), null);
+  assert.deepEqual(railAttention("inbox", state({ blocked: 2 })),
     { kind: "count", count: 2, tone: "warning", note: "2 waiting on you" });
 });
 
@@ -39,7 +36,7 @@ test("Connections shows a warning dot, never a count, and says why", () => {
 });
 
 test("every other destination carries nothing, whatever is waiting elsewhere", () => {
-  const busy = state({ blocked: 4, stalled: 2, machines: { offlineWithActiveSessions: 1, updateRequired: 1 } });
+  const busy = state({ blocked: 4, machines: { offlineWithActiveSessions: 1, updateRequired: 1 } });
   for (const item of GLOBAL_VIEW_ITEMS) {
     if (item.id === "inbox" || item.id === "runners") continue;
     assert.equal(railAttention(item.id, busy), null, item.id);
@@ -49,13 +46,13 @@ test("every other destination carries nothing, whatever is waiting elsewhere", (
 const item = (id: (typeof GLOBAL_VIEW_ITEMS)[number]["id"]) => GLOBAL_VIEW_ITEMS.find((entry) => entry.id === id)!;
 
 test("More takes the most severe tone behind it and names each destination with its breakdown (#2110)", () => {
-  const busy = state({ blocked: 12, stalled: 3, machines: { offlineWithActiveSessions: 0, updateRequired: 1 } });
+  const busy = state({ blocked: 12, machines: { offlineWithActiveSessions: 0, updateRequired: 1 } });
   assert.deepEqual(overflowAttention([item("usage"), item("inbox")], busy),
-    { tone: "danger", note: "Sessions: 12 waiting on you, 3 stalled" });
+    { tone: "warning", note: "Sessions: 12 waiting on you" });
   // The sheet's order, and danger over warning whichever comes first.
   assert.deepEqual(overflowAttention([item("runners"), item("archived"), item("inbox")], busy), {
-    tone: "danger",
-    note: "Connections: 1 machine needs an update. Sessions: 12 waiting on you, 3 stalled",
+    tone: "warning",
+    note: "Connections: 1 machine needs an update. Sessions: 12 waiting on you",
   });
   assert.deepEqual(overflowAttention([item("runners")], busy), { tone: "warning", note: "Connections: 1 machine needs an update" });
   assert.deepEqual(overflowAttention([item("inbox")], state({ blocked: 2 })), { tone: "warning", note: "Sessions: 2 waiting on you" });
@@ -63,7 +60,7 @@ test("More takes the most severe tone behind it and names each destination with 
 
 test("More says nothing when nothing behind it needs the user", () => {
   // Sessions and Connections on the bar contribute nothing, whatever they carry.
-  const busy = state({ blocked: 12, stalled: 3, machines: { offlineWithActiveSessions: 1, updateRequired: 1 } });
+  const busy = state({ blocked: 12, machines: { offlineWithActiveSessions: 1, updateRequired: 1 } });
   assert.equal(overflowAttention([item("usage"), item("archived"), item("skills")], busy), null);
   assert.equal(overflowAttention([], busy), null);
   assert.equal(overflowAttention([item("inbox"), item("runners")], state()), null);

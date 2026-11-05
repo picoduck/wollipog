@@ -35,6 +35,7 @@ import {
 } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignDispatchScopeRefusal, campaignBoundaryCurrent, remintCampaignBoundary } from "./campaign-authority.js";
+import { genericRequestScreenData, storedCredentialScreenFact } from "./credential-screen.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
 import { grantReviewMaxIssues } from "./scope-grant.js";
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
@@ -365,6 +366,7 @@ import {
   LEGACY_BOOTSTRAP_OWNER_NAME,
   LOCAL_OWNER_USER_ID,
   PERSONAL_ORGANIZATION_ID,
+  canOperate,
   type AuthPrincipal,
   type HumanPrincipal,
 } from "./identity.js";
@@ -2980,6 +2982,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_occurrences_key
 CREATE INDEX IF NOT EXISTS idx_decision_occurrences_campaign
   ON decision_occurrences(campaign_session_id, created_at) WHERE campaign_session_id IS NOT NULL;
 
+-- What one campaign Decision occurrence affected (#4104), and the owner's classification when the
+-- Decision Model failed or was uncertain. Identifiers only: never the screened text.
+CREATE TABLE IF NOT EXISTS campaign_decision_subjects (
+  occurrence_id       TEXT PRIMARY KEY,
+  campaign_session_id TEXT NOT NULL,
+  session_id          TEXT NOT NULL,
+  surface             TEXT NOT NULL CHECK (surface IN ('implementation_question','provider_question','tool_request','owner_decision')),
+  request_id          TEXT NOT NULL,
+  classification      TEXT CHECK (classification IN ('decline','orchestrator')),
+  classified_by       TEXT,
+  classified_at       INTEGER,
+  created_at          INTEGER NOT NULL,
+  FOREIGN KEY (occurrence_id) REFERENCES decision_occurrences(occurrence_id) ON DELETE CASCADE
+);
+
 -- Every attempt of an occurrence, with its usage. Decision usage is never managed worker usage.
 CREATE TABLE IF NOT EXISTS decision_attempts (
   occurrence_id         TEXT NOT NULL,
@@ -5298,6 +5315,8 @@ interface DecisionOccurrenceRow {
   decided_at: number | null;
 }
 
+type CampaignDecisionSubject = import("@wollipog/protocol").CampaignDecisionSubject;
+
 export interface DecisionOccurrenceRecord {
   occurrenceId: string;
   organizationId: string;
@@ -7360,6 +7379,9 @@ export class ControlPlaneDb {
       "owner_handoff TEXT",
       // #4067: what Wollipog did when it performed this approved forge action itself.
       "forge_action TEXT",
+      // #4138: the session owner who approved a Location switch, and its claim, then its receipt.
+      "location_switch_approved_by TEXT",
+      "location_switch_result TEXT",
     ]) {
       try { db.exec(`ALTER TABLE workflow_decisions ADD COLUMN ${column}`); } catch { /* already present */ }
     }
@@ -12394,6 +12416,40 @@ export class ControlPlaneDb {
     const row = this.stmt("SELECT * FROM decision_occurrences WHERE occurrence_id=?").get(occurrenceId) as
       DecisionOccurrenceRow | undefined;
     return row ? this.decisionOccurrenceFromRow(row) : null;
+  }
+
+  /** The occurrence a caller's idempotency key names, in any organization's audit. */
+  decisionOccurrenceByKey(occurrenceKey: string): DecisionOccurrenceRecord | null {
+    const row = this.stmt("SELECT * FROM decision_occurrences WHERE occurrence_key=? ORDER BY created_at LIMIT 1").get(occurrenceKey) as
+      DecisionOccurrenceRow | undefined;
+    return row ? this.decisionOccurrenceFromRow(row) : null;
+  }
+
+  /** Record what a campaign occurrence affected (#4104). The first record wins. */
+  recordCampaignDecisionSubject(input: { occurrenceId: string; campaignSessionId: string } & Omit<CampaignDecisionSubject, "classification">, now: number): void {
+    this.stmt(
+      `INSERT OR IGNORE INTO campaign_decision_subjects (occurrence_id, campaign_session_id, session_id, surface, request_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(input.occurrenceId, input.campaignSessionId, input.sessionId, input.surface, input.requestId, now);
+  }
+
+  campaignDecisionSubject(occurrenceId: string): (CampaignDecisionSubject & { campaignSessionId: string }) | null {
+    const row = this.stmt("SELECT * FROM campaign_decision_subjects WHERE occurrence_id=?").get(occurrenceId) as
+      { campaign_session_id: string; session_id: string; surface: CampaignDecisionSubject["surface"]; request_id: string;
+        classification: "decline" | "orchestrator" | null } | undefined;
+    return row ? { campaignSessionId: row.campaign_session_id, sessionId: row.session_id, surface: row.surface,
+      requestId: row.request_id, ...(row.classification ? { classification: row.classification } : {}) } : null;
+  }
+
+  /** The owner's one classification of an uncertain or failed screen, by compare-and-set: only an
+   * occurrence that routed to a person and has no classification yet accepts one. */
+  classifyCampaignDecision(occurrenceId: string, classification: "decline" | "orchestrator", userId: string, now: number): boolean {
+    return Number(this.stmt(
+      `UPDATE campaign_decision_subjects SET classification=?, classified_by=?, classified_at=?
+       WHERE occurrence_id=? AND classification IS NULL
+         AND EXISTS (SELECT 1 FROM decision_occurrences d WHERE d.occurrence_id=campaign_decision_subjects.occurrence_id
+           AND d.state IN ('uncertain','failed'))`,
+    ).run(classification, userId, now, occurrenceId).changes) > 0;
   }
 
   listCampaignDecisionOccurrences(campaignSessionId: string, limit = 200): DecisionOccurrenceRecord[] {
@@ -22581,6 +22637,25 @@ export class ControlPlaneDb {
     });
   }
 
+  /** The owner's classification releasing a question held for it (#4104): an implementation
+   * question moves to the Orchestrator, and an owner decision stays the owner's but may now be
+   * answered. Only a pending, unconsumed occurrence held for that reason changes; nothing else can
+   * be released this way, and an owner decision can never move to an agent. */
+  releaseCredentialScreenReview(
+    occurrenceId: string,
+    authority: "human" | "orchestrator",
+    authorityEvaluation: NonNullable<WorkflowDecisionView["authorityEvaluation"]>,
+  ): WorkflowDecisionView | null {
+    const category = authority === "orchestrator" ? "implementation_question" : "owner_decision";
+    const changed = Number(this.stmt(
+      `UPDATE workflow_decisions SET authority=?, authority_evaluation=?
+       WHERE occurrence_id=? AND status='pending' AND authority='human' AND category=?
+         AND owner_handoff IS NULL AND consumed_at IS NULL
+         AND json_extract(authority_evaluation, '$.reason')='credential_screen_review'`,
+    ).run(authority, JSON.stringify(authorityEvaluation), occurrenceId, category).changes) === 1;
+    return changed ? this.workflowDecisionByOccurrence(occurrenceId) : null;
+  }
+
   /** The pending decisions a campaign's owner kept (#4064), oldest first, for Campaign Status. */
   campaignOwnerDecisions(controllingSessionId: string): NonNullable<OrchestratorCampaignProjection["ownerDecisions"]> | null {
     const where = `controlling_session_id=? AND status='pending' AND authority='human'
@@ -23410,6 +23485,63 @@ export class ControlPlaneDb {
       this.db.exec("COMMIT");
       return resolved;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  /** A Location switch (#4138): the owner's choice, the approver and the durable resume commit together. */
+  resolveLocationSwitchDecision(occurrenceId: string, outcome: "approved" | "denied", userId: string, now: number,
+    selectedOptionId: string | undefined, oweResume: boolean): WorkflowDecisionView | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const decision = this.workflowDecisionByOccurrence(occurrenceId);
+      if (!decision || decision.category !== "location_switch" || decision.authority !== "human") {
+        this.db.exec("ROLLBACK");
+        return null;
+      }
+      const resolved = this.resolveWorkflowDecision(occurrenceId, "human", outcome, now, selectedOptionId, undefined, undefined, undefined, oweResume);
+      if (resolved) this.stmt("UPDATE workflow_decisions SET location_switch_approved_by=? WHERE occurrence_id=?").run(userId, occurrenceId);
+      this.db.exec("COMMIT");
+      return resolved;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  locationSwitchApprover(occurrenceId: string): string | null {
+    return (this.stmt("SELECT location_switch_approved_by AS id FROM workflow_decisions WHERE occurrence_id=? AND category='location_switch'")
+      .get(occurrenceId) as { id: string | null } | undefined)?.id ?? null;
+  }
+
+  /** Mark an approved switch as being carried out. Fails once any attempt has claimed it. */
+  claimLocationSwitch(occurrenceId: string, resourceDigest: string, now: number): boolean {
+    return Number(this.stmt(`UPDATE workflow_decisions SET location_switch_result=?
+      WHERE occurrence_id=? AND category='location_switch' AND authority='human' AND status='approved'
+        AND resource_digest=? AND location_switch_approved_by IS NOT NULL AND location_switch_result IS NULL`)
+      .run(JSON.stringify({ state: "starting", claimedAt: now }), occurrenceId, resourceDigest).changes) === 1;
+  }
+
+  /** An attempt that started nothing gives its claim back, so the approval can be retried. */
+  releaseLocationSwitchClaim(occurrenceId: string): void {
+    this.stmt(`UPDATE workflow_decisions SET location_switch_result=NULL
+      WHERE occurrence_id=? AND category='location_switch' AND status='approved'
+        AND json_extract(location_switch_result, '$.state')='starting'`).run(occurrenceId);
+  }
+
+  completeLocationSwitch(occurrenceId: string, resourceDigest: string, result: NonNullable<WorkflowDecisionView["locationSwitchResult"]>, now: number): boolean {
+    return Number(this.stmt(`UPDATE workflow_decisions SET status='consumed', consumed_at=?, location_switch_result=?
+      WHERE occurrence_id=? AND category='location_switch' AND authority='human' AND status='approved'
+        AND resource_digest=? AND json_extract(location_switch_result, '$.state')='starting'`)
+      .run(now, JSON.stringify(result), occurrenceId, resourceDigest).changes) === 1;
+  }
+
+  /** An active member of the organization who may still mutate its resources, so a member demoted
+   * to Viewer can neither approve nor carry out a mutation. The caller still requires session
+   * ownership. */
+  operatingHumanPrincipal(userId: string, organizationId: string): HumanPrincipal | null {
+    const row = this.stmt(`SELECT user.display_name AS userName, organization.name AS organizationName, membership.role
+      FROM identity_memberships membership JOIN identity_users user ON user.user_id=membership.user_id
+      JOIN identity_organizations organization ON organization.organization_id=membership.organization_id
+      WHERE membership.user_id=? AND membership.organization_id=? AND user.status='active'`)
+      .get(userId, organizationId) as { userName: string; organizationName: string; role: HumanPrincipal["role"] } | undefined;
+    return row && canOperate(row.role)
+      ? { kind: "human", actorId: userId, userId, organizationId, ...row, deviceId: null, localBootstrap: false } : null;
   }
 
   automationCreationApprover(occurrenceId: string): string | null {
@@ -27770,8 +27902,16 @@ export class ControlPlaneDb {
 
   /** Live effective policy facts compose with occurrence-time mandatory gates. Used by both
    * projections and response admission, so a policy edit cannot leave stale delegated ownership. */
-  campaignPolicyRequest(sessionId: string, control: CampaignControl | undefined, request: PendingApproval): PendingApproval {
-    if (control?.mode !== "full_control" || request.kind === "question" || request.kind === "workflow_decision") return request;
+  campaignPolicyRequest(sessionId: string, control: CampaignControl | undefined, pending: PendingApproval): PendingApproval {
+    if (control?.mode !== "full_control" || pending.kind === "workflow_decision") return pending;
+    // #4104: the Decision Model screen is the server's own audited fact for this exact occurrence.
+    // Whatever a runner sent in its place is replaced, and a request not yet screened is pending.
+    const { credentialScreen: _untrusted, ...rest } = pending;
+    const screen = genericRequestScreenData(rest);
+    const request: PendingApproval = screen
+      ? { ...rest, credentialScreen: storedCredentialScreenFact(this, screen.surface, sessionId, rest.occurrenceId ?? rest.requestId, screen.data) }
+      : rest;
+    if (request.kind === "question") return request;
     const row = this.stmt("SELECT runner_id,workspace_id,agent_id,status,cost_usd FROM sessions WHERE id=?").get(sessionId) as
       Pick<SessionRow, "runner_id" | "workspace_id" | "agent_id" | "status" | "cost_usd"> | undefined;
     if (!row) return { ...request, humanRequired: true };
@@ -33834,6 +33974,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     owner_handoff?: string | null;
     issue_closure_result?: string | null;
     automation_creation_result?: string | null;
+    location_switch_result?: string | null;
     closing_reference_check?: string | null;
     forge_action?: string | null;
   } | undefined;
@@ -33849,6 +33990,8 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
   const humanFallback = parseJson<NonNullable<WorkflowDecisionView["humanFallback"]>>(row.human_fallback ?? null);
   const closingReferenceCheck = parseJson<NonNullable<WorkflowDecisionView["closingReferenceCheck"]>>(row.closing_reference_check ?? null);
   const forgeAction = parseJson<NonNullable<WorkflowDecisionView["forgeAction"]>>(row.forge_action ?? null);
+  // A claim without a session is an attempt in progress, not a receipt.
+  const locationSwitchResult = parseJson<Partial<NonNullable<WorkflowDecisionView["locationSwitchResult"]>>>(row.location_switch_result ?? null);
   return {
     requestId: row.request_id,
     occurrenceId: row.occurrence_id,
@@ -33865,6 +34008,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     status: row.status,
     ...(row.issue_closure_result ? { issueClosureResult: JSON.parse(row.issue_closure_result) as NonNullable<WorkflowDecisionView["issueClosureResult"]> } : {}),
     ...(row.automation_creation_result ? { automationCreationResult: JSON.parse(row.automation_creation_result) as NonNullable<WorkflowDecisionView["automationCreationResult"]> } : {}),
+    ...(locationSwitchResult?.sessionId ? { locationSwitchResult: locationSwitchResult as NonNullable<WorkflowDecisionView["locationSwitchResult"]> } : {}),
     ...(closingReferenceCheck ? { closingReferenceCheck } : {}),
     ...(forgeAction ? { forgeAction } : {}),
     ...(row.selected_option_id ? { selectedOptionId: row.selected_option_id } : {}),

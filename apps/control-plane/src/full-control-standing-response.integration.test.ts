@@ -18,6 +18,7 @@ import { Hub } from "./hub.js";
 import type { HumanPrincipal } from "./identity.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { SessionsService } from "./sessions.js";
+import { fakeScreenRuntime } from "./credential-screen-test-fixture.js";
 
 /** Standing Full Control responses (#2940) delivered to the real runner request handlers: the
  * control plane's own decline travels to `SessionManager.resolvePermission` and the runner's
@@ -47,9 +48,11 @@ function bridge(providerAuthRecovery?: ProviderAuthRecoveryController, turnEnd: 
   hub.isRunnerOnline = () => true;
   hub.sessionChangedById = () => {};
   const toRunner: ControlPlaneToRunner[] = [];
-  let svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
+  // A healthy Decision Model (#4104) on a fake harness screens every question as a design subject.
+  const screened = (created: SessionsService) => { created.setDecisionRuntime(fakeScreenRuntime(db, () => ({ verdict: "discusses" })).runtime); return created; };
+  let svc = screened(new SessionsService(db, hub, { info() {}, warn() {}, error() {} }));
   /** The control plane restarts on the same durable database; its in-memory state is gone. */
-  const restartControlPlane = () => { svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} }); };
+  const restartControlPlane = () => { svc = screened(new SessionsService(db, hub, { info() {}, warn() {}, error() {} })); };
 
   // The real runner, with a fake provider whose first turn fails authentication.
   let store = new SessionStore(directory);
@@ -325,7 +328,7 @@ test("an async credential question is dismissed at once and recorded as blocked 
     (h.svc as unknown as { hub: Hub }).hub.sendToRunner = (runnerId, message) => { toRunner.push(message); return deliver.call(null, runnerId, message); };
     h.svc.onSessionEvent("child", { kind: "question_request", requestId: "async-secret", occurrenceId: "async-secret",
       requestSource: "provider_question", async: true,
-      questions: [{ id: "value", question: "Which password should I use?", options: [{ label: "A" }, { label: "B" }] }] });
+      questions: [{ id: "value", question: "Which password should I use?", secret: true, options: [{ label: "A" }, { label: "B" }] }] });
     const answers = toRunner.filter((message) => message.type === "answer_question") as Array<Extract<ControlPlaneToRunner, { type: "answer_question" }>>;
     assert.deepEqual(answers.map((message) => [message.requestId, message.action]), [["async-secret", "dismiss"]], "one automatic dismissal");
     assert.ok(!(h.db.getSession("child")!.pendingApproval && JSON.stringify(h.db.getSession("child")!.pendingApproval).includes("async-secret")),
@@ -350,7 +353,7 @@ for (const ownDecisionPending of [true, false]) {
       const deliver = (h.svc as unknown as { hub: Hub }).hub.sendToRunner;
       (h.svc as unknown as { hub: Hub }).hub.sendToRunner = (runnerId, message) => { toRunner.push(message); return deliver.call(null, runnerId, message); };
       if (ownDecisionPending) {
-        const own = h.svc.createWorkflowDecision("root", { requestId: "own-question", resourceKey: "own-question", resourceSnapshot: {
+        const own = await h.svc.createWorkflowDecisionWithVideo("root", { requestId: "own-question", resourceKey: "own-question", resourceSnapshot: {
           category: "implementation_question", question: "Which layout should the status page use?",
           options: [{ optionId: "stacked", label: "Stacked" }, { optionId: "split", label: "Split" }] } });
         assert.ok(own.ok, own.error ?? "own decision");

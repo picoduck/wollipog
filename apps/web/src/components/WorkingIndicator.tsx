@@ -40,6 +40,7 @@ export function WorkingIndicator({
   onReviewPendingRequest,
   now: nowOverride,
   liveActivitySessionId,
+  connected = true,
 }: {
   label?: string;
   progress?: ActiveTurnProgress | null;
@@ -52,8 +53,9 @@ export function WorkingIndicator({
   /** The live session whose heartbeat also counts as activity. A chunk that only lengthens the
    * reply does not render the view that computes `progress`, so silence reads it here (#2763). */
   liveActivitySessionId?: string;
+  connected?: boolean;
 }) {
-  const clockNow = useActiveTurnClock(nowOverride == null);
+  const clockNow = useActiveTurnClock(nowOverride == null && connected);
   const liveActivityAt = useOptionalStoreSelector((state) => liveActivitySessionId === undefined
     ? undefined
     : state.activity.get(liveActivitySessionId)?.lastEventAt ?? undefined);
@@ -92,7 +94,8 @@ export function WorkingIndicator({
   ].filter((detail): detail is string => detail !== null);
   // Announce what changed state, never the step or the clock: a screen reader hears "Working",
   // "Approval Required" or a new failure once, not every tool call or elapsed second.
-  const announcement = [attention?.label ?? "Working", failed > 0 ? `${failed} failed` : null]
+  const workingState = connected ? "Working" : "Last Reported: Working";
+  const announcement = [attention?.label ?? workingState, failed > 0 ? `${failed} failed` : null]
     .filter(Boolean)
     .join(", ");
 
@@ -103,12 +106,12 @@ export function WorkingIndicator({
           <StatusBadge meta={attention} className="tl-working-attention" />
         ) : (
           <>
-            <span className="working-dots" aria-hidden="true">
+            {connected && <span className="working-dots" aria-hidden="true">
               <span />
               <span />
               <span />
-            </span>
-            <span className="tl-working-state">Working</span>
+            </span>}
+            <span className="tl-working-state" title={connected ? undefined : "The machine is disconnected; this activity may be stale."}>{workingState}</span>
           </>
         )}
         {elapsed && <span className="tl-working-elapsed">{elapsed}</span>}

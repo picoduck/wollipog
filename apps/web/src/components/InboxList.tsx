@@ -36,17 +36,15 @@ function twoLineRowHeight(): number {
 
 /**
  * Whether a row reads the row clock (#2209). Running and Starting rows draw the strip; a row that
- * shows it only for recent activity must notice when its ten minutes pass; a stalled row says how long
- * it has been silent. Every other row reads 0, so the minute tick does not re-render it; the tick on
+ * shows it only for recent activity must notice when its ten minutes pass; the recent activity window expires. Every other row reads 0, so the minute tick does not re-render it; the tick on
  * which recent activity lapses flips the reading to 0, and that re-render is what drops the strip.
  */
 export function inboxRowReadsClock(
   session: Pick<SessionView, "status">,
   activity: SessionActivity | undefined,
-  stalled: boolean,
   now: number,
 ): boolean {
-  return session.status === "running" || session.status === "starting" || stalled || hasRecentActivity(activity, now);
+  return session.status === "running" || session.status === "starting" || hasRecentActivity(activity, now);
 }
 
 export interface InboxListEntry {
@@ -61,7 +59,7 @@ export interface InboxListEntry {
 function ConnectedInboxRow(props: Omit<InboxRowProps, "activity" | "activityNow">) {
   const activity = useStoreSelector((state) => state.activity.get(props.session.id));
   const activityNow = useStoreSelector((state) =>
-    inboxRowReadsClock(props.session, state.activity.get(props.session.id), props.stalled, state.activityNow)
+    inboxRowReadsClock(props.session, state.activity.get(props.session.id), state.activityNow)
       ? state.activityNow
       : 0);
   return <InboxRow {...props} activity={activity} activityNow={activityNow} />;
@@ -79,7 +77,6 @@ export const InboxList = forwardRef<HTMLDivElement, {
   pinnedAncestorSessionIds?: ReadonlySet<string>;
   /** Test/story override. Production rows subscribe to their own activity entry. */
   activityBySession?: ReadonlyMap<string, SessionActivity>;
-  stalledSessionIds: ReadonlySet<string>;
   /** Test/story override paired with `activityBySession`. */
   activityNow?: number;
   onSelect: (sessionId: string) => void;
@@ -103,7 +100,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
   pinnedSessionIds,
   pinnedAncestorSessionIds = new Set(),
   activityBySession,
-  stalledSessionIds,
+
   activityNow,
   onSelect,
   onExpand,
@@ -227,7 +224,6 @@ export const InboxList = forwardRef<HTMLDivElement, {
             reminder,
             pinned: pinnedSessionIds.has(session.id),
             containsPinned: Boolean(thread?.collapsed && pinnedAncestorSessionIds.has(session.id)),
-            stalled: stalledSessionIds.has(session.id),
             threadDepth: thread?.depth ?? 0,
             threadLast: thread?.last ?? false,
             threadOuterSpine: thread?.outerSpine ?? false,
