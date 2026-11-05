@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { REQUIRED, UNIT_SHARDS, WORKER } from "./main-rolling-validation.mjs";
+import { BROWSER_SHARDS } from "./browser-shard-count.mjs";
 
 /** Inert in-process forge for the fast-gate cutover rehearsal (#3637). It is a
  * fixture transport, never a decision maker: delivered modules read it as they
@@ -31,7 +32,7 @@ const CORE = ["Typecheck", "Verify Node 22 Engine Boundary", "Verify Excluded No
   "Verify Node 23 Engine Boundary", "Verify Recommended Node Engine Boundary", "Verify Delegated Linux Provider Containment",
   "Validate Web Production Build", "Validate Runner Bundle", "Validate Control-Plane Bundle"];
 const STEPS = [CORE, ["Remote-Instance Browser End-to-End Tests", "Rendered Production Browser Smoke"],
-  ...[2, 3, 4, 5].map(() => ["Remote-Instance Browser End-to-End Tests"]), ["WebKit Browser End-to-End Tests"],
+  ...BROWSER_SHARDS.slice(1).map(() => ["Remote-Instance Browser End-to-End Tests"]), ["WebKit Browser End-to-End Tests"],
   ["Compare the Diff Against the Settings-Rows Paths"], ["Compare Against the Committed win32 Baselines"],
   ["Verify Recorded-Boundary Pipeline Recovery"], ...UNIT_SHARDS.map(() => ["Unit Tests"]),
   ["Require Every Job to Have Succeeded"]];
