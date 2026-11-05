@@ -63,6 +63,13 @@ export function campaignBoundaryRepository(boundary: Pick<CampaignAuthorityBound
   return campaignBoundaryRepositories(boundary).find((entry) => entry.repository.toLowerCase() === wanted) ?? null;
 }
 
+/** A campaign's repository list on its own: one entry per repository, unique Location ids, within
+ * bounds. A Full Control boundary also requires its first entry to be the boundary's repository. */
+export function validCampaignRepositoryList(value: unknown): value is CampaignBoundaryRepository[] {
+  return Array.isArray(value) && value.length > 0 && typeof (value[0] as CampaignBoundaryRepository | null)?.repository === "string" &&
+    validBoundaryRepositories(value, (value[0] as CampaignBoundaryRepository).repository);
+}
+
 function validBoundaryRepositories(value: unknown, repository: string): boolean {
   if (!Array.isArray(value) || value.length < 1 || value.length > CAMPAIGN_BOUNDARY_REPOSITORIES_MAX) return false;
   const repositories = new Set<string>();
@@ -152,9 +159,10 @@ const operations: CampaignAuthorityOperation[] = ["implementation_question", "pr
 export function campaignWorkflowOwner(control: CampaignControl | undefined, decisions: ParentControlDecisionPolicy,
   category: WorkflowDecisionCategory, supported: boolean, fullControlReviewExtensions = false): "human" | "orchestrator" {
   // A follow-up past the campaign's approval limit is the Human's in every mode (#2940), and so is a
-  // decision its owner kept (#4064). A Location switch widens a session's reach (#4138).
+  // decision its owner kept (#4064). A Location switch widens a session's reach (#4138), and a
+  // repository addition widens the campaign's (#4117).
   if (!supported || category === "automation_creation" || category === "campaign_follow_up_admission" ||
-      category === "owner_decision" || category === "location_switch") return "human";
+      category === "owner_decision" || category === "location_switch" || category === "campaign_repository_addition") return "human";
   if (category === "issue_closure" || category === "campaign_issue_scope") return control?.mode === "full_control" &&
     validCampaignControl(control) && control.boundary.issueAuthority && control.boundary.operations.includes(category) ? "orchestrator" : "human";
   if (!control || control.mode === "custom") return decisions[category];
@@ -431,7 +439,8 @@ export function resolveCampaignAuthority(input: {
   if (Boolean(request) === Boolean(input.snapshot)) return result("human", "human_required", "unverified_intent");
   // The owner kept this decision (#4064): no mode, boundary or grant makes it an agent's.
   if (category === "owner_decision") return result("human", "human_required", "owner_kept");
-  if (category === "automation_creation" || category === "campaign_follow_up_admission" || category === "location_switch") {
+  if (category === "automation_creation" || category === "campaign_follow_up_admission" || category === "location_switch" ||
+      category === "campaign_repository_addition") {
     return result("human", "human_required", "protected_request");
   }
   if (!input.supported) return result("human", "human_required", "unsupported_provider");

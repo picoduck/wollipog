@@ -296,6 +296,33 @@ test("withdraw_workflow_decision posts to the caller's own path and refuses an o
   }
 });
 
+test("repository-addition tools are the campaign root's, post to its own paths and refuse an older peer (#4117)", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 201, body: { occurrenceId: "workflow_1", status: "pending", authority: "human" } }));
+  deps.orchestrator = true;
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryAddition;
+  const ask = { requestId: "add-1", locationId: "loc_third", reason: "The follow-up lives in team/third.", work: { kind: "follow_up", id: "fu_1" } };
+  const asked = await callTool(deps, "request_campaign_repository_addition", ask);
+  assert.equal(asked.isError, undefined, resultText(asked));
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/orchestrator-campaign/repository-additions`);
+  assert.deepEqual(calls.at(-1)?.body, ask);
+  const read = await callTool(deps, "get_campaign_repository_addition", { occurrenceId: "workflow_1" });
+  assert.equal(read.isError, undefined, resultText(read));
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/orchestrator-campaign/repository-additions/workflow_1`);
+  const executed = await callTool(deps, "execute_campaign_repository_addition", { occurrenceId: "workflow_1", resourceDigest: "a".repeat(64) });
+  assert.equal(executed.isError, undefined, resultText(executed));
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/orchestrator-campaign/repository-additions/workflow_1/execute`);
+  assert.deepEqual(calls.at(-1)?.body, { resourceDigest: "a".repeat(64) });
+  const count = calls.length;
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryAddition - 1;
+  const old = await callTool(deps, "request_campaign_repository_addition", ask);
+  assert.equal(old.isError, true);
+  assert.match(resultText(old), new RegExp(`"requiredControlPlaneProtocolVersion":${RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryAddition}`, "u"));
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryAddition;
+  deps.orchestrator = false;
+  assert.equal((await callTool(deps, "request_campaign_repository_addition", ask)).isError, true, "a child never has the tool");
+  assert.equal(calls.length, count, "nothing reaches the control plane");
+});
+
 test("owner-decision tools are the root Orchestrator's, post to its own paths and refuse an older peer (#4064)", async () => {
   const { deps, calls } = makeDeps(() => ({ status: 201, body: { occurrenceId: "workflow_1", status: "pending", authority: "human" } }));
   deps.orchestrator = true;

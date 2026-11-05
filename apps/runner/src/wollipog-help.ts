@@ -163,6 +163,12 @@ Commands:
   work-items [--item <id>] [--state <state>] [--origin original|follow_up]
              [--sort queue|activity|elapsed|cost] [--limit <n>] [--cursor <cursor>]
              [--recommendations]                 Read the summary and one page or one item
+  repository-addition request --input '<json>'  Ask the owner to add a Project Location's repository
+                                                 (protocol v290+): {requestId, locationId, reason,
+                                                 work: {kind: follow_up|work_item, id}}
+  repository-addition get <occurrence-id>        Read the request and the owner's answer
+  repository-addition execute <occurrence-id> --digest <resource-digest>
+                                                 Carry out the exact Location the owner approved
 
 Only an injected Orchestrator session with control plane protocol v196+ may use these. Every
 record lands in the root campaign's ledger. Records grant no authority: they never dispatch,
@@ -172,7 +178,9 @@ reported merged stage does not mark an item delivered. Hand an item whose next s
 person to them with update-item's handoff.
 
 Tools: record_campaign_plan, update_campaign_work_item, assign_campaign_work_item,
-record_campaign_work_item_delivery, adjudicate_campaign_recommendation, get_campaign_work_items.
+record_campaign_work_item_delivery, adjudicate_campaign_recommendation, get_campaign_work_items,
+request_campaign_repository_addition, get_campaign_repository_addition, execute_campaign_repository_addition.
+A repository addition is always the campaign owner's decision; records and reasons never add one.
 `;
 }
 

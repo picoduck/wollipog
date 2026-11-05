@@ -257,6 +257,7 @@ import { registerReviewSettingsRoutes } from "./review-settings-route.js";
 import { ReviewSettingsService } from "./review-settings.js";
 import { registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
 import { CampaignLocations, registerCampaignLocationRoutes } from "./campaign-locations.js";
+import { CampaignRepositoryAdditions, registerCampaignRepositoryAdditionRoutes } from "./campaign-repository-additions.js";
 import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosures.js";
 import { composeHostingVideoEvidence, registerHostingVideoEvidenceRoutes } from "./hosting-video-evidence.js";
 import { registerRunnerAttestationRoute } from "./runner-attestation-route.js";
@@ -4722,6 +4723,10 @@ app.post("/api/sessions/:id/orchestrator-campaign/recommendations/:recommendatio
 
 registerCampaignIssueScopeRoutes(app, {db,svc,requestPrincipal});
 registerAutomationCreationRoutes(app, { service: new AutomationCreationService(db, svc, hub), requestPrincipal });
+registerCampaignRepositoryAdditionRoutes(app, { requestPrincipal, additions: new CampaignRepositoryAdditions({ db, hub, sessions: svc,
+  // The same verified-Location inspection as a launch (#4117), on a runner that can hold the boundary.
+  inspect: (locationId, options) => inspectProjectLocation({ db, hub }, locationId, { ...options, requireProtocol: "campaignRepositoryBoundary" }),
+  synchronize: (rootId) => svc.synchronizeCampaignIssueScope(rootId) }) });
 registerLocationSwitchRoutes(app, { requestPrincipal, service: new LocationSwitchService(db, svc, hub, {
   // The shared verified-Location inspection (#4117): by Location id, in the Location's own path.
   inspect: (locationId, options) => inspectProjectLocation({ db, hub }, locationId, options),

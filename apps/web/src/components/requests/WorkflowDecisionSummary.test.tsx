@@ -43,3 +43,16 @@ test("an owner decision shows the question, its material and its options, and sa
     "Short-Lived Lease (Recommended) Broker Process: Adds a helper process. " +
     "You kept this decision, so only you can make it. The Orchestrator keeps working while it waits.");
 });
+
+test("a repository addition shows the inspected Location, its repository, the work and the Orchestrator's quoted reason (#4117)", () => {
+  const html = renderToStaticMarkup(<WorkflowDecisionSummary snapshot={{ category: "campaign_repository_addition", locationId: "loc_docs",
+    locationName: "Docs on Laptop", repository: "picoduck/docs", reason: "The follow-up changes the docs site.",
+    work: { kind: "follow_up", id: "fu_1", title: "Document Location Switching" } }} />);
+  assert.match(html, /<dt>Orchestrator&#x27;s Reason<\/dt><dd><q>The follow-up changes the docs site\.<\/q><\/dd>/u,
+    "the reason is shown as the Orchestrator's quoted words");
+  assert.equal(text({ category: "campaign_repository_addition", locationId: "loc_docs", locationName: "Docs on Laptop", repository: "picoduck/docs",
+    reason: "The follow-up changes the docs site.", work: { kind: "work_item", id: "cwi_1", title: "Document Location Switching" } }),
+  "Location Docs on Laptop Repository picoduck/docs Work Item Document Location Switching Orchestrator&#x27;s Reason " +
+    "The follow-up changes the docs site. Approving adds this repository to the campaign, so the Orchestrator can work in it like its " +
+    "other repositories. Declining changes nothing, and the work that needs it stays blocked on you.");
+});

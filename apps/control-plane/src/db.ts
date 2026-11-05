@@ -1,5 +1,6 @@
 import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
-import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, PROJECT_LOCATION_INSPECTION_FAILURES,
+import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, PROJECT_LOCATION_INSPECTION_FAILURES, validCampaignRepositoryList,
+  type CampaignBoundaryRepository, type CampaignRepositoryAdditionResult,
   type CampaignExcludedLocation, type CampaignLocationJoin, type CampaignPendingLocation, type CampaignRepositoryBoundaryView } from "@wollipog/protocol";
 import { safeReviewSessionCapability } from "./review-session-capability.js";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
@@ -7383,6 +7384,9 @@ export class ControlPlaneDb {
       // #4138: the session owner who approved a Location switch, and its claim, then its receipt.
       "location_switch_approved_by TEXT",
       "location_switch_result TEXT",
+      // #4117: the campaign owner who approved a repository addition, then what it joined.
+      "campaign_repository_addition_approved_by TEXT",
+      "campaign_repository_addition_result TEXT",
     ]) {
       try { db.exec(`ALTER TABLE workflow_decisions ADD COLUMN ${column}`); } catch { /* already present */ }
     }
@@ -17235,15 +17239,17 @@ export class ControlPlaneDb {
    * removed while its repository keeps its entry. */
   campaignRepositoryBoundaryView(rootId: string, policy: OrchestratorCampaignPolicy): CampaignRepositoryBoundaryView | null {
     const control = policy.control;
-    if (control?.mode !== "full_control" || !control.boundary.repositories) return null;
+    // Full Control keeps the list in its authority boundary; a Custom campaign keeps its own (#4117).
+    const listed = control?.mode === "full_control" ? control.boundary.repositories : policy.repositories;
+    if (!listed) return null;
     // Read the row directly: a session view embeds this projection.
     const projectId = (this.stmt("SELECT project_id FROM sessions WHERE id=?").get(rootId) as { project_id: string | null } | undefined)?.project_id;
     const project = projectId ? this.getProject(projectId) : null;
     const current = new Map((project?.locations ?? []).map((location) => [location.id, location]));
     const named = new Map([...(policy.locationJoins ?? []).map((join) => [join.locationId, join.name] as const)]);
     return {
-      revision: control.boundary.revision,
-      repositories: control.boundary.repositories.map((entry) => ({ repository: entry.repository,
+      revision: control?.mode === "full_control" ? control.boundary.revision : 0,
+      repositories: listed.map((entry) => ({ repository: entry.repository,
         locations: entry.locationIds.map((locationId) => {
           const location = current.get(locationId);
           return { locationId, name: location?.name ?? named.get(locationId) ?? this.projectLocation(locationId, true)?.name ?? "Removed Location",
@@ -17506,17 +17512,61 @@ export class ControlPlaneDb {
    * campaign's owner, exactly as any owner-authorized boundary change: every Full Control member
    * gets the re-minted boundary and unconsumed decisions under the old revision are revoked.
    * Exclusions and pending Locations are informational and never change the revision. The caller
-   * proves each join's provenance; this only refuses a boundary that is stale or not the owner's. */
+   * proves each join's provenance; this only refuses a boundary that is stale or not the owner's.
+   *
+   * `consume` names an approved campaign_repository_addition carried out by these joins: it is
+   * consumed in the same transaction, only for its own approver, and never revoked by the revision
+   * it creates. A Custom campaign has no authority boundary, so an approved addition extends its
+   * repository list instead, starting from `customBase` (its own Location's repository). */
   recordCampaignLocations(rootId: string, ownerUserId: string, update: {
     joins: Array<{ locationId: string; name: string; repository: string; source: CampaignLocationJoin["source"] }>;
     excluded: CampaignExcludedLocation[];
     pending: CampaignPendingLocation[];
-  }, now: number): { ok: true; revision: number; joined: boolean; revoked: WorkflowDecisionView[] } | { ok: false; status: number; error: string } {
+  }, now: number, options: { consume?: { occurrenceId: string; resourceDigest: string }; customBase?: CampaignBoundaryRepository } = {}):
+    { ok: true; revision: number; joined: boolean; revoked: WorkflowDecisionView[] } | { ok: false; status: number; error: string } {
     this.db.exec("BEGIN IMMEDIATE");
     const refuse = (status: number, error: string) => { this.db.exec("ROLLBACK"); return { ok: false as const, status, error }; };
     try {
       const policy = this.sessionOrchestratorPolicy(rootId);
       const control = policy?.control;
+      const consumed = options.consume;
+      const addition = consumed ? this.workflowDecisionByOccurrence(consumed.occurrenceId) : null;
+      if (consumed && (addition?.category !== "campaign_repository_addition" || addition.sessionId !== rootId ||
+          addition.status !== "approved" || addition.authority !== "human" || addition.resourceDigest !== consumed.resourceDigest ||
+          this.campaignRepositoryAdditionApprover(consumed.occurrenceId) !== ownerUserId || update.joins.length !== 1)) {
+        return refuse(409, "This repository addition needs a current approval from the campaign's owner.");
+      }
+      const finishAddition = (revision: number) => {
+        if (!consumed) return;
+        const join = update.joins[0]!;
+        const result: CampaignRepositoryAdditionResult = { repository: join.repository.toLowerCase(), locationId: join.locationId, revision, completedAt: now };
+        this.stmt(`UPDATE workflow_decisions SET status='consumed', consumed_at=?, campaign_repository_addition_result=?
+          WHERE occurrence_id=? AND status='approved'`).run(now, JSON.stringify(result), consumed.occurrenceId);
+      };
+      if (policy && control?.mode !== "full_control" && consumed) {
+        // Custom: the campaign's owner is its root session's owner; there is no boundary to re-mint.
+        const scope = this.sessionScope(rootId);
+        if (scope?.owner.kind !== "user" || scope.owner.userId !== ownerUserId) return refuse(403, "Only the campaign's owner can add a repository.");
+        const repositories = structuredClone(policy.repositories ?? (options.customBase ? [options.customBase] : []));
+        const join = update.joins[0]!;
+        if (!repositories.some((entry) => entry.locationIds.includes(join.locationId))) {
+          const entry = repositories.find((item) => item.repository.toLowerCase() === join.repository.toLowerCase());
+          if (entry) entry.locationIds.push(join.locationId);
+          else repositories.push({ repository: join.repository.toLowerCase(), locationIds: [join.locationId] });
+        }
+        if (!validCampaignRepositoryList(repositories)) return refuse(409, "The campaign cannot hold more repositories or Locations.");
+        policy.repositories = repositories;
+        policy.locationJoins = [...(policy.locationJoins ?? []), { locationId: join.locationId, name: join.name,
+          repository: join.repository.toLowerCase(), revision: 0, at: now, source: join.source }].slice(-CAMPAIGN_LOCATION_JOINS_MAX);
+        policy.excludedLocations = (policy.excludedLocations ?? []).filter((item) => item.locationId !== join.locationId);
+        policy.pendingLocations = (policy.pendingLocations ?? []).filter((item) => item.locationId !== join.locationId);
+        if (!policy.excludedLocations.length) delete policy.excludedLocations;
+        if (!policy.pendingLocations.length) delete policy.pendingLocations;
+        this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(policy), now, rootId);
+        finishAddition(0);
+        this.db.exec("COMMIT");
+        return { ok: true, revision: 0, joined: true, revoked: [] };
+      }
       if (!policy || control?.mode !== "full_control" || !control.boundary.repositories) {
         return refuse(409, "Only a Full Control campaign with a repository boundary takes Project Locations.");
       }
@@ -17565,6 +17615,8 @@ export class ControlPlaneDb {
             WHERE id=? AND parent_control_policy_revision=?`).run(rootId, parentControlPolicy.revision).changes) !== 1) {
           return refuse(409, "Campaign authority changed; inspect the Location again.");
         }
+        // The addition this revision carries out is spent first, so the revocation below never reaches it.
+        finishAddition(revision);
         revoked = this.unconsumedWorkflowDecisionsForController(rootId);
         for (const stale of revoked) {
           this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
@@ -17572,6 +17624,8 @@ export class ControlPlaneDb {
           this.revokeUiEvidenceReviewReceipts(stale.occurrenceId, now);
         }
       }
+      // An approved addition whose Location joined meanwhile (an owner addition, say) is still spent.
+      if (!joins.length) finishAddition(revision);
       if (excluded.length) policy.excludedLocations = excluded.slice(-CAMPAIGN_BOUNDARY_LOCATIONS_MAX); else delete policy.excludedLocations;
       if (pending.length) policy.pendingLocations = pending.slice(-CAMPAIGN_BOUNDARY_LOCATIONS_MAX); else delete policy.pendingLocations;
       this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(policy), now, rootId);
@@ -22532,6 +22586,21 @@ export class ControlPlaneDb {
     };
   }
 
+  /** The newest repository addition a campaign requested for one repository (#4117). */
+  latestCampaignRepositoryAddition(rootId: string, resourceKey: string): WorkflowDecisionView | null {
+    return workflowDecisionFromRow(this.stmt(`SELECT * FROM workflow_decisions WHERE session_id=?
+      AND category='campaign_repository_addition' AND resource_key=? ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(rootId, resourceKey));
+  }
+
+  /** The title of a follow-up this campaign recorded or of one of its work items, or null when
+   * the campaign has no such record (#4117). Agent-supplied ids resolve only within the campaign. */
+  campaignRepositoryAdditionWork(rootId: string, kind: "follow_up" | "work_item", id: string): string | null {
+    const row = kind === "follow_up"
+      ? this.stmt("SELECT title FROM orchestrator_campaign_follow_ups WHERE id=? AND campaign_session_id=?").get(id, rootId) as { title: string } | undefined
+      : this.stmt("SELECT COALESCE(title, item_key) AS title FROM campaign_work_items WHERE id=? AND campaign_session_id=?").get(id, rootId) as { title: string } | undefined;
+    return row?.title ?? null;
+  }
+
   workflowDecisionByRequestId(sessionId: string, requestId: string): WorkflowDecisionView | null {
     return workflowDecisionFromRow(this.stmt(
       "SELECT * FROM workflow_decisions WHERE session_id=? AND request_id=?",
@@ -23612,6 +23681,29 @@ export class ControlPlaneDb {
       this.db.exec("COMMIT");
       return resolved;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  /** A campaign repository addition (#4117): the owner's outcome, the approver and the durable resume
+   * commit together. */
+  resolveCampaignRepositoryAdditionDecision(occurrenceId: string, outcome: "approved" | "denied", userId: string, now: number,
+    oweResume: boolean): WorkflowDecisionView | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const decision = this.workflowDecisionByOccurrence(occurrenceId);
+      if (!decision || decision.category !== "campaign_repository_addition" || decision.authority !== "human") {
+        this.db.exec("ROLLBACK");
+        return null;
+      }
+      const resolved = this.resolveWorkflowDecision(occurrenceId, "human", outcome, now, undefined, undefined, undefined, undefined, oweResume);
+      if (resolved) this.stmt("UPDATE workflow_decisions SET campaign_repository_addition_approved_by=? WHERE occurrence_id=?").run(userId, occurrenceId);
+      this.db.exec("COMMIT");
+      return resolved;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  campaignRepositoryAdditionApprover(occurrenceId: string): string | null {
+    return (this.stmt(`SELECT campaign_repository_addition_approved_by AS id FROM workflow_decisions
+      WHERE occurrence_id=? AND category='campaign_repository_addition'`).get(occurrenceId) as { id: string | null } | undefined)?.id ?? null;
   }
 
   /** A Location switch (#4138): the owner's choice, the approver and the durable resume commit together. */
@@ -33978,8 +34070,8 @@ function validPendingLocations(value: unknown): boolean {
 function validLocationJoins(value: unknown): boolean {
   return Array.isArray(value) && value.length <= CAMPAIGN_LOCATION_JOINS_MAX && value.every((item) => {
     const entry = locationRecord(item, ["locationId", "name", "repository", "revision", "at", "source"]);
-    return Boolean(entry && campaignRepositoryLocation(entry.repository) && Number.isSafeInteger(entry.revision) && (entry.revision as number) > 0 &&
-      Number.isSafeInteger(entry.at) && ["owner_added", "runner_reconnected", "owner_included"].includes(entry.source as string));
+    return Boolean(entry && campaignRepositoryLocation(entry.repository) && Number.isSafeInteger(entry.revision) && (entry.revision as number) >= 0 &&
+      Number.isSafeInteger(entry.at) && ["owner_added", "runner_reconnected", "owner_included", "addition_approved"].includes(entry.source as string));
   });
 }
 
@@ -34076,6 +34168,7 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
   if (value.excludedLocations !== undefined && !validExcludedLocations(value.excludedLocations)) delete value.excludedLocations;
   if (value.pendingLocations !== undefined && !validPendingLocations(value.pendingLocations)) delete value.pendingLocations;
   if (value.locationJoins !== undefined && !validLocationJoins(value.locationJoins)) delete value.locationJoins;
+  if (value.repositories !== undefined && (value.control?.mode === "full_control" || !validCampaignRepositoryList(value.repositories))) delete value.repositories;
   const validSources = new Set([
     "system_default", "user_default", "session_override", "compatibility_fallback", "legacy_session", "active_campaign",
   ]);
@@ -34138,6 +34231,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     issue_closure_result?: string | null;
     automation_creation_result?: string | null;
     location_switch_result?: string | null;
+    campaign_repository_addition_result?: string | null;
     closing_reference_check?: string | null;
     forge_action?: string | null;
   } | undefined;
@@ -34172,6 +34266,8 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     ...(row.issue_closure_result ? { issueClosureResult: JSON.parse(row.issue_closure_result) as NonNullable<WorkflowDecisionView["issueClosureResult"]> } : {}),
     ...(row.automation_creation_result ? { automationCreationResult: JSON.parse(row.automation_creation_result) as NonNullable<WorkflowDecisionView["automationCreationResult"]> } : {}),
     ...(locationSwitchResult?.sessionId ? { locationSwitchResult: locationSwitchResult as NonNullable<WorkflowDecisionView["locationSwitchResult"]> } : {}),
+    ...(row.campaign_repository_addition_result ? { campaignRepositoryAdditionResult:
+      JSON.parse(row.campaign_repository_addition_result) as NonNullable<WorkflowDecisionView["campaignRepositoryAdditionResult"]> } : {}),
     ...(closingReferenceCheck ? { closingReferenceCheck } : {}),
     ...(forgeAction ? { forgeAction } : {}),
     ...(row.selected_option_id ? { selectedOptionId: row.selected_option_id } : {}),

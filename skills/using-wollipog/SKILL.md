@@ -768,6 +768,28 @@ Neither tool exists for a child or under Custom, where a person already sees the
 requests, and an older runner or control plane refuses them by name. Never decide an owner-kept
 decision yourself, and never ask the owner to approve one in chat.
 
+## Adding a Repository to a Campaign
+
+A campaign covers the verified repositories of its Project's Locations; `get_campaign` lists them
+under `repositoryBoundary`. When recorded work needs a Project repository the campaign does not
+cover (most often a follow-up in another repository), a root Orchestrator on protocol v290, in Full
+Control or Custom, asks the campaign's owner to add it:
+
+- `request_campaign_repository_addition` (CLI `wollipog campaign repository-addition request --input
+  '<json>'`) names one Project Location by id, a one-line reason, and the recorded follow-up or work
+  item that needs it. The control plane inspects that Location first; a Location outside the Project
+  or one that fails inspection is refused before the owner sees it. The decision is always the
+  owner's: nobody acting for the campaign can approve it, and your reason is shown as your words.
+  A pending request for the same repository is reused; a declined one is not asked again for the
+  same work.
+- When the owner approves, call `execute_campaign_repository_addition` (CLI `wollipog campaign
+  repository-addition execute <occurrence-id> --digest <digest>`) with the occurrence and its digest.
+  It inspects the exact approved Location again and adds its repository at a new boundary revision.
+- When the owner declines, record the dependent work as blocked on the owner, never as delivered.
+
+You cannot create a Location. When no Location of the repository exists in the Project, report that
+the work needs one; once the owner adds it, it joins the campaign on its own.
+
 ## Inspecting and Changing Campaign Issue Scope
 
 Before delegating an epic, use `get_campaign_issue_scope` (CLI: `wollipog issue-scope get --epic <number>`).
