@@ -10236,6 +10236,85 @@ test("with only profiles of other control planes, a session without a chosen acc
   assert.ok(explicit.ok && explicit.data, explicit.error);
 });
 
+test("unverifiable ancestry agrees across selection, discovery and admission (#4175)", async () => {
+  const { ProviderProfileGrants } = await import("../../runner/src/provider-profile-grants.js");
+  const { selectProviderAccount, selectProviderAccountForDiscovery, projectProviderAccountDiscoveryReadiness,
+    probeProviderAccountsForDiscovery, bindSessionProviderAccount } = await import("../../runner/src/provider-accounts.js");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const { db, hub, svc } = makeHarness();
+  const accountMeta = runnerMeta();
+  const agent = { ...accountMeta.agents.find((candidate) => candidate.id === AGENT_ID)!,
+    context: { kind: "native" as const }, available: true };
+  const a = { id: "a", label: "A", provider: "claude" as const, directory: join(tmpdir(), "synthetic-4175-a"),
+    profileId: "6f1c2d3e-4a5b-4c6d-8e7f-001122334455" };
+  const b = { id: "b", label: "B", provider: "claude" as const, directory: join(tmpdir(), "synthetic-4175-b") };
+  const accounts = [a, b];
+  const grants = new ProviderProfileGrants({ controlPlaneInstanceId: "0a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3",
+    accounts: () => accounts, readMarker: (account) => account.id === "a"
+      ? { state: "unverifiable", cause: "ancestry" } : { state: "absent" } });
+  grants.synchronize(PROTOCOL_VERSION, []);
+  const usable = (account: typeof b) => grants.usable(account);
+  assert.equal(usable(a), false);
+  assert.deepEqual(grants.accountProfile(a), { id: a.profileId, access: "not_granted" });
+  const probes: string[] = [];
+  const statuses = await probeProviderAccountsForDiscovery({ accounts, agents: [agent], usable,
+    environment: () => ({}), probe: async (_agent, env) => {
+      probes.push(env.CLAUDE_CONFIG_DIR!);
+      return "authenticated";
+    } });
+  assert.deepEqual(probes, [b.directory], "only the eligible synthetic HOME is probed");
+  const projected = projectProviderAccountDiscoveryReadiness([agent], accounts, statuses, usable)[0]!;
+  assert.deepEqual(projected.providerAccountReadiness, {
+    defaultAccountId: "b", defaultAuthStatus: "authenticated", readyAccountIds: ["b"],
+  });
+  assert.equal(selectProviderAccount(accounts, agent, "claude-code", undefined, process.platform, usable)?.id, "b");
+  assert.equal(selectProviderAccountForDiscovery(accounts, agent, usable)?.credentialHome, b.directory);
+  const register = (savedAgent = projected) => {
+    accountMeta.providerAccounts = grants.project(accounts, (account) => ({ id: account.id, label: account.label,
+      provider: account.provider, authStatus: statuses.get(account.id) ?? "unknown" }));
+    accountMeta.agents = accountMeta.agents.map((candidate) => candidate.id === AGENT_ID ? savedAgent : candidate);
+    db.registerRunner(accountMeta, Date.now(), PROTOCOL_VERSION);
+  };
+  register();
+  assert.ok(db.getAgentLaunch(RUNNER_ID, AGENT_ID));
+  const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(created.ok, created.error);
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.providerAccountId, "b");
+
+  assert.equal(selectProviderAccount(accounts, agent, "claude-code", "a", process.platform, usable)?.credentialHome, a.directory);
+  const explicit = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, providerAccountId: "a" });
+  assert.ok(explicit.ok, explicit.error);
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.providerAccountId, "a");
+  const savedAgent = { ...agent, defaultProviderAccountId: "a" };
+  assert.equal(selectProviderAccount(accounts, savedAgent, "claude-code", undefined, process.platform, usable)?.id, "a");
+  assert.throws(() => selectProviderAccountForDiscovery(accounts, savedAgent, usable), /not granted/);
+  const savedProjection = projectProviderAccountDiscoveryReadiness([savedAgent], accounts, statuses, usable)[0]!;
+  assert.equal(savedProjection.providerAccountReadiness?.defaultAccountId, "a");
+  assert.equal(savedProjection.providerAccountReadiness?.defaultAuthStatus, "unknown");
+  register(savedProjection);
+  const beforeDefault = hub.sentOfType("start_session").length;
+  const saved = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.equal(saved.ok, false);
+  assert.match(saved.error ?? "", /default provider account is not ready/);
+  assert.equal(hub.sentOfType("start_session").length, beforeDefault);
+  const spec = hub.sentOfType("start_session").at(-1)!.spec;
+  assert.equal(bindSessionProviderAccount({ providerAccountId: "a", providerCredentialHome: a.directory,
+    providerAccountProvider: "claude", providerProfileId: a.profileId } as Parameters<typeof bindSessionProviderAccount>[0],
+  spec, () => { throw new Error("must retain prior binding"); })?.credentialHome, a.directory);
+
+  accounts.splice(1);
+  register(projectProviderAccountDiscoveryReadiness([agent], accounts, statuses, usable)[0]!);
+  assert.throws(() => selectProviderAccount(accounts, agent, "claude-code", undefined, process.platform, usable), /No compatible provider account is granted/);
+  assert.throws(() => selectProviderAccountForDiscovery(accounts, agent, usable), /granted/);
+  const beforeUnavailable = hub.sentOfType("start_session").length;
+  const unavailable = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.equal(unavailable.ok, false);
+  assert.equal(unavailable.status, 409);
+  assert.match(unavailable.error ?? "", /Review their setup and ownership details/);
+  assert.equal(hub.sentOfType("start_session").length, beforeUnavailable, "no launch or legacy HOME fallback");
+});
+
 test("a WSL agent does not implicitly inherit a runner-host provider account", () => {
   const { db, hub, svc } = makeHarness();
   const accountMeta = runnerMeta();
