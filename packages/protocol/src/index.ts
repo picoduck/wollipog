@@ -5378,6 +5378,14 @@ export interface CampaignIssueScopeView {
   contextIssueNumbers?: number[];
   /** The scope grant the owner's first message established (#4102), for Campaign Status. */
   scopeGrant?: FullControlScopeGrant;
+  /** True when the view is the saved scope because the campaign runner is disconnected (#2664).
+   * Campaign Status polls while it is set, so a mounted panel recovers after reconnection. */
+  runnerDisconnected?: boolean;
+  /** Recorded work whose number is in the saved scope while the campaign repository is unknown
+   * (`repository` is empty, #2664). It is neither verified in scope nor confirmed outside it. */
+  unverifiedWork?: Array<{ workItemId: string; title: string; issue: CampaignIssueRef; sessionId: string | null }>;
+  /** Recorded work confirmed outside the scope: another repository than a known `repository`, or a
+   * number the saved scope does not hold. An unknown repository alone never places work here. */
   outsideScope: Array<{ workItemId: string; title: string; issue: CampaignIssueRef; sessionId: string | null }>;
   candidates?: Array<{ issue: CampaignIssueRef; title: string; source: "umbrella" | "sub_issue" | "member_checklist" }>;
 }

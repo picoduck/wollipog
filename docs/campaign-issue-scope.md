@@ -13,6 +13,15 @@ oversized inspection fails closed; use an explicit set of up to 100 repository-q
 Under Full Control, recorded work outside authority is never dispatched, and a merge that would close
 an unscoped issue needs the campaign owner (see [What the Scope Bounds Under Full Control](#what-the-scope-bounds-under-full-control)).
 
+While the campaign runner is disconnected, Campaign Status shows the saved membership and revision
+without a runner call, offers **Refresh Scope**, and checks again every ten seconds while the tab is
+visible, so a mounted panel recovers after reconnection at the same revision (#2664). A legacy campaign
+saved without a repository shows its numbers under a **Not Verified** repository and is never assigned a
+guessed one. Recorded work with a saved number is listed as awaiting repository verification, not as
+outside the scope; only a number outside the saved list, or another repository than a known one, is a
+confirmed mismatch. None of this grants authority: reconnection, repository verification and the
+existing scope and closure approvals still apply.
+
 The root agent can use `get_campaign_issue_scope` and `request_campaign_issue_scope_change` to prepare the
 same proposal after a human's prompt. Custom approval is human-owned; bounded Full Control admission
 is described below. The exact payload includes the
