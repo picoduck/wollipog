@@ -12487,6 +12487,20 @@ export class ControlPlaneDb {
       requestId: row.request_id, ...(row.classification ? { classification: row.classification } : {}) } : null;
   }
 
+  /** The latest check of one subject that did not confirm it (#4104): a refusing verdict, an
+   * uncertain one or a failure. Such an outcome sticks to the server-owned subject, so rewording the
+   * request's text never buys a second verdict. */
+  latestUnconfirmedCampaignCheck(campaignSessionId: string, surface: CampaignDecisionSubject["surface"], requestId: string,
+    kind: string, refuse: string): DecisionOccurrenceRecord | null {
+    const row = this.stmt(
+      `SELECT d.* FROM campaign_decision_subjects s JOIN decision_occurrences d ON d.occurrence_id = s.occurrence_id
+       WHERE s.campaign_session_id=? AND s.surface=? AND s.request_id=? AND d.kind=?
+         AND (d.state IN ('uncertain','failed') OR (d.state='decided' AND d.verdict=?))
+       ORDER BY d.created_at DESC, d.occurrence_id DESC LIMIT 1`,
+    ).get(campaignSessionId, surface, requestId, kind, refuse) as DecisionOccurrenceRow | undefined;
+    return row ? this.decisionOccurrenceFromRow(row) : null;
+  }
+
   /** The owner's one classification of an uncertain or failed screen, by compare-and-set: only an
    * occurrence that routed to a person and has no classification yet accepts one. */
   classifyCampaignDecision(occurrenceId: string, classification: "decline" | "orchestrator", userId: string, now: number): boolean {

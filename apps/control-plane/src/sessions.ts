@@ -11161,7 +11161,7 @@ export class SessionsService {
     const items = (proof as { items?: Array<{ id: string; commitmentRecord?: { state: string; reason: string | null } }> }).items ?? [];
     return runCampaignCheck(this.db, this.decisionRuntime, {
       kind: "closure_reason", confirm: "fits", refuse: "does_not_fit", organizationId, root, sessionId: root.id,
-      surface: "issue_closure", requestId: `${snapshot.repository.toLowerCase()}#${snapshot.issue}`,
+      surface: "issue_closure", requestId: `${snapshot.repository.toLowerCase()}#${snapshot.issue}:${snapshot.reason}`,
       inputs: {
         data: {
           closure: JSON.stringify({ issue: `${snapshot.repository}#${snapshot.issue}`, title: snapshot.title, reason: snapshot.reason,
@@ -11651,7 +11651,7 @@ export class SessionsService {
             this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "closure_proposal", sessionId, requestId: request.requestId,
               boundaryRevision: fullBoundary.revision, outcome: "refused", reason: "closure_reason_does_not_fit", occurrenceId: check.occurrenceId }));
             return fail(`The Decision Model found that the reason "${snapshot.reason}" does not fit issue #${snapshot.issue} and its evidence, ` +
-              `so no closure was requested. Its reason: ${check.reason} Correct the reason or the campaign's record, or leave the issue open.`, 409);
+              `so no closure was requested. Its reason: ${check.reason} This refusal stands for this issue and reason; leave the issue open and report it for the campaign's owner to decide.`, 409);
           }
           if (check.outcome === "owner") reasonGap = issueClosureDeliveryGap("reason_unconfirmed");
         }

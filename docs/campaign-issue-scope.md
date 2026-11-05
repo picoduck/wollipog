@@ -320,8 +320,11 @@ admitted the request, never reads its text any other way, and may only refuse.
   A closure proven by delivery or by its epic's members is not a choice of reason and is not checked;
   a closure with no proof keeps the human fallback above without a model call.
 
-Each check's verdict, reason and failure class appear in Campaign Status under Decision Model Checks,
-beside the follow-up or closure it affected.
+A refusal, an uncertain verdict or a failure sticks to the server-owned subject: the recommendation,
+or the issue and the stated reason. A later request for the same subject with reworded text inherits
+that outcome without a new model call, so rewording never buys a second verdict; the person deciding
+the affected request is the only way past it. Each check's verdict, reason and failure class appear
+in Campaign Status under Decision Model Checks, beside the follow-up or closure it affected.
 
 ### Closure Refusal Reasons
 

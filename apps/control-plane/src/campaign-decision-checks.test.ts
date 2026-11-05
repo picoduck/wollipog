@@ -190,7 +190,7 @@ test("closure reason: a fitting not-planned reason is the Orchestrator's, and a 
     assert.equal(fakeDecisionData<{ reason: string }>(call!, "closure").reason, "not_planned");
     assert.match(JSON.stringify(fakeDecisionData(call!, "evidence")), /Superseded by the new importer/u);
     const subject = h.db.campaignDecisionSubject(h.occurrences("closure_reason")[0]!.occurrenceId);
-    assert.deepEqual([subject?.surface, subject?.requestId], ["issue_closure", "team/repo#100"]);
+    assert.deepEqual([subject?.surface, subject?.requestId], ["issue_closure", "team/repo#100:not_planned"]);
   } finally { h.db.close(); }
 });
 
@@ -270,6 +270,45 @@ test("a subjects table from the question screen's release is widened in place, k
       assert.equal(second.campaignDecisionSubject("dec_new")?.surface, "issue_closure");
     } finally { second.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("rewording never buys a second verdict: a refusal or an owner route sticks to the recommendation or the issue and reason", async () => {
+  const relatedness: Record<string, FakeDecisionStep> = { "Add a Dark-Mode Theme": { verdict: "unrelated", reason: "A separate feature." },
+    "Clean Up the Importer Temp File on Crash": { verdict: "uncertain", reason: "Unclear." } };
+  const h = harness((kind, message) => {
+    if (kind === "follow_up_relatedness") return relatedness[fakeDecisionData<{ title: string }>(message, "follow_up").title] ?? { verdict: "related" };
+    if (kind === "closure_reason") return { verdict: "does_not_fit", reason: "The work is only paused." };
+    return { verdict: HEALTHY_VERDICTS[kind]! };
+  });
+  try {
+    const unrelated = recommend(h, "Add a Dark-Mode Theme");
+    assert.equal((await publish(h, "first", unrelated)).errorDetails?.code, "unrelated_follow_up");
+    // The same recommendation, reworded: refused with the first verdict's reason and no new call.
+    const reworded = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "reworded", resourceKey: "reworded",
+      resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: unrelated.title,
+        sanitizedBody: body.replace("temp file", "theme setting"), labels: [], recommendationId: unrelated.id } });
+    assert.equal(reworded.errorDetails?.code, "unrelated_follow_up");
+    assert.match(reworded.error!, /A separate feature\./u);
+    assert.equal(h.calls("follow_up_relatedness").length, 1);
+    // An uncertain check keeps the publication the owner's, whatever the next request says.
+    const unsure = recommend(h);
+    const held = await publish(h, "unsure", unsure);
+    assert.equal(held.data?.authorityEvaluation?.admissionFailure, "relatedness_unconfirmed");
+    const before = h.calls("follow_up_relatedness").length;
+    const again = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "unsure-again", resourceKey: "unsure-again",
+      resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: unsure.title,
+        sanitizedBody: body.replace("Remove it", "Remove it, as the crash fix requires"), labels: [], recommendationId: unsure.id } });
+    assert.ok(again.ok === false || again.data?.authority === "human", "never the Orchestrator's");
+    assert.equal(h.calls("follow_up_relatedness").length, before, "no second verdict");
+    // A closure refused for this reason stays refused for it, however the explanation changes.
+    cancelWork(h, "Paused until the next quarter");
+    assert.equal((await close(h, "misfit")).status, 409);
+    const explained = await h.svc.requestGithubIssueClosure("root", { requestId: "misfit-again", issue: 100, reason: "not_planned",
+      explanation: "A different explanation", evidence: ["Something else"] });
+    assert.deepEqual([explained.ok, explained.status], [false, 409]);
+    assert.match(explained.error!, /The work is only paused\./u);
+    assert.equal(h.calls("closure_reason").length, 1);
+  } finally { h.db.close(); }
 });
 
 test("closure reason: concurrent requests record one verdict", async () => {

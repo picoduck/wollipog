@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { CampaignDecisionSubject, DecisionErrorClass, DecisionKind, SessionView } from "@wollipog/protocol";
-import type { ControlPlaneDb } from "./db.js";
+import type { ControlPlaneDb, DecisionOccurrenceRecord } from "./db.js";
 import { DECISION_KINDS, DecisionInputError, decisionInputDigests, type DecisionInputs } from "./decision-kinds.js";
 import type { DecisionAutomaticHarness } from "./decision-model-settings.js";
 import type { DecisionRuntime } from "./decision-runtime.js";
@@ -71,6 +71,12 @@ export async function runCampaignCheck(db: ControlPlaneDb, runtime: DecisionRunt
     ? { runnerId: input.root.runnerId, agentId: input.root.agentId, driver: input.root.driver } : null;
   const subject = (occurrenceId: string) => db.recordCampaignDecisionSubject({ occurrenceId, campaignSessionId: input.root.id,
     sessionId: input.sessionId, surface: input.surface, requestId: input.requestId }, now());
+  // A refusal, an uncertain verdict or a failure sticks to the server-owned subject (the
+  // recommendation, or the issue and reason): a request whose text differs inherits it without a
+  // new call, so rewording never buys a second verdict. The person deciding the affected request
+  // is the only way past it.
+  const earlier = db.latestUnconfirmedCampaignCheck(input.root.id, input.surface, input.requestId, input.kind, input.refuse);
+  if (earlier && earlier.occurrenceKey !== occurrenceKey) return outcomeOf(earlier, input);
   let occurrenceId: string;
   try {
     occurrenceId = (await runtime.decide({
@@ -86,7 +92,11 @@ export async function runCampaignCheck(db: ControlPlaneDb, runtime: DecisionRunt
     error instanceof DecisionInputError ? "configuration" : "provider_failed", now());
   }
   subject(occurrenceId);
-  const occurrence = db.getDecisionOccurrence(occurrenceId)!;
+  return outcomeOf(db.getDecisionOccurrence(occurrenceId)!, input);
+}
+
+function outcomeOf(occurrence: DecisionOccurrenceRecord, input: Pick<CampaignCheckInput, "confirm" | "refuse">): CampaignCheckOutcome {
+  const occurrenceId = occurrence.occurrenceId;
   if (occurrence.state === "decided" && occurrence.verdict === input.confirm) return { outcome: "confirmed", occurrenceId };
   if (occurrence.state === "decided" && occurrence.verdict === input.refuse) {
     return { outcome: "refused", occurrenceId, reason: occurrence.reason ?? "" };
