@@ -36,6 +36,7 @@ import {
 } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignDispatchScopeRefusal, campaignBoundaryCurrent, remintCampaignBoundary } from "./campaign-authority.js";
+import { genericRequestScreenData, storedCredentialScreenFact } from "./credential-screen.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
 import { validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
@@ -2981,6 +2982,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_occurrences_key
 CREATE INDEX IF NOT EXISTS idx_decision_occurrences_campaign
   ON decision_occurrences(campaign_session_id, created_at) WHERE campaign_session_id IS NOT NULL;
 
+-- What one campaign Decision occurrence affected (#4104), and the owner's classification when the
+-- Decision Model failed or was uncertain. Identifiers only: never the screened text.
+CREATE TABLE IF NOT EXISTS campaign_decision_subjects (
+  occurrence_id       TEXT PRIMARY KEY,
+  campaign_session_id TEXT NOT NULL,
+  session_id          TEXT NOT NULL,
+  surface             TEXT NOT NULL CHECK (surface IN ('implementation_question','provider_question','tool_request','owner_decision')),
+  request_id          TEXT NOT NULL,
+  classification      TEXT CHECK (classification IN ('decline','orchestrator')),
+  classified_by       TEXT,
+  classified_at       INTEGER,
+  created_at          INTEGER NOT NULL,
+  FOREIGN KEY (occurrence_id) REFERENCES decision_occurrences(occurrence_id) ON DELETE CASCADE
+);
+
 -- Every attempt of an occurrence, with its usage. Decision usage is never managed worker usage.
 CREATE TABLE IF NOT EXISTS decision_attempts (
   occurrence_id         TEXT NOT NULL,
@@ -5298,6 +5314,8 @@ interface DecisionOccurrenceRow {
   created_at: number;
   decided_at: number | null;
 }
+
+type CampaignDecisionSubject = import("@wollipog/protocol").CampaignDecisionSubject;
 
 export interface DecisionOccurrenceRecord {
   occurrenceId: string;
@@ -12388,6 +12406,40 @@ export class ControlPlaneDb {
     const row = this.stmt("SELECT * FROM decision_occurrences WHERE occurrence_id=?").get(occurrenceId) as
       DecisionOccurrenceRow | undefined;
     return row ? this.decisionOccurrenceFromRow(row) : null;
+  }
+
+  /** The occurrence a caller's idempotency key names, in any organization's audit. */
+  decisionOccurrenceByKey(occurrenceKey: string): DecisionOccurrenceRecord | null {
+    const row = this.stmt("SELECT * FROM decision_occurrences WHERE occurrence_key=? ORDER BY created_at LIMIT 1").get(occurrenceKey) as
+      DecisionOccurrenceRow | undefined;
+    return row ? this.decisionOccurrenceFromRow(row) : null;
+  }
+
+  /** Record what a campaign occurrence affected (#4104). The first record wins. */
+  recordCampaignDecisionSubject(input: { occurrenceId: string; campaignSessionId: string } & Omit<CampaignDecisionSubject, "classification">, now: number): void {
+    this.stmt(
+      `INSERT OR IGNORE INTO campaign_decision_subjects (occurrence_id, campaign_session_id, session_id, surface, request_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(input.occurrenceId, input.campaignSessionId, input.sessionId, input.surface, input.requestId, now);
+  }
+
+  campaignDecisionSubject(occurrenceId: string): (CampaignDecisionSubject & { campaignSessionId: string }) | null {
+    const row = this.stmt("SELECT * FROM campaign_decision_subjects WHERE occurrence_id=?").get(occurrenceId) as
+      { campaign_session_id: string; session_id: string; surface: CampaignDecisionSubject["surface"]; request_id: string;
+        classification: "decline" | "orchestrator" | null } | undefined;
+    return row ? { campaignSessionId: row.campaign_session_id, sessionId: row.session_id, surface: row.surface,
+      requestId: row.request_id, ...(row.classification ? { classification: row.classification } : {}) } : null;
+  }
+
+  /** The owner's one classification of an uncertain or failed screen, by compare-and-set: only an
+   * occurrence that routed to a person and has no classification yet accepts one. */
+  classifyCampaignDecision(occurrenceId: string, classification: "decline" | "orchestrator", userId: string, now: number): boolean {
+    return Number(this.stmt(
+      `UPDATE campaign_decision_subjects SET classification=?, classified_by=?, classified_at=?
+       WHERE occurrence_id=? AND classification IS NULL
+         AND EXISTS (SELECT 1 FROM decision_occurrences d WHERE d.occurrence_id=campaign_decision_subjects.occurrence_id
+           AND d.state IN ('uncertain','failed'))`,
+    ).run(classification, userId, now, occurrenceId).changes) > 0;
   }
 
   listCampaignDecisionOccurrences(campaignSessionId: string, limit = 200): DecisionOccurrenceRecord[] {
@@ -22555,6 +22607,25 @@ export class ControlPlaneDb {
     });
   }
 
+  /** The owner's classification releasing a question held for it (#4104): an implementation
+   * question moves to the Orchestrator, and an owner decision stays the owner's but may now be
+   * answered. Only a pending, unconsumed occurrence held for that reason changes; nothing else can
+   * be released this way, and an owner decision can never move to an agent. */
+  releaseCredentialScreenReview(
+    occurrenceId: string,
+    authority: "human" | "orchestrator",
+    authorityEvaluation: NonNullable<WorkflowDecisionView["authorityEvaluation"]>,
+  ): WorkflowDecisionView | null {
+    const category = authority === "orchestrator" ? "implementation_question" : "owner_decision";
+    const changed = Number(this.stmt(
+      `UPDATE workflow_decisions SET authority=?, authority_evaluation=?
+       WHERE occurrence_id=? AND status='pending' AND authority='human' AND category=?
+         AND owner_handoff IS NULL AND consumed_at IS NULL
+         AND json_extract(authority_evaluation, '$.reason')='credential_screen_review'`,
+    ).run(authority, JSON.stringify(authorityEvaluation), occurrenceId, category).changes) === 1;
+    return changed ? this.workflowDecisionByOccurrence(occurrenceId) : null;
+  }
+
   /** The pending decisions a campaign's owner kept (#4064), oldest first, for Campaign Status. */
   campaignOwnerDecisions(controllingSessionId: string): NonNullable<OrchestratorCampaignProjection["ownerDecisions"]> | null {
     const where = `controlling_session_id=? AND status='pending' AND authority='human'
@@ -27801,8 +27872,16 @@ export class ControlPlaneDb {
 
   /** Live effective policy facts compose with occurrence-time mandatory gates. Used by both
    * projections and response admission, so a policy edit cannot leave stale delegated ownership. */
-  campaignPolicyRequest(sessionId: string, control: CampaignControl | undefined, request: PendingApproval): PendingApproval {
-    if (control?.mode !== "full_control" || request.kind === "question" || request.kind === "workflow_decision") return request;
+  campaignPolicyRequest(sessionId: string, control: CampaignControl | undefined, pending: PendingApproval): PendingApproval {
+    if (control?.mode !== "full_control" || pending.kind === "workflow_decision") return pending;
+    // #4104: the Decision Model screen is the server's own audited fact for this exact occurrence.
+    // Whatever a runner sent in its place is replaced, and a request not yet screened is pending.
+    const { credentialScreen: _untrusted, ...rest } = pending;
+    const screen = genericRequestScreenData(rest);
+    const request: PendingApproval = screen
+      ? { ...rest, credentialScreen: storedCredentialScreenFact(this, screen.surface, sessionId, rest.occurrenceId ?? rest.requestId, screen.data) }
+      : rest;
+    if (request.kind === "question") return request;
     const row = this.stmt("SELECT runner_id,workspace_id,agent_id,status,cost_usd FROM sessions WHERE id=?").get(sessionId) as
       Pick<SessionRow, "runner_id" | "workspace_id" | "agent_id" | "status" | "cost_usd"> | undefined;
     if (!row) return { ...request, humanRequired: true };

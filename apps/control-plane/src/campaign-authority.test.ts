@@ -16,6 +16,7 @@ import { resolveOrchestratorCampaignPolicy, parseOrchestratorOverrides } from ".
 import type { HumanPrincipal } from "./identity.js";
 import { campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
 import { runnerCredentialRoots, setCampaignCredentialRoots } from "../../runner/src/campaign-operation-evidence.js";
+import { fakeScreenRuntime, settleScreens } from "./credential-screen-test-fixture.js";
 
 /** A v230 runner's attestation that resolved targets are inside the fixture worktree `/repos/test`. */
 const CONTAINED = { version: 1 as const, root: "/repos/test", sessionRoot: "/repos/test" };
@@ -51,17 +52,24 @@ function harness(protocol = PROTOCOL_VERSION, workspacePath = "/repos/test", dri
     ? { type: "github_merge_preflight_result", requestId, sessionId: message.sessionId, ok: true, check: { checkedAt: 1, closures: [] } }
     : request(runnerId, requestId, message, timeoutMs);
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
-  const enable = (delegatablePolicyIds: string[] = []) => svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #2934",
+  // The Decision Model is a fake harness (#4104): it answers `discusses` unless a test lists the
+  // exact request text as one it would find asking for a credential, a sign-in or access.
+  const asking = new Set<string>();
+  const screen = fakeScreenRuntime(db, (request) =>
+    [...asking].some((text) => JSON.stringify(request).includes(JSON.stringify(text).slice(1, -1))) ? { verdict: "ask" } : { verdict: "discusses" });
+  svc.setDecisionRuntime(screen.runtime);
+  const enable =(delegatablePolicyIds: string[] = []) => svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #2934",
     operations: ["implementation_question", "question", "tool_approval", "policy_ask", "pr_merge", "merged_branch_deletion"],
     delegatablePolicyIds }, 1, principal);
   const snapshot: WorkflowDecisionResourceSnapshot = { category: "implementation_question", question: "Which authentication library should we implement?",
     options: [{ optionId: "a", label: "Library A" }, { optionId: "b", label: "Library B" }] };
-  const ask = (id: string, requestId: string) => svc.createWorkflowDecision(id, { requestId, resourceKey: requestId, resourceSnapshot: snapshot });
+  // The typed route's own entry point, which screens the question before it is admitted.
+  const ask = (id: string, requestId: string) => svc.createWorkflowDecisionWithVideo(id, { requestId, resourceKey: requestId, resourceSnapshot: snapshot }, () => true);
   const generic = (id: string, requestId: string, source: PendingApproval["requestSource"] = "provider_question") => svc.onSessionEvent(id, {
     kind: "question_request", requestId, occurrenceId: requestId, requestSource: source,
     questions: [{ id: "approach", question: snapshot.question, options: [{ label: "A" }, { label: "B" }] }],
   });
-  return { db, svc, principal, sent, enable, ask, generic, snapshot, make };
+  return { db, svc, principal, sent, enable, ask, generic, snapshot, make, asking, screen };
 }
 
 test("#4062 a Full Control merge is the Orchestrator's only while every issue it closes is in scope, and is never assumed to close nothing", () => {
@@ -135,11 +143,11 @@ test("pure media authority requires both participant contract inputs and never i
   } finally { h.db.close(); }
 });
 
-test("human admission preserves defaults, mode omission, scope and provider restrictions", () => {
+test("human admission preserves defaults, mode omission, scope and provider restrictions", async () => {
   const h = harness();
   try {
     assert.equal(h.db.getSession("root")!.orchestratorPolicy?.control, undefined);
-    assert.equal(h.ask("root", "custom-root").ok, false);
+    assert.equal((await h.ask("root", "custom-root")).ok, false);
     assert.equal(parseOrchestratorOverrides({ control: { mode: "full_control" } }), null, "child overrides cannot mint a grant");
     const enabled = h.enable(); assert.ok(enabled.ok, enabled.error ?? "admission failed");
     const control = enabled.data!.orchestratorPolicy!.control!;
@@ -166,7 +174,7 @@ test("root requests use standing authorization and child requests delegate; exac
   try {
     assert.ok(h.enable().ok);
     for (const id of ["root", "child"]) {
-      const asked = h.ask(id, `ask-${id}`); assert.ok(asked.ok, asked.error ?? "request failed");
+      const asked = await h.ask(id, `ask-${id}`); assert.ok(asked.ok, asked.error ?? "request failed");
       const decision = asked.data!;
       assert.equal(decision.authority, "orchestrator");
       assert.equal(decision.authorityEvaluation?.basis, id === "root" ? "standing_authorization" : "campaign_delegation");
@@ -179,7 +187,7 @@ test("root requests use standing authorization and child requests delegate; exac
       assert.ok(consumed.ok, consumed.error ?? "consume failed");
       assert.equal((await h.svc.consumeWorkflowDecision(id, decision.occurrenceId, { resourceSnapshot: h.snapshot })).ok, false);
     }
-    const changed = h.ask("child", "changed").data!;
+    const changed = (await h.ask("child", "changed")).data!;
     assert.ok(h.svc.resolveDescendantRequest("root", "child", changed.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve", selectedOptionId: "a" }, () => true).ok);
     assert.equal((await h.svc.consumeWorkflowDecision("child", changed.occurrenceId, { resourceSnapshot: { ...h.snapshot, question: "changed" } })).ok, false);
@@ -187,12 +195,17 @@ test("root requests use standing authorization and child requests delegate; exac
   } finally { h.db.close(); }
 });
 
-test("provider, parent and list projections share sensitive request ownership", () => {
+test("provider, parent and list projections share sensitive request ownership", async () => {
   const h = harness();
   try {
     assert.ok(h.enable().ok);
     h.generic("child", "child-planning");
     h.generic("root", "root-planning");
+    // Until the Decision Model screens them (#4104), nobody may answer either question.
+    assert.notEqual(h.db.getSession("root")!.pendingApproval, null, "the root's question waits for its screen");
+    assert.equal(h.svc.descendantRequests("root", () => true).data!.requests[0]!.authorityEvaluation?.reason, "credential_screen_pending");
+    assert.equal(h.svc.resolveDescendantRequest("root", "child", "child-planning", { action: "answer", answers: { approach: "A" } }, () => true).status, 409);
+    await settleScreens();
     assert.equal(h.db.getSession("child")!.pendingRequestOwners?.orchestrator, 1);
     assert.equal(h.db.getSession("root")!.pendingApproval, null, "root provider is resumed from standing authorization");
     const requests = h.svc.descendantRequests("root", () => true).data!.requests;
@@ -203,15 +216,16 @@ test("provider, parent and list projections share sensitive request ownership", 
     assert.ok(h.sent.some((message) => (message as { type: string; sessionId: string }).type === "answer_question" && (message as { sessionId: string }).sessionId === "root"));
     assert.equal(h.svc.resolveDescendantRequest("root", "root", "root-planning", { action: "answer", answers: { approach: "A" } }, () => true).ok, false);
     h.generic("child", "unknown", undefined);
+    await settleScreens();
     // Explicitly remove provenance: default parameters otherwise select the trusted source.
     const pending = h.db.getSession("child")!.pendingApproval!; delete pending.requestSource;
     h.db.setPendingApproval("child", pending);
-    // Unverified provenance about authentication is declined under Full Control (#2940): owned by
-    // the Orchestrator so the Human is never asked, and only ever declined, never answered.
-    assert.equal(h.svc.resolveDescendantRequest("root", "child", "unknown", { action: "answer", answers: { approach: "A" } }, () => true).ok, false);
+    // Unverified provenance is the Orchestrator's to decide once (#2940); the Human is never asked.
+    // A design question about authentication is no longer declined by a word (#4104).
     const owners = h.db.getSession("child")!.pendingRequestOwners!;
     assert.equal(owners.human, 0);
-    assert.equal(owners.requests!.find((r) => r.occurrenceId === "unknown")!.authorityEvaluation!.disposition, "decline");
+    const unknown = owners.requests!.find((r) => r.occurrenceId === "unknown")!.authorityEvaluation!;
+    assert.deepEqual([unknown.owner, unknown.requestClass, unknown.disposition], ["orchestrator", "unverified_tool_effects", undefined]);
     assert.ok(h.svc.resolveDescendantRequest("root", "child", "unknown", { action: "dismiss" }, () => true).ok);
   } finally { h.db.close(); }
 });
@@ -220,15 +234,15 @@ test("revocation invalidates pending and approved decisions durably and scope ch
   const h = harness();
   try {
     assert.ok(h.enable().ok);
-    const approved = h.ask("child", "approved").data!;
+    const approved = (await h.ask("child", "approved")).data!;
     assert.ok(h.svc.resolveDescendantRequest("root", "child", approved.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve", selectedOptionId: "a" }, () => true).ok);
-    const pending = h.ask("root", "pending").data!;
+    const pending = (await h.ask("root", "pending")).data!;
     const revoke = h.svc.setCampaignControl("root", { mode: "custom" }, 2, h.principal);
     assert.ok(revoke.ok, revoke.error ?? "revocation failed");
     for (const decision of [approved, pending]) assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "revoked");
     assert.equal((await h.svc.consumeWorkflowDecision("child", approved.occurrenceId, { resourceSnapshot: h.snapshot })).ok, false);
-    assert.equal(h.ask("root", "after-revoke").ok, false);
+    assert.equal((await h.ask("root", "after-revoke")).ok, false);
     assert.equal(h.db.getSession("root")!.parentControlPolicy!.revision, 3);
   } finally { h.db.close(); }
 });
@@ -589,11 +603,11 @@ test("pending root requests settle on human admission; unavailable delivery beco
   }
 });
 
-test("a root's own pending typed decision never blocks its standing allow of a verified effect (#2940)", () => {
+test("a root's own pending typed decision never blocks its standing allow of a verified effect (#2940)", async () => {
   const h = harness();
   try {
     assert.ok(h.enable().ok);
-    const own = h.ask("root", "own-decision");
+    const own = await h.ask("root", "own-decision");
     assert.ok(own.ok, own.error ?? "own decision");
     assert.equal(own.data!.status, "pending");
     assert.ok(h.db.getSession("root")!.pendingRequestOwners!.requests!.some((r) => r.occurrenceId === own.data!.occurrenceId), "the root holds its own typed decision");
@@ -634,19 +648,20 @@ test("live Human Required, deny and withdrawn asks have the same effective owner
   }
 });
 
-test("ambiguous credential-value choices are declined, never answered, even on trusted question and implementation routes", () => {
+test("questions the Decision Model finds asking for a credential are declined, never answered, on every question route (#4104)", async () => {
   const h = harness();
   try {
     assert.ok(h.enable().ok);
     for (const question of ["Which password should I use?", "Which credentials should we use to implement the feature?"]) {
+      h.asking.add(question);
       h.svc.onSessionEvent("root", { kind: "question_request", requestId: question, occurrenceId: question,
         requestSource: "provider_question", questions: [{ id: "value", question, options: [{ label: "A" }, { label: "B" }] }] });
+      await settleScreens();
       const delivered = h.sent.filter((m) => (m as { type: string; requestId: string }).type === "answer_question" &&
         (m as { requestId: string }).requestId === question) as Array<{ action: string; answers: Record<string, unknown> }>;
-      assert.deepEqual(delivered.map((m) => [m.action, Object.keys(m.answers).length]), [["dismiss", 0]],
-        "a planning source cannot authorize actual credential-value selection; the question is dismissed");
-      const typed = h.svc.createWorkflowDecision("child", { requestId: question, resourceKey: question,
-        resourceSnapshot: { ...h.snapshot, question } });
+      assert.deepEqual(delivered.map((m) => [m.action, Object.keys(m.answers).length]), [["dismiss", 0]], "the question is dismissed");
+      const typed = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: question, resourceKey: question,
+        resourceSnapshot: { ...h.snapshot, question } }, () => true);
       assert.equal(typed.ok, false);
       assert.equal(typed.status, 403);
       assert.equal(h.db.pendingWorkflowDecisionsForController("root").length, 0, "no decision is created for anyone to answer");
@@ -658,7 +673,7 @@ test("ambiguous credential-value choices are declined, never answered, even on t
   } finally { h.db.close(); }
 });
 
-test("a typed credential-handling design question is decided by the Orchestrator; one seeking a credential, sign-in or access is declined (#3844)", async () => {
+test("a typed credential-handling design question reaches the Orchestrator; the floor declines values and stores with no model call (#3844, #4104)", async () => {
   const h = harness();
   try {
     assert.ok(h.enable().ok);
@@ -666,48 +681,46 @@ test("a typed credential-handling design question is decided by the Orchestrator
       question: "Should importing a provider sign-in copy an API key, move an OAuth sign-in, or be unsupported?",
       options: [{ optionId: "copy", label: "Copy the API key" }, { optionId: "move", label: "Move the OAuth sign-in" },
         { optionId: "none", label: "Not supported" }], recommendedOptionId: "none" };
-    // The service entry point the request_workflow_decision route calls.
     const ask = (requestId: string, resourceSnapshot: WorkflowDecisionResourceSnapshot, sessionId = "child") =>
       h.svc.createWorkflowDecisionWithVideo(sessionId, { requestId, resourceKey: requestId, resourceSnapshot }, () => true);
     // The root decides the same question through its own typed route, as its question notice says.
     const rootAsked = await ask("root-import-design", design, "root");
     assert.ok(rootAsked.ok, rootAsked.error ?? "root request failed");
     assert.equal(rootAsked.data!.authorityEvaluation?.basis, "standing_authorization");
-    assert.equal(rootAsked.data!.authorityEvaluation?.disposition, undefined, "decided, not declined");
+    assert.equal(rootAsked.data!.authorityEvaluation?.credentialScreen?.verdict, "discusses");
     assert.ok(h.svc.resolveDescendantRequest("root", "root", rootAsked.data!.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve", selectedOptionId: "none" }, () => true).ok);
     assert.ok((await h.svc.consumeWorkflowDecision("root", rootAsked.data!.occurrenceId, { resourceSnapshot: design })).ok);
     const asked = await ask("import-design", design);
     assert.ok(asked.ok, asked.error ?? "request failed");
     assert.equal(asked.data!.authority, "orchestrator");
-    assert.equal(asked.data!.authorityEvaluation?.basis, "campaign_delegation");
     assert.equal(asked.data!.authorityEvaluation?.disposition, undefined, "decided, not declined");
     assert.ok(h.svc.resolveDescendantRequest("root", "child", asked.data!.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve", selectedOptionId: "none" }, () => true).ok);
-    const consumed = await h.svc.consumeWorkflowDecision("child", asked.data!.occurrenceId, { resourceSnapshot: design });
-    assert.ok(consumed.ok, consumed.error ?? "consume failed");
+    assert.ok((await h.svc.consumeWorkflowDecision("child", asked.data!.occurrenceId, { resourceSnapshot: design })).ok);
     const option = (label: string): WorkflowDecisionResourceSnapshot => ({ ...design, options: [{ optionId: "none", label: "Not supported" }, { optionId: "b", label }] });
+    // The floor: a credential literal or a credential store declines with no model call at all.
+    const calls = h.screen.calls.length;
     for (const [requestId, snapshot] of [
-      ["key-value", { ...design, question: "What API key value should the importer use?" }],
-      ["email-value", option("Use dev@example.com for the profile")],
-      ["sign-in", option("Sign in to the provider now")],
-      ["grant", option("Grant the importer access to the provider account")],
-      ["lasting", option("Always allow the importer to read provider sign-ins")],
-      ["send-url", option("Send the API key to https://collector.example for the provider test")],
-      ["upload-token", option("Upload the token to the shared bucket")],
-      ["pr-description", option("Copy the API key into the PR description")],
-      ["public-log", option("Use the token in the public log")],
+      ["key-literal", option("Copy sk-abcdefghijklmnop into the profile")],
+      ["credential-path", option("Copy ~/.codex/auth.json into the profile")],
       ["backticked-env", { ...design, question: "Should we load `.env` for the import feature?" }],
-      // CR-2.1 to CR-2.3.
-      ["tell-me", option("Tell me the API key")],
-      ["live-key", option("Copy the live API key into the profile")],
-      ["personal-key", option("Copy the personal API key into the profile")],
-      ["bare-host", option("Copy the API key to metrics.example.test")],
-      ["host-port", option("Copy the API key to metrics.example.test:9090")],
-      ["localhost-port", option("Use the API key on localhost:8080")],
     ] satisfies Array<[string, WorkflowDecisionResourceSnapshot]>) for (const sessionId of ["child", "root"]) {
       const declined = await ask(`${sessionId}-${requestId}`, snapshot, sessionId);
-      assert.equal(declined.ok, false, `${sessionId} ${requestId}`);
+      assert.equal(declined.status, 403, `${sessionId} ${requestId}`);
+    }
+    assert.equal(h.screen.calls.length, calls, "the floor never consults the Decision Model");
+    // Everything else is the Decision Model's: an `ask` verdict declines it on the same route.
+    for (const [requestId, snapshot] of [
+      ["key-value", { ...design, question: "What API key value should the importer use?" }],
+      ["sign-in", option("Sign in to the provider now")],
+      ["grant", option("Grant the importer access to the provider account")],
+      ["tell-me", option("Tell me the API key")],
+      ["bare-host", option("Copy the API key to metrics.example.test")],
+    ] satisfies Array<[string, WorkflowDecisionResourceSnapshot]>) for (const sessionId of ["child", "root"]) {
+      const snapshotText = snapshot.category === "implementation_question" ? snapshot.options.at(-1)!.label : "";
+      h.asking.add(requestId === "key-value" ? "What API key value should the importer use?" : snapshotText);
+      const declined = await ask(`${sessionId}-${requestId}`, snapshot, sessionId);
       assert.equal(declined.status, 403, `${sessionId} ${requestId}`);
     }
     assert.equal(h.db.pendingWorkflowDecisionsForController("root").length, 0, "no declined decision is left for anyone to answer");
@@ -716,7 +729,7 @@ test("a typed credential-handling design question is decided by the Orchestrator
   } finally { h.db.close(); }
 });
 
-test("questions that only mention credentials or permissions reach their owner; genuine requests are recorded as request_declined (#3913)", async () => {
+test("questions that only mention credentials or permissions reach their owner; genuine requests are recorded as request_declined (#3913, #4104)", async () => {
   const h = harness();
   try {
     assert.ok(h.enable().ok);
@@ -731,11 +744,11 @@ test("questions that only mention credentials or permissions reach their owner; 
       "Option B would widen the workflow's read-only, secret-free permissions so it can poll the GitHub Actions API. Which option should the design take?",
       "Should the design grant its job the actions: read permission so it can poll the GitHub Actions API?",
       "Option A would need the CI token to read the GitHub Actions API. Which design should we take?",
-      "Option B would need more access to the GitHub Actions API than the default workflow permissions. Which design should we take?",
       "The child's question was refused because the campaign cannot supply credentials. Should I continue without that design input?",
     ];
     for (const [index, question] of mentionOnly.entries()) {
       provider("child", `child-mention-${index}`, question);
+      await settleScreens();
       const request = h.svc.descendantRequests("root", () => true).data!.requests.find((r) => r.occurrenceId === `child-mention-${index}`);
       assert.equal(request?.responseOwner, "orchestrator", question);
       assert.equal(request?.authorityEvaluation?.disposition, undefined, `reaches the Orchestrator: ${question}`);
@@ -746,19 +759,22 @@ test("questions that only mention credentials or permissions reach their owner; 
         assert.equal(typed.data!.authorityEvaluation?.disposition, undefined, question);
       }
       provider("root", `root-mention-${index}`, question);
+      await settleScreens();
       assert.ok(dismissed(`root-mention-${index}`), `a root's own question is dismissed: ${question}`);
     }
     assert.equal(declinedRecords().length, 0, "nothing that only mentions credentials is blocked work");
     for (const [index, question] of ["Please paste your GitHub token here", "Grant this session wider provider access for the design.",
       "The campaign cannot supply credentials, so paste one here for the design."].entries()) {
+      h.asking.add(question);
       provider("child", `child-genuine-${index}`, question);
+      await settleScreens();
       assert.ok(dismissed(`child-genuine-${index}`), `declined, never forwarded: ${question}`);
       for (const sessionId of ["child", "root"]) {
         const typed = await ask(sessionId, `${sessionId}-typed-genuine-${index}`, question);
-        assert.equal(typed.ok, false, `${sessionId} typed: ${question}`);
         assert.equal(typed.status, 403, `${sessionId} typed: ${question}`);
       }
       provider("root", `root-genuine-${index}`, question);
+      await settleScreens();
       assert.ok(dismissed(`root-genuine-${index}`), question);
     }
     assert.deepEqual(declinedRecords().map((record) => [record.resource.sessionId, record.state, record.effectiveOwner]).sort(),

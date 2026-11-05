@@ -58,6 +58,7 @@ import { DetailSkeleton, Skeleton } from "./common.js";
 import { ChevronLeftIcon } from "./Icons.js";
 import { CampaignIssueScopePanel } from "./CampaignIssueScopePanel.js";
 import { CampaignFollowUpLimit } from "./CampaignFollowUpLimit.js";
+import { CampaignDecisionModelChecks } from "./CampaignDecisionModelChecks.js";
 import { CampaignRecoveryNotice } from "./CampaignRecoveryNotice.js";
 import { Notice } from "./Notice.js";
 import { StaleContent } from "./StaleContent.js";
@@ -256,6 +257,12 @@ function AvailableCampaignStatus({
                   onOpenRequest={onOpenRequest}
                 />
               )}
+              <CampaignDecisionModelChecks
+                sessionId={session.id}
+                canClassify={availability.role === "campaign"}
+                refreshKey={data.summary.campaign}
+                onOpenSession={onOpenSession}
+              />
               {data.summary.campaign?.handoffs && (
                 <CampaignHandoffs
                   handoffs={data.summary.campaign.handoffs}

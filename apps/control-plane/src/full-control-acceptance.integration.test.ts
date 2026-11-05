@@ -19,6 +19,7 @@ import { Hub } from "./hub.js";
 import type { HumanPrincipal } from "./identity.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { SessionsService } from "./sessions.js";
+import { fakeScreenRuntime, settleScreens } from "./credential-screen-test-fixture.js";
 import { shortVideoDecoderAvailable } from "./video-frame-decode.js";
 
 const REPOSITORY = "fixture-owner/full-control-acceptance";
@@ -84,13 +85,15 @@ function stack(driver: "codex-app-server" | "claude-code", protocol = PROTOCOL_V
     return new SessionsService(db, hub, { info() {}, warn() {}, error() {} }, undefined, undefined, undefined, undefined, undefined,
       undefined, false, undefined, undefined, video.workflowVideoApprovals, disclosures, undefined, video.preparedMediaActiveStops);
   };
-  let svc = service();
+  // A healthy Decision Model (#4104) on a fake harness screens every question as a design subject.
+  const screened = (created: SessionsService) => { created.setDecisionRuntime(fakeScreenRuntime(db, () => ({ verdict: "discusses" })).runtime); return created; };
+  let svc = screened(service());
   const enable = (budgetAuthority?: CampaignBudgetAuthority, expectedRevision = 1) => svc.setCampaignControl("root", {
     mode: "full_control", objective: "Implement the fixture button interaction for issue 1",
     operations: [...OPERATIONS], delegatablePolicyIds: [],
     ...(budgetAuthority ? { budgetAuthority } : {}),
   }, expectedRevision, human);
-  const ask = (sessionId: string, requestId: string) => svc.createWorkflowDecision(sessionId,
+  const ask = (sessionId: string, requestId: string) => svc.createWorkflowDecisionWithVideo(sessionId,
     { requestId, resourceKey: requestId, resourceSnapshot: question });
   const approve = (sessionId: string, occurrenceId: string) => svc.resolveDescendantRequest("root", sessionId,
     occurrenceId, { action: "resolve_workflow_decision", outcome: "approve", selectedOptionId: "inline" }, () => true);
@@ -111,9 +114,9 @@ function stack(driver: "codex-app-server" | "claude-code", protocol = PROTOCOL_V
         config: { model: "fixture-vision" }, prompt: "Implement fixture issue 1", campaignWorkItemId },
       undefined, undefined, false, false, false, { parentSessionId: "root" });
     },
-    reopen() { db.close(); db = ControlPlaneDb.open(path); svc = service(); },
+    reopen() { db.close(); db = ControlPlaneDb.open(path); svc = screened(service()); },
     /** Rebuild the service on the same database with frame review switched on or off. */
-    setFrameReview(enabled: boolean, controller?: string) { frameReview = { enabled, controller }; svc = service(); },
+    setFrameReview(enabled: boolean, controller?: string) { frameReview = { enabled, controller }; svc = screened(service()); },
     close() { db.close(); rmSync(directory, { recursive: true, force: true }); },
   };
 }
@@ -202,7 +205,7 @@ for (const driver of ["codex-app-server", "claude-code"] as const) {
       const created = h.createAssignedChild(workItemId);
       assert.ok(created.ok && created.data, created.error ?? "retry launch refused");
       const childId = created.data.id;
-      const decision = h.ask(childId, "assigned-implementation"); assert.ok(decision.ok && decision.data);
+      const decision = await h.ask(childId, "assigned-implementation"); assert.ok(decision.ok && decision.data);
       assert.ok(h.approve(childId, decision.data.occurrenceId).ok);
       const allocation = h.db.campaignBudgets.allocation(childId);
       h.reopen();
@@ -226,6 +229,9 @@ for (const driver of ["codex-app-server", "claude-code"] as const) {
       h.svc.onSessionEvent("root", { kind: "question_request", requestId: "root-plan", occurrenceId: "root-plan",
         requestSource: "provider_question", questions: [{ id: "placement", question: question.question,
           options: [{ label: "Inline" }, { label: "Footer" }] }] });
+      // The root's question is dismissed once its Decision Model screen settles (#4104); its parked
+      // provider asks for nothing else until then.
+      await settleScreens();
       h.inspection("root", "root-inspection");
       assert.equal(h.db.getSession("root")!.pendingApproval, null);
       assert.equal(h.sent.filter((m) => m.type === "answer_question").length, 1);
@@ -234,7 +240,7 @@ for (const driver of ["codex-app-server", "claude-code"] as const) {
       assert.equal(h.db.getSession("worker")!.pendingRequestOwners!.orchestrator, 1);
       assert.ok(h.svc.resolveDescendantRequest("root", "worker", "worker-inspection",
         { action: "approve", optionId: "once" }, () => true).ok);
-      const requested = h.ask("worker", "placement"); assert.ok(requested.ok, requested.error ?? "request failed");
+      const requested = await h.ask("worker", "placement"); assert.ok(requested.ok, requested.error ?? "request failed");
       const decision = requested.data!;
       assert.ok(h.approve("worker", decision.occurrenceId).ok);
       h.reopen();
@@ -329,7 +335,7 @@ for (const driver of ["codex-app-server", "claude-code"] as const) {
     try {
       assert.ok(h.enable().ok);
       const event = { kind: "question_request" as const, requestId: "credential-value", occurrenceId: "credential-value",
-        requestSource: "provider_question" as const, questions: [{ id: "secret", question: "Which password should I use?",
+        requestSource: "provider_question" as const, questions: [{ id: "secret", question: "Which password should I use?", secret: true,
           options: [{ label: "A" }, { label: "B" }] }] };
       for (let index = 0; index < 3; index++) h.svc.onSessionEvent("worker", event);
       const humanRequests = h.svc.descendantRequests("root", () => true, "human");
@@ -346,10 +352,10 @@ for (const driver of ["codex-app-server", "claude-code"] as const) {
         .map((decline) => [decline.sessionId, decline.requestClass, decline.count]), [["worker", "secrets_and_sign_in", 1]]);
       assert.equal(h.svc.resolveDescendantRequest("root", "worker", event.occurrenceId,
         { action: "answer", answers: { secret: "A" } }, () => true).ok, false);
-      const unrelated = h.ask("sibling", "sibling-placement").data!;
+      const unrelated = (await h.ask("sibling", "sibling-placement")).data!;
       assert.ok(h.approve("sibling", unrelated.occurrenceId).ok);
       assert.ok((await h.svc.consumeWorkflowDecision("sibling", unrelated.occurrenceId, { resourceSnapshot: question })).ok);
-      const stale = h.ask("sibling", "pre-restart").data!;
+      const stale = (await h.ask("sibling", "pre-restart")).data!;
       assert.ok(h.approve("sibling", stale.occurrenceId).ok);
       assert.ok(h.svc.restart("sibling").ok);
       h.reopen();

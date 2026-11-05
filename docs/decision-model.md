@@ -83,6 +83,26 @@ ceiling, change a repository or grant an operation; callers enforce that before 
 with `narrowToProposal`. Write a repository floor as "a repository in the campaign's boundary" so it
 holds for single- and multi-repository boundaries.
 
+## The Question and Credential Screen (`credential_screen`, #4104)
+
+`apps/control-plane/src/credential-screen.ts` screens Full Control question and tool text that the
+deterministic floor in `@wollipog/protocol` (`campaign-authority.ts`) left open. The `request`
+data field is one JSON document: the `surface` (`implementation_question`, `provider_question`,
+`tool_request` or `owner_decision`) and the request's own text, quoted. Verdicts are `ask`,
+`discusses` and `uncertain`. The occurrence key names the session, the request occurrence and a
+digest of that text, so a replay joins the recorded outcome.
+
+- The typed route screens an implementation question before it is admitted and passes the fact to
+  the evaluation. A re-evaluation of a stored occurrence never re-screens it.
+- A provider question or tool request is stored first and screened asynchronously. Every
+  evaluation reads its fact from the audit (`campaignPolicyRequest`), so a runner can never supply
+  one; until it settles the request is `credential_screen_pending` and nobody may answer it.
+- The person-owned request for an uncertain or failed screen is the affected request itself, held
+  as `credential_screen_review`. Its owner classifies it with
+  `POST /api/sessions/:id/campaign/decisions/:occurrenceId/classify` (`decline` or
+  `orchestrator`), once. `campaign_decision_subjects` records what each occurrence affected and the
+  classification, so `GET /api/sessions/:id/campaign/decisions` lists each verdict beside its request.
+
 ## Audit and Usage
 
 `decision_occurrences` records the kind, prompt version, resolved target (runner, harness, model and
