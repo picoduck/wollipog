@@ -877,14 +877,15 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      executes the exact approved option. Orchestrators and child sessions are refused with their
 //      role's guidance. Older runners and control planes refuse the tool by name. (286 is claimed
 //      by an open pull request.)
-// 288: Switch and Continue (#4138). A same-runner `location_switch` approval can name the action
+// 289: Switch and Continue (#4138). A same-runner `location_switch` approval can name the action
 //      `switch`; the control plane sends `session_location_switch` to the session's runner, which
 //      re-verifies the target workspace, path and origin, records `pendingLocationSwitch` durably,
 //      and at the next turn boundary moves the live session into a new (or recovered-branch)
 //      worktree of the target repository, carries the provider conversation over and continues.
 //      Snapshots carry `locationSwitch` (pending or failed); the control plane moves the session
-//      row only under a consumed switch naming exactly that Location.
-export const PROTOCOL_VERSION = 288;
+//      row only under a consumed switch naming exactly that Location. (288 is claimed by an open
+//      pull request.)
+export const PROTOCOL_VERSION = 289;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1278,7 +1279,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionLocationSwitch: 287,
   /** (#4138) A same-runner Location switch of the live session: `session_location_switch` moves it
    * at its next turn boundary and resumes the same conversation in the target repository. */
-  sessionLocationSwitchLive: 288,
+  sessionLocationSwitchLive: 289,
   /** v239 runner answers `gitlab_merge_preflight`, which a GitLab `pr_merge` consume requires (#3602). */
   gitlabMergeDecisions: 239,
   /** v242 runner answers `github_merge_preflight`, the closing-reference check of a GitHub merge (#3713). */
