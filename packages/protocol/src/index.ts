@@ -5687,6 +5687,9 @@ export interface PendingApproval {
   standingAdmissionFailure?: "provider_delivery_unavailable";
   /** CP-derived mandatory human rule on this occurrence. Provider input cannot set it. */
   humanRequired?: boolean;
+  /** CP-derived Decision Model screen of this request's text (#4104). The control plane overwrites
+   * it on every Full Control evaluation, so a runner or provider value is never read. */
+  credentialScreen?: import("./campaign-authority.js").CredentialScreenFact;
   /** Runner bridge envelope, not question/tool input. Missing provenance fails closed in Full
    * Control when sensitivity cannot otherwise be verified. */
   requestSource?: CampaignRequestSource;
@@ -7140,7 +7143,7 @@ export interface SessionNamingConnectionTestResult {
 /** A typed control-plane decision (#4101). Each kind has a fixed, versioned prompt and an output
  * schema registered in the control plane. `probe` is the fixed Test Decision Model question;
  * the Full Control callers (#4102–#4104) add their kinds here with their prompts. */
-export type DecisionKind = "probe";
+export type DecisionKind = "probe" | "credential_screen";
 
 /** Why one Decision attempt failed. The control plane, not the runner, decides what is transient:
  * see DECISION_TRANSIENT_ERROR_CLASSES. */
@@ -7280,9 +7283,26 @@ export interface DecisionModelTestResult {
 }
 
 /** Campaign Status: its Decision calls and their separate usage. Never managed worker accounting. */
+/** What a campaign decision affected (#4104), so Campaign Status shows its verdict beside it. */
+export interface CampaignDecisionSubject {
+  /** The session whose request was screened. */
+  sessionId: string;
+  surface: "implementation_question" | "provider_question" | "tool_request" | "owner_decision";
+  /** The affected request: a workflow decision request id, or a provider request occurrence id. */
+  requestId: string;
+  /** The owner's classification of an uncertain or failed screen. */
+  classification?: "decline" | "orchestrator";
+}
+
+/** Owner classification of a question the Decision Model could not screen (#4104). It never
+ * carries an answer to the question itself. */
+export interface ClassifyCampaignDecisionRequest {
+  classification: "decline" | "orchestrator";
+}
+
 export interface CampaignDecisionsResponse {
   campaignSessionId: string;
-  decisions: DecisionOccurrenceView[];
+  decisions: Array<DecisionOccurrenceView & { subject?: CampaignDecisionSubject }>;
   usage: DecisionUsageView & { calls: number; unpricedCalls: number };
 }
 

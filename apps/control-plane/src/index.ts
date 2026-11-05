@@ -103,6 +103,7 @@ import {
   type ExecuteWorkflowDecisionRequest,
   type CreateOwnerDecisionRequest,
   type HandWorkflowDecisionToOwnerRequest,
+  type ClassifyCampaignDecisionRequest,
   type RecordOrchestratorFollowUpRequest,
   type AdjudicateCampaignRecommendationRequest,
   type GetCampaignWorkItemsRequest,
@@ -1064,6 +1065,8 @@ const svc = new SessionsService(
   videoEvidence.preparedMediaActiveStops,
 );
 videoEvidence.attach(svc, hub);
+// The Full Control screens (#4104) share the audited runtime and its rate table.
+svc.setDecisionRuntime(decisionRuntime);
 db.setCampaignVideoReviewSource((root, uiEvidenceOwner) => svc.campaignVideoReview(root, uiEvidenceOwner));
 const roleConversions = new SessionRoleConversions(db, hub, (event, fields) =>
   app.log.info({ event, ...fields }, "session role conversion"), () => svc.expireAutomationCreationDecisions());
@@ -4870,7 +4873,7 @@ app.post("/api/sessions/:id/owner-decisions", async (req, reply) => {
     return reply.code(403).send({ error: "a matching root Orchestrator credential is required" });
   }
   if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
-  return respond(reply, svc.createOwnerDecision(id, req.body as CreateOwnerDecisionRequest,
+  return respond(reply, await svc.createOwnerDecision(id, req.body as CreateOwnerDecisionRequest,
     (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 
@@ -4891,6 +4894,17 @@ app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/hand-to-owner", asy
   return respond(reply, svc.handWorkflowDecisionToOwner(id, occurrenceId,
     { reason: body?.reason as string, ...(body?.sessionId !== undefined ? { sessionId: body.sessionId } : {}) },
     (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+// #4104: the campaign owner classifies a question the Decision Model could not screen. People only.
+app.post("/api/sessions/:id/campaign/decisions/:occurrenceId/classify", async (req, reply) => {
+  const { id, occurrenceId } = req.params as { id: string; occurrenceId: string };
+  const human = requestHuman(req);
+  if (!human) return reply.code(403).send({ error: "only the campaign's owner can classify this question" });
+  if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
+  if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
+  return respond(reply, svc.classifyCampaignDecision(id, occurrenceId, req.body as ClassifyCampaignDecisionRequest,
+    { kind: "human", id: humanActorId(req) }, (sessionId) => db.canAccessSession(human, sessionId)));
 });
 
 app.get("/api/sessions/:id/descendant-requests", async (req, reply) => {

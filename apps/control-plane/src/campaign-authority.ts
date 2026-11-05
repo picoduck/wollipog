@@ -1,6 +1,6 @@
 import {
   campaignAuthorityPreflight, resolveCampaignAuthority, runnerSupportsProtocol, validCampaignControl,
-  type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope,
+  type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope, type CredentialScreenFact,
   type ParentControlPolicy, type PendingApproval, type SessionView, type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
 import type { HumanPrincipal } from "./identity.js";
@@ -109,6 +109,8 @@ export function evaluateCampaignAuthority(
   peerContracts?: { requester?: unknown; controller?: unknown },
   /** #4075: `ControlPlaneDb.reviewExtensionCap` for a review_round_extension snapshot. */
   reviewExtensionCap?: "within" | "exceeded",
+  /** #4104: the typed route's Decision Model screen of an implementation question, at admission only. */
+  credentialScreen?: CredentialScreenFact,
 ): CampaignAuthorityEvaluation {
   const control = controller.orchestratorPolicy?.control;
   const full = control?.mode === "full_control";
@@ -128,7 +130,8 @@ export function evaluateCampaignAuthority(
     // Both the requester's runner and the controller's must support capped extensions (#4075).
     ...(snapshot?.category === "review_round_extension" && reviewExtensionCap &&
       runnerSupportsProtocol(protocol, "fullControlReviewExtensions") &&
-      runnerSupportsProtocol(controllerProtocol, "fullControlReviewExtensions") ? { reviewExtensionCap } : {}) });
+      runnerSupportsProtocol(controllerProtocol, "fullControlReviewExtensions") ? { reviewExtensionCap } : {}),
+    ...(snapshot?.category === "implementation_question" && credentialScreen ? { credentialScreen } : {}) });
   const repositoryBound = !pending || (controller.runnerId !== undefined && requester.runnerId === controller.runnerId &&
     controller.workspaceId !== undefined && controller.workspaceId !== null && requester.workspaceId === controller.workspaceId);
   const issueOperation = snapshot?.category === "campaign_issue_scope" || snapshot?.category === "issue_closure" ||
