@@ -51,6 +51,31 @@ export function onlyOtherRepositories(text: string, n: number, repositories: rea
   });
 }
 
+const NUMBER_WORDS = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
+  "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"];
+
+/** Whether the message states `n` as a count: its digits, or for up to twenty its English word. */
+export function writtenAsCount(text: string, n: number): boolean {
+  if (writtenAsDigits(text, n)) return true;
+  const word = NUMBER_WORDS[n - 1];
+  return word !== undefined && new RegExp(String.raw`(?<![\p{L}-])${word}(?![\p{L}-])`, "iu").test(text);
+}
+
+// What may stand between a range's two ends: a dash, `..`, `to`, `through` or `thru`, with an
+// optional `#` or `issue`/`issues` before the last end.
+const RANGE_JOIN = /^\s*(?:[-–—]|\.\.|to|through|thru)\s*(?:#|issues?\s+#?)?$/iu;
+
+/** Whether the message writes `first` and `last` as one range (`#2997–#3005`, `issues 10 through
+ * 14`, `10..14`), so its inner numbers come from the owner's own words, not from two numbers the
+ * model joined. A floor only. */
+export function writtenAsRange(text: string, first: number, last: number): boolean {
+  const ends = digitOccurrences(text, last);
+  return digitOccurrences(text, first).some((start) => {
+    const from = start + String(first).length;
+    return ends.some((end) => end > from && end - from <= 32 && RANGE_JOIN.test(text.slice(from, end)));
+  });
+}
+
 /** The fields of a `scope_grant` verdict, as `validateDecisionOutput` returns them. */
 export interface ScopeGrantFields {
   explicit: Array<{ repository: string; number: number }>;
@@ -72,7 +97,9 @@ export interface ScopeGrantCandidates {
   explicit: number[];
   context: number[];
   dropped: Array<{ repository: string; number: number; reason: ScopeGrantDropReason }>;
-  selection: { repository: string; requestedCount: number | null; criteria: string; constraints: string[] } | null;
+  /** `requestedCount` is a count the message states; `unstatedCount` one the model gave that the
+   * message does not, which can only lower the default. */
+  selection: { repository: string; requestedCount: number | null; unstatedCount?: number; criteria: string; constraints: string[] } | null;
   /** The operations the message leaves, when it narrowed them; null when it did not. */
   operations: string[] | null;
 }
@@ -115,6 +142,12 @@ export function scopeGrantCandidates(text: string, fields: ScopeGrantFields, bou
   const ranges = fields.ranges.filter((range) => {
     const ends = [range.first, range.last].map((n) => admissible(range.repository, n));
     if (!ends.every(Boolean)) return false;
+    // Two numbers the message writes apart are not a range the owner asked for, and a range whose
+    // end is context is not one either: neither expands.
+    if (!writtenAsRange(text, range.first, range.last) || context.has(range.first) || context.has(range.last)) {
+      drop(range.repository, range.first, "range_not_in_message"); drop(range.repository, range.last, "range_not_in_message");
+      return false;
+    }
     if (range.first >= range.last || range.last - range.first >= MAX_MESSAGE_ISSUES) {
       drop(range.repository, range.first, "range_too_wide"); drop(range.repository, range.last, "range_too_wide");
       return false;
@@ -135,7 +168,9 @@ export function scopeGrantCandidates(text: string, fields: ScopeGrantFields, bou
     dropped: dropped.sort((a, b) => a.number - b.number),
     selection: selectionRepository ? {
       repository: selectionRepository,
-      requestedCount: fields.selectionCount > 0 ? fields.selectionCount : null,
+      // A count the message does not state is not the owner's: it never raises the default.
+      requestedCount: fields.selectionCount > 0 && writtenAsCount(text, fields.selectionCount) ? fields.selectionCount : null,
+      ...(fields.selectionCount > 0 && !writtenAsCount(text, fields.selectionCount) ? { unstatedCount: fields.selectionCount } : {}),
       criteria: fields.selectionCriteria.replace(/\s+/gu, " ").trim(),
       constraints: fields.selectionConstraints.map((c) => c.replace(/\s+/gu, " ").trim()).filter(Boolean),
     } : null,
@@ -176,7 +211,7 @@ export function grantOperations(launch: readonly CampaignAuthorityOperation[], a
 export function grantSelection(selection: ScopeGrantCandidates["selection"], scoped: number, boundary: CampaignAuthorityBoundary,
   derived: FullControlDerivedLimits | undefined): ScopeGrantSelection | undefined {
   if (!selection) return undefined;
-  const wanted = selection.requestedCount ?? SCOPE_GRANT_DEFAULT_SELECTION_COUNT;
+  const wanted = selection.requestedCount ?? Math.min(SCOPE_GRANT_DEFAULT_SELECTION_COUNT, selection.unstatedCount ?? SCOPE_GRANT_DEFAULT_SELECTION_COUNT);
   const explicitMax = derived?.maxIssues ? undefined : boundary.issueAuthority?.maxIssues;
   const room = Math.max(0, Math.min(MAX_MESSAGE_ISSUES, explicitMax ?? MAX_MESSAGE_ISSUES) - scoped);
   const count = Math.min(wanted, room);

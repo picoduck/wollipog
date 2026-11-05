@@ -21,6 +21,7 @@ const DROP_REASONS: Record<ScopeGrantDropReason, string> = {
   not_in_message: "not written in the message",
   other_repository: "outside the campaign's repositories",
   not_an_issue: "not an issue of the repository",
+  range_not_in_message: "a range the message doesn't write",
   range_too_wide: "in a range too wide to expand",
   over_ceiling: "over Maximum Issues",
 };

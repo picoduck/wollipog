@@ -3012,9 +3012,10 @@ export const SCOPE_GRANT_DEFAULT_SELECTION_COUNT = 3;
 
 /** Why a number the Decision Model returned grants nothing (#4102): it is not written in the
  * message as a digit string, it belongs to a repository outside the campaign's boundary, the
- * runner did not read it as an issue of the campaign repository, it is in a range too wide to
- * expand, or an explicit Maximum Issues left no room for it. */
-export type ScopeGrantDropReason = "not_in_message" | "other_repository" | "not_an_issue" | "range_too_wide" | "over_ceiling";
+ * runner did not read it as an issue of the campaign repository, it ends a range the message does
+ * not write as one, it is in a range too wide to expand, or an explicit Maximum Issues left no room
+ * for it. */
+export type ScopeGrantDropReason = "not_in_message" | "other_repository" | "not_an_issue" | "range_not_in_message" | "range_too_wide" | "over_ceiling";
 
 /** Issues the owner's first message asked the campaign to choose (#4102), as the Decision Model
  * read them. `count` is the ceiling selection admissions count against, never follow-up room;

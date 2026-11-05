@@ -8,7 +8,7 @@ import type { CampaignAuthorityBoundary } from "@wollipog/protocol";
 import { DECISION_KINDS, decisionOutputSchema, renderDecisionInput, validateDecisionOutput } from "./decision-kinds.js";
 import {
   boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, onlyOtherRepositories, resolveGrantRepository,
-  scopeGrantCandidates, writtenAsDigits, type ScopeGrantFields,
+  scopeGrantCandidates, writtenAsCount, writtenAsDigits, writtenAsRange, type ScopeGrantFields,
 } from "./scope-grant.js";
 import { EMPTY_GRANT, issues } from "./scope-grant-test-fixture.js";
 
@@ -58,6 +58,41 @@ test("the floors drop invented numbers, other repositories and over-wide ranges,
     "owner/repo#1:range_too_wide", "other/repo#5:other_repository", "owner/repo#5:other_repository", "owner/repo#500:range_too_wide",
     "owner/repo#31337:not_in_message",
   ]);
+});
+
+test("a range expands only where the message writes it as one, and never from a context end", () => {
+  for (const text of ["Fix #10–#14", "Fix #10-#14", "Fix #10..#14", "Fix issues 10 through 14", "Fix #10 to issue #14", "Fix 10-14"]) {
+    assert.equal(writtenAsRange(text, 10, 14), true, text);
+    assert.deepEqual(scopeGrantCandidates(text, fields({ ranges: [{ repository: "", first: 10, last: 14 }] }), BOUNDARY).explicit,
+      [10, 11, 12, 13, 14], text);
+  }
+  // Two numbers written apart are not a range: the model cannot join them into the issues between.
+  const apart = scopeGrantCandidates("Fix #1 and #100", fields({ explicit: issues(1), ranges: [{ repository: "", first: 1, last: 100 }] }), BOUNDARY);
+  assert.deepEqual(apart.explicit, [1]);
+  assert.deepEqual(apart.dropped.map(({ number, reason }) => `${number}:${reason}`), ["1:range_not_in_message", "100:range_not_in_message"]);
+  assert.equal(writtenAsRange("Fix #10 and #14", 10, 14), false);
+  assert.equal(writtenAsRange("See #10, then fix everything up to #14", 10, 14), false);
+  // A range whose end the model also calls context expands nothing.
+  const cited = scopeGrantCandidates("See #10–#14", fields({ ranges: [{ repository: "", first: 10, last: 14 }], context: issues(10) }), BOUNDARY);
+  assert.deepEqual(cited.explicit, []);
+  assert.deepEqual(cited.context, [10]);
+});
+
+test("a selection count the message does not state can only lower the default", () => {
+  assert.equal(writtenAsCount("Find the five highest-priority issues", 5), true);
+  assert.equal(writtenAsCount("Find the 5 highest-priority issues", 5), true);
+  assert.equal(writtenAsCount("Find the highest-priority issues", 50), false);
+  const selection = (text: string, selectionCount: number) => grantSelection(scopeGrantCandidates(text,
+    fields({ selectionRequested: true, selectionCount, selectionCriteria: "highest priority" }), BOUNDARY).selection, 0, boundary(1),
+    { acceptedFollowUps: true, maxIssues: true });
+  assert.deepEqual(selection("Find the five highest-priority issues", 5),
+    { repository: "owner/repo", count: 5, defaulted: false, requestedCount: 5, criteria: "highest priority", constraints: [] });
+  // An invented 50 never raises the ceiling: it falls back to the default.
+  assert.deepEqual(selection("Find the highest-priority issues", 50),
+    { repository: "owner/repo", count: 3, defaulted: true, criteria: "highest priority", constraints: [] });
+  // "A couple" read as 2 keeps the lower count, still marked as defaulted since the message states no number.
+  assert.deepEqual(selection("Find a couple of high-priority issues", 2),
+    { repository: "owner/repo", count: 2, defaulted: true, criteria: "highest priority", constraints: [] });
 });
 
 test("a selection keeps its count, defaults to 3 without one, and an explicit Maximum Issues caps it", () => {
