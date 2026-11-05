@@ -4121,6 +4121,7 @@ export class SessionManager {
       branch: worktree.branch,
       source: worktree.source === "created" ? "created" : "legacy",
       ...(worktree.baseRef ? { baseRef: worktree.baseRef } : {}),
+      ...(worktree.branchPreexisted ? { preserveBranch: true } : {}),
       trigger,
       removalMode,
       createdAt: Date.now(),
@@ -4394,6 +4395,17 @@ export class SessionManager {
       this.cleanupJournal.add(record);
       await this.runCleanupTeardown(record, meta);
     };
+    // A branch that existed before this worktree (#4138) is never deleted, and its worktree is
+    // removed only when nothing in it changed; otherwise the worktree stays for its person.
+    if (record.preserveBranch) {
+      try {
+        await beforeRemove();
+        await releaseRecoveredWorktree(record.repoPath, record.worktreePath, { context: record.context });
+        return { removed: true };
+      } catch {
+        return { removed: false, reason: "unavailable" };
+      }
+    }
     if (record.removalMode === "safe") {
       return this.discardSessionWorktreeIfSafe(
         record.repoPath,
@@ -14429,6 +14441,8 @@ export class SessionManager {
       worktree = {
         id: created.path.split(/[\\/]/u).at(-1)!, path: created.path, branch: created.branch, baseRef: created.baseRef,
         baseCommit: created.baseCommit, source: "created", ...(defaultBranch ? { defaultBranch } : {}),
+        // A recovered branch is the person's existing work: removing this worktree keeps it.
+        ...(pending.recoverBranch ? { branchPreexisted: true } : {}),
       };
     } catch (error) {
       this.failLocationSwitch(sessionId, entry, pending, error instanceof LocationSwitchRefusal ? error.message

@@ -22919,11 +22919,12 @@ export class ControlPlaneDb {
   }
 
   /** Mark an approved switch as being carried out. Fails once any attempt has claimed it. */
-  claimLocationSwitch(occurrenceId: string, resourceDigest: string, now: number): boolean {
+  claimLocationSwitch(occurrenceId: string, resourceDigest: string, now: number,
+    target?: { action: "switch" | "new_session"; locationId: string }): boolean {
     return Number(this.stmt(`UPDATE workflow_decisions SET location_switch_result=?
       WHERE occurrence_id=? AND category='location_switch' AND authority='human' AND status='approved'
         AND resource_digest=? AND location_switch_approved_by IS NOT NULL AND location_switch_result IS NULL`)
-      .run(JSON.stringify({ state: "starting", claimedAt: now }), occurrenceId, resourceDigest).changes) === 1;
+      .run(JSON.stringify({ state: "starting", claimedAt: now, ...target }), occurrenceId, resourceDigest).changes) === 1;
   }
 
   /** An attempt that started nothing gives its claim back, so the approval can be retried. */
@@ -22943,14 +22944,24 @@ export class ControlPlaneDb {
   /** The Project Location a consumed Switch and Continue approval moved `sessionId` to, when it is
    * exactly (runner, workspace); otherwise null (#4138). */
   approvedLocationSwitchTarget(sessionId: string, runnerId: string, workspaceId: string): ProjectLocationView | null {
-    const rows = this.stmt(`SELECT location_switch_result AS result FROM workflow_decisions
-      WHERE session_id=? AND category='location_switch' AND status='consumed'
-        AND json_extract(location_switch_result, '$.action')='switch'
-      ORDER BY consumed_at DESC LIMIT 5`).all(sessionId) as Array<{ result: string }>;
+    // A claimed switch whose runner reply was lost counts too: the runner may have recorded it and
+    // moved the session, and the row must follow. Moving here completes that claim's receipt.
+    const rows = this.stmt(`SELECT occurrence_id AS occurrenceId, status, location_switch_result AS result FROM workflow_decisions
+      WHERE session_id=? AND category='location_switch' AND json_extract(location_switch_result, '$.action')='switch'
+        AND (status='consumed' OR (status='approved' AND json_extract(location_switch_result, '$.state')='starting'))
+      ORDER BY COALESCE(consumed_at, resolved_at) DESC LIMIT 5`).all(sessionId) as Array<{ occurrenceId: string; status: string; result: string }>;
     for (const row of rows) {
-      const locationId = parseJson<{ locationId?: unknown }>(row.result)?.locationId;
-      const location = typeof locationId === "string" ? this.projectLocation(locationId) : null;
-      if (location && location.runnerId === runnerId && location.workspaceId === workspaceId) return location;
+      const claim = parseJson<{ locationId?: unknown; claimedAt?: unknown }>(row.result);
+      const location = typeof claim?.locationId === "string" ? this.projectLocation(claim.locationId) : null;
+      if (!location || location.runnerId !== runnerId || location.workspaceId !== workspaceId) continue;
+      if (row.status === "approved") {
+        const completedAt = typeof claim!.claimedAt === "number" ? claim!.claimedAt : Date.now();
+        this.stmt(`UPDATE workflow_decisions SET status='consumed', consumed_at=?, location_switch_result=?
+          WHERE occurrence_id=? AND status='approved' AND json_extract(location_switch_result, '$.state')='starting'`)
+          .run(completedAt, JSON.stringify({ action: "switch", locationId: location.id, sessionId,
+            navigationPath: `/sessions/~${Buffer.from(sessionId, "utf16le").toString("base64url")}`, completedAt }), row.occurrenceId);
+      }
+      return location;
     }
     return null;
   }

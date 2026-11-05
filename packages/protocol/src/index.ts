@@ -8760,6 +8760,9 @@ export interface SessionWorktreeView {
   /** Commit resolved from baseRef when this worktree was created. */
   baseCommit?: string;
   source: "legacy" | "created" | "attached";
+  /** (#4138) The runner created this worktree on a branch that existed before it, such as one a
+   * Location switch recovered. Removing the worktree never deletes or force-removes that branch. */
+  branchPreexisted?: boolean;
   /** Protocol v141: repository-owned setup lifecycle. Environment values and copied contents are
    * deliberately runner-private; only names, timing, and bounded outcomes cross the wire. */
   setup?: WorktreeSetupState;

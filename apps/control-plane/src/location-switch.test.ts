@@ -217,17 +217,29 @@ test("a refused switch gives its approval back, and an unconfirmed one is never 
     const again = await h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
     assert.match(again.error!, /may already have moved this session/u);
     assert.equal(h.switches.length, 2, "after an unconfirmed attempt the runner is not asked again");
+    // The runner did record it and moved the session: its snapshot moves the row and completes the receipt.
+    reportWorkspace(h.db, "docs");
+    const session = h.db.getSession("self")!;
+    assert.deepEqual([session.workspaceId, session.projectLocationId], ["docs", h.locations.docs.id]);
+    const settled = h.db.workflowDecisionByOccurrence(decision.occurrenceId)!;
+    assert.equal(settled.status, "consumed");
+    assert.equal(settled.locationSwitchResult?.locationId, h.locations.docs.id);
   } finally { h.db.close(); }
 });
+
+/** The session's runner reports it in `workspaceId`, as a runtime snapshot does after a switch. */
+function reportWorkspace(db: ControlPlaneDb, workspaceId: string): void {
+  db.updateSessionFromSnapshot("self", {
+    id: "self", workspaceId, agentId: "agent", title: "App Session", status: "idle", driver: "claude-code",
+    useWorktree: true, worktreePath: `/worktrees/${workspaceId}`, config: { model: "model", effort: "high" }, preview: null,
+    pendingApproval: null, tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, createdAt: 1000, updatedAt: 1000,
+  } satisfies SessionSnapshot, Date.now());
+}
 
 test("the session row follows its runner into the new Location only under a consumed switch naming it", async () => {
   const h = harness({ driver: "claude-code" });
   try {
-    const moved = (workspaceId: string) => h.db.updateSessionFromSnapshot("self", {
-      id: "self", workspaceId, agentId: "agent", title: "App Session", status: "idle", driver: "claude-code",
-      useWorktree: true, worktreePath: `/worktrees/${workspaceId}`, config: { model: "model", effort: "high" }, preview: null, pendingApproval: null,
-      tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, createdAt: 1000, updatedAt: 1000,
-    } satisfies SessionSnapshot, Date.now());
+    const moved = (workspaceId: string) => reportWorkspace(h.db, workspaceId);
     moved("docs");
     assert.equal(h.db.getSession("self")!.workspaceId, "app", "a runner never moves the row by itself");
     const decision = (await h.request()).data!;

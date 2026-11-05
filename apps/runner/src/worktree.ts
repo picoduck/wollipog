@@ -130,6 +130,9 @@ export interface WorktreeCleanupRecord {
   branch?: string;
   source?: "legacy" | "created";
   baseRef?: string;
+  /** (#4138) The branch existed before this worktree: cleanup removes only an unchanged worktree
+   * and keeps the branch, whatever the removal mode. */
+  preserveBranch?: boolean;
   /** Exact checkpoint namespace owned by this worktree generation. Absent means legacy refs. */
   checkpointOwnerHash?: string;
   /** Durable proof that rollback owns the session's current checkpoint generation, not merely an

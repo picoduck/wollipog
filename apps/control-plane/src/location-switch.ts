@@ -337,7 +337,9 @@ export class LocationSwitchService {
     target: LocationSwitchCandidate, now: number): Promise<ServiceResult<LocationSwitchResult>> {
     const workspacePath = this.db.getWorkspacePath(target.runnerId, target.workspaceId);
     if (!workspacePath || target.runnerId !== session.runnerId) return fail("The target Location is no longer available on this session's machine");
-    if (!this.db.claimLocationSwitch(occurrenceId, digest, now)) {
+    // The claim names its target, so a runner snapshot that arrives after a lost reply still moves
+    // the session row and completes this receipt.
+    if (!this.db.claimLocationSwitch(occurrenceId, digest, now, { action: "switch", locationId: target.locationId })) {
       return fail("A previous attempt to carry out this approval may already have moved this session; check it before asking again");
     }
     let reply: { ok: boolean; error?: string };
@@ -359,6 +361,9 @@ export class LocationSwitchService {
     const result: LocationSwitchResult = { action: "switch", locationId: target.locationId, sessionId: session.id,
       navigationPath: navigationPath(session.id), completedAt: now };
     if (!this.db.completeLocationSwitch(occurrenceId, digest, result, now)) {
+      // The runner may already have moved the session and its snapshot completed this receipt.
+      const recorded = this.db.workflowDecisionByOccurrence(occurrenceId)?.locationSwitchResult;
+      if (recorded?.action === "switch" && recorded.locationId === target.locationId) return ok(recorded);
       throw new Error(`Location switch ${occurrenceId} was accepted by the runner but its receipt could not be recorded`);
     }
     return ok(result);
@@ -368,7 +373,7 @@ export class LocationSwitchService {
     target: LocationSwitchCandidate, human: HumanPrincipal, now: number): ServiceResult<LocationSwitchResult> {
     // The claim is durable before anything starts, so neither a retry nor a crash between creation
     // and consumption can start a second session for one approval.
-    if (!this.db.claimLocationSwitch(occurrenceId, digest, now)) {
+    if (!this.db.claimLocationSwitch(occurrenceId, digest, now, { action: "new_session", locationId: target.locationId })) {
       return fail("A previous attempt to carry out this approval may already have started a session; check Sessions before asking again");
     }
     const created = this.deps.createSession(human, {
