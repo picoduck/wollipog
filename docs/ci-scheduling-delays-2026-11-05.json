@@ -103,7 +103,7 @@
         "max": 65.46666666666667
       },
       "dependencyCompletionToAggregatorStartMinutes": {
-        "measured": 234,
+        "measured": 233,
         "median": 0.03333333333333333,
         "p90": 0.45,
         "max": 11.05
@@ -3045,10 +3045,10 @@
     "since": "2026-10-30T00:00:00Z",
     "until": "2026-10-31T00:00:00.000Z"
   },
-  "requiredResultMinutes": 29.283333333333335,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.03333333333333333,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     124320108267,
     124320108700,
@@ -3602,7 +3602,7 @@
   "requiredResultMinutes": 36.46666666666667,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.05,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     124217735190,
     124217735390,
@@ -5599,10 +5599,10 @@
     "since": "2026-10-30T00:00:00Z",
     "until": "2026-10-31T00:00:00.000Z"
   },
-  "requiredResultMinutes": 31.583333333333332,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.03333333333333333,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     123909371954,
     123909372854,
@@ -5785,10 +5785,10 @@
     "since": "2026-10-30T00:00:00Z",
     "until": "2026-10-31T00:00:00.000Z"
   },
-  "requiredResultMinutes": 32.916666666666664,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.03333333333333333,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     123909748923,
     123909749247,
@@ -6153,10 +6153,10 @@
     "since": "2026-10-30T00:00:00Z",
     "until": "2026-10-31T00:00:00.000Z"
   },
-  "requiredResultMinutes": 35.083333333333336,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.05,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     123897898186,
     123897899105,
@@ -8664,10 +8664,10 @@
     "since": "2026-11-02T00:00:00Z",
     "until": "2026-11-03T00:00:00.000Z"
   },
-  "requiredResultMinutes": 9.666666666666666,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.03333333333333333,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     125624858518,
     125624858884,
@@ -9148,10 +9148,10 @@
     "since": "2026-11-02T00:00:00Z",
     "until": "2026-11-03T00:00:00.000Z"
   },
-  "requiredResultMinutes": 10.183333333333334,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.05,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     125540137708,
     125540137901,
@@ -10080,10 +10080,10 @@
     "since": "2026-11-02T00:00:00Z",
     "until": "2026-11-03T00:00:00.000Z"
   },
-  "requiredResultMinutes": 10.883333333333333,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.05,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     125354561486,
     125354561919,
@@ -10119,10 +10119,10 @@
     "since": "2026-11-02T00:00:00Z",
     "until": "2026-11-03T00:00:00.000Z"
   },
-  "requiredResultMinutes": 12.95,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.05,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     125368379215,
     125368380879,
@@ -10158,10 +10158,10 @@
     "since": "2026-11-02T00:00:00Z",
     "until": "2026-11-03T00:00:00.000Z"
   },
-  "requiredResultMinutes": 12.583333333333334,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.05,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     125395375879,
     125395375954,
@@ -10933,10 +10933,10 @@
     "since": "2026-11-02T00:00:00Z",
     "until": "2026-11-03T00:00:00.000Z"
   },
-  "requiredResultMinutes": 15.066666666666666,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 3.6166666666666667,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     125273484553,
     125273484956,
@@ -11979,10 +11979,10 @@
     "since": "2026-11-02T00:00:00Z",
     "until": "2026-11-03T00:00:00.000Z"
   },
-  "requiredResultMinutes": 37.016666666666666,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.11666666666666667,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     125127378189,
     125127378946,
@@ -15349,10 +15349,10 @@
     "since": "2026-11-03T00:00:00Z",
     "until": "2026-11-04T00:00:00.000Z"
   },
-  "requiredResultMinutes": 13.5,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.05,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     126299506183,
     126299506713,
@@ -15870,10 +15870,10 @@
     "since": "2026-11-03T00:00:00Z",
     "until": "2026-11-04T00:00:00.000Z"
   },
-  "requiredResultMinutes": 11.85,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.05,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     126216126022,
     126216126996,
@@ -15950,10 +15950,10 @@
     "since": "2026-11-03T00:00:00Z",
     "until": "2026-11-04T00:00:00.000Z"
   },
-  "requiredResultMinutes": 14.433333333333334,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.05,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     126215584049,
     126215584129,
@@ -16631,10 +16631,10 @@
     "since": "2026-11-03T00:00:00Z",
     "until": "2026-11-04T00:00:00.000Z"
   },
-  "requiredResultMinutes": 11.65,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.05,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     126094302732,
     126094304151,
@@ -18399,10 +18399,10 @@
     "since": "2026-11-03T00:00:00Z",
     "until": "2026-11-04T00:00:00.000Z"
   },
-  "requiredResultMinutes": 37.56666666666667,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.05,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     125834373795,
     125834374148,
@@ -18479,10 +18479,10 @@
     "since": "2026-11-03T00:00:00Z",
     "until": "2026-11-04T00:00:00.000Z"
   },
-  "requiredResultMinutes": 38.31666666666667,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.05,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     125788724095,
     125788724525,
@@ -18717,10 +18717,10 @@
     "since": "2026-11-03T00:00:00Z",
     "until": "2026-11-04T00:00:00.000Z"
   },
-  "requiredResultMinutes": 8.9,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.03333333333333333,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     125760692573,
     125760694153,
@@ -18959,10 +18959,10 @@
     "since": "2026-11-03T00:00:00Z",
     "until": "2026-11-04T00:00:00.000Z"
   },
-  "requiredResultMinutes": 13.483333333333333,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.05,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     125754545011,
     125754545290,
@@ -19160,10 +19160,10 @@
     "since": "2026-11-03T00:00:00Z",
     "until": "2026-11-04T00:00:00.000Z"
   },
-  "requiredResultMinutes": 13.55,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.05,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     125748931383,
     125748932611,
@@ -22253,10 +22253,10 @@
     "since": "2026-11-04T00:00:00Z",
     "until": "2026-11-05T00:00:00.000Z"
   },
-  "requiredResultMinutes": 15.55,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.3,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     126926581293,
     126926581462,
@@ -22532,10 +22532,10 @@
     "since": "2026-11-04T00:00:00Z",
     "until": "2026-11-05T00:00:00.000Z"
   },
-  "requiredResultMinutes": 26.25,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.03333333333333333,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     126898893395,
     126898893816,
@@ -22882,10 +22882,10 @@
     "since": "2026-11-04T00:00:00Z",
     "until": "2026-11-05T00:00:00.000Z"
   },
-  "requiredResultMinutes": 8.033333333333333,
+  "requiredResultMinutes": null,
   "schedulingGapMinutes": null,
   "criticalPathJobIds": null,
-  "dependencyCompletionToAggregatorStartMinutes": 0.03333333333333333,
+  "dependencyCompletionToAggregatorStartMinutes": null,
   "otherJobIds": [
     126890953715,
     126890954202,

@@ -58,9 +58,11 @@ export function analyzeReports(reports) {
     const split = row.jobs.map((job) => ({ ...splitJob(job, row.attempt),
       onCriticalPath: pathIds ? pathIds.includes(job.id) : null }));
     const dependencies = row.jobs.filter((job) => job.name !== AGGREGATOR && !ADVISORY_JOBS.has(job.name));
-    const latest = dependencies.every((job) => Number.isFinite(Date.parse(job.completedAt)))
+    const latest = dependencies.every((job) => Number.isFinite(Date.parse(job.completedAt)) &&
+      timingQuality(job).state !== "unmeasured-allocation")
       ? dependencies.map((job) => job.completedAt).sort().at(-1) : null;
-    const requiredResultMinutes = aggregator?.startedAt ? minutes(row.createdAt, aggregator.completedAt) : null;
+    const requiredResultMinutes = row.attempt === 1 && aggregator?.startedAt
+      ? minutes(row.createdAt, aggregator.completedAt) : null;
     const criticalJobs = split.filter((job) => job.onCriticalPath);
     const allocated = pathIds && criticalJobs.every((job) => job.runnerWaitMinutes !== null &&
       (job.state === "skipped" || job.observedIntervalMinutes !== null))
@@ -71,7 +73,8 @@ export function analyzeReports(reports) {
       requiredResultMinutes, schedulingGapMinutes: requiredResultMinutes !== null && allocated !== null
         ? requiredResultMinutes - allocated : null,
       criticalPathJobIds: pathIds, dependencyCompletionToAggregatorStartMinutes:
-        latest && aggregator?.startedAt ? minutes(latest, aggregator.startedAt) : null,
+        row.attempt === 1 && !row.jobsTruncated && latest && aggregator?.startedAt &&
+          timingQuality(aggregator).state !== "unmeasured-allocation" ? minutes(latest, aggregator.startedAt) : null,
       jobs: split };
   });
   const summary = ["pull_request", "merge_group"].map((event) => {

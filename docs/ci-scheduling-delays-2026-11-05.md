@@ -28,8 +28,8 @@ identities, branch names and test names. Every time below is UTC; every window i
 | Total | 385 | 196 | 604 |
 
 The collector also queried main-push CI: there were zero runs in these windows. There are 581
-first attempts and 23 rerun attempts. Rerun copies are retained as identities, excluded from wait
-and execution distributions. All run, attempt, job and removal pagination completed without
+first attempts and 23 rerun attempts. Rerun copies are retained as identities, with required-result
+and dependency-wait fields null, excluded from wait and execution distributions. All run, attempt, job and removal pagination completed without
 truncation. Collection finished at 2026-11-05T15:11:40Z.
 
 October 29 is excluded as the upgrade transition day; its provisional cutover readback was
@@ -53,7 +53,8 @@ collector. It reuses the existing dependency/critical-path model and #4046 class
   relabelled as test execution or runner queue wait.
 - **Unmeasured allocation:** executed steps outside their job interval or a terminal gap over
   180 seconds. Raw job/step timestamps and the observed job span are retained, but execution,
-  finalization and wait allocation are null. No guessed one-hour offset is subtracted.
+  finalization and wait allocation are null, including dependency-to-aggregator wait when a required
+  dependency or the aggregator has conflicting clocks. No guessed one-hour offset is subtracted.
 
 A conflicting required job withdraws the critical path, even if another job might have been
 the longest. Missing/incomplete steps retain nulls. No completed required result is invented for
@@ -76,7 +77,7 @@ PR p50/p90 is 39.07/49.48 minutes (n=198); merge-group p50/p90 is 37.82/40.65 (n
 | Critical finalization, summed | 233 | 0.08 / 0.12 / 2.02 | 196 | 0.08 / 0.13 / 0.82 |
 | Critical runner overhead, summed | 233 | 0.03 / 0.05 / 0.25 | 196 | 0.03 / 0.03 / 0.18 |
 | Scheduling gap | 233 | 0.02 / 0.03 / 0.15 | 196 | 0.02 / 0.03 / 0.05 |
-| Last dependency completion → aggregator start | 234 | 0.03 / 0.45 / 11.05 | 196 | 0.03 / 0.17 / 6.20 |
+| Last dependency completion → aggregator start | 233 | 0.03 / 0.45 / 11.05 | 196 | 0.03 / 0.17 / 6.20 |
 
 Each row has its own distribution; percentiles must not be added together. Per-run partitions
 reconcile to required wall time. The JSON provides the individual job partitions rather than
