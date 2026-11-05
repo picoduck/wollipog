@@ -3346,6 +3346,21 @@ test("Location is a Select of machines with status and folder, and an offline on
   }
 });
 
+test("a location renamed in its project leads with that name in Location (#4151)", async () => {
+  const renamed: ProjectView = {
+    ...project,
+    locations: [{ ...project.locations[0]!, name: "Main Checkout", nameSource: "user" }],
+  };
+  const fixture = await mountFixture({ projects: [renamed] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    const trigger = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Location:"]')!;
+    assert.equal(trigger.getAttribute("aria-label"), "Location: Main Checkout on runner-1");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("a project without locations shows the No Locations notice in Location's place (#2952)", async () => {
   const empty: ProjectView = { ...project, locations: [] };
   const fixture = await mountFixture({ projects: [empty] });

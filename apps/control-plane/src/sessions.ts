@@ -6,6 +6,7 @@ import { FORGE_DECISION_ACTION_REFUSAL_REASONS, FORGE_DECISION_ACTION_STALE_REFU
   FORGE_DECISION_ACTION_SUMMARY_LIMIT, type ExecuteWorkflowDecisionRequest, type ForgeDecisionAction,
   type ForgeDecisionActionRefusalReason, type ForgeDecisionActionResultMessage, type WorkflowDecisionForgeAction } from "@wollipog/protocol";
 import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
+import { inspectionResource, invalidInspectionReason } from "./campaign-worktree-inspection.js";
 import { worktreeDirtyPaths } from "@wollipog/protocol";
 import { formatCampaignAssignment } from "./campaign-assignment.js";
 import { campaignFollowUpAdmissionKey } from "./campaign-budget.js";
@@ -8826,31 +8827,47 @@ export class SessionsService {
       if (paths.length && completion === "stop_and_archive") {
         const unsupported = this.capabilityFailure(child.runnerId, "campaignWorktreeRecovery",
           "campaign worktree inspection");
-        if (unsupported) return unsupported;
-        if (!this.hub.isRunnerOnline(child.runnerId)) return fail("runner is offline; cannot inspect child worktrees before archival", 409);
-        for (const worktreePath of paths) {
+        const resource = (index: number) => inspectionResource(child.id, paths[index]!, index);
+        if (unsupported) {
+          const knownVersion = unsupported.capabilityRequirement?.runnerProtocolVersion;
+          const knownUnsupported = knownVersion !== null && knownVersion !== undefined;
+          return { ...unsupported, error: `Child worktree inspection [${knownUnsupported ? "unsupported_capability" : "capability_unproven"}] for ${resource(0)}; ` +
+            (knownUnsupported ? unsupported.error : "runner inspection capability is unproven; reconnect the runner and check its advertised protocol") +
+            ". Preserve the worktree; retry verify_campaign_child after recovery using the same completed report; do not repeat delivery or merge" };
+        }
+        if (!this.hub.isRunnerOnline(child.runnerId)) return fail(
+          `Child worktree inspection [runner_offline] for ${resource(0)}; reconnect the child's runner, then retry verify_campaign_child`, 409);
+        for (const [index, worktreePath] of paths.entries()) {
           const requestId = randomUUID();
+          const refuse = (category: string, nextAction: string) => fail<never>(
+            `Child worktree inspection [${category}] for ${resource(index)} (request ${requestId}); ${nextAction}. ` +
+              "Inspection proof is missing: verification and archival were not recorded; preserve the worktree. " +
+              "Retry verify_campaign_child after recovery using the same completed report; do not repeat delivery or merge", 409);
           try {
             const result = await this.hub.requestFromRunner(child.runnerId, requestId, {
               type: "git_action", requestId, sessionId: child.id, worktreePath, action: { kind: "status" },
             }, 30_000);
+            if (!result || typeof result !== "object" || result.type !== "git_result" || typeof result.ok !== "boolean") {
+              return refuse("invalid_response:unexpected_result_type", "inspect status-response diagnostics and restore a valid Git result");
+            }
             // The runner no longer links this worktree to the child (it was retired, #4070): there is
             // nothing of the child's left there to protect, and archival would not touch it.
-            if (result.type === "git_result" && !result.ok && result.code === "GIT_WORKTREE_UNLINKED") continue;
-            if (result.type === "git_result" && !result.ok) {
-              return fail(`runner could not inspect child worktree ${JSON.stringify(worktreePath)}` +
-                `${result.error ? `: ${result.error.slice(0, 300)}` : ""}; update Wollipog on the child's runner if this persists, then retry`, 409);
+            if (!result.ok && result.code === "GIT_WORKTREE_UNLINKED") continue;
+            if (!result.ok) {
+              return refuse("runner_error", "inspect runner diagnostics for the status request and restore successful inspection");
             }
-            const status = result.type === "git_result" && result.ok ? result.data?.status : undefined;
-            if (!status || !Number.isSafeInteger(status.changedPathCount) || status.changedPathCount! < 0 ||
-                status.hasChanges !== (status.changedPathCount! > 0) || !Array.isArray(status.files)) {
-              return fail("runner did not provide child worktree inspection; update Wollipog and retry", 409);
+            const status = result.data?.status;
+            const invalid = invalidInspectionReason(status);
+            if (invalid) {
+              return refuse(`invalid_response:${invalid}`, "inspect runner/control-plane compatibility and status-response diagnostics; restore valid status data");
             }
-            if (status.hasChanges) return fail(`Child worktree ${JSON.stringify(worktreePath)}: ` +
-              worktreeDirtyPaths(status.changedPathCount!, status.files.map((file) => file.path)) +
+            if (status!.hasChanges) return fail(`Child worktree ${JSON.stringify(worktreePath)}: ` +
+              worktreeDirtyPaths(status!.changedPathCount!, status!.files.map((file) => file.path)) +
               "; ask the child to preserve and clean its work before verification", 409);
-          } catch {
-            return fail("child worktree inspection failed; retry before archival", 409);
+          } catch (error) {
+            if (isRunnerRequestTimeoutError(error)) return refuse("timeout", "the runner did not answer within 30 seconds; check runner connectivity and status-request diagnostics");
+            if (isRunnerRequestNotSentError(error)) return refuse("runner_offline", "reconnect the child's runner");
+            return refuse("runner_error", "inspect runner connectivity and status-request diagnostics");
           }
         }
       }

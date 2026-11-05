@@ -1683,6 +1683,7 @@ function snapshot(): UiSnapshotMessage {
       ...(SESSION_REMINDERS ? { sessionReminders: true } : {}),
       ...(orchestratorRoleSupported ? { orchestratorRole: true } : {}),
       ...(LIST_NOTICES.has("setup") || SHELL_PROJECTS_MODE === "locations" ? { worktreeSetupConfig: true } : {}),
+      ...(SHELL_PROJECTS_MODE === "locations" ? { renameProjectLocations: true } : {}),
       ...(SHELL_PROJECTS_MODE === "access" ? { accessScopeManagement: true } : {}),
     },
     runners: SHELL_SKILLS_MODE === "detail" ? [runner, secondSkillRunner]
@@ -3422,6 +3423,19 @@ const client = {
     window.setTimeout(() => {
       socket?.push({ type: "project_upsert", project: structuredClone(owningProject) });
     }, 0);
+    return { project: structuredClone(owningProject) };
+  },
+  renameProjectLocation: async (projectId: string, locationId: string, name: string) => {
+    const owningProject = model.projects.find((candidate) => candidate.id === projectId);
+    const location = owningProject?.locations.find((candidate) => candidate.id === locationId);
+    if (!owningProject || !location) throw new Error("project location not found");
+    const trimmed = name.trim().replace(/\s+/g, " ");
+    if (!trimmed) throw new Error("Enter a location name of 1–120 characters, without control characters.");
+    location.name = trimmed;
+    location.nameSource = "user";
+    owningProject.updatedAt += 1;
+    saveModel();
+    window.setTimeout(() => socket?.push({ type: "project_upsert", project: structuredClone(owningProject) }), 0);
     return { project: structuredClone(owningProject) };
   },
   setDefaultProjectLocation: async (projectId: string, locationId: string) => {

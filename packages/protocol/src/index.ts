@@ -894,6 +894,7 @@ export * from "./review-contract.js";
 export * from "./review-run.js";
 export * from "./rate-priced-usage.js";
 export * from "./campaign-recovery.js";
+export * from "./project-location-inspection.js";
 import type { CampaignAuthorityOperation, CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
 export { CAMPAIGN_LAUNCH_INSPECTION_ERRORS } from "./campaign-control-launch.js";
 export type { CampaignLaunchInspectionFailure } from "./campaign-control-launch.js";
@@ -3907,6 +3908,8 @@ export interface WorkspaceInfo {
 
 /** How a durable Project Location entered the control-plane catalog. */
 export type ProjectLocationSource = "reported" | "managed" | "legacy";
+/** Where a Location's name comes from: its workspace, or a person who renamed it in its Project. */
+export type ProjectLocationNameSource = "workspace" | "user";
 
 /** Current launch availability for one exact Project Location. Cached metadata remains visible
  * when the backing runner or workspace is unavailable. */
@@ -3923,7 +3926,11 @@ export interface ProjectLocationView {
   projectId: string;
   runnerId: string;
   workspaceId: string;
+  /** The Location's name in this Project: the workspace's, until someone renames it here. */
   name: string;
+  /** `user` once renamed in this Project (#4151); runner discovery keeps that name. Older control
+   * planes omit it. */
+  nameSource?: ProjectLocationNameSource;
   path: string;
   source: ProjectLocationSource;
   availability: ProjectLocationAvailability;
@@ -12982,6 +12989,8 @@ export interface UiSnapshotMessage {
     indefiniteSessionReminders?: boolean;
     /** Per-user worktree setup notices and runner-owned generation are available. */
     worktreeSetupConfig?: boolean;
+    /** PATCH /api/projects/:id/locations/:locationId renames a Location within its Project. */
+    renameProjectLocations?: boolean;
     /** Session creation accepts `role` independently of the provider permission mode. */
     orchestratorRole?: boolean;
     sessionRoleConversion?: boolean;
@@ -13486,6 +13495,12 @@ export interface MoveProjectLocationRequest {
 /** Path parameter input used by clients removing a Location link. */
 export interface RemoveProjectLocationRequest {
   locationId: string;
+}
+
+/** Body for PATCH /api/projects/:id/locations/:locationId: the Location's name in this Project.
+ * Trimmed; an empty name is refused. */
+export interface RenameProjectLocationRequest {
+  name: string;
 }
 
 /** Path parameter input used by clients choosing a Project's default Location. */

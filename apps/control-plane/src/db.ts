@@ -223,6 +223,7 @@ import {
   type PromptSessionMessage,
   type AnswerRecoveredQuestionCommand,
   type ProjectLocationAvailability,
+  type ProjectLocationNameSource,
   type ProjectLocationSource,
   type ProjectLocationView,
   type ProjectView,
@@ -728,6 +729,8 @@ CREATE TABLE IF NOT EXISTS project_locations (
   runner_id    TEXT NOT NULL,
   workspace_id TEXT NOT NULL,
   name         TEXT NOT NULL,
+  -- 'user' once someone renames the Location in this Project (#4151): discovery keeps that name.
+  name_source  TEXT NOT NULL DEFAULT 'workspace' CHECK (name_source IN ('workspace','user')),
   path         TEXT NOT NULL,
   source       TEXT NOT NULL CHECK (source IN ('reported','managed','legacy')),
   last_seen_at INTEGER,
@@ -4093,6 +4096,7 @@ interface ProjectLocationRow {
   runner_id: string;
   workspace_id: string;
   name: string;
+  name_source: ProjectLocationNameSource;
   path: string;
   source: ProjectLocationSource;
   last_seen_at: number | null;
@@ -6858,6 +6862,14 @@ export class ControlPlaneDb {
         ON project_locations(project_id, runner_id, workspace_id)
         WHERE detached_at IS NULL AND removed_at IS NULL;
     `);
+    // A Location's own name in its Project (#4151). Existing rows keep their runner-provided name.
+    const projectLocationColumns = db.prepare("PRAGMA table_info(project_locations)")
+      .all() as unknown as Array<{ name: string }>;
+    if (!projectLocationColumns.some((column) => column.name === "name_source")) {
+      db.exec(
+        "ALTER TABLE project_locations ADD COLUMN name_source TEXT NOT NULL DEFAULT 'workspace' CHECK (name_source IN ('workspace','user'))",
+      );
+    }
     // The installation identity belongs to the database, not the process or network endpoint.
     // INSERT OR IGNORE makes first-open initialization idempotent; a moved/reopened database
     // remains the same control plane while independent databases always receive distinct ids.
@@ -9077,7 +9089,7 @@ export class ControlPlaneDb {
   private projectView(row: ProjectRow, principal?: AuthPrincipal): ProjectView {
     const projectScope = this.projectScope(row.id);
     const locationRows = this.stmt(
-      `SELECT id, project_id, runner_id, workspace_id, name, path, source, last_seen_at,
+      `SELECT id, project_id, runner_id, workspace_id, name, name_source, path, source, last_seen_at,
               detached_at, removed_at, created_at, updated_at
        FROM project_locations WHERE project_id=? AND removed_at IS NULL
        ORDER BY CASE WHEN id=? THEN 0 ELSE 1 END, created_at, id`,
@@ -9127,6 +9139,7 @@ export class ControlPlaneDb {
         runnerId: location.runner_id,
         workspaceId: location.workspace_id,
         name: location.name,
+        nameSource: location.name_source,
         path: location.path,
         source: location.source,
         availability: this.projectLocationAvailability(location),
@@ -9405,7 +9418,8 @@ export class ControlPlaneDb {
     if (active.length > 0) {
       const override = this.workspaceOverride(runnerId, workspace.id);
       this.stmt(
-        `UPDATE project_locations SET name=?, path=?, source=?, last_seen_at=?, updated_at=?
+        `UPDATE project_locations SET name=CASE WHEN name_source='user' THEN name ELSE ? END,
+           path=?, source=?, last_seen_at=?, updated_at=?
          WHERE runner_id=? AND workspace_id=? AND detached_at IS NULL AND removed_at IS NULL`,
       ).run(workspace.name, workspace.path, source, now, now, runnerId, workspace.id);
       for (const link of active) {
@@ -9459,7 +9473,7 @@ export class ControlPlaneDb {
 
   projectLocation(locationId: string, includeRemoved = false): ProjectLocationView | null {
     const row = this.stmt(
-      `SELECT id, project_id, runner_id, workspace_id, name, path, source, last_seen_at,
+      `SELECT id, project_id, runner_id, workspace_id, name, name_source, path, source, last_seen_at,
               detached_at, removed_at, created_at, updated_at
        FROM project_locations WHERE id=? AND (removed_at IS NULL OR ?=1)`,
     ).get(locationId, includeRemoved ? 1 : 0) as unknown as ProjectLocationRow | undefined;
@@ -9473,6 +9487,7 @@ export class ControlPlaneDb {
       runnerId: row.runner_id,
       workspaceId: row.workspace_id,
       name: row.name,
+      nameSource: row.name_source,
       path: row.path,
       source: row.source,
       availability: this.projectLocationAvailability(row),
@@ -9579,7 +9594,8 @@ export class ControlPlaneDb {
       if (detached) {
         this.stmt(
           `UPDATE project_locations
-           SET name=?, path=?, source=?, last_seen_at=?, detached_at=NULL, updated_at=?
+           SET name=CASE WHEN name_source='user' THEN name ELSE ? END,
+             path=?, source=?, last_seen_at=?, detached_at=NULL, updated_at=?
            WHERE id=? AND detached_at IS NOT NULL AND removed_at IS NULL`,
         ).run(workspace.name, workspace.path, workspace.source, now, now, locationId);
       } else {
@@ -9650,7 +9666,8 @@ export class ControlPlaneDb {
           .run(location.runnerId, location.workspaceId);
         this.stmt(
           `UPDATE project_locations
-           SET project_id=?, name=?, path=?, source=?, last_seen_at=?, detached_at=NULL, updated_at=?
+           SET project_id=?, name=CASE WHEN name_source='user' THEN name ELSE ? END,
+             path=?, source=?, last_seen_at=?, detached_at=NULL, updated_at=?
            WHERE id=? AND removed_at IS NULL`,
         ).run(
           targetProjectId,
@@ -9702,6 +9719,31 @@ export class ControlPlaneDb {
       ).run(location.projectId, now, location.projectId);
     });
     return this.projectLocation(locationId, true);
+  }
+
+  /**
+   * Name one Location within its Project (#4151). The name is this Project's label only: the
+   * workspace, its folder and the same workspace's Locations in other Projects keep theirs, and
+   * runner discovery no longer replaces it. Null when the Location is not an active one of this Project.
+   */
+  renameProjectLocation(
+    projectId: string,
+    locationId: string,
+    name: string,
+    now = Date.now(),
+  ): ProjectLocationView | null {
+    const trimmed = name.trim();
+    if (!trimmed) throw new Error("Enter a name for the location.");
+    const location = this.projectLocation(locationId);
+    if (!location || location.projectId !== projectId) return null;
+    this.atomic(() => {
+      this.stmt(
+        `UPDATE project_locations SET name=?, name_source='user', updated_at=?
+         WHERE id=? AND project_id=? AND removed_at IS NULL`,
+      ).run(trimmed, now, locationId, projectId);
+      this.stmt("UPDATE projects SET updated_at=? WHERE id=?").run(now, projectId);
+    });
+    return this.projectLocation(locationId);
   }
 
   setProjectDefaultLocation(
