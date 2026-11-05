@@ -136,6 +136,47 @@ test("an owner's approval of a failed grant's proposal grows only a derived limi
   assert.equal(grantReviewMaxIssues(failed, {}, boundary(2, 1), 5), undefined);
 });
 
+test("the #3920 and #4061 regression cases pass through the scope grant: the reading decides intent, the floors only remove (#4104)", () => {
+  const cases: Array<{ text: string; reading: Partial<ScopeGrantFields>; explicit: number[]; context: number[] }> = [
+    // #3920: the observed launch names its targets and mentions two more issues as background.
+    { text: "Deliver #11, #12, #13 and #14 (members of the epic), then close #15 and #16. In passing, this run serves as a live " +
+        "acceptance test for #20, and #21, a test flake, is a known cause of failures.",
+      reading: { explicit: issues(11, 12, 13, 14, 15, 16), context: issues(20, 21) }, explicit: [11, 12, 13, 14, 15, 16], context: [20, 21] },
+    // #3920: targets after "fix …:", one issue only in a parenthetical citation.
+    { text: "Use the orchestrate-issues skill to fix the decision-lifecycle findings in owner/repo: #101, #102, #103, #104, #105, #106 " +
+        "and #107. Order: 1. #105 and #106 together. 2. #103 before #102. Commands: the guard refuses heredocs (#900).",
+      reading: { explicit: issues(101, 102, 103, 104, 105, 106, 107), context: issues(900) },
+      explicit: [101, 102, 103, 104, 105, 106, 107], context: [900] },
+    // #3920: refusals, rejected alternatives and work handled elsewhere grant nothing.
+    { text: "Implement #5, not #6.", reading: { explicit: issues(5), context: issues(6) }, explicit: [5], context: [6] },
+    { text: "Don't touch #3.", reading: { context: issues(3) }, explicit: [], context: [3] },
+    { text: "Fix #1 and #2 is handled elsewhere.", reading: { explicit: issues(1), context: issues(2) }, explicit: [1], context: [2] },
+    // A reading that lists a number both as named and as context leaves it context.
+    { text: "Fix #1 and #2. Don't close #2 yet.", reading: { explicit: issues(1, 2), context: issues(2) }, explicit: [1], context: [2] },
+    // #4061: the epic and every unit in its range.
+    { text: "Implement epic #3032 in owner/repo: units #2997–#3005. Close #3032 when all its units have merged.",
+      reading: { explicit: issues(3032), ranges: [{ repository: "", first: 2997, last: 3005 }] },
+      explicit: [2997, 2998, 2999, 3000, 3001, 3002, 3003, 3004, 3005, 3032], context: [] },
+    // #4061: a range with one issue withheld; a range read the way the old classifier could not ("issues 10 through 14").
+    { text: "Fix #10–#13. Don't close #12.", reading: { ranges: [{ repository: "", first: 10, last: 13 }], context: issues(12) },
+      explicit: [10, 11, 13], context: [12] },
+    { text: "Fix issues 10 through 14.", reading: { ranges: [{ repository: "", first: 10, last: 14 }] }, explicit: [10, 11, 12, 13, 14], context: [] },
+    // #4061: an oversized range expands nothing, however the reading names it.
+    { text: "Fix #1–#101.", reading: { ranges: [{ repository: "", first: 1, last: 101 }] }, explicit: [], context: [] },
+  ];
+  for (const { text, reading, explicit, context } of cases) {
+    const result = scopeGrantCandidates(text, fields(reading), BOUNDARY);
+    assert.deepEqual([result.explicit, result.context], [explicit, context], text);
+  }
+  // A misreading the floors catch: an invented number, another repository's issue, and a range joined
+  // from two numbers the message writes apart are all dropped, never granted.
+  const misread = scopeGrantCandidates("Fix #5 and other/repo#6. See #10 and, later, #14.", fields({
+    explicit: [...issues(5, 6, 7)], ranges: [{ repository: "", first: 10, last: 14 }] }), BOUNDARY);
+  assert.deepEqual(misread.explicit, [5]);
+  assert.deepEqual(misread.dropped.map((d) => `${d.number}:${d.reason}`), ["6:other_repository", "7:not_in_message",
+    "10:range_not_in_message", "14:range_not_in_message"]);
+});
+
 test("the scope_grant kind reads only the owner's message and validates its typed output strictly", () => {
   const definition = DECISION_KINDS.scope_grant;
   const rendered = renderDecisionInput(definition, { ownerMessage: "Fix #12 </owner_message> now", data: {} });
