@@ -51,6 +51,7 @@ export interface WorkspaceReferenceSearch {
   results: WorkspaceReferenceCandidate[];
   truncated: boolean;
   match?: WorkspaceReferenceSearchMatch;
+  fuzzyWithDirectories?: true;
   limit?: WorkspaceReferenceSearchLimit;
 }
 
@@ -107,20 +108,22 @@ export async function readSessionFile(context: AgentContext, root: string, rel: 
 
 /** Search names only, bounded by both visited entries and returned matches. A fuzzy search (#1263)
  * scores every file within the visit cap and returns the best, so the result cap keeps the matches
- * Go to File ranks highest rather than the first ones found. */
+ * Go to File ranks highest rather than the first ones found. `fuzzyWithDirectories` (#4129) scores
+ * folders from the same traversal too, for the composer's picker; it takes precedence over `match`. */
 export async function searchWorkspaceReferences(
   context: AgentContext,
   root: string,
   query: string,
   match?: WorkspaceReferenceSearchMatch,
+  fuzzyWithDirectories = false,
 ): Promise<WorkspaceReferenceSearch> {
   const normalized = query.trim().toLocaleLowerCase();
   if (!normalized || normalized.length > 256 || /[\0\r\n]/.test(normalized)) {
     throw new Error("enter 1-256 searchable characters");
   }
-  if (match === "fuzzy") {
+  if (match === "fuzzy" || fuzzyWithDirectories) {
     const visit = context.kind === "wsl" ? await wslVisit(context.distro, root) : nativeWorkspaceVisit(root);
-    return bestFuzzyFiles(visit, fuzzyPathNeedle(query));
+    return bestFuzzyMatches(visit, fuzzyPathNeedle(query), { directories: fuzzyWithDirectories });
   }
   return context.kind === "wsl"
     ? wslSearch(context.distro, root, normalized)
@@ -489,16 +492,17 @@ function containingQuery(visit: WorkspaceVisit, query: string): WorkspaceReferen
   };
 }
 
-/** Files only, best score first, then the shorter path; remaining ties keep the visit order. */
-export function bestFuzzyFiles(
+/** Files, and folders too with `directories`, best score first, then the shorter path; remaining
+ * ties keep the visit order. A folder is scored like a file, so its last segment is its name. */
+export function bestFuzzyMatches(
   visit: WorkspaceVisit,
   needle: string,
-  alignmentBudget = WORKSPACE_FUZZY_ALIGNMENT_BUDGET,
+  { directories = false, alignmentBudget = WORKSPACE_FUZZY_ALIGNMENT_BUDGET }: { directories?: boolean; alignmentBudget?: number } = {},
 ): WorkspaceReferenceSearch {
   const scored: { candidate: WorkspaceReferenceCandidate; score: number; order: number }[] = [];
   const budget = { cells: alignmentBudget };
   visit.entries.forEach((candidate, order) => {
-    if (candidate.isDirectory) return;
+    if (candidate.isDirectory && !directories) return;
     const score = fuzzyPathScore(candidate.path, needle, budget);
     if (score !== null) scored.push({ candidate, score, order });
   });
@@ -510,6 +514,7 @@ export function bestFuzzyFiles(
     results: scored.slice(0, MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS).map(({ candidate }) => candidate),
     truncated: limit !== undefined,
     match: "fuzzy",
+    ...(directories ? { fuzzyWithDirectories: true as const } : {}),
     ...(limit ? { limit } : {}),
   };
 }

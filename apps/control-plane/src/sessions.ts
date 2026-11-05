@@ -21107,10 +21107,12 @@ export class SessionsService {
     sessionId: string,
     query: string,
     match?: WorkspaceReferenceSearchMatch,
+    fuzzyWithDirectories = false,
   ): Promise<ServiceResult<{
     results: WorkspaceReferenceCandidate[];
     truncated: boolean;
     match?: WorkspaceReferenceSearchMatch;
+    fuzzyWithDirectories?: boolean;
     limit?: WorkspaceReferenceSearchLimit;
   }>> {
     const session = this.db.getSession(sessionId);
@@ -21121,15 +21123,21 @@ export class SessionsService {
     const requestId = `wsr_search_${randomUUID().slice(0, 8)}`;
     try {
       const res = await this.hub.requestFromRunner(session.runnerId, requestId, {
-        type: "search_workspace_references", requestId, sessionId, query, ...(match ? { match } : {}),
+        type: "search_workspace_references", requestId, sessionId, query,
+        ...(match ? { match } : {}),
+        ...(fuzzyWithDirectories ? { fuzzyWithDirectories: true } : {}),
       }, 20_000);
       if (res.type !== "search_workspace_references_result") return fail("unexpected runner reply", 502);
       if (!res.ok) return fail(res.error ?? "could not search workspace paths", 502);
-      // A runner that predates `match` answers without echoing it: its results contain the query.
+      // A runner that predates `match` or `fuzzyWithDirectories` answers without echoing it: its
+      // results contain the query.
+      const echoed = fuzzyWithDirectories
+        ? res.fuzzyWithDirectories === true && res.match === "fuzzy" ? { match: "fuzzy" as const, fuzzyWithDirectories: true } : {}
+        : match && res.match === match ? { match } : {};
       return ok({
         results: res.results ?? [],
         truncated: res.truncated === true,
-        ...(match && res.match === match ? { match } : {}),
+        ...echoed,
         ...(res.limit === "entries" || res.limit === "results" ? { limit: res.limit } : {}),
       });
     } catch (err) {
