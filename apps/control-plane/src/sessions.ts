@@ -55,6 +55,7 @@ import { SESSION_REVIEW_JOB_ID_PATTERN, type SessionReviewJobArtifacts, type Ses
 import { normalizeCampaignIssueScopeSnapshot, titleFromPrompt, type CampaignIssueScopeRequest, type CampaignIssueScopeView, type CampaignIssueScopeSnapshot } from "@wollipog/protocol";
 import { normalizeIssueClosureSnapshot, issueClosureActiveChildren, issueClosureFailureRefusal, issueClosureResultRefusal } from "./github-issue-closure.js";
 import { normalizeAutomationCreationSnapshot } from "./automation-creation-snapshot.js";
+import { normalizeLocationSwitchSnapshot } from "./location-switch-snapshot.js";
 import { INTENDED_CLOSURES_LIMIT, normalizeIntendedClosures, prMergeClosureMismatch, unscopedClosureRefusal, validClosingReferenceCheck } from "./pr-merge-closures.js";
 import { observeReconciliationSnapshot, reconciliationSnapshotAvailable, correctionFrame, latestReconciliationRepair, normalizeReconciledSnapshot, reconciliationRevision } from "./claude-cost-reconciliation.js";
 import type { GithubIssueClosureRequest, GithubIssueClosureResult, GithubIssueClosureSnapshot, IssueClosureProofGapNotice } from "@wollipog/protocol";
@@ -269,6 +270,9 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   SESSION_NAMING_RUNNER_BUDGET_MS,
   SESSION_NAMING_SUPERVISION_MARGIN_MS,
   sessionRole,
+  locationSwitchRole,
+  withRepositoryMismatchGuidance,
+  type LocationSwitchRole,
   advertisesOrchestratorAdditiveRole,
   orchestratorAdditiveCapability,
   usesOrchestratorPresetPermissions,
@@ -530,7 +534,7 @@ const CAMPAIGN_REQUEST_WITHDRAWN_OUTCOME = "withdrawn";
 /** Categories only a person settles while a person owns them (#3917): their requests stay with
  * that person, so neither the requester nor an Orchestrator can withdraw one. */
 const PERSON_SETTLED_WORKFLOW_DECISION_CATEGORIES: ReadonlySet<WorkflowDecisionCategory> = new Set([
-  "issue_closure", "campaign_issue_scope", "campaign_follow_up_admission", "automation_creation",
+  "issue_closure", "campaign_issue_scope", "campaign_follow_up_admission", "automation_creation", "location_switch",
 ]);
 
 /** A request resolution a person made, or a server revocation a person's action led to, asks the
@@ -842,6 +846,12 @@ function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): strin
       ? "Act on the option your owner chose; it needs no consumption."
       : decision.status === "denied" ? "Your owner chose not to proceed with any option: do not act on this decision."
       : "Nobody answered it: ask again with request_owner_decision if you still need the owner's choice."] : []),
+    ...(decision.category === "location_switch" && !decision.withdrawal ? [decision.status === "approved"
+      ? "Call execute_location_switch (or `wollipog location-switch execute`) with this occurrenceId and its resourceDigest now; " +
+        "it carries out exactly the Location and action your owner chose. Do not continue the task here."
+      : decision.status === "denied" ? "Your owner chose Stay Here: keep working in this Location and repository, and do not ask again " +
+        "unless they tell you to. Explain what can and cannot be done from here."
+      : "The request ended unanswered: this session stays where it is."] : []),
     "The decision record is authoritative: read it with get_workflow_decision before acting. " +
       "If you have already acted on this outcome, continue from where you are.",
     "[End Wollipog Workflow Decision]",
@@ -916,7 +926,7 @@ const MALFORMED_ANCESTRY_AUTHORITY_REFUSAL =
 
 /** How one finished review reads in its requester's continuation (#3369). Reviewer-written text is
  * bounded to single lines (compactReviewFinding) or quoted, so it can never forge a framing line. */
-function reviewContinuationOutcome(review: ReviewSessionView): string[] {
+function reviewContinuationOutcome(review: ReviewSessionView, role: LocationSwitchRole | null = null): string[] {
   const reviewer = review.reviewer === "codex" ? "Codex Review" : "Claude Review";
   // A base-merge round (#4075) is named as one, since it uses none of the epoch's rounds.
   const round = review.round ? ` (round ${review.round.round}, epoch ${review.round.epoch}` +
@@ -941,7 +951,10 @@ function reviewContinuationOutcome(review: ReviewSessionView): string[] {
   } else if (review.state === "completed") {
     outcome = "a report that was not checked against the review contract (an older runner)";
   } else {
-    outcome = `no review: ${decisionLiteral(review.reason ?? "the review ended without a result")}`;
+    const reason = review.reason ?? "the review ended without a result";
+    // A review refused because the session is in another repository says how to recover (#4138).
+    const guidance = role ? withRepositoryMismatchGuidance(role, "review", reason).slice(reason.length) : "";
+    outcome = `no review: ${decisionLiteral(reason)}${guidance}`;
   }
   const shown = review.findings.slice(0, 20).map(compactReviewFinding);
   const atLimit = review.reason === REVIEW_ROUND_REFUSALS.roundLimit;
@@ -962,8 +975,8 @@ function reviewContinuationOutcome(review: ReviewSessionView): string[] {
   ];
 }
 
-function reviewContinuationPrompt(reviews: readonly ReviewSessionView[]): string {
-  return reviews.flatMap(reviewContinuationOutcome).join("\n");
+function reviewContinuationPrompt(reviews: readonly ReviewSessionView[], role: LocationSwitchRole | null): string {
+  return reviews.flatMap((review) => reviewContinuationOutcome(review, role)).join("\n");
 }
 
 const PULL_REQUEST_WATCH_OUTCOME_TEXT: Record<PullRequestWatchOutcome, string> = {
@@ -1078,6 +1091,10 @@ export function normalizeWorkflowDecisionSnapshot(
   if (category === "automation_creation") {
     const snapshot = normalizeAutomationCreationSnapshot(value);
     return snapshot ? ok(snapshot) : fail("automation creation requires a server-prepared exact configuration");
+  }
+  if (category === "location_switch") {
+    const snapshot = normalizeLocationSwitchSnapshot(value);
+    return snapshot ? ok(snapshot) : fail("a Location switch requires a server-inspected set of Project Locations");
   }
   if (category === "campaign_issue_scope") {
     const normalized = normalizeCampaignIssueScopeSnapshot(value);
@@ -10568,7 +10585,7 @@ export class SessionsService {
     const ids = held.map((review) => review.reviewSessionId);
     let claimed = false;
     const sent = this.prompt(
-      requesterSessionId, reviewContinuationPrompt(held), [], undefined, undefined, undefined, "session", true, {
+      requesterSessionId, reviewContinuationPrompt(held, this.repositoryMismatchRole(session)), [], undefined, undefined, undefined, "session", true, {
         admitAs: "queued" as const,
         // The durable lane is where the runner validates this trusted continuation marker.
         ...(supportsQuestionRetention ? { durable: true, reviewContinuation: true as const } : {}),
@@ -11606,6 +11623,8 @@ export class SessionsService {
     request: CreateWorkflowDecisionRequest,
     canAccess: (sessionId: string) => boolean = () => true,
     internal?: { trustedDerivedVideo?: boolean; videoFallbackReason?: string; trustedIssueClosure?: boolean; trustedIssueScope?: boolean; trustedPublication?: boolean; trustedAutomationCreation?: boolean;
+      /** A regular session's Location switch, inspected by LocationSwitchService (#4138). */
+      trustedLocationSwitch?: boolean;
       publicationAdmissionFailure?: CampaignPublicationAdmissionFailure;
       /** The resourceKey an admitted publication was requested under, before it was stored under its recommendation (#4066). */
       requestedResourceKey?: string;
@@ -11658,6 +11677,9 @@ export class SessionsService {
     }
     if (normalized.data.category === "automation_creation" && !internal?.trustedAutomationCreation) {
       return fail("use request_automation_creation for a server-validated automation proposal", 403);
+    }
+    if (normalized.data.category === "location_switch" && !internal?.trustedLocationSwitch) {
+      return fail("use request_location_switch: the control plane inspects the Project's Locations itself", 403);
     }
     if (normalized.data.category === "pr_merge") {
       const snapshot = normalized.data;
@@ -12024,6 +12046,36 @@ export class SessionsService {
       this.hub.sessionChangedById(childSessionId);
       return ok(this.withMergeReviewEvidence(resolved));
     }
+    // A Location switch widens what the session reaches (#4138): only its authenticated owner picks
+    // the exact Location, and Stay Here leaves its repository and permissions unchanged.
+    if (decision?.category === "location_switch") {
+      if (decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
+          parentSessionId !== childSessionId || !canAccess(childSessionId)) return fail("workflow decision not found", 404);
+      const session = this.db.getSession(childSessionId);
+      const scope = this.db.sessionScope(childSessionId);
+      const human = authority === "human" && actor.kind === "human" && actor.id && scope
+        ? this.db.operatingHumanPrincipal(actor.id, scope.organizationId) : null;
+      if (!human || !this.db.isSessionOwner(human, childSessionId)) {
+        return fail("Only this session's owner can approve a Location switch", 403);
+      }
+      const snapshot = decision.resourceSnapshot;
+      if (!session || isTerminal(session.status) || session.archived || decision.status !== "pending" ||
+          snapshot.category !== "location_switch" || resolution?.outcome === "approve" && Date.now() >= snapshot.expiresAt) {
+        return fail("This Location switch request has ended, expired, or was already answered", 409);
+      }
+      const checked = this.validateWorkflowDecisionResolution(decision, resolution);
+      if (!checked.ok) return failAs(checked);
+      const now = Date.now();
+      const oweResume = this.workflowDecisionResumeOwed(session);
+      const approve = resolution.outcome === "approve";
+      const resolved = this.db.resolveLocationSwitchDecision(occurrenceId, approve ? "approved" : "denied", human.userId, now,
+        approve ? resolution.selectedOptionId : undefined, oweResume);
+      if (!resolved) return fail("This Location switch request was answered concurrently", 409);
+      this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
+      this.recordWorkflowDecisionAudit(resolved, approve ? "allowed" : "denied", actor, now);
+      this.hub.sessionChangedById(childSessionId);
+      return ok(this.withMergeReviewEvidence(resolved));
+    }
     const ownRequester = decision?.sessionId === childSessionId ? this.db.getSession(childSessionId) : null;
     // A Custom root's own publication, which only the campaign owner decides (#3919).
     const rootOwnPublication = Boolean(decision && ownRequester && decision.category === "follow_up_issue_publication" &&
@@ -12292,6 +12344,7 @@ export class SessionsService {
     if (!decision || decision.sessionId !== sessionId) return fail("workflow decision not found", 404);
     if (decision.category === "campaign_issue_scope") return fail("Scope resolution applies and consumes the exact authorized proposal atomically", 403);
     if (decision.category === "automation_creation") return fail("use execute_automation_creation to consume and create the approved automation atomically", 403);
+    if (decision.category === "location_switch") return fail("use execute_location_switch to carry out the exact Location its owner chose", 403);
     if (decision.category === "issue_closure") return fail("use close_github_issue to consume and execute the exact approved closure", 403);
     if (decision.category === "campaign_follow_up_admission") {
       return fail("accept the follow-up again: the approval is consumed when the campaign admits exactly that follow-up", 403);
@@ -13231,7 +13284,9 @@ export class SessionsService {
     session: SessionView;
     policy: ParentControlPolicy;
   } | null {
-    if (category === "automation_creation") return {
+    // A Location switch is the regular session's own gate, always its owner's (#4138). Its service
+    // refuses Orchestrators and children before a request reaches here.
+    if (category === "automation_creation" || category === "location_switch") return {
       session: child, policy: { revision: 0, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
     };
     if (child.orchestratorPolicy?.control?.mode === "full_control" && child.parentControlPolicy &&
@@ -13272,6 +13327,14 @@ export class SessionsService {
   private customRootOwnPublication(session: SessionView): boolean {
     return sessionRole(session) === "orchestrator" && Boolean(session.parentControlPolicy) &&
       session.orchestratorPolicy?.control?.mode !== "full_control" && this.decisionControllerRoot(session) === "none";
+  }
+
+  /** How a repository mismatch refusal tells `session` to recover (#4138), or null when it cannot
+   * help: a regular session is pointed at request_location_switch only on a runner that has it. */
+  private repositoryMismatchRole(session: SessionView): LocationSwitchRole | null {
+    const role = locationSwitchRole({ role: sessionRole(session), parentSessionId: session.parentSessionId });
+    return role !== "offer" || runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "sessionLocationSwitch")
+      ? role : null;
   }
 
   /** A child's gates resolve from its parent, exactly as its campaign attention does, so a gate
@@ -13484,7 +13547,7 @@ export class SessionsService {
     decision: WorkflowDecisionView,
     options: { recordingCompletedMerge?: boolean } = {},
   ): boolean {
-    if (decision.category === "automation_creation") return decision.authority === "human" &&
+    if (decision.category === "automation_creation" || decision.category === "location_switch") return decision.authority === "human" &&
       decision.controllingSessionId === decision.sessionId;
     // A decision the owner kept (#4064) stays the person's whatever the boundary would now delegate.
     // An Orchestrator-owned occurrence for a resource the owner kept (one requested before the
@@ -14033,8 +14096,10 @@ export class SessionsService {
       ui_evidence_approval: "UI Evidence Approval Required",
       review_round_extension: "Review Round Extension Approval Required",
       owner_decision: "Owner Decision Required",
+      location_switch: "Location Switch Approval Required",
     };
-    const options = snapshot.category === "implementation_question" || snapshot.category === "owner_decision"
+    const options = snapshot.category === "implementation_question" || snapshot.category === "owner_decision" ||
+        snapshot.category === "location_switch"
       ? [
           ...snapshot.options.map((option) => ({
             optionId: option.optionId,
@@ -14042,7 +14107,9 @@ export class SessionsService {
             description: option.description,
             kind: "allow_once" as const,
           })),
-          { optionId: "__workflow_deny__", name: "Do Not Proceed", kind: "reject_once" as const },
+          // Declining a Location switch keeps the session where it is (#4138).
+          { optionId: "__workflow_deny__", name: snapshot.category === "location_switch" ? "Stay Here" : "Do Not Proceed",
+            kind: "reject_once" as const },
         ]
       : [
           { optionId: "approve", name: "Approve", kind: "allow_once" as const },
@@ -14086,11 +14153,13 @@ export class SessionsService {
       );
     }
     const snapshot = decision.resourceSnapshot;
-    if (snapshot.category === "implementation_question" || snapshot.category === "owner_decision") {
+    if (snapshot.category === "implementation_question" || snapshot.category === "owner_decision" ||
+        snapshot.category === "location_switch") {
       if (resolution.outcome === "approve" &&
           (typeof resolution.selectedOptionId !== "string" ||
             !snapshot.options.some((option) => option.optionId === resolution.selectedOptionId))) {
-        return fail(`${snapshot.category === "owner_decision" ? "an owner" : "implementation"} approval must select one offered option`, 400);
+        return fail(snapshot.category === "location_switch" ? "a Location switch approval must choose one offered Location and action"
+          : `${snapshot.category === "owner_decision" ? "an owner" : "implementation"} approval must select one offered option`, 400);
       }
       if (resolution.outcome === "deny" && resolution.selectedOptionId !== undefined) {
         return fail("a denied implementation decision cannot select an option", 400);
@@ -15467,12 +15536,15 @@ export class SessionsService {
         return (decision && this.supersededWorkflowDecisionRefusal(decision)) ?? fail("workflow decision is stale or no longer pending", 409);
       }
       const snapshot = decision.resourceSnapshot;
-      const implementation = snapshot.category === "implementation_question" || snapshot.category === "owner_decision";
+      const implementation = snapshot.category === "implementation_question" || snapshot.category === "owner_decision" ||
+        snapshot.category === "location_switch";
       let deny: boolean;
-      if (snapshot.category === "implementation_question" || snapshot.category === "owner_decision") {
+      if (snapshot.category === "implementation_question" || snapshot.category === "owner_decision" ||
+          snapshot.category === "location_switch") {
         if (optionId !== null && optionId !== "__workflow_deny__" &&
             !snapshot.options.some((option) => option.optionId === optionId)) {
-          return fail(`${snapshot.category === "owner_decision" ? "owner" : "implementation"} decision option is not offered`, 409);
+          return fail(`${snapshot.category === "location_switch" ? "Location switch"
+            : snapshot.category === "owner_decision" ? "owner" : "implementation"} decision option is not offered`, 409);
         }
         deny = optionId === "__workflow_deny__" || optionId === null;
       } else {

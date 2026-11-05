@@ -294,7 +294,7 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
       typeof inspection.repository === "string" && /^[a-f0-9]{64}$/.test(inspection.digest ?? "") &&
       canonical(inspection.issueNumbers) === canonical(issueNumbers);
   const repository = verified ? (campaignScope?.repository ?? inspection!.repository!).toLowerCase() : null;
-  // Only a v286 root runner validates a boundary with a repository list; older roots keep today's
+  // Only a v288 root runner validates a boundary with a repository list; older roots keep today's
   // single-repository boundary.
   const boundary = repository && !campaignScope && facts.projectLocations &&
     runnerSupportsProtocol(runner.protocolVersion, "campaignRepositoryBoundary")

@@ -3,6 +3,7 @@ import { CampaignIssueScopeSummary } from "../CampaignIssueScopePanel.js";
 import type { PullRequestClosingReferenceCheck, WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
 import { IssueClosureSummary } from "../IssueClosureSummary.js";
 import { AutomationCreationSummary } from "../AutomationCreationSummary.js";
+import { LocationSwitchSummary } from "./LocationSwitchSummary.js";
 import { followUpLimitText } from "../../follow-up-limit.js";
 import { issueRefLabel } from "../../campaign-status.js";
 
@@ -29,6 +30,8 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck }: {
   switch (snapshot.category) {
     case "automation_creation":
       return <AutomationCreationSummary snapshot={snapshot} />;
+    case "location_switch":
+      return <LocationSwitchSummary snapshot={snapshot} />;
     case "implementation_question":
       return <>
         <p>{snapshot.question}</p>

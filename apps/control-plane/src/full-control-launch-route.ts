@@ -95,7 +95,7 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
     const lifetime = new AbortController();
     const onClose = () => { if (!reply.raw.writableFinished) lifetime.abort(); };
     reply.raw.once("close", onClose);
-    // #4117: a v286 root's campaign covers every active Location of its Project. Each other Location
+    // #4117: a v288 root's campaign covers every active Location of its Project. Each other Location
     // is inspected in its own path, in parallel with the launch Location and within its lifetime.
     const projectId = initial.plan.projectId ?? null;
     const launchLocationId = initial.plan.projectLocationId ?? null;

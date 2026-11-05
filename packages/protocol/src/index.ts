@@ -870,12 +870,20 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      advertises `decisionCalls` on Claude Code and Codex App Server. An older runner never
 //      receives the call: the control plane records a non-transient `runner_incapable` failure and
 //      the caller's one typed, person-owned request follows.
-// 286: multi-repository campaign boundaries (#4117). A Full Control boundary may carry
+// 287: a regular session recovers from a repository mismatch (#4138). request_location_switch
+//      (`wollipog location-switch`) asks the control plane to inspect the session's Project
+//      Locations and create a human-owned `location_switch` workflow decision naming the verified
+//      Locations of the task's repository; only the session's owner decides it, and the requester
+//      executes the exact approved option. Orchestrators and child sessions are refused with their
+//      role's guidance. Older runners and control planes refuse the tool by name. (286 is claimed
+//      by an open pull request.)
+// 288: multi-repository campaign boundaries (#4117). A Full Control boundary may carry
 //      `repositories`, one entry per verified repository of the campaign's Project with its
-//      ordered Location ids. A launch inspects every Project Location; only a v286 root runner
+//      ordered Location ids. A launch inspects every Project Location; only a v288 root runner
 //      receives the list, and a Location whose runner is older is excluded as too old. Older
-//      roots keep single-repository boundaries, and stored boundaries read as one entry.
-export const PROTOCOL_VERSION = 286;
+//      roots keep single-repository boundaries, and stored boundaries read as one entry. (It
+//      was first claimed as 286, which no released version uses.)
+export const PROTOCOL_VERSION = 288;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -982,6 +990,7 @@ export const SESSION_NAMING_TRANSPORT_MARGIN_MS = SESSION_NAMING_CLEANUP_BUDGET_
 export const SESSION_NAMING_SUPERVISION_MARGIN_MS = SESSION_NAMING_TRANSPORT_MARGIN_MS + 1_000;
 export { buildConversationHandoff, handoffDestinationError, inPlaceHandoffTurns } from "./conversation-handoff.js";
 export * from "./automation-messages.js";
+export * from "./location-switch.js";
 export { PROMPT_TITLE_MAX, titleFromPrompt } from "./session-title.js";
 export { plainTextPreview } from "./plain-text-preview.js";
 export * from "./campaign-work-ledger.js";
@@ -1263,6 +1272,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * and a one-way handoff of an Orchestrator-owned occurrence to that owner. Checked against the
    * root's runner by the control plane and against the control plane by the runner. */
   ownerDecisions: 281,
+  /** (#4138) A regular session's request_location_switch, checked against the requester's runner by
+   * the control plane and against the control plane by the runner. */
+  sessionLocationSwitch: 287,
   /** v239 runner answers `gitlab_merge_preflight`, which a GitLab `pr_merge` consume requires (#3602). */
   gitlabMergeDecisions: 239,
   /** v242 runner answers `github_merge_preflight`, the closing-reference check of a GitHub merge (#3713). */
@@ -1421,8 +1433,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   runnerCapacityDimensions: 135,
   /** Exact transient cross-process capacity-mutation lock diagnostics. */
   capacityLockDiagnostics: 137,
-  /** v286 validates a Full Control boundary's `repositories` list (#4117). */
-  campaignRepositoryBoundary: 286,
+  /** v288 validates a Full Control boundary's `repositories` list (#4117). */
+  campaignRepositoryBoundary: 288,
 } as const;
 
 /* ========================================================================== */
@@ -2814,8 +2826,11 @@ export type DelegatableWorkflowDecisionCategory = typeof WORKFLOW_DECISION_CATEG
  * creates it when the Orchestrator accepts that follow-up; only the campaign's Human decides it. */
 /** `owner_decision` (#4064): a Full Control root's question for its campaign's owner, created only
  * through request_owner_decision. Always the person's: no agent can answer, approve or resolve it. */
+/** `location_switch` (#4138): a regular session's request to continue its task in another Project
+ * Location of the repository it belongs to. Created only through request_location_switch; only the
+ * session's owner decides it, and the requester executes the exact approved target. */
 export type WorkflowDecisionCategory = DelegatableWorkflowDecisionCategory | "issue_closure" | "campaign_issue_scope" | "automation_creation" |
-  "campaign_follow_up_admission" | "owner_decision";
+  "campaign_follow_up_admission" | "owner_decision" | "location_switch";
 export type WorkflowDecisionAuthority = "human" | "orchestrator";
 
 export type ParentControlDecisionPolicy = Record<DelegatableWorkflowDecisionCategory, WorkflowDecisionAuthority>;
@@ -5398,6 +5413,7 @@ export const OWNER_DECISION_LIMITS = { question: 4000, material: 8000, minOption
 
 export type WorkflowDecisionResourceSnapshot =
   | AutomationCreationSnapshot
+  | import("./location-switch.js").LocationSwitchSnapshot
   | GithubIssueClosureSnapshot
   | CampaignIssueScopeSnapshot
   | CampaignFollowUpAdmissionSnapshot
@@ -5591,6 +5607,8 @@ export interface WorkflowDecisionView {
   forgeAction?: import("./forge-decision-action.js").WorkflowDecisionForgeAction;
   issueClosureResult?: GithubIssueClosureResult;
   automationCreationResult?: AutomationCreationResult;
+  /** (#4138) Where an approved Location switch continued the task. */
+  locationSwitchResult?: import("./location-switch.js").LocationSwitchResult;
   /** v242 (#3713): what the child's runner read from GitHub when a GitHub merge was requested.
    * Absent when the runner predates the check, so the closures it would make are unknown. */
   closingReferenceCheck?: PullRequestClosingReferenceCheck;

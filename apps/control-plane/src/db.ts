@@ -365,6 +365,7 @@ import {
   LEGACY_BOOTSTRAP_OWNER_NAME,
   LOCAL_OWNER_USER_ID,
   PERSONAL_ORGANIZATION_ID,
+  canOperate,
   type AuthPrincipal,
   type HumanPrincipal,
 } from "./identity.js";
@@ -7360,6 +7361,9 @@ export class ControlPlaneDb {
       "owner_handoff TEXT",
       // #4067: what Wollipog did when it performed this approved forge action itself.
       "forge_action TEXT",
+      // #4138: the session owner who approved a Location switch, and its claim, then its receipt.
+      "location_switch_approved_by TEXT",
+      "location_switch_result TEXT",
     ]) {
       try { db.exec(`ALTER TABLE workflow_decisions ADD COLUMN ${column}`); } catch { /* already present */ }
     }
@@ -23382,6 +23386,63 @@ export class ControlPlaneDb {
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
+  /** A Location switch (#4138): the owner's choice, the approver and the durable resume commit together. */
+  resolveLocationSwitchDecision(occurrenceId: string, outcome: "approved" | "denied", userId: string, now: number,
+    selectedOptionId: string | undefined, oweResume: boolean): WorkflowDecisionView | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const decision = this.workflowDecisionByOccurrence(occurrenceId);
+      if (!decision || decision.category !== "location_switch" || decision.authority !== "human") {
+        this.db.exec("ROLLBACK");
+        return null;
+      }
+      const resolved = this.resolveWorkflowDecision(occurrenceId, "human", outcome, now, selectedOptionId, undefined, undefined, undefined, oweResume);
+      if (resolved) this.stmt("UPDATE workflow_decisions SET location_switch_approved_by=? WHERE occurrence_id=?").run(userId, occurrenceId);
+      this.db.exec("COMMIT");
+      return resolved;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  locationSwitchApprover(occurrenceId: string): string | null {
+    return (this.stmt("SELECT location_switch_approved_by AS id FROM workflow_decisions WHERE occurrence_id=? AND category='location_switch'")
+      .get(occurrenceId) as { id: string | null } | undefined)?.id ?? null;
+  }
+
+  /** Mark an approved switch as being carried out. Fails once any attempt has claimed it. */
+  claimLocationSwitch(occurrenceId: string, resourceDigest: string, now: number): boolean {
+    return Number(this.stmt(`UPDATE workflow_decisions SET location_switch_result=?
+      WHERE occurrence_id=? AND category='location_switch' AND authority='human' AND status='approved'
+        AND resource_digest=? AND location_switch_approved_by IS NOT NULL AND location_switch_result IS NULL`)
+      .run(JSON.stringify({ state: "starting", claimedAt: now }), occurrenceId, resourceDigest).changes) === 1;
+  }
+
+  /** An attempt that started nothing gives its claim back, so the approval can be retried. */
+  releaseLocationSwitchClaim(occurrenceId: string): void {
+    this.stmt(`UPDATE workflow_decisions SET location_switch_result=NULL
+      WHERE occurrence_id=? AND category='location_switch' AND status='approved'
+        AND json_extract(location_switch_result, '$.state')='starting'`).run(occurrenceId);
+  }
+
+  completeLocationSwitch(occurrenceId: string, resourceDigest: string, result: NonNullable<WorkflowDecisionView["locationSwitchResult"]>, now: number): boolean {
+    return Number(this.stmt(`UPDATE workflow_decisions SET status='consumed', consumed_at=?, location_switch_result=?
+      WHERE occurrence_id=? AND category='location_switch' AND authority='human' AND status='approved'
+        AND resource_digest=? AND json_extract(location_switch_result, '$.state')='starting'`)
+      .run(now, JSON.stringify(result), occurrenceId, resourceDigest).changes) === 1;
+  }
+
+  /** An active member of the organization who may still mutate its resources, so a member demoted
+   * to Viewer can neither approve nor carry out a mutation. The caller still requires session
+   * ownership. */
+  operatingHumanPrincipal(userId: string, organizationId: string): HumanPrincipal | null {
+    const row = this.stmt(`SELECT user.display_name AS userName, organization.name AS organizationName, membership.role
+      FROM identity_memberships membership JOIN identity_users user ON user.user_id=membership.user_id
+      JOIN identity_organizations organization ON organization.organization_id=membership.organization_id
+      WHERE membership.user_id=? AND membership.organization_id=? AND user.status='active'`)
+      .get(userId, organizationId) as { userName: string; organizationName: string; role: HumanPrincipal["role"] } | undefined;
+    return row && canOperate(row.role)
+      ? { kind: "human", actorId: userId, userId, organizationId, ...row, deviceId: null, localBootstrap: false } : null;
+  }
+
   automationCreationApprover(occurrenceId: string): string | null {
     return (this.stmt("SELECT automation_creation_approved_by AS id FROM workflow_decisions WHERE occurrence_id=? AND category='automation_creation'")
       .get(occurrenceId) as { id: string | null } | undefined)?.id ?? null;
@@ -33818,6 +33879,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     owner_handoff?: string | null;
     issue_closure_result?: string | null;
     automation_creation_result?: string | null;
+    location_switch_result?: string | null;
     closing_reference_check?: string | null;
     forge_action?: string | null;
   } | undefined;
@@ -33833,6 +33895,8 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
   const humanFallback = parseJson<NonNullable<WorkflowDecisionView["humanFallback"]>>(row.human_fallback ?? null);
   const closingReferenceCheck = parseJson<NonNullable<WorkflowDecisionView["closingReferenceCheck"]>>(row.closing_reference_check ?? null);
   const forgeAction = parseJson<NonNullable<WorkflowDecisionView["forgeAction"]>>(row.forge_action ?? null);
+  // A claim without a session is an attempt in progress, not a receipt.
+  const locationSwitchResult = parseJson<Partial<NonNullable<WorkflowDecisionView["locationSwitchResult"]>>>(row.location_switch_result ?? null);
   return {
     requestId: row.request_id,
     occurrenceId: row.occurrence_id,
@@ -33849,6 +33913,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     status: row.status,
     ...(row.issue_closure_result ? { issueClosureResult: JSON.parse(row.issue_closure_result) as NonNullable<WorkflowDecisionView["issueClosureResult"]> } : {}),
     ...(row.automation_creation_result ? { automationCreationResult: JSON.parse(row.automation_creation_result) as NonNullable<WorkflowDecisionView["automationCreationResult"]> } : {}),
+    ...(locationSwitchResult?.sessionId ? { locationSwitchResult: locationSwitchResult as NonNullable<WorkflowDecisionView["locationSwitchResult"]> } : {}),
     ...(closingReferenceCheck ? { closingReferenceCheck } : {}),
     ...(forgeAction ? { forgeAction } : {}),
     ...(row.selected_option_id ? { selectedOptionId: row.selected_option_id } : {}),

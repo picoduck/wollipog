@@ -28,7 +28,7 @@ export function authorizeFullControl(
   return validCampaignControl(control) ? structuredClone(control) : null;
 }
 
-/** The runner's diagnostic copy of a campaign's control. A pre-v286 runner rejects a boundary with
+/** The runner's diagnostic copy of a campaign's control. A pre-v288 runner rejects a boundary with
  * a `repositories` list (#4117), so it receives the boundary without it, which names the same first
  * repository. The server keeps and enforces the full boundary. */
 export function campaignControlForRunner(control: CampaignControl, protocolVersion: number | null | undefined): CampaignControl {

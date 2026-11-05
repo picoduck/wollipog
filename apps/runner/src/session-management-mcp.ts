@@ -1299,7 +1299,56 @@ async function automationCreationCall(deps: McpDeps, method: "GET" | "POST", suf
   return response.ok ? textResult(response.data) : errorResult(response.message);
 }
 
+/** A regular session's own Location switch (#4138). Orchestrators never see these tools. */
+async function locationSwitchCall(deps: McpDeps, method: "GET" | "POST", suffix: string, body?: Json): Promise<ToolResult> {
+  if (!deps.selfSessionId) return errorResult("A Location switch requires a Wollipog session identity");
+  const compatibility = deps.controlPlaneProtocolVersion === undefined ? await cpFetch(deps, "GET", "/api/compatibility") : null;
+  const version = deps.controlPlaneProtocolVersion ?? (compatibility?.ok ? compatibility.data?.protocolVersion : undefined);
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionLocationSwitch;
+  if (!Number.isSafeInteger(version) || version < required) {
+    return controlPlaneUpdateRequired("Switching Locations needs a newer version of Wollipog. Update Wollipog, or start a session in the " +
+      "right Location yourself; this session was not moved.", required, version);
+  }
+  const response = await cpFetch(deps, method, `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/location-switch-requests${suffix}`,
+    body, method === "POST" ? deps.requestTimeoutMs ?? 90_000 : undefined);
+  return response.ok ? textResult(response.data) : errorResult(response.message);
+}
+
 export const TOOLS: McpTool[] = [
+  {
+    name: "request_location_switch",
+    description: "Ask your person to continue this task in another Location of the same Project when the task belongs to another " +
+      "repository than this session's (for example, the issue or pull request you were asked to work on is in another repository). " +
+      "Call it before implementing when you notice the mismatch, or when attaching a worktree or requesting a review is refused " +
+      "because the repository differs (trigger worktree_attach or review). The control plane inspects every Location of the Project, " +
+      "and the person chooses one: Start a New Session there with your handoff, or Stay Here. Only the person approves; nothing " +
+      "moves until they do. Regular sessions only: Orchestrators dispatch children instead, and a child session reports the mismatch " +
+      "to the session that started it. Then end your turn; the outcome resumes you.",
+    inputSchema: { type: "object", properties: {
+      requestId: { type: "string", minLength: 1, maxLength: 256 },
+      repository: { type: "string", minLength: 1, maxLength: 300, description: "The repository the task belongs to: GitHub owner/name, or a GitLab host/group/project." },
+      reason: { type: "string", minLength: 1, maxLength: 1000, description: "One or two sentences the person reads: why the task belongs to that repository." },
+      handoff: { type: "string", minLength: 1, maxLength: 8000, description: "The task as whoever continues it needs it: the request, what is done so far, " +
+        "branches or pull requests that exist, and what remains. The person sees it before approving." },
+      trigger: { type: "string", enum: ["early", "worktree_attach", "review"] },
+    }, required: ["requestId", "repository", "reason", "handoff"], additionalProperties: false },
+    handler: async (args, deps) => locationSwitchCall(deps, "POST", "", args),
+  },
+  {
+    name: "get_location_switch",
+    description: "Read your own Location switch request: the Locations it offered, the person's choice and, once carried out, " +
+      "the session that continues the task. Nothing is approved or moved.",
+    inputSchema: { type: "object", properties: { occurrenceId: { type: "string", minLength: 1, maxLength: 256 } }, required: ["occurrenceId"], additionalProperties: false },
+    handler: async (args, deps) => locationSwitchCall(deps, "GET", `/${encodeURIComponent(args.occurrenceId)}`),
+  },
+  {
+    name: "execute_location_switch",
+    description: "Carry out the exact Location and action your person approved, after the control plane verifies the Location again. " +
+      "Supply the occurrenceId and resourceDigest of the request; no target can be supplied. The approval expires after an hour. " +
+      "After Start a New Session, tell your person where the task continues and stop working on it here.",
+    inputSchema: { type: "object", properties: { occurrenceId: { type: "string", minLength: 1, maxLength: 256 }, resourceDigest: { type: "string", pattern: "^[0-9a-f]{64}$" } }, required: ["occurrenceId", "resourceDigest"], additionalProperties: false },
+    handler: async (args, deps) => locationSwitchCall(deps, "POST", `/${encodeURIComponent(args.occurrenceId)}/execute`, { resourceDigest: args.resourceDigest }),
+  },
   {
     name: "request_automation_creation",
     description: "Propose an exact automation for authenticated human approval. Available to Normal and Orchestrator sessions; Full Control never delegates this approval. Returns a pending typed decision, never creates a schedule. Reuse requestId with identical content to recover its result; reuse resourceKey with a new requestId to revise a proposal. Read the decision with get_automation_creation and execute only after human approval. Future runs retain their own budgets, permissions and approval gates.",

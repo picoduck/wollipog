@@ -36,7 +36,7 @@ export interface CampaignAuthorityBoundary {
   evidenceAuthority?: CampaignEvidenceAuthority;
   /** Every verified repository of the campaign's Project (#4117), one entry per repository, the
    * launch Location's first; the first entry's repository is `repository`. Omitted on boundaries
-   * minted before v286 or for a pre-v286 root runner: those read as one entry of `repository`. */
+   * minted before v288 or for a pre-v288 root runner: those read as one entry of `repository`. */
   repositories?: CampaignBoundaryRepository[];
 }
 
@@ -144,9 +144,9 @@ const operations: CampaignAuthorityOperation[] = ["implementation_question", "pr
 export function campaignWorkflowOwner(control: CampaignControl | undefined, decisions: ParentControlDecisionPolicy,
   category: WorkflowDecisionCategory, supported: boolean, fullControlReviewExtensions = false): "human" | "orchestrator" {
   // A follow-up past the campaign's approval limit is the Human's in every mode (#2940), and so is a
-  // decision its owner kept (#4064).
+  // decision its owner kept (#4064). A Location switch widens a session's reach (#4138).
   if (!supported || category === "automation_creation" || category === "campaign_follow_up_admission" ||
-      category === "owner_decision") return "human";
+      category === "owner_decision" || category === "location_switch") return "human";
   if (category === "issue_closure" || category === "campaign_issue_scope") return control?.mode === "full_control" &&
     validCampaignControl(control) && control.boundary.issueAuthority && control.boundary.operations.includes(category) ? "orchestrator" : "human";
   if (!control || control.mode === "custom") return decisions[category];
@@ -690,7 +690,9 @@ export function resolveCampaignAuthority(input: {
   if (Boolean(request) === Boolean(input.snapshot)) return result("human", "human_required", "unverified_intent");
   // The owner kept this decision (#4064): no mode, boundary or grant makes it an agent's.
   if (category === "owner_decision") return result("human", "human_required", "owner_kept");
-  if (category === "automation_creation" || category === "campaign_follow_up_admission") return result("human", "human_required", "protected_request");
+  if (category === "automation_creation" || category === "campaign_follow_up_admission" || category === "location_switch") {
+    return result("human", "human_required", "protected_request");
+  }
   if (!input.supported) return result("human", "human_required", "unsupported_provider");
   // Rules a person marked Human Required, and built-in safety rules, stay theirs in every mode.
   if (input.humanRequired) return result("human", "human_required", "human_required_rule",

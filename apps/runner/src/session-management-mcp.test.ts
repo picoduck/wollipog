@@ -74,6 +74,33 @@ function resultJson(result: any): any {
   return JSON.parse(result.content[0].text);
 }
 
+test("only regular sessions have the Location switch tools, which act on the session itself and need a v287 control plane", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 201, body: { status: "pending", authority: "human" } }));
+  deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  const ask = { requestId: "switch-1", repository: "acme/docs", reason: "The issue is in acme/docs.", handoff: "Fix acme/docs#12.", trigger: "early" };
+  assert.equal((await callTool(deps, "request_location_switch", ask)).isError, undefined);
+  assert.equal(calls.at(-1)!.url, `${CP_URL}/api/sessions/${SELF_ID}/location-switch-requests`);
+  assert.deepEqual(calls.at(-1)!.body, ask);
+  assert.equal((await callTool(deps, "get_location_switch", { occurrenceId: "switch_1" })).isError, undefined);
+  assert.equal(calls.at(-1)!.method, "GET");
+  assert.equal((await callTool(deps, "execute_location_switch", { occurrenceId: "switch_1", resourceDigest: "a".repeat(64) })).isError, undefined);
+  assert.equal(calls.at(-1)!.url, `${CP_URL}/api/sessions/${SELF_ID}/location-switch-requests/switch_1/execute`);
+  assert.deepEqual(calls.at(-1)!.body, { resourceDigest: "a".repeat(64) });
+  calls.length = 0;
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionLocationSwitch - 1;
+  const old = await callTool(deps, "request_location_switch", ask);
+  assert.equal(old.isError, true);
+  assert.equal(resultJson(old).requiredControlPlaneProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.sessionLocationSwitch);
+  assert.equal(calls.length, 0, "an older control plane is never asked");
+  // An Orchestrator neither lists nor calls them.
+  deps.orchestrator = true;
+  deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  const listed = await dispatch({ jsonrpc: "2.0", id: 3, method: "tools/list" }, deps);
+  assert.equal((listed!.result.tools as { name: string }[]).some((tool) => tool.name.includes("location_switch")), false);
+  assert.equal((await callTool(deps, "request_location_switch", ask)).isError, true);
+  assert.equal(calls.length, 0);
+});
+
 test("Normal and Orchestrator automation tools are session-bound and never fall back on unsupported peers", async () => {
   for (const orchestrator of [false, true]) {
     const { deps, calls } = makeDeps(() => ({ status: 200, body: { status: "pending", authority: "human" } }));
@@ -760,6 +787,9 @@ test("tools/list returns the curated session and workflow tools with schemas", a
   assert.deepEqual(
     tools.map((t) => t.name),
     [
+      "request_location_switch",
+      "get_location_switch",
+      "execute_location_switch",
       "request_automation_creation",
       "get_automation_creation",
       "execute_automation_creation",

@@ -46,11 +46,11 @@ test("a boundary minted before the list reads as one entry of its repository (#4
   assert.deepEqual(listed.repositories[0]!.locationIds, ["loc_a"], "readers get a copy, never the stored list");
 });
 
-test("only a v286 runner can enforce a boundary with a repository list (#4117)", () => {
+test("only a v288 runner can enforce a boundary with a repository list (#4117)", () => {
   const listed = control([{ repository: "owner/repo", locationIds: ["loc_a"] }]);
   assert.equal(campaignAuthorityPreflight(listed, "claude-code", PROTOCOL_VERSION).supported, true);
-  const older = campaignAuthorityPreflight(listed, "claude-code", 285);
+  const older = campaignAuthorityPreflight(listed, "claude-code", 287);
   assert.equal(older.supported, false);
-  assert.match(JSON.stringify(older), /286/);
+  assert.match(JSON.stringify(older), /288/);
   assert.equal(campaignAuthorityPreflight({ mode: "full_control", boundary }, "claude-code", 284).supported, true);
 });

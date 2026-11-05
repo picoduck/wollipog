@@ -2083,7 +2083,7 @@ test("a launch builds one boundary entry per verified Project repository and exc
     assert.deepEqual(policy.excludedLocations, checked!.summary.excludedLocations);
     const start = f.starts.find((message) => message.type === "start_session");
     assert.deepEqual(start?.type === "start_session" && (start.spec.orchestrator?.control as typeof policy.control | undefined),
-      policy.control, "a v286 root runner receives the whole boundary");
+      policy.control, "a v288 root runner receives the whole boundary");
   } finally { await server.close(); f.db.close(); }
 });
 
@@ -2157,7 +2157,7 @@ test("a launch Location that fails inspection still fails the launch with #4090'
   } finally { await server.close(); f.db.close(); }
 });
 
-test("a pre-v286 root keeps a single-repository boundary and inspects only its launch Location (#4117)", async () => {
+test("a pre-v288 root keeps a single-repository boundary and inspects only its launch Location (#4117)", async () => {
   const f = fixture({ protocolVersion: PROTOCOL_VERSION - 1 });
   const p = multiRepositoryProject(f);
   const { server } = await app(f);
@@ -2198,7 +2198,7 @@ test("a one-Location Project yields a one-entry boundary that reads like today's
     const { repositories: _omitted, ...stored } = boundary;
     assert.ok(validCampaignControl({ mode: "full_control", boundary: stored }));
     assert.deepEqual(campaignBoundaryRepositories(stored), [{ repository: "owner/repo", locationIds: [] }]);
-    // A pre-v286 runner's diagnostic copy drops the list; v286 keeps it.
+    // A pre-v288 runner's diagnostic copy drops the list; v288 keeps it.
     assert.deepEqual(campaignControlForRunner(policy.control!, PROTOCOL_VERSION - 1), { mode: "full_control", boundary: stored });
     assert.equal(campaignControlForRunner(policy.control!, PROTOCOL_VERSION), policy.control);
   } finally { await server.close(); f.db.close(); }
