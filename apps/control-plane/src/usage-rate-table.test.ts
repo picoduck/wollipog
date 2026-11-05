@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mock, test } from "node:test";
 import {
+  DEFAULT_USAGE_PRICING_URL,
   USAGE_PRICING_ERROR_MAX_LENGTH,
   USAGE_PRICING_REFRESH_FLOOR_MS,
   USAGE_PRICING_TTL_MS,
@@ -269,6 +270,63 @@ test("a source URL carrying credentials never reaches the reported failure (#405
     assert.ok(message.length > 0, `the failure is reported for ${sourceUrl}`);
     assert.doesNotMatch(message, /mirror-user|mirror-pass|first|pass|abc123|frag/, message);
   }
+});
+
+test("the reported source drops URL credentials while fetches and the disk cache keep the full URL (#4173)", async () => {
+  const sourceUrl = "https://u:p@host.example/rates.json?key=v#frag";
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-usage-rates-"));
+  const cachePath = join(dir, "usage-model-rates.json");
+  try {
+    const h = harness({ sourceUrl, cachePath });
+    assert.equal(h.service.status().source, "https://host.example/rates.json");
+    const refreshed = await h.service.ensure(true);
+    assert.equal(refreshed.source, "https://host.example/rates.json");
+    assert.deepEqual(h.calls, [sourceUrl], "the full configured URL is fetched");
+    const skipped = await h.service.ensure(true);
+    assert.ok(skipped.refreshSkipped);
+    assert.equal(skipped.source, "https://host.example/rates.json");
+    assert.equal((JSON.parse(readFileSync(cachePath, "utf8")) as { source: string }).source, sourceUrl,
+      "the cache stays keyed on the full configured URL");
+
+    for (const status of [h.service.status(), refreshed, skipped]) {
+      assert.doesNotMatch(JSON.stringify(status), /u:p@|key=v|frag/);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a cache written before #4173 under a credentialed source is still recognized as fresh", async () => {
+  const sourceUrl = "https://u:p@host.example/rates.json?key=v";
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-usage-rates-"));
+  const cachePath = join(dir, "usage-model-rates.json");
+  try {
+    // The file the service wrote before this change: the same shape, keyed on the full URL.
+    writeFileSync(cachePath, JSON.stringify({ version: 1, source: sourceUrl, fetchedAt: 5_000, document }));
+    const calls: string[] = [];
+    const service = new UsageRateTableService({
+      sourceUrl, cachePath, now: () => 5_001, log: () => {},
+      fetchDocument: async (url) => { calls.push(url); throw new Error("unreachable"); },
+    });
+    assert.deepEqual(await service.ensure(), {
+      status: "fresh", source: "https://host.example/rates.json", fetchedAt: 5_000, knownModels: 2,
+    });
+    assert.equal(calls.length, 0, "a fresh cached table is served without a fetch");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the default source and a disabled source are reported as before (#4173)", async () => {
+  const defaults = harness({ sourceUrl: resolveUsagePricingUrl(undefined) });
+  assert.equal(defaults.service.status().source, DEFAULT_USAGE_PRICING_URL);
+  assert.equal((await defaults.service.ensure()).source, DEFAULT_USAGE_PRICING_URL);
+  assert.deepEqual(defaults.calls, [DEFAULT_USAGE_PRICING_URL]);
+
+  const off = harness({ sourceUrl: resolveUsagePricingUrl("off") });
+  assert.equal(off.service.status().source, "disabled");
+  assert.equal((await off.service.ensure(true)).source, "disabled");
+  assert.equal(off.calls.length, 0);
 });
 
 test("a refresh failure is one bounded line without headers or credentials (#4056)", () => {
