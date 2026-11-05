@@ -88,17 +88,28 @@ async function realTree(path: string): Promise<void> {
  * the companion directory holding its subagent transcripts, into the new working directory's
  * project in the same root, so the provider resumes it there. The source stays where it is, so
  * the earlier Location's history is untouched. Call only after the old provider has retired.
- * Returns whether a transcript was found in any of `roots`.
+ *
+ * A session that already moved has a copy in every working directory it ran in, and only the one
+ * in `sourceCwd`, where its provider last ran, is current. That copy replaces any older one already
+ * in the target, such as when a session returns to a Location it left. Returns whether a
+ * transcript was found in any of `roots`.
  */
-export async function moveClaudeTranscriptToCwd(roots: readonly string[], sessionId: string, cwd: string): Promise<boolean> {
+export async function moveClaudeTranscriptToCwd(
+  roots: readonly string[], sessionId: string, sourceCwd: string, cwd: string,
+): Promise<boolean> {
   if (!/^[a-zA-Z0-9_-]+$/u.test(sessionId)) throw new Error("the provider conversation id is unsafe to copy");
+  const sourceKey = claudeProjectPathKey(sourceCwd);
   const targetKey = claudeProjectPathKey(cwd);
   for (const root of roots) {
     const projects = await transcriptProjects(root, sessionId);
     if (projects.length === 0) continue;
-    if (projects.includes(targetKey)) return true;
-    if (projects.length !== 1) throw new Error("the conversation has more than one saved copy; it cannot be moved unambiguously");
-    const source = join(root, projects[0]!);
+    // A single copy is the conversation wherever it was saved; with several, only the source's is current.
+    const current = projects.includes(sourceKey) ? sourceKey : projects.length === 1 ? projects[0]! : undefined;
+    if (current === undefined) {
+      throw new Error("the conversation has several saved copies and none where the session last ran");
+    }
+    if (current === targetKey) return true;
+    const source = join(root, current);
     const target = join(root, targetKey);
     await mkdir(target, { recursive: true });
     if (!(await lstat(target)).isDirectory()) throw new Error("the conversation store is not a real directory");

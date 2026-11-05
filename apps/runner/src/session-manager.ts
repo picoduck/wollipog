@@ -14473,11 +14473,21 @@ export class SessionManager {
         : removeWorktree(pending.repoPath, { path: worktree.path, branch: worktree.branch }, options)).catch((error) =>
         this.log(`session ${sessionId} could not release its unused Location switch worktree: ${errText(error)}`));
     };
+    // Preparation awaited: a Stop, Delete, Restart, or a turn that began meanwhile owns the session
+    // now, and replacing the provider would override it. Give the worktree back; the switch stays
+    // durable, so the session's next provider carries it out at its own turn boundary.
+    if (!this.worktreeRebindCanProceed(sessionId, entry) || this.store.readMeta(sessionId)?.status === "stopped" ||
+        this.store.readMeta(sessionId)?.pendingLocationSwitch?.occurrenceId !== pending.occurrenceId) {
+      await release();
+      const current = this.active.get(sessionId);
+      if (current?.pendingLocationSwitch && !current.running) setImmediate(() => this.scheduleDrain(sessionId));
+      return;
+    }
     const result = await this.replaceProviderProcess(sessionId, entry, {
       prepareReplacement: async () => {
         const conversation = this.store.readMeta(sessionId)?.agentSessionId;
         if (meta.driver === "claude-code" && conversation &&
-            !await moveClaudeTranscriptToCwd(this.claudeTranscriptRoots(meta), conversation, worktree.path)) {
+            !await moveClaudeTranscriptToCwd(this.claudeTranscriptRoots(meta), conversation, entry.cwd, worktree.path)) {
           throw new Error("the saved conversation was not found");
         }
       },

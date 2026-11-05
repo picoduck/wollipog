@@ -270,6 +270,39 @@ test("a switch that cannot prepare its target leaves the session where it was, v
   });
 });
 
+test("a Stop while the target is being prepared wins: nothing moves or relaunches, and the worktree is given back", async () => {
+  await withSession("stop-during-prepare", async (h) => {
+    await establishConversation(h);
+    const worktrees = () => git(h.docs, "worktree", "list", "--porcelain").split("\n").filter((line) => line.startsWith("worktree ")).length;
+    // Model the person's Stop landing while preparation awaits: the first readiness check that
+    // finds the target worktree already checked out stops the session before answering.
+    const manager = h.manager as unknown as { worktreeRebindCanProceed: (sessionId: string, entry: unknown) => boolean };
+    const canProceed = manager.worktreeRebindCanProceed.bind(h.manager);
+    let stopped = false;
+    manager.worktreeRebindCanProceed = (sessionId, entry) => {
+      if (!stopped && worktrees() > 1) {
+        stopped = true;
+        h.manager.stop(h.sessionId);
+      }
+      return canProceed(sessionId, entry);
+    };
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => stopped, "the target was never prepared");
+    await waitFor(() => worktrees() === 1, "the unused target worktree was not released");
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    const meta = h.store.readMeta(h.sessionId)!;
+    assert.equal(meta.status, "stopped");
+    assert.equal(meta.workspaceId, "app");
+    assert.equal(meta.repoPath, h.app);
+    assert.equal(meta.locationHistory, undefined);
+    assert.equal(h.fake.launches(), 1, "no provider was launched for a stopped session");
+    assert.equal(h.fake.prompts.length, 1);
+    assert.ok(git(h.docs, "rev-parse", "--verify", "refs/heads/fix/install-link"), "the branch to recover stays");
+    // The approved switch stays owed, as it is when Stop lands before preparation starts.
+    assert.equal(meta.pendingLocationSwitch?.occurrenceId, "occurrence-1");
+  });
+});
+
 test("the runner re-verifies everything it was asked to switch to before accepting", async () => {
   await withSession("refusals", async (h) => {
     await establishConversation(h);
@@ -301,14 +334,40 @@ test("a conversation is copied into the new working directory's project and its 
     mkdirSync(join(source, "conv"), { recursive: true });
     writeFileSync(join(source, "conv.jsonl"), "history\n");
     writeFileSync(join(source, "conv", "agent.jsonl"), "subagent\n");
-    assert.equal(await moveClaudeTranscriptToCwd([join(root, "missing"), projects], "conv", "/src/docs/worktree"), true);
+    assert.equal(await moveClaudeTranscriptToCwd([join(root, "missing"), projects], "conv", "/src/app", "/src/docs/worktree"), true);
     const target = join(projects, claudeProjectPathKey("/src/docs/worktree"));
     assert.equal(readFileSync(join(target, "conv.jsonl"), "utf8"), "history\n");
     assert.equal(readFileSync(join(target, "conv", "agent.jsonl"), "utf8"), "subagent\n");
     assert.equal(readFileSync(join(source, "conv.jsonl"), "utf8"), "history\n");
-    assert.equal(await moveClaudeTranscriptToCwd([projects], "conv", "/src/docs/worktree"), true, "already in place");
-    assert.equal(await moveClaudeTranscriptToCwd([projects], "other", "/src/docs/worktree"), false);
-    await assert.rejects(moveClaudeTranscriptToCwd([projects], "../conv", "/x"), /unsafe/u);
+    assert.equal(await moveClaudeTranscriptToCwd([projects], "conv", "/src/docs/worktree", "/src/docs/worktree"), true, "already in place");
+    assert.equal(await moveClaudeTranscriptToCwd([projects], "other", "/src/app", "/src/docs/worktree"), false);
+    await assert.rejects(moveClaudeTranscriptToCwd([projects], "../conv", "/src/app", "/x"), /unsafe/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a session that moves again carries its latest conversation, including back to a Location it left", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-location-transcript-again-"));
+  try {
+    const projects = join(root, "projects");
+    const transcript = (cwd: string) => join(projects, claudeProjectPathKey(cwd), "conv.jsonl");
+    mkdirSync(join(projects, claudeProjectPathKey("/src/a")), { recursive: true });
+    writeFileSync(transcript("/src/a"), "turn 1\n");
+    // A to B, then a turn in B.
+    assert.equal(await moveClaudeTranscriptToCwd([projects], "conv", "/src/a", "/src/b"), true);
+    writeFileSync(transcript("/src/b"), "turn 1\nturn 2 in b\n");
+    // B to C: A's older copy does not make the move ambiguous, and C gets B's history.
+    assert.equal(await moveClaudeTranscriptToCwd([projects], "conv", "/src/b", "/src/c"), true);
+    assert.equal(readFileSync(transcript("/src/c"), "utf8"), "turn 1\nturn 2 in b\n");
+    writeFileSync(transcript("/src/c"), "turn 1\nturn 2 in b\nturn 3 in c\n");
+    // C back to A: A's stale copy is replaced by the latest history.
+    assert.equal(await moveClaudeTranscriptToCwd([projects], "conv", "/src/c", "/src/a"), true);
+    assert.equal(readFileSync(transcript("/src/a"), "utf8"), "turn 1\nturn 2 in b\nturn 3 in c\n");
+    // Earlier copies stay where they were saved.
+    assert.equal(readFileSync(transcript("/src/b"), "utf8"), "turn 1\nturn 2 in b\n");
+    // Several copies and none where the session last ran is refused rather than guessed.
+    await assert.rejects(moveClaudeTranscriptToCwd([projects], "conv", "/src/elsewhere", "/src/d"), /none where the session last ran/u);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
