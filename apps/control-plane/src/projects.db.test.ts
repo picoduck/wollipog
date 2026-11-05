@@ -1329,3 +1329,123 @@ test("an existing database gains the project request table on reopen (#3468)", (
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a renamed Location keeps its name in its Project across discovery, offline and reopen (#4151)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-location-rename-"));
+  const path = join(dir, "control-plane.db");
+  try {
+    let db = ControlPlaneDb.open(path);
+    db.registerRunner(runner("runner-1", [
+      { id: "ws-1", name: "Alpha", path: "/repos/alpha" },
+      { id: "ws-2", name: "Bravo", path: "/repos/bravo" },
+    ]), 10);
+    const alpha = db.listProjects(true).find((project) => project.locations[0]?.workspaceId === "ws-1")!;
+    const bravo = db.listProjects(true).find((project) => project.locations[0]?.workspaceId === "ws-2")!;
+    const original = alpha.locations[0]!;
+    assert.equal(original.nameSource, "workspace");
+    const shared = db.createProject({ name: "Shared", now: 11 });
+    const sharedLink = db.addProjectLocation(shared.id, { runnerId: "runner-1", workspaceId: "ws-1" }, 12);
+    const linked = db.createSession({
+      ...session("alpha-session", "runner-1", "ws-1", 13),
+      projectId: alpha.id,
+      projectLocationId: original.id,
+    });
+
+    // The machine is offline: renaming is the control plane's metadata alone.
+    db.markOffline("runner-1", 14);
+    assert.throws(() => db.renameProjectLocation(alpha.id, original.id, "   ", 15), /Enter a name/);
+    assert.equal(db.renameProjectLocation(bravo.id, original.id, "Elsewhere", 15), null,
+      "a Location outside the named Project is not renamed");
+    const renamed = db.renameProjectLocation(alpha.id, original.id, "  Main Checkout  ", 16)!;
+    assert.equal(renamed.name, "Main Checkout");
+    assert.equal(renamed.nameSource, "user");
+    assert.deepEqual(
+      { id: renamed.id, projectId: renamed.projectId, runnerId: renamed.runnerId, workspaceId: renamed.workspaceId,
+        path: renamed.path, source: renamed.source, isDefault: renamed.isDefault },
+      { id: original.id, projectId: original.projectId, runnerId: original.runnerId, workspaceId: original.workspaceId,
+        path: original.path, source: original.source, isDefault: original.isDefault },
+    );
+    assert.deepEqual(db.getProject(alpha.id)?.locations[0]?.scope, original.scope, "access is unchanged");
+    assert.equal(db.getProject(alpha.id)?.name, "Alpha", "the Project keeps its name");
+    assert.equal(db.getProject(alpha.id)?.updatedAt, 16, "clients see the Project change");
+    assert.equal(db.getProject(shared.id)?.locations[0]?.name, "Alpha", "another Project's link keeps its label");
+    assert.equal(db.getSession(linked.id)?.projectLocationId, original.id);
+    assert.equal(db.getProject(bravo.id)?.locations[0]?.name, "Bravo");
+
+    // Reconnection reports new workspace names: the renamed Location keeps its own, the rest follow.
+    db.registerRunner(runner("runner-1", [
+      { id: "ws-1", name: "Alpha Renamed On Machine", path: "/repos/alpha-moved" },
+      { id: "ws-2", name: "Bravo Renamed On Machine", path: "/repos/bravo" },
+    ]), 20);
+    let location = db.getProject(alpha.id)!.locations[0]!;
+    assert.equal(location.name, "Main Checkout");
+    assert.equal(location.path, "/repos/alpha-moved", "discovery still updates the path");
+    assert.equal(db.getProject(shared.id)?.locations[0]?.id, sharedLink.id);
+    assert.equal(db.getProject(shared.id)?.locations[0]?.name, "Alpha Renamed On Machine");
+    assert.equal(db.getProject(shared.id)?.locations[0]?.nameSource, "workspace");
+    assert.equal(db.getProject(bravo.id)?.locations[0]?.name, "Bravo Renamed On Machine");
+    assert.equal(db.getProject(alpha.id)?.name, "Alpha Renamed On Machine",
+      "a workspace-named Project follows its workspace as before, not its Location's label");
+    db.close();
+
+    // A control-plane restart and a fresh registration keep it too.
+    db = ControlPlaneDb.open(path);
+    db.registerRunner(runner("runner-1", [
+      { id: "ws-1", name: "Alpha Again", path: "/repos/alpha-moved" },
+      { id: "ws-2", name: "Bravo", path: "/repos/bravo" },
+    ]), 30);
+    location = db.getProject(alpha.id)!.locations[0]!;
+    assert.equal(location.name, "Main Checkout");
+    assert.equal(location.nameSource, "user");
+
+    // Rediscovery after the workspace disappeared and came back keeps it as well.
+    db.registerRunner(runner("runner-1", [{ id: "ws-2", name: "Bravo", path: "/repos/bravo" }]), 40);
+    db.registerRunner(runner("runner-1", [
+      { id: "ws-1", name: "Alpha Back", path: "/repos/alpha" },
+      { id: "ws-2", name: "Bravo", path: "/repos/bravo" },
+    ]), 41);
+    assert.equal(db.getProject(alpha.id)?.locations[0]?.name, "Main Checkout");
+    assert.equal(db.getProject(shared.id)?.locations[0]?.name, "Alpha Back");
+    db.close();
+
+    // Unlinked and added back to the same Project, the Location reuses its row and its name.
+    const raw = new DatabaseSync(path);
+    raw.prepare("UPDATE project_locations SET detached_at=?, updated_at=? WHERE id=?").run(50, 50, original.id);
+    raw.close();
+    db = ControlPlaneDb.open(path);
+    assert.equal(db.addProjectLocation(alpha.id, { runnerId: "runner-1", workspaceId: "ws-1" }, 51).name, "Main Checkout");
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an existing database gains Location name sources and keeps its names (#4151)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-location-name-source-"));
+  const path = join(dir, "control-plane.db");
+  try {
+    let db = ControlPlaneDb.open(path);
+    db.registerRunner(runner(), 10);
+    const project = db.listProjects(true)[0]!;
+    db.close();
+
+    // The database as it was before the column: the same names, and no name source.
+    const raw = new DatabaseSync(path);
+    raw.exec("ALTER TABLE project_locations DROP COLUMN name_source");
+    raw.prepare("UPDATE project_locations SET name='Kept Name' WHERE id=?").run(project.locations[0]!.id);
+    raw.close();
+
+    db = ControlPlaneDb.open(path);
+    const location = db.getProject(project.id)!.locations[0]!;
+    assert.equal(location.name, "Kept Name", "the upgrade keeps the stored name");
+    assert.equal(location.nameSource, "workspace", "and keeps runner-provided naming for it");
+    db.registerRunner(runner(), 20);
+    assert.equal(db.getProject(project.id)?.locations[0]?.name, "Alpha");
+    db.close();
+    db = ControlPlaneDb.open(path);
+    assert.equal(db.getProject(project.id)?.locations[0]?.nameSource, "workspace", "reopening is idempotent");
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

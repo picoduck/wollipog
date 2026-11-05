@@ -123,6 +123,26 @@ test("Location options name the folder on its Machine and never a connection id"
   assert.equal(folderName("/"), "/");
 });
 
+test("a Location renamed in its Project is offered by that name, and the others by their folder (#4151)", () => {
+  const runners = new Map<string, RunnerView>([
+    ["runner-a", { runnerId: "runner-a", status: "online", workspaces: [
+      { id: "w1", name: "app", path: "/src/app" },
+      { id: "w2", name: "Docs Workspace", path: "/src/docs" },
+    ] } as unknown as RunnerView],
+  ]);
+  const project = {
+    id: "p", name: "App",
+    locations: [
+      { id: "l1", runnerId: "runner-a", workspaceId: "w1", name: "Main Checkout", nameSource: "user", path: "/src/app", availability: "available" },
+      { id: "l2", runnerId: "runner-a", workspaceId: "w2", name: "Docs Workspace", nameSource: "workspace", path: "/src/docs", availability: "available" },
+    ],
+  } as unknown as ProjectView;
+  assert.deepEqual(runLocationOptions(project, runners, new Map([["runner-a", "Studio Mac"]])).map((option) => option.label), [
+    "Main Checkout on Studio Mac",
+    "docs on Studio Mac",
+  ]);
+});
+
 test("newRunBlockedReason follows the fields' order and names the fix", () => {
   const runners = new Map<string, RunnerView>([
     ["r", { runnerId: "r", status: "online", workspaces: [{ id: "w", name: "w", path: "/w" }] } as unknown as RunnerView],
