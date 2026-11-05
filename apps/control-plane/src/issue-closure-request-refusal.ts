@@ -1,4 +1,4 @@
-import type { SessionView } from "@wollipog/protocol";
+import type { CampaignScopeGrantReview, SessionView } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import { issueBoundary } from "./campaign-issue-authority.js";
 import { scopeCompatibility, scopeParticipants } from "./campaign-issue-scope.js";
@@ -11,14 +11,17 @@ export type IssueClosureRequestRefusalCode =
   | "campaign_issue_scope_missing"
   | "campaign_issue_outside_scope";
 
-/** How the scope can come to name the issue, as `errorDetails.recovery`. Both available routes start
+/** How the scope can come to name the issue, as `errorDetails.recovery`. Every available route starts
  * with a campaign owner in Campaign Status. `owner_scope_review_or_proposal`: the agent may also file a
  * proposal a person decides. `owner_scope_review_or_lineage`: the agent's proposal is admitted only
- * with the lineage the campaign's Full Control issue authority accepts. `unavailable`: no scope
- * change can be made right now, by anyone, for the reason the sentence names. */
+ * with the lineage the campaign's Full Control issue authority accepts. `owner_scope_review_or_selection`:
+ * that lineage, or a proposal as one of the issues the owner's first message asked the campaign to
+ * choose, under that scope grant's checks. `unavailable`: no scope change can be made right now, by
+ * anyone, for the reason the sentence names. */
 export type IssueClosureScopeRecovery =
   | "owner_scope_review_or_proposal"
   | "owner_scope_review_or_lineage"
+  | "owner_scope_review_or_selection"
   | "unavailable";
 
 export interface IssueClosureRequestRefusal {
@@ -75,8 +78,11 @@ function scopeChangeUnavailable(db: ControlPlaneDb, root: SessionView): string |
 
 /** The refusal for a well-formed closure of an issue the campaign's authorized scope does not name, or
  * null when the scope names it. It reads only saved state: no runner call, no decision, no comment.
- * The sentences name who can change the scope and never suggest the agent can widen it on its own. */
-export function issueClosureScopeRefusal(db: ControlPlaneDb, root: SessionView, issue: number): IssueClosureRequestRefusal | null {
+ * The sentences name who can change the scope and never suggest the agent can widen it on its own.
+ * `grantReview` is the cause `proposeCampaignIssueScope` would give an addition without lineage
+ * (the first message's scope grant failed, was uncertain, or asked the campaign to select issues). */
+export function issueClosureScopeRefusal(db: ControlPlaneDb, root: SessionView, issue: number,
+  grantReview?: CampaignScopeGrantReview["cause"]): IssueClosureRequestRefusal | null {
   const numbers = root.orchestratorPolicy?.issueNumbers ?? [];
   if (numbers.includes(issue)) return null;
   const scope = root.orchestratorPolicy?.issueScope;
@@ -89,18 +95,28 @@ export function issueClosureScopeRefusal(db: ControlPlaneDb, root: SessionView, 
     ? `Issue #${issue} is outside this campaign's authorized issue scope (revision ${revision}${where}: ${listed}), so no closure was requested.`
     : `This campaign has no authorized issue scope, so it cannot close issue #${issue} and no closure was requested.`;
   const unavailable = scopeChangeUnavailable(db, root);
+  const boundaryAdmits = Boolean(issueBoundary(root)?.operations.includes("campaign_issue_scope"));
   let recovery: IssueClosureScopeRecovery;
   let next: string;
   if (unavailable) {
     recovery = "unavailable";
     next = `Its issue scope cannot change right now: ${unavailable} Until it can, leave issue #${issue} open and report it for the campaign's owner.`;
-  } else if (issueBoundary(root)?.operations.includes("campaign_issue_scope")) {
+  } else if (boundaryAdmits && grantReview === "selection") {
+    // Selection proposals take their own route (#4103): the grant's count and checks, never the agent's say.
+    recovery = "owner_scope_review_or_selection";
+    next = `A campaign owner can add issue #${issue} in Campaign Status under Issue Scope. request_campaign_issue_scope_change can ` +
+      "propose it as one of the issues the owner's first message asked this campaign to choose, subject to that scope grant's count, " +
+      "checks and approval, or with the lineage this campaign's Full Control issue authority accepts; otherwise only a campaign " +
+      "owner can add the issue. Once the issue is in scope, request the closure again; it still needs its own closure decision.";
+  } else if (boundaryAdmits && grantReview === undefined) {
     recovery = "owner_scope_review_or_lineage";
     next = `A campaign owner can add issue #${issue} in Campaign Status under Issue Scope. request_campaign_issue_scope_change admits ` +
       "an addition only with the lineage this campaign's Full Control issue authority accepts, such as a verified member of an " +
       "authorized epic or an approved follow-up's published issue; without it, only a campaign owner can add the issue. " +
       "Once the issue is in scope, request the closure again; it still needs its own closure decision.";
   } else {
+    // No Full Control admission of scope, or a failed or uncertain grant: an addition without
+    // lineage becomes the owner's one typed approval.
     recovery = "owner_scope_review_or_proposal";
     next = `A campaign owner can add issue #${issue} in Campaign Status under Issue Scope, or you can propose the addition with ` +
       "request_campaign_issue_scope_change for a person to approve. Once the issue is in scope, request the closure again; " +

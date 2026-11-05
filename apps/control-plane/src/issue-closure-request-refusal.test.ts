@@ -16,7 +16,8 @@ const PROPOSAL: GithubIssueClosureRequest = { requestId: "scope-diagnostic", iss
 
 /** A root campaign Orchestrator whose issue scope the test chooses: `undefined` saves none at all, an
  * array saves that list at revision 1. Every runner command, decision and runner send is counted. */
-function harness(options: { scope?: number[]; protocol?: number; full?: boolean; foreignParticipant?: boolean } = {}) {
+function harness(options: { scope?: number[]; protocol?: number; full?: boolean; foreignParticipant?: boolean;
+  grant?: "failed" | "uncertain" | "selection" } = {}) {
   const db = ControlPlaneDb.open(":memory:");
   const principal: HumanPrincipal = { ...db.localIdentityContext(), kind: "human", actorId: db.localIdentityContext().userId };
   const metadata: RunnerMetadata = { runnerId: "r", hostname: "test", os: "linux", version: "test",
@@ -27,6 +28,14 @@ function harness(options: { scope?: number[]; protocol?: number; full?: boolean;
   if (options.scope) {
     policy.issueScope = { repository: "team/repo", issueNumbers: options.scope, revision: 1, authorizedByUserId: principal.userId, authorizedAt: 1 };
     policy.issueNumbers = options.scope;
+  }
+  if (options.grant) {
+    // The first message's scope grant (#4102), as a settled launch records it.
+    const ceilings = { repositories: ["team/repo"], maxIssues: 5, maxIssuesSource: "explicit" as const, operations: [] };
+    policy.firstMessageScope = { state: "established", messageDigest: "d".repeat(64), establishedAt: 1, grant: options.grant === "selection"
+      ? { version: 1, status: "granted", reason: "The owner asked for five issues", namedIssues: [], ceilings,
+        selection: { repository: "team/repo", count: 5, defaulted: false, criteria: "Highest impact", constraints: [] } }
+      : { version: 1, status: options.grant, failureClass: "timed_out", namedIssues: [], ceilings } };
   }
   db.createSession({ id: "root", runnerId: "r", workspaceId: "w", agentId: "codex", title: "root", useWorktree: false, driver: "codex-app-server",
     now: 1, config: {}, role: "orchestrator", orchestratorPolicy: policy, parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } } });
@@ -205,6 +214,42 @@ test("#3382 under Full Control issue authority the refusal names lineage, never 
     assert.match(result.error!, /A campaign owner can add issue #12 in Campaign Status under Issue Scope/);
     assert.match(result.error!, /admits an addition only with the lineage this campaign's Full Control issue authority accepts/);
     assert.match(result.error!, /without it, only a campaign owner can add the issue/);
+    h.assertNothingRan();
+  } finally { h.db.close(); }
+});
+
+test("#3382 under a failed or uncertain scope grant the refusal names the owner's approval of a proposal without lineage", async () => {
+  for (const grant of ["failed", "uncertain"] as const) {
+    const h = harness({ scope: [3], full: true, grant });
+    try {
+      const result = await h.close(PROPOSAL);
+      assert.equal(result.status, 403);
+      assert.equal(result.errorDetails?.code, "campaign_issue_outside_scope");
+      assert.equal(result.errorDetails?.recovery, "owner_scope_review_or_proposal", grant);
+      assert.match(result.error!, /request_campaign_issue_scope_change for a person to approve/);
+      assert.doesNotMatch(result.error!, /only with the lineage/);
+      h.assertNothingRan();
+    } finally { h.db.close(); }
+  }
+});
+
+test("#3382 under a selection scope grant the refusal names the grant's own route and its checks", async () => {
+  const h = harness({ scope: [3], full: true, grant: "selection" });
+  try {
+    const result = await h.close(PROPOSAL);
+    assert.equal(result.status, 403);
+    assert.equal(result.errorDetails?.recovery, "owner_scope_review_or_selection");
+    assert.match(result.error!, /one of the issues the owner's first message asked this campaign to choose, subject to that scope grant's count, checks and approval/);
+    assert.match(result.error!, /otherwise only a campaign owner can add the issue/);
+    h.assertNothingRan();
+  } finally { h.db.close(); }
+});
+
+test("#3382 a selection grant without Full Control scope admission keeps the person-approved proposal route", async () => {
+  const h = harness({ scope: [3], grant: "selection" });
+  try {
+    const result = await h.close(PROPOSAL);
+    assert.equal(result.errorDetails?.recovery, "owner_scope_review_or_proposal");
     h.assertNothingRan();
   } finally { h.db.close(); }
 });

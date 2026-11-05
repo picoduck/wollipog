@@ -379,11 +379,16 @@ Both scope refusals carry `issue`, `scopeRevision` and `recovery`, and name the 
 add the issue:
 
 - `owner_scope_review_or_proposal`: a campaign owner adds it in Campaign Status under Issue Scope,
-  or the root proposes it with `request_campaign_issue_scope_change` for a person to approve.
-- `owner_scope_review_or_lineage`: under Full Control issue authority, the root's proposal is
-  admitted only with the lineage that authority accepts (see
+  or the root proposes it with `request_campaign_issue_scope_change` for a person to approve. This
+  is also the route under Full Control issue authority when the first message's scope grant failed
+  or was uncertain, where an addition without lineage is the owner's one typed approval.
+- `owner_scope_review_or_lineage`: under Full Control issue authority without a scope grant review,
+  the root's proposal is admitted only with the lineage that authority accepts (see
   [Bounded Full Control Issue Authority](#bounded-full-control-issue-authority)); otherwise only a
   campaign owner can add the issue.
+- `owner_scope_review_or_selection`: under Full Control issue authority with a scope grant that asked
+  the campaign to choose issues, the root may also propose the issue as one of those choices, subject
+  to that grant's count, checks and approval.
 - `unavailable`: no one can change the scope right now, and the sentence says why: a participating
   runner below the scope-change protocol, or an active Orchestrator participant in another
   repository workspace. The root leaves the issue open and reports it.

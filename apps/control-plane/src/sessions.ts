@@ -818,7 +818,6 @@ function failAs<T>(result: ServiceResult<unknown>, fallback?: string): ServiceRe
   };
 }
 
-
 /** The resource key and option ids come from the child's own request and may contain line breaks,
  * so they are quoted as single-line literals and can never forge an envelope's framing lines. */
 function decisionLiteral(value: string): string {
@@ -11731,7 +11730,7 @@ export class SessionsService {
     // apart (#3382), and a scope refusal stops here: no synchronization, inspection or decision.
     const invalidFields = issueClosureRequestInvalidFields(request);
     if (invalidFields.length) return issueClosureRequestInvalid(invalidFields);
-    const scopeRefusal = issueClosureScopeRefusal(this.db, session, request.issue);
+    const scopeRefusal = issueClosureScopeRefusal(this.db, session, request.issue, this.scopeGrantReview(session)?.cause);
     if (scopeRefusal) {
       this.log.info(JSON.stringify({ event: "campaign_issue_closure_refused", entryPoint: "closure_proposal", sessionId, requestId: request.requestId,
         issue: request.issue, reason: scopeRefusal.errorDetails.code, scopeRevision: scopeRefusal.errorDetails.scopeRevision, recovery: scopeRefusal.errorDetails.recovery }));
