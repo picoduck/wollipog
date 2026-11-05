@@ -19390,10 +19390,14 @@ export class SessionManager {
       : active.running ? active.activeTurnId : undefined;
     const providerTurnId = active.client.agentTurnId?.();
     const providerThreadId = active.client.agentSessionId();
-    if (!sessionTurnId || sessionTurnId !== raw.sessionTurnId ||
-        typeof providerTurnId !== "string" || !bounded(providerTurnId, 512) ||
-        typeof providerThreadId !== "string" || !bounded(providerThreadId, 512)) {
-      return fail(occurrenceId, "App Server provider coordinates changed before action arming");
+    // Each refusal names its own cause (#4054); the control plane relays it with the recovery.
+    if (!sessionTurnId) return fail(occurrenceId, "the session has no active runner turn");
+    if (sessionTurnId !== raw.sessionTurnId) return fail(occurrenceId, "the session's runner turn changed before action arming");
+    if (typeof providerThreadId !== "string" || !bounded(providerThreadId, 512)) {
+      return fail(occurrenceId, "the Codex thread is not established");
+    }
+    if (typeof providerTurnId !== "string" || !bounded(providerTurnId, 512)) {
+      return fail(occurrenceId, "Codex has not confirmed a provider turn for the current turn");
     }
     const payload: WorkflowActionAdmissionArmedEvent = {
       kind: "workflow_action_admission_armed",

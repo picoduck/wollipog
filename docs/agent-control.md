@@ -1673,6 +1673,13 @@ one shared claim across live consumption and every reconciliation proof. The for
 policy, ancestry, and authority checks remain unchanged.
 Missing, reordered, duplicated, cross-generation, replayed, or mismatched evidence fails closed.
 
+Admission never arms against an unconfirmed provider turn (#4054). When `turn/start` answers
+without a turn id, the runner confirms the turn from the first notification for its thread that
+names one. If none does within 60 seconds, it interrupts the thread and ends the turn with a
+visible error. It never leaves the turn running without an owner. A refused admission relays the
+runner's specific cause, arms nothing and revokes nothing. The child can consume the same approval
+again in this turn or the next one, so it never has to stop the session, which would revoke it.
+
 Protocol v153 keeps that proof available across provider and session restarts. An ordered durable
 runner sequence—arm, exact Guardian receipt, and one successful terminal update for the receipt's
 item—can prove completion without asking the restarted App Server to reconstruct an old turn. A

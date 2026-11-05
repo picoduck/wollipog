@@ -6858,6 +6858,51 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     } finally { db.close(); }
   });
 
+  await t.test("a refused runner admission names its cause and leaves the approval consumable (#4054)", async () => {
+    const { db, hub, svc, child, arm } = setup();
+    try {
+      const accept = hub.requestHandler!;
+      hub.requestHandler = (message) => {
+        assert.equal(message.type, "record_workflow_action_admission");
+        const request = message as Extract<ControlPlaneToRunner, { type: "record_workflow_action_admission" }>;
+        return {
+          type: "workflow_action_admission_recorded",
+          requestId: request.requestId,
+          sessionId: request.sessionId,
+          occurrenceId: request.occurrenceId,
+          accepted: false,
+          error: "Codex has not confirmed a provider turn for the current turn",
+        };
+      };
+      const refused = await arm(1150, 409);
+      assert.equal(refused.armed.error, "The runner could not arm this App Server action: Codex has not " +
+        "confirmed a provider turn for the current turn. Nothing was armed and the approval is still approved, " +
+        "so consume it again. If the refusal repeats, finish this turn and consume the approval in the " +
+        "session's next turn; stopping the session would revoke it.");
+      const held = db.workflowDecisionByOccurrence(refused.decision.occurrenceId);
+      assert.equal(held?.status, "approved", "a refused admission revokes nothing");
+      assert.equal(held?.actionAdmission, undefined, "a refused admission arms nothing");
+
+      hub.requestHandler = () => { throw new Error("runner did not respond in time"); };
+      const offline = await svc.consumeWorkflowDecision(child.id, refused.decision.occurrenceId, {
+        resourceSnapshot: refused.snapshot,
+        action: { kind: "pr_merge_enqueue", command: refused.command },
+      });
+      assert.equal(offline.status, 409);
+      assert.match(offline.error ?? "", /^The runner could not arm this App Server action\. Nothing was armed/u,
+        "an unclassified transport failure still names the recovery without inventing a cause");
+
+      hub.requestHandler = accept;
+      const retried = await svc.consumeWorkflowDecision(child.id, refused.decision.occurrenceId, {
+        resourceSnapshot: refused.snapshot,
+        action: { kind: "pr_merge_enqueue", command: refused.command },
+      });
+      assert.equal(retried.status, 200, retried.error);
+      assert.equal(db.workflowDecisionByOccurrence(refused.decision.occurrenceId)?.actionAdmission?.providerTurnId,
+        "provider-session-turn-1", "the same approval arms once the runner confirms the provider turn");
+    } finally { db.close(); }
+  });
+
   await t.test("ordinary App Server permission admission never derives identity from display reason", async () => {
     const { db, hub, svc, child, arm } = setup();
     try {

@@ -1976,6 +1976,16 @@ function boundedProviderCorrelationId(value: unknown): value is string {
     !/[\x00-\x1f\x7f]/u.test(value);
 }
 
+/** A refused App Server admission arms nothing and revokes nothing (#4054). Name the runner's cause
+ * and the way forward, so the agent retries instead of stopping the session, which would revoke it. */
+export function workflowActionAdmissionRefusal(cause: unknown): string {
+  const reason = typeof cause === "string" ? cause.trim().replace(/\.+$/u, "") : "";
+  const named = reason && reason.length <= 300 && !/[\x00-\x1f\x7f]/u.test(reason) ? `: ${reason}` : "";
+  return `The runner could not arm this App Server action${named}. Nothing was armed and the approval ` +
+    "is still approved, so consume it again. If the refusal repeats, finish this turn and consume the " +
+    "approval in the session's next turn; stopping the session would revoke it.";
+}
+
 function validatedGuardianApprovalReviewReceipt(value: unknown): ReviewDecisionApprovalReviewReceipt | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Record<string, unknown>;
@@ -12977,7 +12987,11 @@ export class SessionsService {
                 !boundedProviderCorrelationId(recorded.providerThreadId) ||
                 !Number.isSafeInteger(recorded.historyEpoch) || recorded.historyEpoch! < 0 ||
                 !Number.isSafeInteger(recorded.eventSeq) || recorded.eventSeq! < 1) {
-              return fail("runner could not establish the App Server action admission boundary", 409);
+              const refusal = recorded.type === "workflow_action_admission_recorded" &&
+                recorded.sessionId === child.id && recorded.occurrenceId === occurrenceId && !recorded.accepted;
+              return fail(workflowActionAdmissionRefusal(refusal
+                ? recorded.error
+                : "the runner's admission record did not match this request"), 409);
             }
             providerFence = {
               armedAfterEventSeq: recorded.eventSeq,
@@ -12987,12 +13001,12 @@ export class SessionsService {
               runnerHistoryEpoch: recorded.historyEpoch,
             };
           } catch (error) {
+            const cause = isRunnerRequestTimeoutError(error) ? "the runner did not acknowledge it in time"
+              : isRunnerRequestNotSentError(error) ? "the runner is offline" : null;
             this.log.warn(`workflow action admission append failed for ${child.id}: ${
-              isRunnerRequestTimeoutError(error) ? "runner acknowledgement timed out"
-                : isRunnerRequestNotSentError(error) ? "runner is offline"
-                  : error instanceof Error ? error.message : "unknown runner error"
+              cause ?? (error instanceof Error ? error.message : "unknown runner error")
             }`);
-            return fail("runner could not establish the App Server action admission boundary", 409);
+            return fail(workflowActionAdmissionRefusal(cause), 409);
           }
         }
       }
