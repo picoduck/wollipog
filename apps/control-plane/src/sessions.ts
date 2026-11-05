@@ -492,6 +492,14 @@ function boundedCampaignEventText(text: string): string {
 
 /** One member's correctable publication refusal for one recommendation (#4065), hashed. */
 /** The one Decision occurrence that reads a Custom campaign's first message for its epic seed (#4104). */
+/** Who wrote the first message a Custom campaign's reading reads (#4259), which decides what the reading
+ * may grant: the owner's own create request (granted, with the launch provenance Full Control enable
+ * trusts), the owner's first prompt after an empty launch (granted), an unattributed message (a recorded
+ * transcript message whose author was never recorded, or a staged automation launch: granted without that
+ * provenance, as the parser it replaces did), or a first prompt from anyone other than the campaign's owner,
+ * whose named issues are never granted: the reading is left with the owner instead. */
+type FirstMessageAuthor = "launch_request" | "owner" | "unattributed" | "other";
+
 function issueScopeSeedKey(rootId: string, messageDigest: string): string {
   return `scope_grant:issue_scope_seed:${rootId}:${messageDigest}`;
 }
@@ -5624,7 +5632,7 @@ export class SessionsService {
     if (!capture) this.log.info(`session created ${id} on ${req.runnerId} (${req.agentId} @ ${req.workspaceId})`);
     if (!capture && session.reviewPolicy) this.log.info(JSON.stringify({ event: "campaign_child_review_policy_snapshot",
       entryPoint: "create_session", sessionId: id, parentSessionId, ...session.reviewPolicy }));
-    if (!capture && session.orchestratorPolicy?.issueScopeSeed?.state === "pending") this.startCampaignIssueScopeSeed(id, requestedText, !delivery);
+    if (!capture && session.orchestratorPolicy?.issueScopeSeed?.state === "pending") this.startCampaignIssueScopeSeed(id, requestedText, delivery ? "unattributed" : "launch_request");
     return ok(this.db.getSession(id)!, 201);
   }
 
@@ -5734,7 +5742,7 @@ export class SessionsService {
       const admitted = await this.promptFromUser(principal.userId, sessionId, text, images, slashCommand, config, reviewedResultRevision);
       if (admitted.ok && seed && this.db.beginCampaignIssueScopeSeed(sessionId, seed, Date.now())) {
         this.hub.sessionChangedById(sessionId);
-        if (seed.state === "pending") this.startCampaignIssueScopeSeed(sessionId, text.trim());
+        if (seed.state === "pending") this.startCampaignIssueScopeSeed(sessionId, text.trim(), this.db.isSessionOwner(principal, sessionId) ? "owner" : "other");
       }
       return admitted;
     }
@@ -6008,7 +6016,7 @@ export class SessionsService {
     if (!this.db.beginCampaignIssueScopeSeed(root.id, seed, Date.now())) return this.db.getSession(root.id) ?? root;
     this.log.info(JSON.stringify({ event: "campaign_issue_scope_seed_pre_upgrade", sessionId: root.id, state: seed.state }));
     this.hub.sessionChangedById(root.id);
-    if (seed.state === "pending") this.startCampaignIssueScopeSeed(root.id, text);
+    if (seed.state === "pending") this.startCampaignIssueScopeSeed(root.id, text, "unattributed");
     return this.db.getSession(root.id) ?? root;
   }
 
@@ -6021,10 +6029,10 @@ export class SessionsService {
   }
 
   /** Start reading a Custom campaign's first message for its epic seed and issues (#4104, #4259),
-   * once per root. `launchRequest` marks the person's own create request (`seedCampaignIssueScope`). */
-  private startCampaignIssueScopeSeed(rootId: string, text: string, launchRequest = false): void {
+   * once per root. `author` decides what the reading may grant (`FirstMessageAuthor`). */
+  private startCampaignIssueScopeSeed(rootId: string, text: string, author: FirstMessageAuthor): void {
     if (this.issueScopeSeeds.has(rootId)) return;
-    const run = this.seedCampaignIssueScope(rootId, text, launchRequest).catch((error: unknown) => {
+    const run = this.seedCampaignIssueScope(rootId, text, author).catch((error: unknown) => {
       this.log.warn(JSON.stringify({ event: "campaign_issue_scope_seed_failed", sessionId: rootId, error: String((error as Error)?.message ?? error).slice(0, 200) }));
     }).finally(() => this.issueScopeSeeds.delete(rootId));
     this.issueScopeSeeds.set(rootId, run);
@@ -6069,10 +6077,11 @@ export class SessionsService {
    *   can't read leaves the seed with the owner: delegation waits for the person to approve a scope
    *   or continue without one, and no issue numbers are granted.
    *
-   * `launchRequest` is true only for the person's own create request, the provenance Full Control
-   * enable trusts; a transcript's first message (a pre-upgrade campaign or a restart) is not.
+   * `author` decides what it may grant (`FirstMessageAuthor`): only the owner's own create request
+   * carries the provenance Full Control enable trusts, and a first prompt from anyone other than the
+   * campaign's owner grants no issue at all.
    */
-  private async seedCampaignIssueScope(rootId: string, text: string, launchRequest: boolean): Promise<void> {
+  private async seedCampaignIssueScope(rootId: string, text: string, author: FirstMessageAuthor): Promise<void> {
     const root = this.db.getSession(rootId);
     const pending = root?.orchestratorPolicy?.issueScopeSeed;
     if (!root || pending?.state !== "pending") return;
@@ -6134,9 +6143,12 @@ export class SessionsService {
     if (!runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "orchestratorIssueScope")) {
       return settle({ state: "owner", occurrenceId });
     }
+    // Issue-write authority is the owner's to grant: a first prompt someone else wrote names issues
+    // the owner decides on, never ones the reading grants.
+    if (author === "other") return settle({ state: "owner", occurrenceId });
     const verified = await this.verifiedMessageIssues(root, repository, candidates.explicit);
     if (verified.length !== candidates.explicit.length) return settle({ state: "owner", occurrenceId });
-    settle({ state: "none", occurrenceId, grant: { issueNumbers: verified, launchRequest } });
+    settle({ state: "none", occurrenceId, grant: { issueNumbers: verified, launchRequest: author === "launch_request" } });
   }
 
   /** The campaign repository the runner reads from the campaign's checkout, or null when it can't. */

@@ -573,3 +573,20 @@ test("a first message after an empty launch is read the same way, without launch
     assert.equal(h.policy().issueNumbersSource, undefined, "only the create request is the launch request Full Control enable trusts");
   } finally { h.db.close(); }
 });
+
+test("a first prompt from anyone other than the campaign's owner never grants issues: the reading is the owner's (#4259)", async () => {
+  const h = harness("", () => named(12, 13));
+  try {
+    const identity = h.db.localIdentityContext();
+    const other = { ...identity, kind: "human" as const, userId: "someone-else", actorId: "someone-else", organizationId: "another-organization" };
+    assert.equal(h.db.isSessionOwner(other, h.id), false, "the fixture's prompter is not the owner");
+    h.db.updateSessionStatus(h.id, "idle", Date.now());
+    const sent = await h.svc.promptFromHuman(other, h.id, "Orchestrate issues #12 and #13.");
+    assert.ok(sent.ok, sent.error ?? "first message");
+    await h.settled();
+    assert.equal(h.fake.calls.length, 1, "the message is still read");
+    assert.equal(h.policy().issueNumbers, undefined, "no issue-write authority from a non-owner's message");
+    assert.equal(h.policy().issueScopeSeed!.state, "owner", "the owner decides through the one person-owned request");
+    assert.equal(h.delegate().ok, false);
+  } finally { h.db.close(); }
+});

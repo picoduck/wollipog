@@ -31,7 +31,9 @@ ordinary approval path. The runner's Orchestrator receives the issue numbers at 
 launch, so its routine writes on them keep that approval path until then. Enabling Full Control waits
 for a pending reading. Only issues granted from the person's own create request carry the launch
 provenance (`issueNumbersSource: "human_launch_request"`) that Full Control enable trusts; a reading of
-a first prompt after an empty launch, or of a recorded transcript message, grants them without it.
+the owner's first prompt after an empty launch, or of a recorded transcript message, grants them without
+it. A first prompt from anyone other than the campaign's owner never grants issues: a reading that
+names some is left with the owner.
 
 A seed left pending with no reading in flight (a control-plane restart) settles as `owner`, with its
 reading recorded as failed. A message without digits makes no Decision call and grants nothing.
