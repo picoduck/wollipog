@@ -235,6 +235,7 @@ export function validIssueLineage(value: unknown): boolean {
   if (value === undefined) return true;
   if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
+  if (v.kind === "selection") return Object.keys(v).length === 1;
   return Object.keys(v).length === 2 && (v.kind === "epic" && Number.isSafeInteger(v.epic) && (v.epic as number) > 0 ||
     v.kind === "follow_up" && typeof v.publicationOccurrenceId === "string" && v.publicationOccurrenceId.length > 0 && v.publicationOccurrenceId.length <= 256);
 }

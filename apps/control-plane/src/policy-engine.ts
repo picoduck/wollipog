@@ -208,6 +208,8 @@ export function policyMatches(policy: GovernancePolicy, input: ApprovalPolicyInp
   }
   const c = policy.conditions;
   if (!c) return true;
+  // An issue label rule (#4103) describes issues a campaign may add, never a tool request.
+  if (c.issueLabels !== undefined) return false;
   if (c.statuses?.length && !c.statuses.includes(input.status)) return false;
   if (c.minCostUsd !== undefined && input.costUsd < c.minCostUsd) return false;
   if (c.maxCostUsd !== undefined && input.costUsd > c.maxCostUsd) return false;
@@ -215,6 +217,23 @@ export function policyMatches(policy: GovernancePolicy, input: ApprovalPolicyInp
   if (c.maxToolCalls !== undefined && input.toolCallCount > c.maxToolCalls) return false;
   if (c.escalated !== undefined && input.escalated !== c.escalated) return false;
   return true;
+}
+
+/** The first of an issue's `labels` that an enabled Human Required issue label rule (#4103) names,
+ * among rules whose selectors match where the campaign runs, or null. Labels compare
+ * case-insensitively; built-in rules never carry labels. */
+export function humanRequiredIssueLabel(policies: readonly GovernancePolicy[],
+  where: Pick<GovernanceScope, "organizationId" | "runnerId" | "workspaceId" | "agentId">, labels: readonly string[]): string | null {
+  for (const policy of policies) {
+    const wanted = policy.conditions?.issueLabels;
+    if (!wanted || !policy.enabled || policy.effect !== "ask" || policy.builtin || policy.conditions?.humanRequired !== true) continue;
+    if ((["organizationId", "runnerId", "workspaceId", "agentId"] as const).some((key) =>
+      policy.scope[key] !== undefined && !scopePatternMatches(where[key], policy.scope[key]!))) continue;
+    const names = new Set(wanted.map((label) => label.trim().toLowerCase()));
+    const hit = labels.find((label) => names.has(label.trim().toLowerCase()));
+    if (hit !== undefined) return hit;
+  }
+  return null;
 }
 
 /** Exact matching unless the selector contains `*`; missing input never matches a populated rule. */
@@ -366,7 +385,7 @@ export function validateGovernancePolicy(policy: Omit<GovernancePolicy, "created
   const c = policy.conditions;
   if (!c) return null;
   if (typeof c !== "object" || Array.isArray(c)) return "conditions must be an object";
-  const conditionKeys = new Set(["statuses", "minCostUsd", "maxCostUsd", "minToolCalls", "maxToolCalls", "escalated", "humanRequired"]);
+  const conditionKeys = new Set(["statuses", "minCostUsd", "maxCostUsd", "minToolCalls", "maxToolCalls", "escalated", "humanRequired", "issueLabels"]);
   if (Object.keys(c).some((key) => !conditionKeys.has(key))) return "conditions contains unsupported fields";
   if (c.statuses !== undefined && (!Array.isArray(c.statuses) || !c.statuses.length || c.statuses.some((status) => !(["queued", "starting", "running", "input_required", "idle", "completed", "failed", "stopped"] as unknown[]).includes(status)))) {
     return "conditions.statuses contains an invalid session status";
@@ -380,6 +399,16 @@ export function validateGovernancePolicy(policy: Omit<GovernancePolicy, "created
   if (c.minToolCalls !== undefined && c.maxToolCalls !== undefined && c.minToolCalls > c.maxToolCalls) return "minimum tool calls exceeds maximum tool calls";
   if (c.escalated !== undefined && typeof c.escalated !== "boolean") return "conditions.escalated must be boolean";
   if (c.humanRequired !== undefined && (typeof c.humanRequired !== "boolean" || policy.effect !== "ask")) return "Human Required applies only to ask policies";
+  if (c.issueLabels !== undefined) {
+    if (!Array.isArray(c.issueLabels) || !c.issueLabels.length || c.issueLabels.length > 20 ||
+        c.issueLabels.some((label) => typeof label !== "string" || !label.trim() || label.length > 100)) return "conditions.issueLabels must list 1 to 20 labels of at most 100 characters";
+    if (c.humanRequired !== true) return "issue label conditions require a Human Required ask policy";
+    // A label rule describes issues, not tool calls, so it may narrow only by where the campaign runs.
+    if (Object.keys(c).some((key) => key !== "issueLabels" && key !== "humanRequired") ||
+        Object.keys(policy.scope).some((key) => !["organizationId", "runnerId", "workspaceId", "agentId"].includes(key))) {
+      return "issue label conditions combine only with Human Required and organization, machine, workspace or agent selectors";
+    }
+  }
   if (policy.effect === "allow" && c.escalated !== undefined) {
     return "allow policies cannot depend on runner-asserted escalation state";
   }

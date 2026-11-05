@@ -13,7 +13,7 @@ export function scopeParticipants(db: ControlPlaneDb, root: SessionView): Sessio
 }
 
 /** Why an Orchestrator participant cannot hold the campaign's scope (#4118), or null. It must be in
- * a Location of a boundary repository; outside the launch repository its runner needs v290. */
+ * a Location of a boundary repository; outside the launch repository its runner needs v293. */
 export function participantScopeRefusal(db: ControlPlaneDb, root: SessionView, member: Pick<SessionView, "id" | "runnerId" | "workspaceId">):
   { error: string; status: number; capability?: RunnerCapabilityRequirementDetails } | null {
   // The root's own workspace always qualifies, even before the campaign records its repository.

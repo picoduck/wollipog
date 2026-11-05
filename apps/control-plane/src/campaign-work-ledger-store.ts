@@ -882,6 +882,13 @@ export class CampaignWorkLedgerStore {
     `).all(campaignId, repository, JSON.stringify(issueNumbers)) as Array<{ session_id: string }>).map((row) => row.session_id));
   }
 
+  /** Campaigns with a committed work item for this issue (#4103). */
+  campaignsWithCommittedIssue(repository: string, issue: number): string[] {
+    return (this.stmt(`SELECT DISTINCT campaign_session_id FROM campaign_work_items
+      WHERE lower(issue_repository)=lower(?) AND issue_number=? AND commitment='committed'`)
+      .all(repository, issue) as Array<{ campaign_session_id: string }>).map((row) => row.campaign_session_id);
+  }
+
   /** Sessions an issue closure may leave out: those {@link sessionsUnrelatedToIssues} proves
    * unrelated to the one issue being closed. */
   issueClosureExcludableSessions(campaignId: string, repository: string, issueNumber: number): Set<string> {

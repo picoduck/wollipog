@@ -19556,7 +19556,7 @@ export class SessionManager {
       if (message.operation === "inspect") {
         if (message.epic !== undefined && (!Number.isSafeInteger(message.epic) || message.epic < 1) ||
             message.issues !== undefined && !boundedIssueNumbers(message.issues)) return { ...base, ok: false, error: "Invalid bounded issue selection" };
-        return { ...base, ok: true, ...await inspectCampaignIssueScope(run, message.epic, message.issues, message.publication) };
+        return { ...base, ok: true, ...await inspectCampaignIssueScope(run, message.epic, message.issues, message.publication, message.facts === true) };
       }
       const live = this.active.get(message.sessionId)?.orchestratorLaunchPolicy;
       if (live && message.scope?.revision >= (live.issueScope?.revision ?? 0)) live.issueNumbers = [];
@@ -19572,7 +19572,7 @@ export class SessionManager {
         return { ...base, ok: false, error: "Stale or conflicting campaign scope revision" };
       }
       let control = message.control;
-      // A participant in any boundary repository stores its own repository's part (#4118, v290).
+      // A participant in any boundary repository stores its own repository's part (#4118, v293).
       if (control && (!validCampaignControl(control) || control.mode === "full_control" && !campaignBoundaryRepository(control.boundary, repository))) return { ...base, ok: false, error: "Scope authority boundary is invalid or in another repository" };
       // A human scope revision intentionally invalidates older standing authorization, but
       // scope removal must still persist. Disable the stale runner diagnostic contract;

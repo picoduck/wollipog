@@ -42,7 +42,7 @@ import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMess
 import { firstMessageTargetEpics } from "./first-message-issue-intent.js";
 import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, scopeGrantCandidates, type ScopeGrantFields } from "./scope-grant.js";
 import { runCampaignCheck, type CampaignCheckOutcome } from "./campaign-decision-checks.js";
-import type { CampaignScopeGrantReview, DecisionErrorClass, FullControlScopeGrant } from "@wollipog/protocol";
+import { boundedIssueNumbers, validCampaignIssueFacts, type CampaignIssueFacts, type CampaignScopeGrantReview, type DecisionErrorClass, type FullControlScopeGrant } from "@wollipog/protocol";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
   everyOutstandingScopeDecision, participantScope, participantScopeRefusal, repositoryOutsideBoundary, scopeRequestOutsideBoundary } from "./campaign-issue-scope.js";
@@ -357,6 +357,7 @@ import { type GuardrailFields, type PolicyInput, normalizeCostCheckpoints,
   evaluateHookApprovalPolicies,
   evaluatePolicies,
   firstAsk,
+  humanRequiredIssueLabel,
   parsePolicyHookRequest,
   rulesFromSession,
   validateGovernancePolicy,
@@ -11351,8 +11352,9 @@ export class SessionsService {
     const root = this.db.getSession(sessionId);
     if (!root?.orchestratorPolicy || this.db.campaignRootForMember(sessionId) !== sessionId || !canAccess(sessionId)) return fail("scope proposals require the root campaign", 403);
     if (human && (human.kind !== "human" || !this.db.isSessionOwner(human, sessionId))) return fail("Only the authenticated campaign owner can propose human scope authority", 403);
-    // A repository outside the campaign's is refused from the stored boundary, before any runner call (#4118).
-    const outside = scopeRequestOutsideBoundary(root, request);
+    // A repository outside the campaign's is refused from the stored boundary, before any runner call
+    // (#4118). A selection proposal's own floors (#4103) refuse it in their order, also before one.
+    const outside = request?.lineage?.kind === "selection" ? null : scopeRequestOutsideBoundary(root, request);
     if (outside) {
       this.log.info(JSON.stringify({ event: "campaign_issue_scope_refused", sessionId, requestId: typeof request?.requestId === "string" ? request.requestId.slice(0, 256) : null,
         reason: "repository_outside_boundary" }));
@@ -11375,11 +11377,18 @@ export class SessionsService {
     if (request?.expectedRevision !== view.data.revision) return fail("Campaign scope changed. Refresh and propose against the current revision.", 409);
     // A legacy campaign learns its launch repository from the runner; check the boundary again.
     const allowed = new Set([view.data.repository.toLowerCase(), ...campaignScopeRepositories(root).map((entry) => entry.repository)]);
-    const late = [...request.additions ?? [], ...request.removals ?? []].find((ref) => ref && typeof ref.repository === "string" &&
+    const late = request.lineage?.kind === "selection" ? undefined : [...request.additions ?? [], ...request.removals ?? []].find((ref) => ref && typeof ref.repository === "string" &&
       campaignRepositoryLocation(ref.repository) && !allowed.has(ref.repository.toLowerCase()));
     if (late) {
       const refusal = repositoryOutsideBoundary(late.repository.toLowerCase());
       return { ok: false, status: refusal.status, error: refusal.error, errorDetails: refusal.errorDetails };
+    }
+    // Issues the Orchestrator chose to fill the owner's selection take their own route (#4103). A
+    // proposal without lineage takes it too, so a runner that predates the lineage still can.
+    const selection = human ? undefined : this.scopeGrantReview(root);
+    if (selection?.cause === "selection" && issueBoundary(root)?.operations.includes("campaign_issue_scope") &&
+        Array.isArray(request?.additions) && request.additions.length && (request.lineage === undefined || request.lineage?.kind === "selection")) {
+      return this.proposeSelectionScope(root, view.data.repository, request, selection, canAccess);
     }
     const snapshot = scopeSnapshot(this.db, root, view.data.repository, request);
     if (!snapshot) return fail("Provide unique repository-qualified additions/removals, a current revision, and an explanation. Review supports at most 100 issues and 100 active child assignments; finish some child work or resolve outstanding requests before retrying a larger campaign.", 400);
@@ -11419,7 +11428,10 @@ export class SessionsService {
       const groups = campaignScopeChangeGroups(snapshot);
       const additionCount = groups.reduce((total, group) => total + group.additions.length, 0);
       const otherAdditions = additionCount - snapshot.additions.length;
-      const grantReview = !human && additionCount && !snapshot.lineage ? this.scopeGrantReview(latest) : undefined;
+      // Selection lineage without a selection to fill is read as no lineage: a failed or uncertain
+      // grant's proposal still goes to the owner, and a healthy grant without one is refused.
+      const lineageless = !snapshot.lineage || snapshot.lineage.kind === "selection";
+      const grantReview = !human && additionCount && lineageless ? this.scopeGrantReview(latest) : undefined;
       if (!human && boundary && boundary.operations.includes("campaign_issue_scope")) {
         // Each refusal names the one condition that failed, in a fixed sentence and code (#2940).
         const refuse = (code: CampaignScopeAdmissionFailure, details: Record<string, number> = {}): ServiceResult<WorkflowDecisionView> => {
@@ -11441,6 +11453,7 @@ export class SessionsService {
           // No admission: the decision is the owner's.
         } else if (additionCount) {
           if (!snapshot.lineage) return refuse("lineage_missing");
+          if (snapshot.lineage.kind === "selection") return refuse("selection_not_granted");
           if (snapshot.lineage.kind === "epic") {
             if (!boundary.issueAuthority!.epics.includes(snapshot.lineage.epic)) return refuse("epic_not_authorized");
             // The epic is the launch repository's, so its members are too.
@@ -11553,6 +11566,106 @@ export class SessionsService {
       return `The forge could not verify every proposed change in ${repository} through its Location. Nothing changed; check that Location's repository and gh or glab access, then retry.`;
     }
     return null;
+  }
+
+  /**
+   * Issues an Orchestrator chose to fill its owner's selection (#4103). Deterministic floors run
+   * first, in this order, and the first that fails refuses the proposal with its fixed code and no
+   * model call:
+   *
+   * 1. every addition is in a repository in the campaign's boundary;
+   * 2. the runner reads each as an issue, not a pull request, and it is open;
+   * 3. none is already in this scope;
+   * 4. none is in another active campaign's scope or committed work;
+   * 5. the selection's admissions stay within the grant's count, and the scope within Maximum Issues;
+   * 6. no Human Required issue label rule names one of its labels.
+   *
+   * A runner that cannot report issue facts leaves floors 2 and 6 unverified, so the proposal goes
+   * to the owner. A proposal that passes every floor is the owner's to approve.
+   */
+  private async proposeSelectionScope(root: SessionView, repository: string, request: CampaignIssueScopeRequest,
+    selection: CampaignScopeGrantReview, canAccess: (id: string) => boolean): Promise<ServiceResult<WorkflowDecisionView>> {
+    const sessionId = root.id;
+    const boundary = issueBoundary(root)!;
+    const refuse = (code: CampaignScopeAdmissionFailure, details: Record<string, number> = {}): ServiceResult<WorkflowDecisionView> => {
+      this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "scope_proposal", sessionId, requestId: request.requestId,
+        boundaryRevision: boundary.revision, scopeRevision: request.expectedRevision, lineage: "selection", outcome: "refused", reason: code, ...details }));
+      const refusal = CAMPAIGN_SCOPE_ADMISSION_REFUSALS[code];
+      return { ok: false, status: refusal.status, error: refusal.message, errorDetails: { code, ...details } };
+    };
+    const malformed = (): ServiceResult<WorkflowDecisionView> =>
+      fail("Provide unique repository-qualified additions, a current revision, and an explanation. A selection proposal adds at most 100 issues.", 400);
+    if (Array.isArray(request.removals) && request.removals.length) return refuse("selection_additions_only");
+    // Floor 1: a repository in the campaign's boundary. Scope still names one repository, the
+    // boundary's, until multi-repository scope (#4118) lets a boundary repository carry its own.
+    const repositories = boundaryRepositories(boundary);
+    if (request.additions.some((r) => !r || typeof r.repository !== "string")) return malformed();
+    if (request.additions.some((r) => !repositories.includes(r.repository.toLowerCase()) || r.repository.toLowerCase() !== repository.toLowerCase())) {
+      return refuse("repository_outside_boundary");
+    }
+    const additions = request.additions.map((r) => r.number);
+    if (!boundedIssueNumbers(additions)) return malformed();
+    let facts: CampaignIssueFacts[] | null = null;
+    try {
+      const requestId = `issue_scope_selection_${randomUUID()}`;
+      const withFacts = runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "campaignIssueFacts");
+      const response = await this.hub.requestFromRunner(root.runnerId, requestId, { type: "campaign_issue_scope", operation: "inspect", requestId,
+        sessionId, issues: additions, ...(withFacts ? { facts: true as const } : {}) }, 60_000);
+      if (response.type !== "campaign_issue_scope_result" || !response.ok || response.sessionId !== sessionId ||
+          response.repository?.toLowerCase() !== repository.toLowerCase()) return fail("The forge could not verify every proposed addition in the campaign repository.", 409);
+      if (withFacts && Array.isArray(response.issueFacts)) {
+        // A fact out of its bounds, or with labels the runner could not report in full, verifies nothing.
+        facts = additions.map((n) => response.issueFacts!.find((fact) => validCampaignIssueFacts(fact) && fact.number === n))
+          .filter((fact): fact is CampaignIssueFacts => Boolean(fact));
+        if (facts.length !== additions.length) return fail("The forge could not verify every proposed addition in the campaign repository.", 409);
+      }
+      // Floor 2: an open issue. Without facts every addition must at least read as an issue.
+      if (facts) {
+        const pull = facts.find((fact) => fact.kind !== "issue");
+        if (pull) return refuse("not_an_issue", { issue: pull.number });
+        const closed = facts.find((fact) => fact.state !== "open");
+        if (closed) return refuse("issue_not_open", { issue: closed.number });
+      }
+      if (!additions.every((n) => (facts ? facts.some((fact) => fact.number === n && fact.kind === "issue") : true) &&
+          response.candidates?.some((c) => c.issue.number === n && c.issue.repository.toLowerCase() === repository.toLowerCase()))) {
+        return fail("The forge could not verify every proposed addition in the campaign repository.", 409);
+      }
+    } catch { return fail("GitHub issue validation timed out or failed. Try a smaller explicit proposal and verify the runner's GitHub access, then retry.", 409); }
+    const latest = this.db.getSession(sessionId);
+    const latestBoundary = latest && issueBoundary(latest);
+    if (!latest || !latestBoundary || latestBoundary.revision !== boundary.revision ||
+        (latest.orchestratorPolicy?.issueScope?.revision ?? 0) !== request.expectedRevision) return fail("Campaign scope changed during inspection; refresh and propose again.", 409);
+    // Floor 3: not already in this scope.
+    const before = latest.orchestratorPolicy?.issueNumbers ?? [];
+    const scoped = additions.find((n) => before.includes(n));
+    if (scoped !== undefined) return refuse("already_in_scope", { issue: scoped });
+    // Floor 4: not held by another active campaign.
+    const held = additions.find((n) => this.db.issueHeldByOtherCampaign(sessionId, repository, n));
+    if (held !== undefined) return refuse("other_campaign_scope", { issue: held });
+    // Floor 5: within the selection's count, then within Maximum Issues.
+    const count = selection.selection?.count ?? 0;
+    const admitted = this.db.consumedSelectionAdditions(sessionId).length;
+    if (admitted + additions.length > count) return refuse("selection_count_exhausted", { count, admitted, requested: additions.length });
+    const limit = this.db.campaignIssueLimit(sessionId, latestBoundary.issueAuthority!.maxIssues);
+    const requested = before.length + additions.length + reservedPublicationSlots(this.db, latest);
+    if (requested > limit) return refuse("capacity_exhausted", { limit, requested });
+    // Floor 6: no Human Required issue label rule.
+    if (facts) {
+      const policies = this.db.listGovernancePolicies();
+      const where = { organizationId: this.db.sessionScope(sessionId)?.organizationId, runnerId: latest.runnerId,
+        workspaceId: latest.workspaceId ?? undefined, agentId: latest.agentId ?? undefined };
+      const labeled = facts.find((fact) => humanRequiredIssueLabel(policies, where, fact.labels) !== null);
+      if (labeled) return refuse("human_required_label", { issue: labeled.number });
+    }
+    const snapshot = scopeSnapshot(this.db, latest, repository, { ...request, removals: [], lineage: { kind: "selection" } });
+    if (!snapshot) return malformed();
+    snapshot.grantReview = selection;
+    snapshot.affectedDecisions = everyOutstandingScopeDecision(this.db, sessionId);
+    this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "scope_proposal", sessionId, requestId: request.requestId,
+      boundaryRevision: boundary.revision, scopeRevision: request.expectedRevision, lineage: "selection", outcome: "owner_review",
+      factsVerified: facts !== null }));
+    return this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: `campaign_issue_scope:${sessionId}`,
+      resourceSnapshot: snapshot }, canAccess, { trustedIssueScope: true });
   }
 
   async synchronizeCampaignIssueScope(sessionId: string): Promise<boolean> {
