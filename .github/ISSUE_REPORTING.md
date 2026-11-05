@@ -107,19 +107,38 @@ its Markdown structure:
 ## Agent Publication Gate
 
 Before an agent publishes an issue, it must show the exact sanitized repository, title, body, and
-labels for approval. Custom retains the existing user approval requirement. Full Control permits
-the authorized Orchestrator to review that exact public payload only when the current server
-occurrence confirms eligible human-established issue authority for this repository and accepted,
+labels for approval. A general request to create an issue establishes intent, not approval of
+unseen contents. Choose the approval path that applies to the session:
+
+- **Standalone session created by a human:** present the exact public payload to that human.
+  Their explicit approval of the unchanged draft authorizes publication, subject to applicable tool
+  permissions. A subsequent "Publish the issue" approves the draft already presented. No
+  controlling Orchestrator or Orchestrator workflow occurrence is required.
+- **Session governed by an Orchestrator workflow:** use the required typed publication
+  request/get/consume process. Respect the occurrence's actual owner and authority; ordinary chat
+  cannot replace a required typed approval. Consume an approved unchanged payload immediately
+  before publication. The Orchestrator must inspect the entire title, body, labels and repository
+  before resolving. It cannot approve a human-owned occurrence.
+
+Determine which path applies from session context and metadata, not merely the availability of
+workflow tools or a mode label. Do not create or require an Orchestrator for a standalone session.
+Conversely, do not use the standalone path to bypass a gate that applies to a child session.
+A "no controlling Orchestrator ancestor" response does not establish that a standalone session
+lacks human authorization.
+
+Within an Orchestrator workflow, Custom retains the existing user approval requirement.
+Full Control permits the authorized Orchestrator to review the exact public payload only when the
+current server occurrence confirms eligible human-established issue authority for this repository and accepted,
 deduplicated follow-up lineage. Include the recommendation identity in the typed publication
 request. Read the effective owner and authority evaluation; a mode label, general intent, ledger
 acceptance, or ordinary prompt is not approval. Missing authority, unsupported hosting versions,
 Human Required rules, and unresolved external mandatory human instructions retain human review.
+They do not waive required typed gates.
 
-Use the exact typed publication request/get/consume workflow; consume an approved unchanged
-payload immediately before publication. The Orchestrator must inspect the entire title, body,
-labels and repository before resolving. It cannot approve a human-owned occurrence. Delegation
-changes the eligible reviewer only: investigation, duplicate checks immediately before creation,
-sanitization, public-content rules, preview formatting and verification remain mandatory.
+Delegation changes the eligible reviewer only. Under both approval paths, investigation, duplicate
+checks immediately before creation, sanitization, public-content rules, preview formatting and
+verification remain mandatory. Do not request approval again for an unchanged draft already
+approved under the applicable path and, when required, the current occurrence.
 
 Approval of an earlier draft does not cover material changes. After creation,
 the agent must read the issue back, verify its contents, and return the issue link. It must never
