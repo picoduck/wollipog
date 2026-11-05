@@ -161,7 +161,10 @@ Only `allow_once` options can grant tool access through Full Control. Unknown, d
 and Human Required rules cannot be admitted to `delegatablePolicyIds`; an ordinary ask left out of
 that list is still an Orchestrator decision (class `undelegated_policy_asks`), while a listed one
 carries no class. `conditions.humanRequired: true` is valid only for ask rules and prevents
-delegation, including an otherwise matching workflow command admission. A hard deny always wins.
+delegation, including an otherwise matching workflow command admission. A Human Required ask rule
+may instead name `conditions.issueLabels` (#4103): it never matches a tool request, and it keeps an
+Orchestrator from admitting an issue with one of those labels into its own scope through a selection,
+which stays the owner's to add (see `docs/campaign-issue-scope.md`). A hard deny always wins.
 Current rules are checked again before an agent resolves a tool approval. Current Human Required,
 deny, unknown and withdrawn asks also feed every request projection, so ownership cannot lag a
 policy edit. Persistent options never become eligible.
