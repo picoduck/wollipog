@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
-  PROJECT_LOCATION_INSPECTION_FAILURES,
+  PROJECT_LOCATION_INSPECTION_FAILURES, campaignRepositoryLocation,
   type CampaignLaunchInspectionFailure, type CampaignLaunchInspectionResult, type ProjectLocationInspection,
   type ProjectLocationInspectionFailure, type RunnerView,
 } from "@wollipog/protocol";
@@ -77,18 +77,21 @@ export async function inspectProjectLocation(
   if (!workspacePath) return fail("path_missing");
   const result = await inspectCampaignWorkspace(hub, runner, location.workspaceId, [],
     options.signal ?? new AbortController().signal, options.timeoutMs, workspacePath);
-  if (!result?.ok || result.cancelled || typeof result.repository !== "string" || !result.repository ||
-      typeof result.digest !== "string" || !result.digest) {
-    return fail((result?.failure && RUNNER_FAILURES[result.failure]) ?? "read_failed");
+  // Runner frames are not validated on the wire: only an exact success for this workspace verifies.
+  if (result?.ok !== true || result.cancelled !== undefined || result.workspaceId !== location.workspaceId ||
+      campaignRepositoryLocation(result.repository) === null || typeof result.digest !== "string" || !/^[a-f0-9]{64}$/.test(result.digest)) {
+    const failure = result?.ok === false && typeof result.failure === "string" && Object.hasOwn(RUNNER_FAILURES, result.failure)
+      ? RUNNER_FAILURES[result.failure] : undefined;
+    return fail(failure ?? "read_failed");
   }
   // The answer describes the path that was inspected; a Location removed, moved to another Project
   // or repointed meanwhile is not the Location the caller asked about.
   const current = active();
   if (!current) return fail("unknown_location");
-  if (current.runnerId !== location.runnerId || current.workspaceId !== location.workspaceId ||
+  if (current.projectId !== location.projectId || current.runnerId !== location.runnerId || current.workspaceId !== location.workspaceId ||
       db.getWorkspacePath(location.runnerId, location.workspaceId) !== workspacePath) return fail("read_failed");
   return { ok: true, location: {
     locationId, projectId: current.projectId, runnerId: current.runnerId, workspaceId: current.workspaceId,
-    repository: result.repository, digest: result.digest, verifiedAt: (options.now ?? Date.now)(),
+    repository: result.repository!.toLowerCase(), digest: result.digest, verifiedAt: (options.now ?? Date.now)(),
   } };
 }

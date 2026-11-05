@@ -101,13 +101,40 @@ test("runner failure codes map to closed Location reasons, and anything else rea
     const result = await inspectProjectLocation(f, f.location.id);
     assert.deepEqual(result, { ok: false, locationId: f.location.id, failure: expected, reason: PROJECT_LOCATION_INSPECTION_FAILURES[expected] });
   }
-  const malformed = fixture();
-  malformed.state.answer = (message) => ({ type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId, ok: true });
-  assert.equal((await inspectProjectLocation(malformed, malformed.location.id) as { failure?: string }).failure, "read_failed");
-  const cancelled = fixture();
-  cancelled.state.answer = (message) => ({ type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId,
-    ok: true, repository: "owner/repo", digest: "d".repeat(64), cancelled: true });
-  assert.equal((await inspectProjectLocation(cancelled, cancelled.location.id) as { failure?: string }).failure, "read_failed");
+});
+
+test("only an exact success for the requested workspace verifies; malformed answers read as read_failed", async () => {
+  const good = { ok: true, repository: "owner/repo", issueNumbers: [], digest: "d".repeat(64) };
+  // Runner frames are not validated on the wire, so each variant is cast past its static type.
+  const variants: Array<Record<string, unknown>> = [
+    { ok: true },
+    { ...good, cancelled: true },
+    { ...good, workspaceId: "another" },
+    { ...good, ok: 1 },
+    { ...good, ok: "true" },
+    { ...good, digest: "not-a-digest" },
+    { ...good, digest: "D".repeat(64) },
+    { ...good, repository: "" },
+    { ...good, repository: "https://github.com/owner/repo.git" },
+    { ok: false, failure: "__proto__" },
+    { ok: false, failure: "constructor" },
+    { ok: false, failure: "toString" },
+    { ok: false, failure: 7 },
+    { ok: true, failure: "not_repository" },
+  ];
+  for (const variant of variants) {
+    const f = fixture();
+    f.state.answer = (message) => ({ type: "campaign_launch_inspection_result", requestId: message.requestId,
+      workspaceId: message.workspaceId, ...variant } as unknown as CampaignLaunchInspectionResult);
+    const result = await inspectProjectLocation(f, f.location.id);
+    assert.deepEqual(result, { ok: false, locationId: f.location.id, failure: "read_failed", reason: PROJECT_LOCATION_INSPECTION_FAILURES.read_failed },
+      JSON.stringify(variant));
+  }
+  const mixedCase = fixture();
+  mixedCase.state.answer = (message) => ({ type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId,
+    ...good, repository: "Owner/Repo" });
+  const canonical = await inspectProjectLocation(mixedCase, mixedCase.location.id);
+  assert.equal(canonical.ok && canonical.location.repository, "owner/repo");
 });
 
 test("a timeout or cancelled caller never verifies a Location", async () => {
@@ -142,4 +169,15 @@ test("a Location missing its workspace path or changing during inspection is not
   };
   const moved = await inspectProjectLocation(repointed, repointed.location.id);
   assert.equal(!moved.ok && moved.failure, "read_failed");
+
+  // A Location moved to another Project keeps its runner, workspace and path, but it is no longer
+  // the Location the caller asked about, with or without a `projectId` constraint.
+  for (const constrained of [false, true]) {
+    const relocated = fixture();
+    const target = relocated.db.createProject({ name: "Target" });
+    relocated.state.during = () => { assert.ok(relocated.db.moveProjectLocation(relocated.location.id, target.id)); };
+    const answer = await inspectProjectLocation(relocated, relocated.location.id, constrained ? { projectId: relocated.project.id } : {});
+    assert.equal(answer.ok, false, `constrained=${constrained}`);
+    assert.equal(!answer.ok && answer.failure, constrained ? "unknown_location" : "read_failed");
+  }
 });
