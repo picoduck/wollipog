@@ -12491,6 +12491,11 @@ export interface SearchWorkspaceReferencesRequestMessage {
    * contain the query, files and folders, in traversal order. A runner that predates the field
    * ignores it and answers without echoing it. */
   match?: WorkspaceReferenceSearchMatch;
+  /** The composer's picker (#4129): matched like `match: "fuzzy"`, folders as well as files, ranked
+   * by the same scorer within the same caps. Sent instead of `match`, so a runner or control plane
+   * that predates it answers with substring results, which still include folders, rather than with
+   * fuzzy files only. Takes precedence over `match`. */
+  fuzzyWithDirectories?: boolean;
 }
 
 export type WorkspaceReferenceSearchMatch = "fuzzy";
@@ -12505,8 +12510,11 @@ export interface SearchWorkspaceReferencesResultMessage {
   error?: string;
   results?: WorkspaceReferenceCandidate[];
   truncated?: boolean;
-  /** Echoes the request's `match` when the runner applied it. */
+  /** Echoes the request's `match` when the runner applied it; `"fuzzy"` too for an applied
+   * `fuzzyWithDirectories`. */
   match?: WorkspaceReferenceSearchMatch;
+  /** Echoes the request's `fuzzyWithDirectories` when the runner applied it (#4129). */
+  fuzzyWithDirectories?: boolean;
   /** Set on a truncated fuzzy search. */
   limit?: WorkspaceReferenceSearchLimit;
 }

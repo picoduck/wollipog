@@ -4054,7 +4054,9 @@ async function handleSearchWorkspaceReferences(msg: SearchWorkspaceReferencesReq
       error: targetError ?? "unknown session" });
   }
   try {
-    const found = await searchWorkspaceReferences(target.context, target.root, msg.query, msg.match);
+    const found = await searchWorkspaceReferences(
+      target.context, target.root, msg.query, msg.match, msg.fuzzyWithDirectories === true,
+    );
     sendUp({ type: "search_workspace_references_result", requestId: msg.requestId, ok: true, ...found });
   } catch (err) {
     sendUp({ type: "search_workspace_references_result", requestId: msg.requestId, ok: false, error: errText(err) });
