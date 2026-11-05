@@ -133,17 +133,22 @@ test("each selection proposal shows its outcome, issues, rationale and the Decis
   const read = api.campaignDecisions;
   const proposal = (outcome: NonNullable<CampaignDecisionsResponse["decisions"][number]["selectionProposal"]>["outcome"], numbers: number[], explanation: string) =>
     ({ outcome, explanation, issues: numbers.map((number) => ({ repository: "team/repo", number, title: `Issue ${number}` })) });
-  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions: [
+  api.campaignDecisions = async () => ({ campaignSessionId: "root-1", decisions: [
     decision("sel_admit", { kind: "scope_review", promptVersion: "scope_review.v1", subject: undefined, verdict: "admit",
       reason: "Both are labeled priority/high.", selectionProposal: proposal("applied", [30, 31], "The two highest-priority open issues.") }),
     decision("sel_refuse", { kind: "scope_review", promptVersion: "scope_review.v1", subject: undefined, verdict: "refuse",
       reason: "Issue 40 is a typo fix, not a priority.", selectionProposal: proposal("refused", [40], "Next in the backlog.") }),
     decision("sel_unsure", { kind: "scope_review", promptVersion: "scope_review.v1", subject: undefined, state: "uncertain", verdict: "uncertain",
-      reason: "The owner didn't say whether UI work counts.", selectionProposal: proposal("waiting_for_owner", [41], "A UI regression users report.") }),
+      reason: "The owner didn't say whether UI work counts.",
+      selectionProposal: { ...proposal("waiting_for_owner", [41], "A UI regression users report."), requestOccurrenceId: "wd_scope" } }),
     decision("sel_failed", { kind: "scope_review", promptVersion: "scope_review.v1", subject: undefined, state: "failed", failureClass: "authentication",
       selectionProposal: proposal("owner_declined", [42], "An old crash report.") }),
   ], usage: { ...usage, calls: 4, unpricedCalls: 0 } });
-  const view = await render(<CampaignDecisionModelChecks sessionId="root-1" canClassify refreshKey={1} onOpenSession={() => {}} />);
+  const opened: string[] = [];
+  const requests: string[] = [];
+  const view = await render(<CampaignDecisionModelChecks sessionId="member-1" canClassify={false} refreshKey={1} onOpenSession={(id) => opened.push(id)}
+    findRequest={(target) => target.occurrenceId === "wd_scope" && target.sessionId === null ? "request:wd_scope" : null}
+    onOpenRequest={(key) => requests.push(key)} />);
   try {
     const items = [...view.container.querySelectorAll("li")];
     assert.deepEqual(items.map(facts), [
@@ -156,8 +161,14 @@ test("each selection proposal shows its outcome, issues, rationale and the Decis
       { "Selection Proposal": "You declined the scope change.", Issue: "#42 Issue 42", Rationale: "An old crash report.", Verdict: "None",
         Failure: "Sign-In Required" },
     ]);
-    // A selection is decided on its scope request, never classified here.
-    assert.equal(view.container.querySelectorAll("button").length, 0);
+    // Each item opens the campaign's Orchestrator session; the pending one also opens the owner's
+    // scope approval card. A selection is never classified here.
+    assert.deepEqual(items.map((item) => [...item.querySelectorAll("button")].map((node) => node.textContent)),
+      [["Open Session"], ["Open Session"], ["Open Request", "Open Session"], ["Open Session"]]);
+    await act(async () => { (items[2]!.querySelector("button") as HTMLButtonElement).click(); });
+    await act(async () => { ([...items[0]!.querySelectorAll("button")].at(-1) as HTMLButtonElement).click(); });
+    assert.deepEqual(requests, ["request:wd_scope"]);
+    assert.deepEqual(opened, ["root-1"], "the campaign root, not the member session showing the list");
   } finally {
     view.unmount();
     api.campaignDecisions = read;

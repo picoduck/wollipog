@@ -86,10 +86,14 @@ for (const [label, viewport] of [["1440", { width: 1440, height: 1500 }], ["390"
     await expect(items.nth(2)).toContainText("Waiting for your approval of the scope change.");
     await expect(items.nth(2)).toContainText("Uncertain");
     await expect(items.nth(2)).toContainText("didn't say whether UI regressions count");
-    // A selection is decided on its scope request: nothing here classifies it.
-    await expect(section.getByRole("button")).toHaveCount(0);
+    // Each item opens the Orchestrator's session; the pending one also opens the owner's scope
+    // approval card. Nothing here classifies a selection.
+    await expect(items.nth(0).getByRole("button")).toHaveText(["Open Session"]);
+    await expect(items.nth(1).getByRole("button")).toHaveText(["Open Session"]);
+    await expect(items.nth(2).getByRole("button")).toHaveText(["Open Request", "Open Session"]);
     await section.scrollIntoViewIfNeeded();
-    await section.screenshot({ path: testInfo.outputPath(`selection-proposals-${label}.png`) });
+    // The whole Campaign Status panel in the page, not a crop of the section.
+    await page.screenshot({ path: testInfo.outputPath(`selection-proposals-${label}.png`) });
     const geometry = await section.evaluate((element) => ({ clientWidth: element.clientWidth, scrollWidth: element.scrollWidth }));
     expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
   });

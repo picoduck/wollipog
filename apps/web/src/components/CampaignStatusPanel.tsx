@@ -264,6 +264,8 @@ function AvailableCampaignStatus({
                 canClassify={availability.role === "campaign"}
                 refreshKey={data.summary.campaign}
                 onOpenSession={onOpenSession}
+                findRequest={findRequest}
+                onOpenRequest={onOpenRequest}
               />
               {data.summary.campaign?.handoffs && (
                 <CampaignHandoffs

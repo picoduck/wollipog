@@ -424,10 +424,26 @@ const followUpCards: import("@wollipog/protocol").PendingApproval[] = params.get
     resourceDigest: "f".repeat(64), policyRevision: 1, authority: "human" as const, status: "pending" as const, createdAt: NOW - 5 * MINUTE },
 })) : [];
 
+/** `selection=1`: the owner's scope approval for the selection the Decision Model was uncertain about (#4103). */
+const selectionCard: import("@wollipog/protocol").PendingApproval | null = params.get("selection") === "1" ? {
+  requestId: "wd_sel_3", occurrenceId: "wd_sel_3", kind: "workflow_decision", title: "Scope Approval Required",
+  options: [{ optionId: "approve", name: "Approve", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }],
+  workflowDecision: { requestId: "selection-141", occurrenceId: "wd_sel_3", sessionId: "s_root", controllingSessionId: "s_root",
+    category: "campaign_issue_scope", resourceKey: "campaign_issue_scope:s_root",
+    resourceSnapshot: { category: "campaign_issue_scope", repository: "team/repo", expectedRevision: 2, before: [130, 131], additions: [141], removals: [],
+      explanation: "A UI regression three users reported this week.", affectedAssignments: [], affectedDecisions: [], activeChildren: [],
+      lineage: { kind: "selection" }, grantReview: { cause: "selection_uncertain", ownerMessage: "Find the 3 highest-priority open issues and fix them",
+        messageDigest: "a".repeat(64), reviewOccurrenceId: "sel_uncertain",
+        reason: "The owner asked for the highest-priority issues but didn't say whether UI regressions count.",
+        selection: { count: 3, defaulted: false, criteria: "highest priority", constraints: ["open"] } } },
+    resourceDigest: "c".repeat(64), policyRevision: 1, authority: "human", status: "pending", createdAt: NOW - 60_000 },
+} : null;
+
 function sessionsFor(rev: number): SessionView[] {
   const root = baseSession({ orchestratorCampaign: projectionFor(rev),
     ...(followUpCards.length ? { pendingApproval: { ...followUpCards[0]!, additionalRequests: followUpCards.slice(1) } } : {}),
-    ...(ownerCard ? { pendingApproval: ownerCard } : {}) });
+    ...(ownerCard ? { pendingApproval: ownerCard } : {}),
+    ...(selectionCard ? { pendingApproval: selectionCard } : {}) });
   const child = baseSession({
     id: "s_child", title: "#2417 Slice 7: Campaign Status Panel", parentSessionId: "s_root",
     ...(scenario === "legacy" ? {} : { campaignMembership: { campaignSessionId: "s_root", currentWorkItemId: "cwi_2", currentAttemptId: "catt_2" } }),

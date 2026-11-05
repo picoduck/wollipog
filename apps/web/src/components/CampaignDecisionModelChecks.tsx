@@ -3,6 +3,7 @@ import type { CampaignDecisionsResponse, DecisionErrorClass, DecisionKind } from
 import { useApi } from "../api-context.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
+import type { CampaignRequestTarget } from "./CampaignStatusPanel.js";
 
 type CampaignDecision = CampaignDecisionsResponse["decisions"][number];
 
@@ -95,17 +96,22 @@ function outcomeText(decision: CampaignDecision): string {
  * classifies it here: Decline, or Let the Orchestrator Answer. A follow-up or closure it could not
  * check becomes the owner's own decision, which they make on its request. Nobody is asked for a value.
  */
-export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey, onOpenSession }: {
+export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey, onOpenSession, findRequest, onOpenRequest }: {
   sessionId: string;
   /** The campaign's own session offers the classification; the server checks the person. */
   canClassify: boolean;
   /** Any value that changes when the campaign does, so the list reloads with it. */
   refreshKey: unknown;
   onOpenSession: (sessionId: string) => void;
+  /** Where a pending selection's scope approval card is, so the owner can open it (#4103). */
+  findRequest?: (target: CampaignRequestTarget) => string | null;
+  onOpenRequest?: (requestKey: string) => void;
 }) {
   const api = useApi();
   const headingId = useId();
   const [decisions, setDecisions] = useState<CampaignDecision[] | null>(null);
+  // A selection proposal is the campaign Orchestrator's own, whichever session shows the list.
+  const [campaignSessionId, setCampaignSessionId] = useState(sessionId);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -115,6 +121,7 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
     const controller = new AbortController();
     api.campaignDecisions(sessionId, controller.signal).then((response) => {
       setDecisions(response.decisions.filter((decision) => SHOWN_KINDS.has(decision.kind)));
+      setCampaignSessionId(response.campaignSessionId);
       setLoadError(null);
     }).catch((cause: unknown) => {
       if (controller.signal.aborted) return;
@@ -159,6 +166,10 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
           // An owner decision stays the owner's: classifying it only lets them choose an option.
           const ownerDecision = subject?.surface === "owner_decision";
           const proposal = decision.selectionProposal;
+          // A selection waiting for the owner points to the scope approval card they decide it on:
+          // only that exact request, never another one pending on the session.
+          const requestKey = proposal?.outcome === "waiting_for_owner" && proposal.requestOccurrenceId && findRequest
+            ? findRequest({ occurrenceId: proposal.requestOccurrenceId, sessionId: null }) : null;
           const label = decision.kind === "scope_review" ? "Selection Proposal" : subject ? SURFACE_LABELS[subject.surface] : "Request";
           return (
             <li key={decision.occurrenceId} className="campaign-screen-item">
@@ -210,6 +221,14 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
                   {subject && (
                     <button type="button" className="btn sm" onClick={() => onOpenSession(subject.sessionId)}>Open Session</button>
                   )}
+                </div>
+              )}
+              {proposal && (
+                <div className="campaign-screen-actions" role="group" aria-label={`${label} Actions`}>
+                  {requestKey && onOpenRequest && (
+                    <button type="button" className="btn primary sm" onClick={() => onOpenRequest(requestKey)}>Open Request</button>
+                  )}
+                  <button type="button" className="btn sm" onClick={() => onOpenSession(campaignSessionId)}>Open Session</button>
                 </div>
               )}
             </li>
