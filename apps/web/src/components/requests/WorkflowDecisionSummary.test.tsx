@@ -30,9 +30,16 @@ test("a merge requested through a runner without the check says so, with what it
     /Not checked: the runner predates this check\. Declared: picoduck\/wollipog#3713\.$/u);
 });
 
-test("a GitLab merge closes issues by GitLab's rules, so it shows no closures row", () => {
-  assert.doesNotMatch(text({ ...MERGE, repository: "gitlab.example.com/group/project", mergeMethod: "merge_train",
-    squash: false, removeSourceBranch: false }), /Closes on Merge/u);
+test("a GitLab merge shows the issues GitLab would close, or that an older runner did not check them (#3762)", () => {
+  const gitlab = { ...MERGE, repository: "gitlab.example.com/group/project", mergeMethod: "merge_train",
+    squash: false, removeSourceBranch: false } as const satisfies WorkflowDecisionResourceSnapshot;
+  assert.match(text(gitlab, { checkedAt: 1, closures: [] }), /Closes on Merge None/u);
+  assert.match(text({ ...gitlab, intendedClosures: ["gitlab.example.com/group/project#5", "gitlab.example.com/group/project#9"] },
+    { checkedAt: 1, closures: [
+      { issue: "gitlab.example.com/group/project#5", sources: ["description"], excerpt: "Implements #5." },
+      { issue: "gitlab.example.com/group/project#9", sources: ["linked"] },
+    ] }), /Closes on Merge gitlab\.example\.com\/group\/project#5: Implements #5\. gitlab\.example\.com\/group\/project#9 \(reported by GitLab\)/u);
+  assert.match(text(gitlab), /Closes on Merge Not checked: the runner predates this check\.$/u);
 });
 
 test("an owner decision shows the question, its material and its options, and says only the owner decides (#4064)", () => {

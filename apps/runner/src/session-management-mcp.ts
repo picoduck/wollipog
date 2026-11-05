@@ -566,9 +566,10 @@ async function mergeReviewEvidenceCompatibilityError(args: Json, deps: McpDeps):
       "Update Wollipog before citing a review session; this citation was not submitted."), required, actual);
 }
 
-/** A pre-v242 control plane drops intendedClosures without checking GitHub (#3713). */
-async function intendedClosuresCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
-  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.githubMergeClosingReferences;
+/** A pre-v242 control plane drops intendedClosures without checking GitHub (#3713), and a pre-v295
+ * one refuses them on a GitLab merge, which it does not check (#3762). */
+async function intendedClosuresCompatibilityError(deps: McpDeps, gitlab = false): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL[gitlab ? "gitlabMergeClosingReferences" : "githubMergeClosingReferences"];
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
     const result = await cpFetch(deps, "GET", "/api/compatibility");
@@ -1177,13 +1178,16 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
         mergeMethod: { type: "string", enum: ["merge_train", "merge"] },
         squash: { type: "boolean" },
         removeSourceBranch: { type: "boolean" },
-        // GitHub only (#3713): the issues this merge should close; omit it when it must close none.
+        // The issues this merge should close (#3713; GitLab since #3762); omit it when it must close none.
         intendedClosures: {
           type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 512 },
-          description: "GitHub only: every issue this merge is meant to close, as #N, owner/repo#N, or an issue URL. " +
+          description: "Every issue this merge is meant to close: on GitHub as #N, owner/repo#N, or an issue URL; on GitLab " +
+            "as #N, group/project#N, <host>/group/project#N, or an issue URL on that instance. " +
             "Omit it when the merge must close no issue. Before the decision is created and again before it is armed, " +
-            "the runner reads what GitHub would close (closing keywords in the description, even negated as in " +
-            "\"does not close #N\", and issues linked by hand); any difference is refused with each reference and its line.",
+            "the runner reads what the forge would close: on GitHub, closing keywords in the description, even negated as in " +
+            "\"does not close #N\", and issues linked by hand; on GitLab, its closing pattern on the description (also " +
+            "\"closing\", \"implements\" and every reference in a list such as \"Closes #1, #2 and #3\") and GitLab's own " +
+            "list, which covers the title and commits. Any difference is refused with each reference and its line.",
         },
       },
       required: ["category", "repository", "pullRequest", "headSha", "reviewResult", "requiredChecks"],
@@ -2445,7 +2449,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_workflow_decision",
-    description: "Create an explicit typed workflow gate bound to this session, its controlling Orchestrator, the current human-owned policy revision, and an exact resource snapshot. Generic questions and approvals cannot satisfy this gate. A GitHub pr_merge is created only when the issues GitHub would close on merge are exactly its intendedClosures; reference an issue that must stay open as \"Refs #N\".",
+    description: "Create an explicit typed workflow gate bound to this session, its controlling Orchestrator, the current human-owned policy revision, and an exact resource snapshot. Generic questions and approvals cannot satisfy this gate. A pr_merge is created only when the issues the forge would close on merge are exactly its intendedClosures (GitHub, and GitLab from v295); reference an issue that must stay open as \"Refs #N\".",
     inputSchema: {
       type: "object",
       properties: {
@@ -2477,7 +2481,7 @@ export const TOOLS: McpTool[] = [
         if (compatibilityError) return compatibilityError;
       }
       if (args?.resourceSnapshot?.category === "pr_merge" && args.resourceSnapshot.intendedClosures !== undefined) {
-        const compatibilityError = await intendedClosuresCompatibilityError(deps);
+        const compatibilityError = await intendedClosuresCompatibilityError(deps, args.resourceSnapshot.mergeMethod !== undefined);
         if (compatibilityError) return compatibilityError;
       }
       const evidenceCompatibilityError = await mergeReviewEvidenceCompatibilityError(args, deps);
@@ -2555,7 +2559,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "consume_workflow_decision",
-    description: "Immediately before the approved external action begins, consume its one-shot authorization using the exact current resource snapshot. PR merge approvals instead arm one canonical enqueue command pinned to the approved head (gh pr merge with --match-head-commit, after the runner reads again which issues GitHub would close: any the snapshot's intendedClosures does not list revoke the approval; for a GitLab merge request, one glab api merge-train or merge call with sha=, which the runner first checks against GitLab: a stale head, or a direct merge where the project runs merge trains, is refused) and are consumed when its matching runner permission is delivered, or, when no permission prompt occurs (Claude Code in auto or Full Access), by reconcile_workflow_decision after the PR reads MERGED. Revoked, changed, replayed, stale, or superseded grants fail closed.",
+    description: "Immediately before the approved external action begins, consume its one-shot authorization using the exact current resource snapshot. PR merge approvals instead arm one canonical enqueue command pinned to the approved head (gh pr merge with --match-head-commit, after the runner reads again which issues GitHub would close: any the snapshot's intendedClosures does not list revoke the approval; for a GitLab merge request, one glab api merge-train or merge call with sha=, which the runner first checks against GitLab: a stale head, or a direct merge where the project runs merge trains, is refused, and, as on GitHub, a closure the snapshot's intendedClosures does not list revokes the approval) and are consumed when its matching runner permission is delivered, or, when no permission prompt occurs (Claude Code in auto or Full Access), by reconcile_workflow_decision after the PR reads MERGED. Revoked, changed, replayed, stale, or superseded grants fail closed.",
     inputSchema: {
       type: "object",
       properties: {

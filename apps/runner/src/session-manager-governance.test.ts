@@ -127,6 +127,32 @@ test("App Server action admission distinguishes the runner turn from the provide
   }
 });
 
+test("a refused App Server action admission names its specific cause (#4054)", () => {
+  const h = harness({}, true);
+  try {
+    const admit = (sessionTurnId = "turn-exact") => h.sm.recordWorkflowActionAdmission("s_governance", {
+      occurrenceId: "workflow-refused",
+      commandDigest: "c".repeat(64),
+      sessionTurnId,
+    });
+    (h.entry.client as any).agentTurnId = () => null;
+    assert.deepEqual(admit(), {
+      accepted: false,
+      occurrenceId: "workflow-refused",
+      error: "Codex has not confirmed a provider turn for the current turn",
+    });
+    (h.entry.client as any).agentTurnId = () => "provider-turn-exact";
+    assert.equal(admit("turn-stale").error, "the session's runner turn changed before action arming");
+    (h.entry.client as any).agentSessionId = () => null;
+    assert.equal(admit().error, "the Codex thread is not established");
+    (h.entry as any).running = false;
+    assert.equal(admit().error, "the session has no active runner turn");
+    assert.deepEqual(h.store.readEvents("s_governance"), [], "a refused admission appends no fence");
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("retroactive action reconciliation binds exact provider admission, command, and forge evidence", async () => {
   const h = harness({}, true);
   try {

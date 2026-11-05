@@ -133,7 +133,9 @@ export class UsageRateTableService {
     const expired = this.state === "fresh" && this.fetchedAt !== null && this.now() - this.fetchedAt >= USAGE_PRICING_TTL_MS;
     return {
       status: expired ? "cached" : this.state,
-      source: this.options.sourceUrl ?? "disabled",
+      // Every member who can open Usage and Cost reads this, so the configured source's
+      // credentials stay behind (#4173); fetches and the disk cache keep the full URL.
+      source: this.options.sourceUrl === null ? "disabled" : displaySourceUrl(this.options.sourceUrl),
       fetchedAt: this.fetchedAt,
       knownModels: this.table?.size ?? 0,
       ...(this.lastError ? { lastRefreshError: { ...this.lastError } } : {}),

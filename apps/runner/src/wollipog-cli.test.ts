@@ -16,6 +16,7 @@ import {
   AGENT_CONTROL_RELAY_KEY_ENV,
 } from "./agent-control-relay.js";
 import type { GhOutcome, GhRunner } from "./campaign-forge-status.js";
+import type { GlabRunner } from "./campaign-gitlab-status.js";
 import { runPullRequestCli, runWollipogCli, runWollipogInit } from "./wollipog-cli.js";
 import { expandCommandAlias, resolveHelp } from "./wollipog-help.js";
 
@@ -372,12 +373,60 @@ test("pr closures reports what merging a pull request or a draft would close, ag
   assert.equal(JSON.parse(denied.stdout).error, "gh in this session's context is not signed in to github.com.");
   for (const args of [["pr", "closures"], ["pr", "closures", "7", "8"], ["pr", "closures", "--file"],
     ["pr", "closures", "7", "--intended"], ["pr", "closures", "7", "--repo", "a/b", "--intended", "nope"],
-    ["pr", "closures", "gitlab.example.com/group/project!7"], ["pr", "closures", "--file", "body.md", "7", "--repo", "a/b"]]) {
+    ["pr", "closures", "--file", "body.md", "7", "--repo", "a/b"]]) {
     assert.equal((await run([...args, "--json"])).code, 2, args.join(" "));
   }
   const help = await captureCli(["pr", "closures", "--help"]);
   assert.equal(help.code, 0);
   assert.match(help.stdout, /wollipog pr closures --file <description\.md>/u);
+});
+
+test("pr closures reads a GitLab merge request or draft by GitLab's closing pattern and its own list (#3762)", async () => {
+  const head = "44579c6c25235598f1a28f8ccb0449cb8dbbc810";
+  const project = "gitlab.example.com/group/project";
+  const encoded = encodeURIComponent("group/project");
+  const calls: string[][] = [];
+  const glab: GlabRunner = async (args) => {
+    calls.push(args);
+    if (args[1] === `projects/${encoded}/merge_requests/7`) {
+      return { stdout: JSON.stringify({ iid: 7, state: "opened", sha: head, description: "Refs #3. This MR is not closing #12." }),
+        stderr: "", code: null, timedOut: false };
+    }
+    assert.equal(args[1], `projects/${encoded}/merge_requests/7/closes_issues?per_page=100`);
+    return { stdout: JSON.stringify([{ id: 1, iid: 20, web_url: `https://${project}/-/issues/20`, references: { full: "group/project#20" } }]),
+      stderr: "", code: null, timedOut: false };
+  };
+  const gh: GhRunner = async () => { throw new Error("a GitLab merge request is never read with gh"); };
+  const run = async (args: string[]) => {
+    let stdout = "";
+    const code = await runPullRequestCli(args, true, { stdout: (text) => { stdout += text; }, stderr: () => {} }, gh, undefined, undefined, glab);
+    return { code, stdout };
+  };
+  const flagged = await run(["pr", "closures", `${project}!7`, "--intended", "#20", "--json"]);
+  assert.equal(flagged.code, 3);
+  assert.deepEqual(JSON.parse(flagged.stdout), {
+    repository: project, pullRequest: 7, state: "opened", headSha: head,
+    closures: [
+      { issue: `${project}#12`, sources: ["description"], excerpt: "Refs #3. This MR is not closing #12." },
+      { issue: `${project}#20`, sources: ["linked"] },
+    ],
+    undeclared: [`${project}#12`], unmade: [],
+  });
+  assert.deepEqual(calls[0], ["api", `projects/${encoded}/merge_requests/7`, "--hostname", "gitlab.example.com"]);
+  const byUrl = await run(["pr", "closures", `https://${project}/-/merge_requests/7`, "--intended", "#12", "--intended", `${project}#20`, "--json"]);
+  assert.equal(byUrl.code, 0);
+
+  const root = mkdtempSync(join(tmpdir(), "wollipog-cli-gitlab-closures-"));
+  try {
+    const draft = join(root, "body.md");
+    writeFileSync(draft, "Implements #4, #5 and other/project#6.\n");
+    const fromFile = await run(["pr", "closures", "--file", draft, "--repo", project, "--json"]);
+    assert.equal(fromFile.code, 3);
+    assert.deepEqual(JSON.parse(fromFile.stdout).undeclared, [`${project}#4`, `${project}#5`, "gitlab.example.com/other/project#6"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+  assert.equal((await run(["pr", "closures", `${project}!7`, "--intended", "https://github.com/a/b/issues/1", "--json"])).code, 2);
 });
 
 test("local init succeeds without control-plane credentials and emits stable content-safe JSON", async () => {

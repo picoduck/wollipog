@@ -129,6 +129,28 @@ test("workspace rows show an icon, the name before its folder, and the match und
   assert.match(picker({ query: "app" }), /<span class="picker-name"><mark>app<\/mark>\.ts<\/span>/);
 });
 
+test("fuzzy workspace rows underline every matched character of the query they answer (#4129)", () => {
+  const html = picker({
+    results: [{ path: "apps/web/src/components", isDirectory: true }],
+    fuzzy: true,
+    query: "awscomp",
+    resultsQuery: "awscom",
+    activeIndex: 0,
+  });
+  assert.match(html, /<span class="picker-name"><mark>com<\/mark>ponents<\/span>/);
+  assert.match(html, /<bdi><mark>a<\/mark>pps\/<mark>w<\/mark>eb\/<mark>s<\/mark>rc<\/bdi>/);
+  assert.doesNotMatch(picker({ fuzzy: true, query: "zz", resultsQuery: "zz" }), /<mark>/, "an unmatched row marks nothing");
+});
+
+test("a truncated workspace answer names the cap that cut it (#4129)", () => {
+  const note = (overrides: Partial<React.ComponentProps<typeof WorkspaceReferencePicker>>) =>
+    /class="picker-note">([^<]+)</.exec(picker({ truncated: true, ...overrides }))?.[1];
+  assert.equal(note({}), "More matches exist. Keep typing to narrow them.");
+  assert.equal(note({ fuzzy: true, limit: "results" }), "Showing the best matches only. Type more to narrow them.");
+  assert.equal(note({ fuzzy: true, limit: "entries" }),
+    "The workspace is too large to search in full, so some matches may be missing.");
+});
+
 test("the workspace picker shows one state at a time in plain words", () => {
   const noQuery = picker({ query: "", results: [] });
   assert.match(noQuery, /Type a file or folder name\./);

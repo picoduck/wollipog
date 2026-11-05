@@ -227,8 +227,8 @@ export function pullRequestHelp(): string {
   return [
     "Usage: wollipog pr wait <number|owner/name#number|url> [--repo <owner/name>] [--head <sha>]",
     "                        [--timeout <ms>] [--interval <ms>] [--any-failure] [--json]",
-    "       wollipog pr closures <number|owner/name#number|url> [--repo <owner/name>] [--intended <issue>]... [--json]",
-    "       wollipog pr closures --file <description.md> [--repo <owner/name>] [--intended <issue>]... [--json]",
+    "       wollipog pr closures <number|owner/name#number|url> [--repo <owner/name|gitlab-project>] [--intended <issue>]... [--json]",
+    "       wollipog pr closures --file <description.md> [--repo <owner/name|gitlab-project>] [--intended <issue>]... [--json]",
     "Block until the pull request's required checks pass or fail, GitHub marks its merge-queue entry",
     "UNMERGEABLE or it leaves the queue, it merges or closes, its head moves, or the timeout expires.",
     "A failed merge-group check alone does not end the wait: GitHub may rebuild the group and merge it.",
@@ -261,8 +261,14 @@ export function pullRequestHelp(): string {
     "(#N, owner/name#N, or an issue URL), and write \"Refs #N\" for one that must stay open. It reads locally",
     "with this machine's `gh` login, like pr wait. A GitHub pr_merge decision makes the same read and is",
     "refused unless its intendedClosures match.",
+    "For a GitLab merge request (as for pr wait, or --file with --repo <gitlab-host>/group/project), it reads",
+    "with `glab` and reports GitLab's default closing pattern on the description: close, fix, resolve or",
+    "implement in any form, including \"closing\" and \"implements\", even negated, closes every reference in a",
+    "list such as \"Closes #1, #2 and #3\", in code too. GitLab's own list of issues the merge request closes",
+    "(which covers the title, commits and an instance's own closing pattern) is reported as well and decides",
+    "where the two differ. --intended takes #N, group/project#N, <host>/group/project#N, or an issue URL.",
     "Exit status: 0 the closures are exactly the intended ones; 3 they differ (see undeclared and unmade);",
-    "1 GitHub or the file could not be read; 2 usage.",
+    "1 the forge or the file could not be read; 2 usage.",
   ].join("\n");
 }
 

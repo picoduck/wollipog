@@ -747,6 +747,149 @@ test("attaching a workspace result restores composer focus in its captured frame
   }
 });
 
+type WorkspaceSearch = Awaited<ReturnType<ApiClient["searchWorkspaceReferences"]>>;
+
+/** Mounts a composer whose @ search answers `answer`, recording each search and each reference made. */
+async function mountWorkspacePicker(answer: WorkspaceSearch) {
+  const searches: unknown[][] = [];
+  const created: unknown[] = [];
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 106,
+    client: {
+      searchWorkspaceReferences: async (...args: unknown[]) => {
+        searches.push(args);
+        return answer;
+      },
+      createWorkspaceReference: async (_sessionId: string, target: { path: string; kind: "file" | "directory" }) => {
+        created.push(target);
+        return { reference: { ...workspaceReference, artifactId: `workspace:${target.path}`, kind: target.kind, path: target.path, startLine: undefined, endLine: undefined } };
+      },
+    } as Partial<ApiClient>,
+  });
+  await resolveDraft(draft, "");
+  await focusRequestedComposer(fixture);
+  return { fixture, searches, created };
+}
+
+/** Types `text` (an @ token) into the composer and runs the picker's debounced search at once. */
+async function searchWorkspace(fixture: Fixture, text: string) {
+  const originalSetTimeout = domWindow.setTimeout;
+  let runSearch: (() => void) | undefined;
+  await withScopedClockOverrides(domWindow, {
+    setTimeout: ((handler: () => void, delay?: number) => {
+      if (delay === 150) {
+        runSearch = handler;
+        return 778 as unknown as ReturnType<typeof domWindow.setTimeout>;
+      }
+      return originalSetTimeout.call(domWindow, handler, delay);
+    }) as typeof domWindow.setTimeout,
+  }, async () => {
+    await act(async () => {
+      fixture.composer.value = text;
+      fireDomEvent.change(fixture.composer);
+      fixture.composer.setSelectionRange(text.length, text.length);
+      fireDomEvent.select(fixture.composer);
+    });
+    assert.ok(runSearch, "workspace search is scheduled");
+    await act(async () => { runSearch?.(); });
+  });
+}
+
+function workspaceOptions(fixture: Fixture): HTMLElement[] {
+  return [...fixture.container.querySelectorAll<HTMLElement>('[role="listbox"][aria-label="Workspace Paths"] [role="option"]')];
+}
+
+async function pressComposerKey(fixture: Fixture, key: string) {
+  await act(async () => {
+    fixture.composer.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }) as never);
+  });
+}
+
+test("the @ picker asks for fuzzy matches with folders and lists the strongest name match first (#4129)", async () => {
+  // The runner's alignment budget can leave a scattered match ahead; the picker ranks them again.
+  const { fixture, searches, created } = await mountWorkspacePicker({
+    results: [
+      { path: "apps/web/src/components/CheckBadge.tsx", isDirectory: false },
+      { path: "apps/web/src/components/SessionDetail.tsx", isDirectory: false },
+    ],
+    truncated: true,
+    match: "fuzzy",
+    fuzzyWithDirectories: true,
+    limit: "results",
+  });
+  try {
+    await searchWorkspace(fixture, "@sdtsx");
+    assert.deepEqual(searches.map((args) => args.slice(1)), [["sdtsx", "fuzzy_with_directories"]]);
+    const options = workspaceOptions(fixture);
+    assert.deepEqual(options.map((option) => option.getAttribute("aria-label")), [
+      "apps/web/src/components/SessionDetail.tsx",
+      "apps/web/src/components/CheckBadge.tsx",
+    ], "a scattered match never ranks above a clearly stronger name match");
+    assert.deepEqual([...options[0]!.querySelectorAll(".picker-name mark")].map((mark) => mark.textContent), ["S", "D", "tsx"],
+      "every matched character is underlined, as in Go to File");
+    assert.equal(fixture.container.querySelector(".picker-note")?.textContent,
+      "Showing the best matches only. Type more to narrow them.");
+
+    await pressComposerKey(fixture, "Enter");
+    assert.deepEqual(created, [{ path: "apps/web/src/components/SessionDetail.tsx", kind: "file" }],
+      "Enter inserts the top match");
+    assert.equal(fixture.composer.value, "", "the @ token is replaced by the reference");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("the @ picker lists folders from a fuzzy answer and Tab inserts a folder reference (#4129)", async () => {
+  const { fixture, created } = await mountWorkspacePicker({
+    results: [
+      { path: "apps/web/src/components/ComposerListbox.tsx", isDirectory: false },
+      { path: "apps/web/src/components", isDirectory: true },
+    ],
+    truncated: true,
+    match: "fuzzy",
+    fuzzyWithDirectories: true,
+    limit: "entries",
+  });
+  try {
+    await searchWorkspace(fixture, "@components");
+    const options = workspaceOptions(fixture);
+    assert.equal(options[0]?.getAttribute("aria-label"), "apps/web/src/components", "the folder named like the query ranks first");
+    assert.equal(options[0]?.querySelector(".picker-name mark")?.textContent, "components");
+    assert.equal(fixture.container.querySelector(".picker-note")?.textContent,
+      "The workspace is too large to search in full, so some matches may be missing.");
+
+    await pressComposerKey(fixture, "Tab");
+    assert.deepEqual(created, [{ path: "apps/web/src/components", kind: "directory" }]);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("against a runner that predates fuzzy search the @ picker keeps its substring results (#4129)", async () => {
+  // An older runner or control plane ignores the request's field and answers without `match`.
+  const { fixture, created } = await mountWorkspacePicker({
+    results: [
+      { path: "src/session", isDirectory: true },
+      { path: "apps/session-tools.ts", isDirectory: false },
+    ],
+    truncated: true,
+  });
+  try {
+    await searchWorkspace(fixture, "@session");
+    const options = workspaceOptions(fixture);
+    assert.deepEqual(options.map((option) => option.getAttribute("aria-label")), ["src/session", "apps/session-tools.ts"],
+      "the runner's order is kept");
+    assert.equal(options[1]?.querySelector(".picker-name mark")?.textContent, "session");
+    assert.equal(fixture.container.querySelector(".picker-note")?.textContent, "More matches exist. Keep typing to narrow them.");
+
+    await pressComposerKey(fixture, "Enter");
+    assert.deepEqual(created, [{ path: "src/session", kind: "directory" }]);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 /** Opens + and activates Reference a File… (#2203). */
 async function referenceAFile(fixture: Fixture) {
   const plus = fixture.container.querySelector<HTMLButtonElement>('button[aria-label="Attach and Settings"]');

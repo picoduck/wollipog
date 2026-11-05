@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { arch, availableParallelism, platform, release, tmpdir } from "node:os";
+import { arch, availableParallelism, loadavg, platform, release, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -91,6 +91,7 @@ async function signIn(page: Page) {
 
 // Diagnostics run outside the existing browser measurement window. Keep an explicit
 // allowlist: no request bodies, tokens, DOM text, raw URLs, stacks or trace bytes.
+// Function identifiers come only from the isolated production bundle.
 function diagnosticNumbers(value: unknown, keys: readonly string[]) {
   const result: Record<string, number> = {};
   if (!value || typeof value !== "object") return result;
@@ -108,11 +109,15 @@ function coldOpeningEnvironment(page: Page, info: TestInfo, rate: number) {
   return {
     attempt: { rate, retry: info.retry, repeatEachIndex: info.repeatEachIndex, workerIndex: info.workerIndex },
     environment: { node: process.version, platform: platform(), release: release().slice(0, 64), arch: arch(),
-      availableCPUs: availableParallelism(), browserVersion: page.context().browser()?.version() ?? null,
+      availableCPUs: availableParallelism(), loadAverage: loadavg(), browserVersion: page.context().browser()?.version() ?? null,
       checkoutSha: checkout && /^[a-f0-9]{40}$/u.test(checkout) ? checkout : null,
       imageOS: imageOS && /^ubuntu\d{2}$/u.test(imageOS) ? imageOS : null,
       imageVersion: imageVersion && /^[0-9.]{1,32}$/u.test(imageVersion) ? imageVersion : null },
   };
+}
+
+function openingOffset(value: unknown, started: unknown) {
+  return typeof value === "number" && typeof started === "number" ? value - started : null;
 }
 
 function coldOpeningDiagnostic(value: Record<string, unknown>, context: ReturnType<typeof coldOpeningEnvironment>, phase: "window" | "result") {
@@ -138,22 +143,43 @@ function coldOpeningDiagnostic(value: Record<string, unknown>, context: ReturnTy
           }
         } catch { /* Ignore malformed or foreign source URLs. */ }
       }
-      const invoker = source.invoker === "Response.json.then" || source.invoker === "requestAnimationFrame" ? source.invoker : "other";
-      return { ...diagnosticNumbers(source, ["startTime", "duration", "executionStart", "forcedStyleAndLayoutDuration", "pauseDuration", "sourceCharPosition"]), asset, invoker };
+      const invoker = ["Response.json.then", "requestAnimationFrame", "setTimeout", "setInterval"]
+        .includes(String(source.invoker)) ? source.invoker : "other";
+      const sourceFunctionName = asset && typeof source.sourceFunctionName === "string" &&
+        /^[A-Za-z0-9_$ .<>-]{0,160}$/u.test(source.sourceFunctionName) ? source.sourceFunctionName : null;
+      const windowStart = typeof value.started === "number" ? value.started : 0;
+      return { ...diagnosticNumbers(source, ["startTime", "duration", "executionStart", "forcedStyleAndLayoutDuration", "pauseDuration", "sourceCharPosition"]),
+        openingOffsetMs: openingOffset(source.startTime, windowStart), asset, sourceFunctionName, invoker,
+        phase: ["classic-script", "module-script", "event-listener", "user-callback", "resolve-promise", "reject-promise"]
+          .includes(String(source.invokerType)) ? source.invokerType : "unknown" };
     });
-    return { ...diagnosticNumbers(source, ["startTime", "duration", "blockingDuration", "renderStart", "styleAndLayoutStart", "paintTime", "presentationTime"]), scripts };
+    return { ...diagnosticNumbers(source, ["startTime", "duration", "blockingDuration", "renderStart", "styleAndLayoutStart", "paintTime", "presentationTime"]),
+      openingOffsetMs: openingOffset(source.startTime, value.started), scripts };
   });
-  const record = { schema: 1, phase, ...context,
+  const tasks = (Array.isArray(value.longTaskDetails) ? value.longTaskDetails : []).slice(0, 8)
+    .map(task => {
+      const numbers = diagnosticNumbers(task, ["startTime", "duration"]);
+      return { ...numbers, openingOffsetMs: openingOffset(numbers.startTime, value.started),
+        overlappingFrameIndexes: frames.flatMap((frame, index) =>
+          typeof frame.startTime === "number" && typeof frame.duration === "number" &&
+          frame.startTime < numbers.startTime + numbers.duration &&
+          frame.startTime + frame.duration > numbers.startTime ? [index] : []) };
+    });
+  const record = { schema: 2, phase, ...context,
+    attributionLimits: "Overlapping frames are correlation, not proof of task ownership. No GC or OS scheduling trace is collected; unattributed time cannot establish runner noise.",
+    animationFrameSupported: value.animationFrameSupported === true,
     ...diagnosticNumbers(value, ["rate", "started", "interactiveMs", "longestTaskMs", "requestCount", "previewEvents"]),
     firstVisibleKey: typeof value.firstVisibleKey === "string" && /^item:user_message:[0-9]{1,16}$/u.test(value.firstVisibleKey) ? value.firstVisibleKey : null,
     cacheComplete: typeof value.cacheComplete === "boolean" ? value.cacheComplete : null,
     longTaskCount: Array.isArray(value.longTasks) ? value.longTasks.length : 0,
-    longTaskDetails: (Array.isArray(value.longTaskDetails) ? value.longTaskDetails : []).slice(0, 8)
-      .map(task => diagnosticNumbers(task, ["startTime", "duration"])),
+    longTaskDetails: tasks,
     longAnimationFrames: frames, assets: [...assets].map(([name, sha256]) => ({ name, sha256 })), omittedFrames: 0 };
   while (Buffer.byteLength(JSON.stringify(record)) > 64 * 1024 && record.longAnimationFrames.length) {
     record.longAnimationFrames.pop();
     record.omittedFrames++;
+  }
+  for (const task of record.longTaskDetails) {
+    task.overlappingFrameIndexes = task.overlappingFrameIndexes.filter(index => index < record.longAnimationFrames.length);
   }
   return record;
 }
@@ -308,24 +334,37 @@ for (const rate of [1, 4]) test(`an incomplete cache opens its real authoritativ
     });
     await page.evaluate(path => {
       const state = { started: performance.now(), interactiveMs: 0, firstVisibleKey: "", longTasks: [] as number[],
-        longTaskDetails: [] as Array<{ startTime: number; duration: number }>, longAnimationFrames: [] as unknown[] };
+        longTaskDetails: [] as Array<{ startTime: number; duration: number }>, longAnimationFrames: [] as Record<string, unknown>[],
+        animationFrameSupported: PerformanceObserver.supportedEntryTypes.includes("long-animation-frame") };
       (window as unknown as { __coldOpening: typeof state }).__coldOpening = state;
       const observer = new PerformanceObserver(list => {
         for (const entry of list.getEntries()) if (entry.startTime >= state.started) {
           state.longTasks.push(entry.duration);
-          if (state.longTaskDetails.length < 8) state.longTaskDetails.push({ startTime: entry.startTime, duration: entry.duration });
+          // Retain the worst tasks, not just the first eight: never lose the failing task.
+          state.longTaskDetails.push({ startTime: entry.startTime, duration: entry.duration });
+          state.longTaskDetails.sort((a, b) => b.duration - a.duration);
+          state.longTaskDetails.length = Math.min(8, state.longTaskDetails.length);
         }
       });
       observer.observe({ type: "longtask", buffered: true });
       // Keep the existing budget intact; retain the task's frame/script attribution when available
       // so a CI-only miss can be investigated without losing the diagnostic attachment with the VM.
-      const animationObserver = new PerformanceObserver(list => {
-        for (const entry of list.getEntries()) if (entry.startTime >= state.started && state.longAnimationFrames.length < 8) {
+      const recordFrames = (entries: PerformanceEntry[]) => {
+        // A frame can start before navigation and still contain the entire slow task.
+        for (const entry of entries) if (entry.startTime + entry.duration > state.started &&
+          (!state.interactiveMs || entry.startTime <= state.started + state.interactiveMs)) {
           const frame = entry.toJSON();
-          if (Array.isArray(frame.scripts)) frame.scripts = frame.scripts.slice(0, 16);
+          if (Array.isArray(frame.scripts)) frame.scripts = frame.scripts.sort((a: { duration: number }, b: { duration: number }) => b.duration - a.duration).slice(0, 16);
           state.longAnimationFrames.push(frame);
+          state.longAnimationFrames.sort((a, b) => Number(b.duration) - Number(a.duration));
+          state.longAnimationFrames.length = Math.min(8, state.longAnimationFrames.length);
         }
-      });
+      };
+      const animationObserver = new PerformanceObserver(list => recordFrames(list.getEntries()));
+      (window as unknown as { __stopColdOpeningFrames: () => void }).__stopColdOpeningFrames = () => {
+        recordFrames(animationObserver.takeRecords());
+        animationObserver.disconnect();
+      };
       if (PerformanceObserver.supportedEntryTypes.includes("long-animation-frame")) {
         animationObserver.observe({ type: "long-animation-frame", buffered: true });
       }
@@ -341,7 +380,9 @@ for (const rate of [1, 4]) test(`an incomplete cache opens its real authoritativ
         const control = document.querySelector<HTMLButtonElement>("[data-later-activity-gap] button");
         if (row && control && !control.disabled && reader?.getAttribute("aria-busy") !== "true") {
           state.interactiveMs = performance.now() - state.started;
-          requestAnimationFrame(() => { observer.disconnect(); animationObserver.disconnect(); });
+          // Preserve the task cutoff. Frame attribution arrives after rendering; collect
+          // it until the result is read, filtering frames to the opening interval above.
+          requestAnimationFrame(() => observer.disconnect());
           return;
         }
         requestAnimationFrame(frame);
@@ -356,8 +397,11 @@ for (const rate of [1, 4]) test(`an incomplete cache opens its real authoritativ
     }
     await expect.poll(() => page.evaluate(() => (window as unknown as { __coldOpening: { interactiveMs: number } }).__coldOpening.interactiveMs),
       { timeout: 15_000 }).toBeGreaterThan(0);
-    const measured = await page.evaluate(() => (window as unknown as { __coldOpening: {
-      interactiveMs: number; firstVisibleKey: string; longTasks: number[] } }).__coldOpening);
+    const measured = await page.evaluate(() => {
+      (window as unknown as { __stopColdOpeningFrames: () => void }).__stopColdOpeningFrames();
+      return (window as unknown as { __coldOpening: {
+        interactiveMs: number; firstVisibleKey: string; longTasks: number[] } }).__coldOpening;
+    });
     console.info(`Cold Opening Window Diagnostic: ${JSON.stringify(coldOpeningDiagnostic({ ...measured, longestTaskMs: Math.max(0, ...measured.longTasks), requestCount: requests.length }, diagnosticContext, "window"))}`);
     const opening = await page.request.get(`${base}/api/sessions/${COLD_SESSION_ID}/events?opening=current-turn&limit=200&eventEpoch=0`, { headers: { authorization: `Bearer ${token}` } });
     const body = await opening.json();
@@ -375,7 +419,9 @@ for (const rate of [1, 4]) test(`an incomplete cache opens its real authoritativ
     expect(body.preview.events).toHaveLength(200);
     expect(report.firstVisibleKey).toBe(`item:user_message:${LONG_TURN_START_SEQ}`);
     expect(report.interactiveMs).toBeLessThan(1_000);
-    expect(report.longestTaskMs).toBeLessThanOrEqual(200);
+    expect(report.longestTaskMs,
+      `Opening long-task budget exceeded (200 ms); CPU throttle ${rate}x; openingOffsetMs is relative to navigation. Attribution: ${JSON.stringify(diagnostic)}`,
+    ).toBeLessThanOrEqual(200);
     expect(report.requestCount).toBeLessThanOrEqual(2);
     await expect(page.getByText(LONG_TURN_PROMPT, { exact: true })).toBeInViewport();
     await page.getByRole("button", { name: "Load Later Activity", exact: true }).click();
