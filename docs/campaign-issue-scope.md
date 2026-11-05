@@ -21,6 +21,13 @@ later message counts as the first. One `scope_grant` reading then decides it:
 A seed left pending with no reading in flight (a control-plane restart) settles as `owner`, with its
 reading recorded as failed. A message without digits makes no Decision call.
 
+A Custom campaign whose first message was recorded before the seed existed has no seed: the build
+before #4216 held it by matching that message against a regular expression on every check, and stored
+nothing. So that it doesn't lose its hold on upgrade (#4258), its recorded first message gets the seed
+it would get now. That happens the first time it tries to delegate or its issue scope is read, through
+the same `scope_grant` reading and the same table. Nothing is matched against the text. A later
+message never counts as the first.
+
 Approving a scope needs at least one issue, and a campaign whose message names none would otherwise
 wait forever. So the owner may also release an `owner` seed: **Continue Without an Epic** on its
 Epic Seed row in Campaign Status (the classification route, `orchestrator`). The seed becomes `none`.
