@@ -493,11 +493,11 @@ function boundedCampaignEventText(text: string): string {
 /** One member's correctable publication refusal for one recommendation (#4065), hashed. */
 /** The one Decision occurrence that reads a Custom campaign's first message for its epic seed (#4104). */
 /** Who wrote the first message a Custom campaign's reading reads (#4259), which decides what the reading
- * may grant: the owner's own create request (granted, with the launch provenance Full Control enable
- * trusts), the owner's first prompt after an empty launch (granted), an unattributed message (a recorded
- * transcript message whose author was never recorded, or a staged automation launch: granted without that
- * provenance, as the parser it replaces did), or a first prompt from anyone other than the campaign's owner,
- * whose named issues are never granted: the reading is left with the owner instead. */
+ * may grant. Only a message the server knows the owner wrote grants issues: the owner's own create
+ * request (with the launch provenance Full Control enable trusts) or the owner's first prompt after an
+ * empty launch. An unattributed message (a recorded transcript message whose author was never stored,
+ * or a staged automation launch) and a first prompt from anyone other than the campaign's owner never
+ * grant issues: a reading that names some is left with the owner. */
 type FirstMessageAuthor = "launch_request" | "owner" | "unattributed" | "other";
 
 function issueScopeSeedKey(rootId: string, messageDigest: string): string {
@@ -6143,9 +6143,10 @@ export class SessionsService {
     if (!runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "orchestratorIssueScope")) {
       return settle({ state: "owner", occurrenceId });
     }
-    // Issue-write authority is the owner's to grant: a first prompt someone else wrote names issues
-    // the owner decides on, never ones the reading grants.
-    if (author === "other") return settle({ state: "owner", occurrenceId });
+    // Issue-write authority is the owner's to grant: only a message the server knows the owner wrote
+    // grants issues. A first prompt someone else wrote, a staged automation launch, or a recorded
+    // transcript message whose author was never stored names issues the owner decides on instead.
+    if (author !== "launch_request" && author !== "owner") return settle({ state: "owner", occurrenceId });
     const verified = await this.verifiedMessageIssues(root, repository, candidates.explicit);
     if (verified.length !== candidates.explicit.length) return settle({ state: "owner", occurrenceId });
     settle({ state: "none", occurrenceId, grant: { issueNumbers: verified, launchRequest: author === "launch_request" } });

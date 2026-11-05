@@ -2103,7 +2103,7 @@ test("a follow-up limit the person sets before the first message survives it: 0 
   } finally { await server.close(); f.db.close(); }
 });
 
-test("enable never trusts issue numbers a restart's reading granted from an automation's first message (CR-1.2, #4259)", async () => {
+test("a restart's reading of an automation's first message grants nothing, and enable derives no issue from it (CR-1.2, #4259)", async () => {
   const f = fixture();
   const { server } = await app(f);
   try {
@@ -2122,8 +2122,10 @@ test("enable never trusts issue numbers a restart's reading granted from an auto
     await f.sessions.campaignIssueScopeSeedSettled(id);
     assert.equal(f.decision.calls.length, 1, "one scripted reading");
     const backfilled = f.db.getSession(id)!.orchestratorPolicy!;
-    assert.deepEqual(backfilled.issueNumbers, [12, 13], "the restart's reading granted the issues it named");
-    assert.equal(backfilled.issueNumbersSource, undefined, "and recorded no Human launch provenance");
+    // The transcript records no author, so the issues it names are the owner's to decide.
+    assert.equal(backfilled.issueNumbers, undefined, "a message no one can show the owner wrote grants no issue");
+    assert.equal(backfilled.issueNumbersSource, undefined);
+    assert.equal(backfilled.issueScopeSeed?.state, "owner", "the reading is left with the owner");
     f.db.updateSessionStatus(id, "running", Date.now());
 
     const checked = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control/preflight`,

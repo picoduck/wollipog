@@ -1151,9 +1151,20 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     unseed();
     const upgradedParent = await createWithIssueListReading(svc, db, hub, [1209, 1210, 1211], () => svc.restart(parent.id));
     assert.ok(upgradedParent.ok, upgradedParent.error);
-    assert.deepEqual(db.getSession(parent.id)?.orchestratorPolicy?.issueNumbers, [1209, 1210, 1211],
-      "restart's reading of the recorded first prompt grants pre-v158 human campaign scope; no grammar parses it");
-    assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.issueNumbersSource, undefined, "a transcript is never the launch request");
+    // The recorded first prompt has no stored author, so no grammar and no reading grants its issues:
+    // they are the owner's to approve through the one person-owned request.
+    assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.issueNumbers, undefined,
+      "restart's reading of an unattributed transcript message grants no pre-v158 campaign scope");
+    const ownerSeed = db.getSession(parent.id)!.orchestratorPolicy!.issueScopeSeed!;
+    assert.equal(ownerSeed.state, "owner");
+    // The owner settles the one request: Continue Without an Epic, which grants nothing.
+    const released = svc.classifyCampaignDecision(parent.id, ownerSeed.occurrenceId!, { classification: "orchestrator" }, { kind: "human", id: db.localIdentityContext().userId });
+    assert.ok(released.ok, released.error);
+    assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.issueNumbers, undefined);
+    // A persisted scope (here the one the launch's reading granted) is what the next check protects.
+    const persisted = db.sessionOrchestratorPolicy(parent.id)!;
+    persisted.issueNumbers = [1209, 1210, 1211];
+    db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(persisted), parent.id);
     assert.ok(svc.restart(parent.id).ok);
     assert.deepEqual(hub.sentOfType("start_session").at(-1)?.spec.orchestrator?.issueNumbers, [1209, 1210, 1211]);
     db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1);

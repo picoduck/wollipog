@@ -167,8 +167,8 @@ Enabling Full Control on an existing campaign that has no issue scope derives on
 comes from the runner's inspection of the root's checkout. The issues are only those the Decision
 Model's reading granted from the authenticated Human's own create request
 (`issueNumbersSource: "human_launch_request"`, #4259), as the runner verifies them. No grammar
-parses that request. Transcript messages record no author, and a restart's reading reads the
-transcript, so neither is ever scope. While the first message's reading is pending, enabling is
+parses that request. Transcript messages record no author, so a restart's reading of one grants no
+issue at all and leaves it with the owner. While the first message's reading is pending, enabling is
 refused with a retry message; a reading that failed or was uncertain grants no issue, and its
 person-owned request stays in Campaign Status. Without such issues the scope is task-only. A campaign with
 any history is established at once in the same action, with its existing task as the objective,

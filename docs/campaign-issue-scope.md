@@ -29,11 +29,15 @@ owner rather than granting part of it.
 Until the reading settles, delegation waits and every GitHub write on an issue takes the person's
 ordinary approval path. The runner's Orchestrator receives the issue numbers at its next provider
 launch, so its routine writes on them keep that approval path until then. Enabling Full Control waits
-for a pending reading. Only issues granted from the person's own create request carry the launch
-provenance (`issueNumbersSource: "human_launch_request"`) that Full Control enable trusts; a reading of
-the owner's first prompt after an empty launch, or of a recorded transcript message, grants them without
-it. A first prompt from anyone other than the campaign's owner never grants issues: a reading that
-names some is left with the owner.
+for a pending reading.
+
+Only a message the server knows the campaign's owner wrote grants issues: the owner's create request,
+whose issues carry the launch provenance (`issueNumbersSource: "human_launch_request"`) that Full
+Control enable trusts, or the owner's first prompt after an empty launch, whose issues don't. Any other
+first message is left with the owner when its reading names issues: a first prompt from someone else, a
+staged automation launch, or a recorded transcript message whose author was never stored (a restart or
+a pre-upgrade campaign). A reading of one of those can still seed an epic, which waits for the owner's
+scope approval anyway.
 
 A seed left pending with no reading in flight (a control-plane restart) settles as `owner`, with its
 reading recorded as failed. A message without digits makes no Decision call and grants nothing.
