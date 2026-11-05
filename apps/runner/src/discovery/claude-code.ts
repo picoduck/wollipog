@@ -134,7 +134,8 @@ function optionBlock(help: string, option: string): string {
 
 /** Project only flags and enumerated values present in this installation's own help output. */
 export function parseClaudeHelp(help: string): Pick<ClaudeCodeCapabilities,
-  "effortLevels" | "permissionModes" | "streamJsonInput" | "forkSession" | "replayUserMessages" | "sessionNaming" | "mutableSystemPromptFlag"
+  "effortLevels" | "permissionModes" | "streamJsonInput" | "forkSession" | "replayUserMessages" | "sessionNaming" | "decisionCalls" |
+  "mutableSystemPromptFlag"
 > {
   const effortBlock = optionBlock(help, "--effort");
   const permissionBlock = optionBlock(help, "--permission-mode");
@@ -147,13 +148,17 @@ export function parseClaudeHelp(help: string): Pick<ClaudeCodeCapabilities,
     "--setting-sources", "--no-session-persistence", "--disable-slash-commands", "--no-chrome",
     "--system-prompt",
   ];
+  const sessionNaming = permissionModes.includes("plan") && namingFlags.every((flag) => help.includes(flag));
   return {
     effortLevels: effortBlock ? EFFORTS.filter((value) => new RegExp(`\\b${value}\\b`).test(effortBlock)) : [],
     permissionModes,
     streamJsonInput: /--input-format/.test(inputBlock) && /stream-json/.test(inputBlock) && /--output-format/.test(help),
     forkSession: /--fork-session\b/.test(help),
     replayUserMessages: /--replay-user-messages\b/.test(help),
-    sessionNaming: permissionModes.includes("plan") && namingFlags.every((flag) => help.includes(flag)),
+    sessionNaming,
+    // Decision calls reuse the naming lockdown and add an enforced schema with a JSON envelope.
+    decisionCalls: sessionNaming && help.includes("--json-schema") &&
+      /\bjson\b/.test(optionBlock(help, "--output-format")),
     mutableSystemPromptFlag: (["--system-prompt-recording", "--system-prompt-snapshot"] as const)
       .find((flag) => /\boff\b/.test(optionBlock(help, flag))),
   };

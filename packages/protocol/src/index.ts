@@ -864,7 +864,13 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      projection lists `mergedBranches`; a pending merged branch keeps a campaign from
 //      `verified_complete`. Older runners never receive the action, and their campaigns keep
 //      today's completion.
-export const PROTOCOL_VERSION = 284;
+// 285: Decision Model runtime (#4101). The control plane sends `run_decision`, one tool-less,
+//      schema-constrained attempt on an explicit harness target, and a v285 runner answers
+//      `run_decision_result` with the structured output, usage and a typed error class. Discovery
+//      advertises `decisionCalls` on Claude Code and Codex App Server. An older runner never
+//      receives the call: the control plane records a non-transient `runner_incapable` failure and
+//      the caller's one typed, person-owned request follows.
+export const PROTOCOL_VERSION = 285;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1350,6 +1356,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionCustomModelNaming: 94,
   sessionNamingTargets: 95,
   sessionNamingDriftCodes: 97,
+  /** v285 runners host tool-less, schema-constrained Decision calls (`run_decision`, #4101). */
+  decisionModel: 285,
   sessionAgentControl: 100,
   sessionAgentControlReasoningEffort: 138,
   sessionOrchestration: 109,
@@ -2522,6 +2530,8 @@ export interface CodexAppServerCapabilities {
   schemaFingerprint?: string;
   /** This installation satisfies the separately verified ephemeral, no-tool session-naming contract. */
   sessionNaming?: boolean;
+  /** This installation can run tool-less Decision calls with an enforced output schema (#4101). */
+  decisionCalls?: boolean;
   /** This installation can enforce Guardian-backed automatic review for Orchestrator turns. */
   orchestratorApproval?: {
     status: "supported" | "unsupported";
@@ -2571,6 +2581,8 @@ export interface ClaudeCodeCapabilities {
   replayUserMessages: boolean;
   /** The installed CLI advertises every fail-closed flag required by runner-hosted title generation. */
   sessionNaming?: boolean;
+  /** The naming flags plus `--json-schema`: tool-less Decision calls with an enforced schema (#4101). */
+  decisionCalls?: boolean;
   mutableSystemPromptFlag?: "--system-prompt-recording" | "--system-prompt-snapshot";
   auth: ClaudeCodeAuth;
   failure?: ClaudeCodeFailure;
@@ -7099,6 +7111,157 @@ export interface SessionNamingConnectionTestResult {
   status: "available" | "authentication_failed" | "endpoint_failed" | "timed_out" | "unavailable";
 }
 
+/* ----------------------------- Decision Model ---------------------------- */
+
+/** A typed control-plane decision (#4101). Each kind has a fixed, versioned prompt and an output
+ * schema registered in the control plane. `probe` is the fixed Test Decision Model question;
+ * the Full Control callers (#4102–#4104) add their kinds here with their prompts. */
+export type DecisionKind = "probe";
+
+/** Why one Decision attempt failed. The control plane, not the runner, decides what is transient:
+ * see DECISION_TRANSIENT_ERROR_CLASSES. */
+export type DecisionErrorClass =
+  /** The attempt ran out of time. */
+  | "timed_out"
+  /** The runner was unreachable, reconnected, or the request never arrived. */
+  | "transport"
+  /** The provider asked the caller to slow down (429). */
+  | "rate_limited"
+  /** The provider was overloaded or failed on its side (5xx). */
+  | "provider_overloaded"
+  /** The output was empty, not JSON, or failed the kind's schema. Never parsed leniently. */
+  | "invalid_output"
+  /** The provider process failed without a classifiable cause. Retried within the bounded budget,
+   * since an outage looks the same; it still ends in the one person-owned request. */
+  | "provider_failed"
+  /** The selected harness is not signed in, or its credentials were rejected. */
+  | "authentication"
+  /** The setting or the runner's configuration cannot run this call. */
+  | "configuration"
+  /** The selected model or effort is not advertised. */
+  | "model_unavailable"
+  /** The selected Agent Harness is missing, unavailable, or cannot run tool-less Decision calls. */
+  | "harness_unavailable"
+  /** The runner is offline or too old to host Decision calls. */
+  | "runner_incapable"
+  /** The provider refused the request. */
+  | "refused";
+
+export const DECISION_ERROR_CLASSES: readonly DecisionErrorClass[] = [
+  "timed_out", "transport", "rate_limited", "provider_overloaded", "invalid_output", "provider_failed",
+  "authentication", "configuration", "model_unavailable", "harness_unavailable", "runner_incapable", "refused",
+];
+
+/** Failures retried within the attempt budget. Every other class fails at once. */
+export const DECISION_TRANSIENT_ERROR_CLASSES: readonly DecisionErrorClass[] = [
+  "timed_out", "transport", "rate_limited", "provider_overloaded", "invalid_output", "provider_failed",
+];
+
+/** Runner-side wall-clock budget for one Decision attempt, clamped again by the runner. */
+export const DECISION_ATTEMPT_BUDGET_MS = 30_000;
+/** Share of an attempt's budget that preparation (isolation, authorization) may spend. */
+export const DECISION_PREPARATION_BUDGET_MS = 4_000;
+/** The runner waits at most this long for teardown after the answer is known. */
+export const DECISION_CLEANUP_BUDGET_MS = 1_000;
+/** Extra time the control plane waits on the runner round trip beyond the attempt budget. */
+export const DECISION_TRANSPORT_MARGIN_MS = DECISION_CLEANUP_BUDGET_MS + 1_000;
+/** Largest structured output, in UTF-8 bytes, a runner returns. */
+export const DECISION_OUTPUT_MAX_BYTES = 8 * 1024;
+/** Largest rendered input, in characters, the control plane sends for one call. */
+export const DECISION_INPUT_MAX_CHARS = 48_000;
+
+/** Fixed order for Automatic: the first family a harness advertises wins, so a small, fast model
+ * decides. A harness that advertises none of them has no Automatic model. */
+export const DECISION_MODEL_AUTOMATIC_PREFERENCE: readonly string[] = ["haiku", "luna", "mini", "nano", "flash"];
+/** Fixed effort order for Automatic, first advertised wins. */
+export const DECISION_MODEL_AUTOMATIC_EFFORTS: readonly string[] = ["low", "minimal", "medium"];
+
+/** Persisted explicit target, recomputed against the runner's current advertisement on every read. */
+export type DecisionModelTarget = SessionNamingHarnessTarget;
+export type DecisionModelMachine = SessionNamingHarnessMachine;
+
+/** Organization setting (#4101). Automatic uses the campaign runner's own harness with the first
+ * model it advertises from DECISION_MODEL_AUTOMATIC_PREFERENCE; an explicit target overrides it. */
+export interface DecisionModelSettingsView {
+  source: "automatic" | "organization";
+  canManage: boolean;
+  /** Present only when an administrator chose an explicit target. */
+  target?: DecisionModelTarget;
+  /** Current authenticated harnesses that can run tool-less Decision calls. */
+  machines: DecisionModelMachine[];
+  automaticPreference: string[];
+}
+
+export interface ConfigureDecisionModelRequest {
+  runnerId: string;
+  agentId: string;
+  driver: SessionNamingHarnessOption["driver"];
+  model: string;
+  effort: string;
+}
+
+/** The harness a Decision call ran on, without credentials. */
+export interface DecisionModelResolvedTarget {
+  source: "automatic" | "organization";
+  runnerId: string;
+  machineName: string;
+  agentId: string;
+  harnessName: string;
+  driver: SessionNamingHarnessOption["driver"];
+  provider: SessionNamingAccountBoundary["provider"];
+  model: string;
+  effort: string;
+}
+
+export interface DecisionAttemptView {
+  attempt: number;
+  /** Absent for the attempt that produced the recorded verdict. */
+  errorClass?: DecisionErrorClass;
+  latencyMs: number;
+}
+
+export interface DecisionUsageView {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  /** Null when the rate table cannot price the reported model. */
+  costUsd: number | null;
+}
+
+/** One audited decision occurrence. Inputs are kept only as SHA-256 digests. */
+export interface DecisionOccurrenceView {
+  occurrenceId: string;
+  kind: DecisionKind;
+  promptVersion: string;
+  /** `decided` holds a verdict other than `uncertain`; `uncertain` and `failed` route to a person. */
+  state: "pending" | "decided" | "uncertain" | "failed";
+  verdict?: string;
+  reason?: string;
+  failureClass?: DecisionErrorClass;
+  /** The typed, person-owned request the caller created for an uncertain or failed occurrence. */
+  humanRequestId?: string;
+  target?: DecisionModelResolvedTarget;
+  inputDigests: Record<string, string>;
+  attempts: DecisionAttemptView[];
+  usage: DecisionUsageView;
+  createdAt: number;
+  decidedAt?: number;
+}
+
+export interface DecisionModelTestResult {
+  occurrence: DecisionOccurrenceView;
+  /** Wall-clock time from the first attempt to the outcome. */
+  latencyMs: number;
+}
+
+/** Campaign Status: its Decision calls and their separate usage. Never managed worker accounting. */
+export interface CampaignDecisionsResponse {
+  campaignSessionId: string;
+  decisions: DecisionOccurrenceView[];
+  usage: DecisionUsageView & { calls: number; unpricedCalls: number };
+}
+
 /* -------------------- Per-user Agent Harness defaults ------------------- */
 
 /** Stable identity for one discovered Agent Harness across Machines. Display names are excluded
@@ -10386,6 +10549,29 @@ export function sessionNamingAgentFailureCode(
   return "harness_unavailable";
 }
 
+/** Why an advertised agent cannot host a tool-less Decision call, or null when it can. A missing
+ * capability is a non-transient failure, never a silent pass (#4101). */
+export function decisionAgentFailureClass(
+  agent: AgentDefinition | undefined,
+): "harness_unavailable" | "authentication" | null {
+  if (!agent || agent.available !== true) return "harness_unavailable";
+  const driver = agent.driver ?? "acp";
+  if (driver === "codex-app-server") {
+    if (agent.codexAppServer?.status !== "supported" || agent.codexAppServer.decisionCalls !== true) {
+      return "harness_unavailable";
+    }
+    return agent.authStatus === "authenticated" ? null : "authentication";
+  }
+  if (driver === "claude-code") {
+    if (agent.claudeCode?.status === "unauthenticated") return "authentication";
+    if (agent.claudeCode?.status !== "ready" || agent.claudeCode.decisionCalls !== true) return "harness_unavailable";
+    return agent.authStatus === "authenticated" && agent.claudeCode.auth.status === "authenticated"
+      ? null
+      : "authentication";
+  }
+  return "harness_unavailable";
+}
+
 export type SessionNamingRunnerFailurePhase =
   | "preflight"
   | "isolation"
@@ -10394,6 +10580,25 @@ export type SessionNamingRunnerFailurePhase =
   | "turn_start"
   | "generation"
   | "output_validation";
+
+/** One tool-less Decision attempt's answer. `outputText` is the provider's structured output as
+ * JSON text; the control plane parses and validates it strictly against the kind's schema. */
+export interface RunDecisionResultMessage {
+  type: "run_decision_result";
+  requestId: string;
+  ok: boolean;
+  outputText?: string;
+  provider?: SessionNamingAccountBoundary["provider"];
+  billingSource?: SessionNamingAccountBoundary["billingSource"];
+  /** Provider-resolved model id, for pricing; the requested alias when none was reported. */
+  model?: string;
+  /** Present whenever the provider reported usage, including on a failed attempt. */
+  usage?: Omit<DecisionUsageView, "costUsd">;
+  errorClass?: DecisionErrorClass;
+  /** A provider Retry-After, in milliseconds, when it reported one. */
+  retryAfterMs?: number;
+  phase?: SessionNamingRunnerFailurePhase;
+}
 
 /** Bounded runner-hosted title result. Provider output, diagnostics, paths, and identities stay local. */
 export interface GenerateSessionTitleResultMessage {
@@ -10516,6 +10721,7 @@ export type RunnerToControlPlane =
   | DriverTelemetryMessage
   | GenerateSessionTitleResultMessage
   | SessionNamingCustomModelResultMessage
+  | RunDecisionResultMessage
   | GitActionResultMessage
   | RewindResultMessage
   | ForkResultMessage
@@ -11322,6 +11528,27 @@ export interface GenerateSessionTitleMessage {
   };
   messages: SessionNamingPromptMessage[];
   /** Complete runner-side wall-clock budget, clamped again by the runner. */
+  timeoutMs: number;
+}
+
+/** One tool-less Decision attempt (#4101) on an explicit harness target. The runner validates the
+ * target again, runs it with no tools, MCP servers, file access or persistence, and returns only
+ * the structured output and usage. `input` already quotes every untrusted field as data. */
+export interface RunDecisionMessage {
+  type: "run_decision";
+  requestId: string;
+  occurrenceId: string;
+  attempt: number;
+  target: {
+    agentId: string;
+    driver: SessionNamingHarnessOption["driver"];
+    model: string;
+    effort: string;
+  };
+  instructions: string;
+  input: string;
+  outputSchema: Record<string, unknown>;
+  /** Complete runner-side wall-clock budget, clamped to DECISION_ATTEMPT_BUDGET_MS. */
   timeoutMs: number;
 }
 
@@ -12579,6 +12806,7 @@ export type ControlPlaneToRunner =
   | ConfigureAutomaticAccountSwitchMessage
   | RefreshSubscriptionUsageMessage
   | GenerateSessionTitleMessage
+  | RunDecisionMessage
   | ConfigureSessionNamingCustomModelMessage
   | DeleteSessionNamingCustomModelKeyMessage
   | TestSessionNamingCustomModelMessage
