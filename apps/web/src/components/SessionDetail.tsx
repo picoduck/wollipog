@@ -5143,7 +5143,7 @@ function SessionDetailLoaded({
         <Notice tone={failed ? "warning" : "neutral"} role="status" ariaLabel={title} title={title} trailing={trailing}
           {...(failed ? { dismissLabel: "Dismiss Notice", onDismiss: () => setDismissedLocationSwitchKey(locationSwitchKey) } : {})}>
           <p>{failed
-            ? <>This session stayed where it was instead of moving to Location &ldquo;{locationSwitch.locationName}&rdquo; ({locationSwitch.repository}).
+            ? <>The switch to Location &ldquo;{locationSwitch.locationName}&rdquo; ({locationSwitch.repository}) didn&rsquo;t finish.
               {" "}{asSentence(locationSwitch.reason ?? "", true)}</>
             : <>This session moves to Location &ldquo;{locationSwitch.locationName}&rdquo; ({locationSwitch.repository}) when its
               current turn ends, then continues the task there.</>}</p>

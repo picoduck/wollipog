@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import type { RunnerToControlPlane, SessionLaunchSpec, SessionLocationSwitchMessage } from "@wollipog/protocol";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -37,13 +37,17 @@ function repository(root: string, name: string, origin: string): string {
   return realpathSync(path);
 }
 
-function fakeProvider() {
+function fakeProvider(options: { failLaunch?: number } = {}) {
   const prompts: Array<{ cwd: string; text: string }> = [];
+  const resumed: Array<string | undefined> = [];
   let launches = 0;
-  const factory = (_driver: unknown, launch: { cwd: string }, cb: DriverCallbacks) => {
+  const factory = (_driver: unknown, launch: { cwd: string; resumeId?: string }, cb: DriverCallbacks) => {
     launches++;
+    const generation = launches;
+    resumed.push(launch.resumeId);
     return {
-      pid: launches, initialize: async () => {}, newSession: async () => {}, close: async () => {},
+      pid: launches, newSession: async () => {}, close: async () => {},
+      initialize: async () => { if (generation === options.failLaunch) throw new Error("provider failed to start"); },
       prompt: async (text: string) => {
         prompts.push({ cwd: launch.cwd, text });
         cb.onPromptAccepted?.();
@@ -54,7 +58,7 @@ function fakeProvider() {
       agentSessionId: () => "provider-session-id",
     };
   };
-  return { factory, prompts, launches: () => launches };
+  return { factory, prompts, resumed, launches: () => launches };
 }
 
 interface Harness {
@@ -66,38 +70,54 @@ interface Harness {
   app: string;
   docs: string;
   claudeHome: string;
+  dataDir: string;
   message: (overrides?: Partial<SessionLocationSwitchMessage>) => SessionLocationSwitchMessage;
+  /** A fresh runner process over the same session store, as after a crash and restart. */
+  restartRunner: (fake?: ReturnType<typeof fakeProvider>) => { manager: SessionManager; store: SessionStore; fake: ReturnType<typeof fakeProvider> };
 }
 
-async function withSession(name: string, body: (h: Harness) => Promise<void>): Promise<void> {
+async function withSession(name: string, body: (h: Harness) => Promise<void>,
+  options: { driver?: "claude-code" | "codex-app-server"; failLaunch?: number } = {}): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), `wollipog-location-switch-${name}-`));
   const previousClaudeHome = process.env.CLAUDE_CONFIG_DIR;
   const claudeHome = join(root, "claude-home");
   process.env.CLAUDE_CONFIG_DIR = claudeHome;
-  let manager: SessionManager | undefined;
+  const managers: SessionManager[] = [];
   try {
     const app = repository(root, "app", "git@github.com:acme/app.git");
     const docs = repository(root, "docs", "git@github.com:acme/docs.git");
     git(docs, "branch", "fix/install-link");
     const dataDir = join(root, "data");
-    const store = new SessionStore(join(dataDir, "sessions"));
     const sent: RunnerToControlPlane[] = [];
-    const fake = fakeProvider();
-    manager = new SessionManager((message) => { sent.push(message); }, () => {}, store, "runner", undefined,
-      fake.factory as never, dataDir, 1);
-    manager.configureSharedDirectories([{ id: "app", name: "App", path: app }, { id: "docs", name: "Docs", path: docs }] as never);
+    const runner = (fake: ReturnType<typeof fakeProvider>) => {
+      const store = new SessionStore(join(dataDir, "sessions"));
+      const manager = new SessionManager((message) => { sent.push(message); }, () => {}, store, "runner", undefined,
+        fake.factory as never, dataDir, 1);
+      manager.configureSharedDirectories([{ id: "app", name: "App", path: app }, { id: "docs", name: "Docs", path: docs }] as never);
+      managers.push(manager);
+      return { manager, store, fake };
+    };
+    const { manager, store, fake } = runner(fakeProvider({ failLaunch: options.failLaunch }));
     const sessionId = `s_location_${name.replaceAll("-", "_")}`;
-    const spec: SessionLaunchSpec = { sessionId, workspaceId: "app", workspacePath: app, agentId: "claude", command: "claude",
-      args: [], env: {}, useWorktree: false, driver: "claude-code", context: { kind: "native" } };
+    const driver = options.driver ?? "claude-code";
+    const spec: SessionLaunchSpec = { sessionId, workspaceId: "app", workspacePath: app, agentId: driver, command: driver,
+      args: [], env: {}, useWorktree: false, driver, context: { kind: "native" } };
     await manager.start(spec);
     const message = (overrides: Partial<SessionLocationSwitchMessage> = {}): SessionLocationSwitchMessage => ({
       type: "session_location_switch", requestId: "request-1", sessionId, workspaceId: "docs", workspacePath: docs,
       repository: "acme/docs", locationName: "Docs", occurrenceId: "occurrence-1", continuation: "Continue the docs fix here.",
       recoverBranch: "fix/install-link", ...overrides,
     });
-    await body({ manager, store, sessionId, fake, sent, app, docs, claudeHome, message });
+    await body({ manager, store, sessionId, fake, sent, app, docs, claudeHome, dataDir, message,
+      restartRunner: (next = fakeProvider()) => {
+        manager.shutdownAll();
+        // A crashed process's session lock goes stale; model that rather than wait a minute.
+        const lock = join(dataDir, "sessions", sessionId, "lock");
+        if (existsSync(lock)) utimesSync(lock, new Date(0), new Date(0));
+        return runner(next);
+      } });
   } finally {
-    manager?.shutdownAll();
+    for (const manager of managers) manager.shutdownAll();
     if (previousClaudeHome === undefined) delete process.env.CLAUDE_CONFIG_DIR;
     else process.env.CLAUDE_CONFIG_DIR = previousClaudeHome;
     rmSync(root, { recursive: true, force: true });
@@ -165,6 +185,66 @@ test("an approved switch moves the live session to the target repository, keeps 
     await waitFor(() => !existsSync(worktree.path), "the recovered worktree was not removed");
     assert.equal(git(h.docs, "rev-parse", "--verify", "refs/heads/fix/install-link").length > 0, true, "the recovered branch stays");
   });
+});
+
+test("a Codex session switches too: the same thread resumes in the new working directory and continues", async () => {
+  await withSession("codex", async (h) => {
+    await establishConversation(h);
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.fake.prompts.length === 2, "the Codex session did not continue in its new Location");
+    const meta = h.store.readMeta(h.sessionId)!;
+    assert.equal(meta.repoPath, h.docs);
+    assert.equal(h.fake.launches(), 2);
+    assert.equal(h.fake.resumed[1], "provider-session-id", "the relaunch resumes the same Codex thread");
+    assert.deepEqual(h.fake.prompts[1], { cwd: meta.worktreePath, text: "Continue the docs fix here." });
+    assert.equal(meta.agentSessionId, "provider-session-id");
+  }, { driver: "codex-app-server" });
+});
+
+test("a runner that stops between the move and the relaunch shows it on the session and keeps the continuation owed", async () => {
+  await withSession("interrupted", async (h) => {
+    await establishConversation(h);
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.fake.prompts.length === 2 && h.store.readMeta(h.sessionId)?.status === "idle", "the switch did not finish");
+    const moved = h.store.readMeta(h.sessionId)!;
+    // The move's single write owes the continuation; model a runner that stopped before the relaunch
+    // consumed it, so the provider never started in the new Location.
+    h.store.patchMeta(h.sessionId, { pendingLocationContinuation: { occurrenceId: "occurrence-1", text: "Continue the docs fix here.",
+      path: moved.worktreePath!, branch: "fix/install-link", locationName: "Docs", repository: "acme/docs" } });
+    h.store.flush(h.sessionId);
+    const restarted = h.restartRunner();
+    restarted.manager.recoverAllOrphanedWork();
+    // Never silent: the session says it moved and how to continue, and it is not left looking busy.
+    const noted = restarted.store.readMeta(h.sessionId)!;
+    assert.equal(noted.locationSwitchFailure?.state, "failed");
+    assert.match(noted.locationSwitchFailure!.reason!, /the runner restarted before it continued the task\. Send it a message/u);
+    assert.notEqual(noted.status, "running");
+    assert.equal(noted.repoPath, h.docs, "nothing is half-applied: the session is in its new Location");
+    const snapshot = h.sent.filter((message) => message.type === "session_runtime_updated").at(-1);
+    assert.equal(snapshot?.type === "session_runtime_updated" && snapshot.snapshot.locationSwitch?.state, "failed");
+    assert.ok(noted.pendingLocationContinuation, "the continuation stays owed to the next launch");
+    // Noting it again (a later reconnect) changes nothing.
+    restarted.manager.recoverAllOrphanedWork();
+    assert.equal(restarted.store.readMeta(h.sessionId)?.locationSwitchFailure?.at, noted.locationSwitchFailure!.at);
+  });
+});
+
+test("a move whose relaunch fails stays visible, and the next message runs the owed continuation first, in the new Location", async () => {
+  await withSession("relaunch-fails", async (h) => {
+    await establishConversation(h);
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.store.readMeta(h.sessionId)?.locationSwitchFailure !== undefined, "the failed relaunch was not recorded");
+    const meta = h.store.readMeta(h.sessionId)!;
+    assert.equal(meta.repoPath, h.docs, "the move itself completed in one write");
+    assert.match(meta.locationSwitchFailure!.reason!, /moved, but its provider could not start in the new Location; send it a message/u);
+    assert.equal(meta.status, "idle", "it waits for a message rather than looking busy");
+    assert.ok(meta.pendingLocationContinuation, "the continuation is still owed");
+    h.manager.prompt(h.sessionId, "carry on");
+    await waitFor(() => h.fake.prompts.length === 3, "the session did not continue after the next message");
+    assert.deepEqual(h.fake.prompts.slice(1).map((prompt) => [prompt.cwd, prompt.text]),
+      [[meta.worktreePath, "Continue the docs fix here."], [meta.worktreePath, "carry on"]]);
+    assert.equal(h.store.readMeta(h.sessionId)?.pendingLocationContinuation, undefined);
+  }, { failLaunch: 2 });
 });
 
 test("a switch that cannot prepare its target leaves the session where it was, visibly, and it keeps working there", async () => {

@@ -430,7 +430,7 @@ test("a pending Location switch says where the session moves, and a failed one w
     assert.ok(notice.classList.contains("t-warning"));
     assert.match(notice.textContent ?? "", /Location Switch Failed/u);
     assert.equal(notice.querySelector(".notice-body")?.textContent,
-      "This session stayed where it was instead of moving to Location “Docs Site” (acme/docs). " +
+      "The switch to Location “Docs Site” (acme/docs) didn’t finish. " +
       "The target worktree could not be prepared: branch fix/link is checked out in another worktree.");
     const dismiss = notice.querySelector<HTMLButtonElement>('button[aria-label="Dismiss Notice"]')!;
     await act(async () => { dismiss.click(); });

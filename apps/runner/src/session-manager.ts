@@ -1152,6 +1152,8 @@ const PROVIDER_REJECTION_QUOTE_CHARS = 500;
 const PROVIDER_CLOSE_TIMEOUT_MS = 5_000;
 const CHECKPOINT_REF_MAINTENANCE_CONCURRENCY = 4;
 const ORPHAN_RECOVERY_RETRY_MS = 30_000;
+/** (#4138) Why a moved session waits: the runner restarted between the move and its relaunch. */
+const INTERRUPTED_MOVE_REASON = "The session moved there, but the runner restarted before it continued the task.";
 const ORPHAN_RECOVERY_SCAN_DEBOUNCE_MS = 30_000;
 const ORPHAN_RECOVERY_PROMPT =
   "Continue after runner restart: consume queued background-task notifications, reconcile every orphaned task, and resume or report unfinished work without waiting for another user message.";
@@ -5844,6 +5846,8 @@ export class SessionManager {
     for (const stored of this.store.listSessions()) {
       this.upgradeLegacyBackgroundDeliveryEvidence(stored);
       if (stored.status === "stopped") continue;
+      // A Location move interrupted before its relaunch continues once the runner is back (#4138).
+      if (stored.pendingLocationContinuation) this.noteInterruptedLocationMove(stored);
       const meta = this.discoverOrphanedClaudeWork(stored);
       this.scheduleHistoricalClaudeJobReconciliation(meta, "reconnect");
       const automatic = automaticClaudeRecoveryAllowed(meta);
@@ -7244,6 +7248,7 @@ export class SessionManager {
       // (#4138) The Locations this session left keep their worktrees attributed across restarts.
       locationHistory: prior?.locationHistory,
       pendingLocationSwitch: priorMatchesWorkspace ? prior?.pendingLocationSwitch : undefined,
+      pendingLocationContinuation: priorMatchesWorkspace ? prior?.pendingLocationContinuation : undefined,
       locationSwitchFailure: prior?.locationSwitchFailure,
       agentVersion: spec.agentVersion ?? prior?.agentVersion,
       capabilities: spec.capabilities ?? prior?.capabilities,
@@ -9818,6 +9823,8 @@ export class SessionManager {
     // initialization cannot strand a still-held recovery queue.
     if (this.recoveryHolds.has(sessionId)) entry.controlPlaneHold = true;
     this.active.set(sessionId, entry);
+    // A move's owed continuation (#4138) runs before anything this launch was started for.
+    if (meta.pendingLocationContinuation) this.queueLocationContinuation(sessionId, entry);
     this.refreshCapacityInventorySession(sessionId);
     this.reportCapacity();
     this.send({ type: "process_status", sessionId, processStatus: "running", pid: client.pid });
@@ -13057,6 +13064,9 @@ export class SessionManager {
         this.steerFences(entry).size ||
         this.reservedPromotionPrecedesQueue(sessionId, entry)) return;
     if (!this.promoteQueuedRecoveredAnswer(sessionId, entry.queue)) return;
+    // A provider started some other way (a person's message) after an interrupted move still runs
+    // the move's owed continuation first (#4138).
+    if (this.store.readMeta(sessionId)?.pendingLocationContinuation) this.queueLocationContinuation(sessionId, entry);
     if (entry.pendingProviderAccountSwitch) {
       if (this.providerAccountSwitchCanProceed(sessionId, entry)) {
         await this.rebindSelectedProviderAccount(sessionId, entry);
@@ -13138,6 +13148,14 @@ export class SessionManager {
         if (this.steerFences(entry).size || this.reservedPromotionPrecedesQueue(sessionId, entry)) break;
         const next = entry.queue.shift()!;
         this.ensureQueueOrdinal(sessionId, next);
+        // A move's owed continuation (#4138) is settled as it starts, so it runs at most once.
+        if (next.id.startsWith("locationcont_") &&
+            this.store.readMeta(sessionId)?.pendingLocationContinuation?.occurrenceId === next.id.slice("locationcont_".length)) {
+          // The move is complete once its continuation runs, so a notice about a stalled move goes.
+          const settled = this.store.patchMeta(sessionId, { pendingLocationContinuation: undefined, locationSwitchFailure: undefined });
+          this.store.flush(sessionId);
+          if (settled) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(settled) });
+        }
         // A person's prompt is the way out of a rejection hold; the turns it held follow it.
         this.providerRejectionHolds.delete(sessionId);
         entry.activeTurnId = next.id;
@@ -14484,6 +14502,10 @@ export class SessionManager {
           locationHistory: [...(fresh.locationHistory ?? []), left],
           pendingLocationSwitch: undefined,
           locationSwitchFailure: undefined,
+          // Owed in the same write as the move, so a runner that stops before the relaunch still
+          // continues the task in the new Location when it recovers.
+          pendingLocationContinuation: { occurrenceId: pending.occurrenceId, text: pending.continuation, path: worktree.path,
+            branch: worktree.branch, locationName: pending.locationName, repository: pending.repository },
         });
         if (moved) this.store.flush(sessionId);
         return moved ?? undefined;
@@ -14492,17 +14514,7 @@ export class SessionManager {
       onLaunched: (replacementEntry) => {
         this.emitEvent(sessionId, { kind: "stderr",
           text: `Moved this session to Location "${pending.locationName}" (${pending.repository}), worktree ${worktree.branch}.` });
-        const latest = this.store.readMeta(sessionId);
-        if (latest) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(latest) });
-        this.insertQueuedPrompt(sessionId, replacementEntry.queue, {
-          id: `locationcont_${randomUUID()}`,
-          text: pending.continuation,
-          images: [],
-          providerRecovery: true,
-          worktreeContinuation: { path: worktree.path, branch: worktree.branch },
-          config: this.snapshotQueuedConfig(sessionId),
-        });
-        this.emitQueue(sessionId);
+        this.queueLocationContinuation(sessionId, replacementEntry);
       },
     });
     if (result.status === "launched") {
@@ -14522,6 +14534,54 @@ export class SessionManager {
       : moved ? "the session moved, but its provider could not start in the new Location; send it a message to retry there"
       : "the provider could not resume in the new Location";
     this.failLocationSwitch(sessionId, entry, pending, reason);
+  }
+
+  /** Queue the automatic turn a completed move owes, once, ahead of anything else, in a provider
+   * already running in the new worktree. Returns whether it was queued. */
+  private queueLocationContinuation(sessionId: string, entry: ActiveSession): boolean {
+    const owed = this.store.readMeta(sessionId)?.pendingLocationContinuation;
+    if (!owed || this.active.get(sessionId) !== entry || !sameWorktreePath(entry.context, entry.cwd, owed.path)) return false;
+    const id = `locationcont_${owed.occurrenceId}`;
+    // The debt settles when the turn starts (drain); until then it is queued at most once.
+    if (entry.queue.some((prompt) => prompt.id === id) || entry.activeTurnId === id ||
+        this.preLaunchQueues.get(sessionId)?.some((prompt) => prompt.id === id)) return false;
+    this.insertQueuedPrompt(sessionId, entry.queue, {
+      id,
+      // Ahead of every queued prompt, including a person's message that reserved its place before
+      // this launch existed: the move's turn finishes the move. Ordinals are positive.
+      ordinal: 1,
+      text: owed.text,
+      images: [],
+      providerRecovery: true,
+      worktreeContinuation: { path: owed.path, branch: owed.branch },
+      config: this.snapshotQueuedConfig(sessionId),
+    });
+    this.emitQueue(sessionId);
+    return true;
+  }
+
+  /** A move whose provider never relaunched (the runner stopped in between) still owes its turn
+   * (#4138). The session already sits in its new Location, so nothing is half-applied; say so where
+   * people see it, and keep the debt. The next launch, which any message starts, runs that
+   * continuation first, and it settles as it starts. */
+  private noteInterruptedLocationMove(meta: SessionMeta): void {
+    const owed = meta.pendingLocationContinuation;
+    if (!owed || this.shuttingDown || meta.status === "stopped" || this.active.has(meta.sessionId)) return;
+    if (!sameWorktreePath(meta.context, meta.worktreePath ?? meta.repoPath, owed.path)) {
+      this.store.patchMeta(meta.sessionId, { pendingLocationContinuation: undefined });
+      return;
+    }
+    if (meta.locationSwitchFailure?.reason?.startsWith(INTERRUPTED_MOVE_REASON)) return;
+    const updated = this.store.patchMeta(meta.sessionId, {
+      locationSwitchFailure: { state: "failed", repository: owed.repository, workspaceId: meta.workspaceId ?? "",
+        locationName: owed.locationName, at: Date.now(),
+        reason: `${INTERRUPTED_MOVE_REASON} Send it a message: it first continues the task in the new Location, then answers you.` },
+      ...(meta.status === "running" || meta.status === "queued" ? { status: "idle" as const } : {}),
+    });
+    if (updated) {
+      this.store.flush(meta.sessionId);
+      this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    }
   }
 
   /** Record a failed switch where people see it. The session stays where its metadata says it is,

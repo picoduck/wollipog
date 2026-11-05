@@ -173,6 +173,9 @@ export interface SessionMeta {
   /** (#4138) An approved Location switch, verified on this runner, that moves the live session at
    * its next turn boundary. Durable so a runner restart neither loses nor half-applies it. */
   pendingLocationSwitch?: PendingLocationSwitch;
+  /** (#4138) The automatic turn a completed move owes the session, written with the move itself.
+   * It is consumed when the relaunched provider queues it; a runner that stopped first resumes it. */
+  pendingLocationContinuation?: { occurrenceId: string; text: string; path: string; branch: string; locationName: string; repository: string };
   /** (#4138) The last Location switch that failed; the session stayed in its previous Location. */
   locationSwitchFailure?: import("@wollipog/protocol").LocationSwitchStateView;
   /** (#4138) Each Location this session left, with the worktrees it owned there. They stay
