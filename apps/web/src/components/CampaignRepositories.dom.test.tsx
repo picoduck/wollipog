@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { PROJECT_LOCATION_INSPECTION_FAILURES, type CampaignRepositoryBoundaryView } from "@wollipog/protocol";
 import { api, ApiError } from "../api.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { CampaignRepositories } from "./CampaignRepositories.js";
 
 const dom = new Window({ url: "http://localhost/" });
@@ -74,7 +75,7 @@ test("Include in Campaign asks the server, and a refusal is shown (#4117)", asyn
   try {
     await act(async () => { includeButton(container)!.click(); });
     assert.deepEqual(calls, [["s_root", "loc_shared"]]);
-    assert.equal(container.querySelector('[role="alert"]'), null);
+    assertNoDomNode(container.querySelector('[role="alert"]'), "an accepted inclusion shows no error");
     api.includeCampaignLocation = async () => { throw new ApiError("Only the campaign's owner can include a Location in it.", 403); };
     await act(async () => { includeButton(container)!.click(); });
     const alert = container.querySelector('[role="alert"]')!;
@@ -86,7 +87,7 @@ test("Include in Campaign asks the server, and a refusal is shown (#4117)", asyn
 test("a member's view shows the boundary without Include in Campaign (#4117)", async () => {
   const { container, unmount } = await render(<CampaignRepositories campaignId="s_root" boundary={boundary} canInclude={false} />);
   try {
-    assert.equal(includeButton(container), null);
+    assertNoDomNode(includeButton(container), "a member's view offers no Include in Campaign");
     assert.match(container.textContent!, /Shared Docs/);
   } finally { unmount(); }
 });
