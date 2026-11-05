@@ -9,7 +9,10 @@ import {
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
+  campaignRepositoryLocation,
+  canonicalGitLabIssueReference,
   canonicalIssueReference,
+  findGitLabClosingReferences,
 } from "@wollipog/protocol";
 import {
   executeManagerTool,
@@ -21,7 +24,8 @@ import {
 import { UI_EVIDENCE_REVIEWER_PRESET } from "./orchestrator-preset.js";
 import { VERSION } from "./version.js";
 import { contextGhRunner, type GhRunner } from "./campaign-forge-status.js";
-import type { GlabRunner } from "./campaign-gitlab-status.js";
+import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
+import { inspectMergeRequestClosures } from "./gitlab-merge-closures.js";
 import { PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS, PULL_REQUEST_WAIT_MAX_TIMEOUT_MS, PULL_REQUEST_WAIT_READ_GRACE_MS, parsePullRequestRef } from "./pull-request-wait.js";
 import { inspectPullRequestClosures, pullRequestClosures } from "./github-merge-preflight.js";
 import { defaultHostAdminIo, hostAdminUsage, runHostAdminCli, type HostAdminIo } from "./host-admin-cli.js";
@@ -193,7 +197,9 @@ export async function runPullRequestCli(
     return code;
   };
   const words = positional(args, ["--repo", "--head", "--file", "--intended"]);
-  if (words[1] === "closures") return runPullRequestClosuresCli(args, words, json, io, gh, signal);
+  if (words[1] === "closures") {
+    return runPullRequestClosuresCli(args, words, json, io, gh, signal, glab ?? contextGlabRunner({ kind: "native" }, process.cwd()));
+  }
   if (words[1] !== "wait" || words.length !== 3) return fail(pullRequestHelp(), 2);
   const timeoutMs = numeric(option(args, "--timeout"));
   const intervalMs = numeric(option(args, "--interval"));
@@ -247,7 +253,9 @@ const CLOSURES_FILE_MAX_BYTES = 1024 * 1024;
 /**
  * `wollipog pr closures` (#3713): every issue merging a pull request would close, or a draft
  * description would, compared with the ones meant to close (`--intended`). Local and read-only, like
- * `pr wait`, and the same read the control plane makes before a GitHub merge decision.
+ * `pr wait`, and the same read the control plane makes before a merge decision. A GitLab merge
+ * request (#3762), named by URL, `<host>/group/project!<iid>`, or `--repo <host>/group/project`,
+ * is read with `glab`: GitLab's closing pattern on the description and GitLab's own list.
  */
 async function runPullRequestClosuresCli(
   args: string[],
@@ -255,7 +263,8 @@ async function runPullRequestClosuresCli(
   json: boolean,
   io: { stdout: Write; stderr: Write },
   gh: GhRunner,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  glab: GlabRunner,
 ): Promise<number> {
   const fail = (message: string, code: number): number => {
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: message })}\n` : `${message}\n`);
@@ -279,13 +288,18 @@ async function runPullRequestClosuresCli(
     repository = parsed.repository;
     pullRequest = parsed.number;
   }
-  if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/u.test(repository!)) {
-    return fail("pr closures reads GitHub pull requests only; pass a GitHub owner/name", 2);
+  const gitlab = campaignRepositoryLocation(repository)?.forge === "gitlab";
+  if (!gitlab && !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/u.test(repository!)) {
+    return fail("pr closures reads GitHub pull requests and GitLab merge requests; pass a GitHub owner/name or a GitLab <host>/group/project", 2);
   }
   const intended: string[] = [];
   for (const value of options(args, "--intended")) {
-    const issue = canonicalIssueReference(value, repository);
-    if (!issue) return fail(`--intended takes #N, owner/name#N, or a GitHub issue URL, not ${JSON.stringify(value)}`, 2);
+    const issue = gitlab ? canonicalGitLabIssueReference(value, repository!) : canonicalIssueReference(value, repository);
+    if (!issue) {
+      return fail(gitlab
+        ? `--intended takes #N, group/project#N, <host>/group/project#N, or an issue URL on that GitLab instance, not ${JSON.stringify(value)}`
+        : `--intended takes #N, owner/name#N, or a GitHub issue URL, not ${JSON.stringify(value)}`, 2);
+    }
     if (!intended.includes(issue)) intended.push(issue);
   }
   let read: { state?: string; headSha?: string; closures: ReturnType<typeof pullRequestClosures> };
@@ -298,9 +312,11 @@ async function runPullRequestClosuresCli(
     } catch {
       return fail(`could not read ${file}`, 1);
     }
-    read = { closures: pullRequestClosures(text, repository!, []) };
+    read = { closures: pullRequestClosures(text, repository!, [], gitlab ? findGitLabClosingReferences : undefined) };
   } else {
-    const inspected = await inspectPullRequestClosures(repository!, pullRequest!, gh, signal);
+    const inspected = gitlab
+      ? await inspectMergeRequestClosures(repository!, pullRequest!, glab, signal)
+      : await inspectPullRequestClosures(repository!, pullRequest!, gh, signal);
     if (!inspected.ok) return fail(inspected.reason, 1);
     read = inspected;
   }

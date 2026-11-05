@@ -97,7 +97,7 @@ test("#4062 a Full Control merge is the Orchestrator's only while every issue it
     assert.deepEqual(evaluate(root, merge({ intendedClosures: ["picoduck/wollipog#2934"] }), 241), unverified);
     assert.deepEqual(evaluate(root, merge({ intendedClosures: ["picoduck/wollipog#3903"] }), 241),
       { owner: "human", reason: "outside_issue_scope", unscopedClosures: ["picoduck/wollipog#3903"] });
-    // Nothing reads a GitLab merge's closures.
+    // A v293 runner reads a GitLab merge's closures (#3762), so it is owned exactly like a GitHub one.
     const gitlab = "gitlab.example.com/platform/wollipog";
     const control = structuredClone(root.orchestratorPolicy!.control!);
     assert.ok(control.mode === "full_control");
@@ -105,7 +105,19 @@ test("#4062 a Full Control merge is the Orchestrator's only while every issue it
     const onGitlab = { ...root, orchestratorPolicy: { ...root.orchestratorPolicy!, control,
       issueScope: { ...root.orchestratorPolicy!.issueScope!, repository: gitlab } } };
     assert.equal(campaignBoundaryCurrent(onGitlab), true);
-    assert.deepEqual(evaluate(onGitlab, merge({ repository: gitlab, mergeMethod: "merge_train", squash: false, removeSourceBranch: false })), unverified);
+    const gitlabMerge = (extra: Record<string, unknown> = {}) =>
+      merge({ repository: gitlab, mergeMethod: "merge_train", squash: false, removeSourceBranch: false, ...extra });
+    assert.deepEqual(evaluate(onGitlab, gitlabMerge()), delegated, "a Refs-only GitLab merge closes nothing");
+    assert.deepEqual(evaluate(onGitlab, gitlabMerge({ intendedClosures: [`${gitlab}#2934`] })), delegated);
+    assert.deepEqual(evaluate(onGitlab, gitlabMerge({ intendedClosures: [`${gitlab}#2934`, `${gitlab}#3903`, "gitlab.example.com/other/project#2934"] })),
+      { owner: "human", reason: "outside_issue_scope", unscopedClosures: [`${gitlab}#3903`, "gitlab.example.com/other/project#2934"] });
+    // A runner older than that read (v292) proves nothing, whatever the merge declares.
+    assert.deepEqual(evaluate(onGitlab, gitlabMerge(), 292), unverified);
+    assert.deepEqual(evaluate(onGitlab, gitlabMerge({ intendedClosures: [`${gitlab}#2934`] }), 292), unverified);
+    assert.deepEqual(evaluate(onGitlab, gitlabMerge({ intendedClosures: [`${gitlab}#3903`] }), 292),
+      { owner: "human", reason: "outside_issue_scope", unscopedClosures: [`${gitlab}#3903`] });
+    // A GitHub read never stands in for a GitLab one: a v242 runner's GitLab merge is unread.
+    assert.deepEqual(evaluate(onGitlab, gitlabMerge(), 242), unverified);
     // A scope that no longer names a closing issue takes the merge back from the Orchestrator.
     const narrowed = { ...root, orchestratorPolicy: { ...root.orchestratorPolicy!, issueNumbers: [],
       issueScope: { ...root.orchestratorPolicy!.issueScope!, issueNumbers: [] } } };

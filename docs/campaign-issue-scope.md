@@ -82,18 +82,20 @@ Campaign Status lists it as recorded work outside authority, but:
   (`request_campaign_issue_scope_change`). A refused scope change cannot be routed around by
   recommitting the item and dispatching it again; only the campaign owner can then add the issue.
   An item that tracks no issue is unaffected.
-- A merge that would close an issue outside the current scope is never Orchestrator-owned. A GitHub
+- A merge that would close an issue outside the current scope is never Orchestrator-owned. A
   `pr_merge` whose `intendedClosures` name such an issue is refused before any decision is created,
   and the refusal names each one; write "Refs #N" for an issue that must stay open, or add the issue
-  to the scope first. On a v242 runner the declared closures are exactly what GitHub would close
-  (closing keywords and linked issues): the runner reads them before the request and again before
-  arming, and any difference is refused (#3713). A merge whose closures are all in scope, or that
-  closes nothing, keeps its ownership.
+  to the scope first. On a current runner the declared closures are exactly what the forge would
+  close: for GitHub (v242, #3713) its closing keywords and linked issues; for GitLab (v293, #3762)
+  its closing pattern on the description and GitLab's own `closes_issues` list. The runner reads
+  them before the request and again before arming, and any difference, or a forge it cannot read, is
+  refused. A merge whose closures are all in scope, or that closes nothing, keeps its ownership: a
+  GitLab merge is then owned exactly like a GitHub one.
 - A merge whose closures nothing reads is never assumed to close nothing. A GitHub merge from a
-  runner older than v242, and a GitLab merge request (whose closing references are not read at
-  all), are human-owned (`unverified_closures`) whatever they declare: an unread pull request that
-  declares an in-scope closure could still close an unscoped issue. A declared unscoped closure is
-  still refused, as above.
+  runner older than v242, and a GitLab merge from a runner older than v293, are human-owned
+  (`unverified_closures`) whatever they declare, and their decision cards say "Not checked": an
+  unread pull request that declares an in-scope closure could still close an unscoped issue. A
+  declared unscoped closure is still refused, as above.
 - Retargeting a work item that has an open attempt at an issue outside the scope, through
   `record_campaign_plan` or `update_campaign_work_item`, is refused like a dispatch. Linking an accepted follow-up's published issue to its item stays allowed, because that
   record must precede the issue's scope addition; its merge still cannot close the issue unscoped.

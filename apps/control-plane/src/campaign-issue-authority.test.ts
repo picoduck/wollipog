@@ -3392,6 +3392,70 @@ test("#4062 a merge that says Refs and closes nothing stays the Orchestrator's, 
   } finally { custom.db.close(); }
 });
 
+test("#3762 a Full Control GitLab merge is the Orchestrator's only with its closures read and all in scope", async () => {
+  const h = scopeGuardHarness();
+  try {
+    // The same campaign, on a GitLab project.
+    const project = "gitlab.example.com/team/repo";
+    const sql = (h.db as unknown as { db: import("node:sqlite").DatabaseSync }).db;
+    const policy = structuredClone(h.db.getSession("root")!.orchestratorPolicy!);
+    assert.ok(policy.control?.mode === "full_control");
+    policy.control.boundary.repository = project;
+    policy.issueScope = { ...policy.issueScope!, repository: project };
+    sql.prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
+    const closes = new Map<number, string[] | "unreadable">();
+    const runner = h.hub.requestFromRunner;
+    h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+      if (message.type !== "gitlab_merge_closures") return runner(runnerId, requestId, message, timeout);
+      const closing = closes.get(message.pullRequest) ?? [];
+      return closing === "unreadable"
+        ? { type: "gitlab_merge_closures_result", requestId, sessionId: message.sessionId, ok: false, refusal: "unavailable",
+          reason: "glab in this session's context is not signed in to gitlab.example.com." }
+        : { type: "gitlab_merge_closures_result", requestId, sessionId: message.sessionId, ok: true, check: { checkedAt: 1,
+          closures: closing.map((issue) => ({ issue, sources: ["description" as const], excerpt: `Implementing #${issue.split("#")[1]}` })) } };
+    };
+    const merge = (pullRequest: number, closing: string[] | "unreadable", declared = closing === "unreadable" ? [] : closing) => {
+      closes.set(pullRequest, closing);
+      const headSha = String(pullRequest).padStart(40, "c");
+      return h.svc.createWorkflowDecisionWithVideo("child", { requestId: `gitlab-merge-${pullRequest}`, resourceKey: `${project}!${pullRequest}`,
+        resourceSnapshot: { category: "pr_merge", repository: project, pullRequest, headSha, reviewResult: "merge",
+          mergeMethod: "merge_train", squash: false, removeSourceBranch: false,
+          requiredChecks: { headSha, status: "passed", checkedAt: 10, checks: [{ name: "Pipeline #1", state: "passed" }] },
+          ...(declared.length ? { intendedClosures: declared } : {}) } });
+    };
+
+    // Read, and every closure in scope: owned exactly like a GitHub merge.
+    for (const [pullRequest, closing] of [[31, [`${project}#100`]], [32, []]] as const) {
+      const created = await merge(pullRequest, [...closing]);
+      assert.ok(created.ok, created.error ?? "refused");
+      assert.equal(created.data!.authority, "orchestrator");
+      assert.equal(created.data!.authorityEvaluation?.reason, "authorized_operation");
+      assert.deepEqual(created.data!.closingReferenceCheck?.closures.map((closure) => closure.issue), closing);
+    }
+    // A closure outside the scope is refused, naming the issue, whether declared or not.
+    const declared = await merge(33, [`${project}#101`]);
+    assert.equal(declared.status, 409);
+    assert.match(declared.error!, /Merging this merge request would close an issue outside this Full Control campaign's issue scope: gitlab\.example\.com\/team\/repo#101\./);
+    const undeclared = await merge(34, [`${project}#101`], []);
+    assert.equal(undeclared.status, 409);
+    assert.match(undeclared.error!, /intendedClosures does not list: gitlab\.example\.com\/team\/repo#101, from the description: “Implementing #101”/);
+    // Closures that cannot be read never make it the Orchestrator's: nothing is created.
+    const unreadable = await merge(35, "unreadable");
+    assert.equal(unreadable.status, 409);
+    assert.match(unreadable.error!, /GitLab could not be read .*not signed in to gitlab\.example\.com\. Try again\./);
+    assert.deepEqual(h.decisions("child").map((decision) => decision.resourceSnapshot.category === "pr_merge" && decision.resourceSnapshot.pullRequest), [31, 32]);
+    // A runner that predates the read (v292) keeps today's behavior: the person's.
+    h.db.registerRunner(h.metadata, 1, RUNNER_CAPABILITY_MIN_PROTOCOL.gitlabMergeClosingReferences - 1);
+    const legacy = await merge(36, [`${project}#100`]);
+    assert.ok(legacy.ok, legacy.error ?? "refused");
+    assert.equal(legacy.data!.authority, "human");
+    assert.equal(legacy.data!.authorityEvaluation?.reason, "unverified_closures");
+    assert.equal(legacy.data!.closingReferenceCheck, undefined);
+    assert.equal(h.svc.resolveDescendantRequest("root", "child", legacy.data!.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok, false, "the Orchestrator cannot approve it");
+  } finally { h.db.close(); }
+});
+
 test("#4062 a merge from a runner that cannot read closing references is the person's, whatever it declares", async () => {
   const h = scopeGuardHarness();
   try {
