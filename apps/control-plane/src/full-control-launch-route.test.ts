@@ -3,14 +3,14 @@ import { test } from "node:test";
 import Fastify from "fastify";
 import {
   CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CONTROLLED_REVIEW_PROFILE, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, WORKFLOW_DECISION_CATEGORIES,
-  campaignWorkflowOwner,
-  type CampaignLaunchInspectionResult, type CampaignLaunchPreflight, type CampaignLaunchProposal, type ControlledReviewCapability,
-  type CampaignWorkItemDetail, type ControlPlaneToRunner, type CreateSessionRequest, type FullControlLaunchRequest, type GithubIssueClosureSnapshot, type RunnerMetadata, type RunnerRuntimeInfo,
+  campaignWorkflowOwner, SCOPE_GRANT_DEFAULT_SELECTION_COUNT,
+  type CampaignIssueScopeSnapshot, type FullControlScopeGrant, type CampaignLaunchInspectionResult, type CampaignLaunchPreflight, type CampaignLaunchProposal, type ControlledReviewCapability,
+  type CampaignWorkItemDetail, type ControlPlaneToRunner, type CreateSessionRequest, type FullControlFirstMessageScope, type FullControlLaunchRequest, type GithubIssueClosureSnapshot, type RunnerMetadata, type RunnerRuntimeInfo,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
-import { fakeScreenRuntime } from "./credential-screen-test-fixture.js";
+import type { DecisionRuntime } from "./decision-runtime.js";
 import { OrchestratorSettings, resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { authorizeFullControl, campaignBoundaryCurrent, campaignControlForRunner, evaluateCampaignAuthority } from "./campaign-authority.js";
 import { firstMessageBoundary, firstMessageDigest, firstMessageObjective } from "./campaign-launch-admission.js";
@@ -26,6 +26,8 @@ import { inspectCampaignWorkspace } from "./project-location-inspection.js";
 import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, PROJECT_LOCATION_INSPECTION_FAILURES, campaignBoundaryRepositories, validCampaignControl, type CampaignControl } from "@wollipog/protocol";
 import type { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
+import { fakeScopeGrantRuntime, grantVerdict, issues, ownerMessageOf, uncertainVerdict, type ScopeGrantAnswer } from "./scope-grant-test-fixture.js";
+import { createHash } from "node:crypto";
 
 const proposal: CampaignLaunchProposal = { repository: "owner/repo", issueNumbers: [12], objective: "Deliver #12",
   operations: ["implementation_question", "pr_merge"], delegatablePolicyIds: [],
@@ -114,14 +116,16 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
   const video = options.hostingVideo ? composeHostingVideoEvidence(db) : undefined;
   const sessions = new SessionsService(db, hub, { info() {}, warn() {}, error() {} }, undefined, undefined, undefined, undefined,
     undefined, undefined, false, undefined, undefined, video?.workflowVideoApprovals, disclosures, undefined, video?.preparedMediaActiveStops);
-  // A healthy Decision Model (#4104) on a fake harness screens every question as a design subject.
-  sessions.setDecisionRuntime(fakeScreenRuntime(db, () => ({ verdict: "discusses" })).runtime);
   receipts = (message) => { sessions.onDurablePromptReceipt("r", message); };
+  // A healthy Decision Model on a fake harness: it reads first messages into scope grants (#4102),
+  // tests replace that answer, and it screens every question as a design subject (#4104).
+  const decision = fakeScopeGrantRuntime(db);
+  sessions.setDecisionRuntime(decision.runtime);
   const scope = { organizationId: human.organizationId, owner: { kind: "user" as const, userId: human.userId } };
   const settings = new OrchestratorSettings(db);
   // `videoPort` also gives the launch route hosting's certification port, as index.ts does.
   const videoCertification = video && options.videoPort ? (runnerId: string) => video.launchCertification(runnerId) : undefined;
-  return { db, hub, sent, starts, state, issues, sessions, human, scope, settings, disclosures, reconnect, video, videoCertification };
+  return { db, hub, sent, starts, state, issues, sessions, human, scope, settings, disclosures, reconnect, video, videoCertification, decision };
 }
 
 async function app(f: ReturnType<typeof fixture>, inspectionTimeoutMs?: number) {
@@ -1113,7 +1117,7 @@ const PENDING = { state: "pending", derivedLimits: { acceptedFollowUps: true, ma
 
 /** A launch with no task, as New Session sends it: the root starts idle like any Orchestrator. */
 async function firstMessageLaunch(f: ReturnType<typeof fixture>, server: Awaited<ReturnType<typeof app>>["server"],
-  limits: Pick<NonNullable<FullControlLaunchRequest["overrides"]>, "budget" | "issues"> = {}) {
+  limits: Pick<NonNullable<FullControlLaunchRequest["overrides"]>, "budget" | "issues" | "operations"> = {}) {
   const body: FullControlLaunchRequest = { runnerId: "r", workspaceId: "w", overrides: { session: { agentId: "claude",
     config: { model: "claude-opus-5-5", permissionMode: "orchestrator" }, orchestrator: { behavior: { followUps: "execute_approved" } } }, ...limits } };
   const { preflight: checked } = await preflight(server, body);
@@ -1169,8 +1173,14 @@ test("a Full Control launch with no task starts idle, and its owner's first mess
     assert.deepEqual(policy.issueScope, { repository: "owner/repo", issueNumbers: [7, 9, 12], revision: 2,
       authorizedByUserId: f.human.userId, authorizedAt: policy.issueScope!.authorizedAt });
     assert.deepEqual(policy.issueNumbers, [7, 9, 12]);
-    assert.deepEqual(policy.firstMessageScope, { state: "established", messageDigest: firstMessageDigest(text),
-      establishedAt: (policy.firstMessageScope as { establishedAt: number }).establishedAt, contextIssueNumbers: [20, 21] });
+    const { grant, ...established } = policy.firstMessageScope as Extract<FullControlFirstMessageScope, { state: "established" }>;
+    assert.deepEqual(established, { state: "established", messageDigest: firstMessageDigest(text),
+      establishedAt: established.establishedAt, contextIssueNumbers: [20, 21], derivedLimits: { acceptedFollowUps: true, maxIssues: true } });
+    // The grant the Decision Model's answer left after the floors (#4102), with the model that read it.
+    assert.equal(grant!.status, "granted");
+    assert.deepEqual(grant!.namedIssues, [7, 9, 12]);
+    assert.equal(grant!.target!.model, "claude-haiku-4-5");
+    assert.equal(f.decision.calls.length, 1, "one Decision call reads the first message");
     const boundary = boundaryOf(f, id);
     assert.equal(boundary.objective, firstMessageObjective(text));
     assert.doesNotMatch(boundary.objective, /\n/u);
@@ -1303,6 +1313,299 @@ test("a first message's range scopes each verified issue, and a derived limit le
     assert.equal((await f.sessions.promptFromHuman(f.human, ranged, "Fix #51 through #54. See #55..#56.")).ok, true);
     assert.deepEqual(f.db.getSession(ranged)!.orchestratorPolicy!.issueScope!.issueNumbers, [51, 53, 54]);
     assert.deepEqual((await f.sessions.campaignIssueScope(ranged)).data!.contextIssueNumbers, [55, 56]);
+  } finally { await server.close(); f.db.close(); }
+});
+
+/* ---------------- Scope grant from the owner's first message (#4102) ---------------- */
+
+const grantOf = (f: ReturnType<typeof fixture>, id: string) => {
+  const first = f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!;
+  assert.notEqual(first.state, "pending");
+  return (first as Extract<FullControlFirstMessageScope, { state: "established" }>).grant!;
+};
+const firstMessageDelivered = (f: ReturnType<typeof fixture>, text: string) => f.sent.some((message) =>
+  message.type === "durable_session_command" && message.command.type === "prompt_session" && message.command.text === text);
+
+test("a healthy Decision Model's grant scopes the owner's named issues in any notation and records a selection without numbers (#4102)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    // Each message gets the answer a healthy model gives it; the server's floors and the runner decide the rest.
+    const answers = new Map<string, ScopeGrantAnswer>([
+      ["Claim and delegate issue 4090.", grantVerdict({ explicit: issues(4090) })],
+      ["Fix #12 and #13", grantVerdict({ explicit: issues(12, 13) })],
+      ["See #7 for background; fix #8", grantVerdict({ explicit: issues(8), context: issues(7) })],
+      ["Find the 5 highest-priority open issues and fix them", grantVerdict({ selectionRequested: true, selectionCount: 5,
+        selectionCriteria: "highest priority", selectionConstraints: ["open"] }, "The owner asks the campaign to choose five issues.")],
+    ]);
+    f.decision.state.answer = (text) => answers.get(text) ?? uncertainVerdict();
+    const launch = async (text: string) => {
+      const { id } = await firstMessageLaunch(f, server);
+      assert.equal((await f.sessions.promptFromHuman(f.human, id, text)).ok, true);
+      assert.equal(firstMessageDelivered(f, text), true);
+      return id;
+    };
+
+    // `issue 4090` has no `#`: the model reads it, and the runner verifies it before it is scope.
+    const bare = await launch("Claim and delegate issue 4090.");
+    assert.deepEqual(f.db.getSession(bare)!.orchestratorPolicy!.issueScope!.issueNumbers, [4090]);
+    assert.deepEqual(boundaryOf(f, bare).issueAuthority!.epics, [4090]);
+    assert.equal(grantOf(f, bare).status, "granted");
+    assert.deepEqual(grantOf(f, bare).namedIssues, [4090]);
+
+    const both = await launch("Fix #12 and #13");
+    assert.deepEqual(f.db.getSession(both)!.orchestratorPolicy!.issueScope!.issueNumbers, [12, 13]);
+
+    const background = await launch("See #7 for background; fix #8");
+    assert.deepEqual(f.db.getSession(background)!.orchestratorPolicy!.issueScope!.issueNumbers, [8]);
+    assert.deepEqual((await f.sessions.campaignIssueScope(background)).data!.contextIssueNumbers, [7]);
+
+    const selected = await launch("Find the 5 highest-priority open issues and fix them");
+    assert.deepEqual(f.db.getSession(selected)!.orchestratorPolicy!.issueScope!.issueNumbers, []);
+    const grant = grantOf(f, selected);
+    assert.deepEqual(grant.selection, { repository: "owner/repo", count: 5, defaulted: false, requestedCount: 5,
+      criteria: "highest priority", constraints: ["open"] });
+    // The selection ceiling counts toward Maximum Issues, never follow-up room.
+    assert.equal(boundaryOf(f, selected).budgetAuthority!.acceptedFollowUps, 1);
+    assert.equal(boundaryOf(f, selected).issueAuthority!.maxIssues, 6);
+    assert.equal(grant.ceilings.maxIssues, 6);
+    assert.equal(grant.ceilings.maxIssuesSource, "derived");
+    assert.equal(grant.reason, "The owner asks the campaign to choose five issues.");
+    const view = (await f.sessions.campaignIssueScope(selected)).data!;
+    assert.deepEqual(view.scopeGrant, grant, "Campaign Status reads the Scope Grant");
+
+    // The Decision Model saw only the exact message: no tools, no repository and no issue content.
+    const call = f.decision.calls.at(-1)!;
+    assert.equal(ownerMessageOf(call), "Find the 5 highest-priority open issues and fix them");
+    assert.doesNotMatch(call.input, /owner\/repo|untrusted_data/u);
+    assert.deepEqual(f.db.getDecisionOccurrence(grant.occurrenceId!)!.inputDigests,
+      { owner_message: createHash("sha256").update("Find the 5 highest-priority open issues and fix them").digest("hex") });
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a scope grant can only narrow: invented numbers, other repositories and added operations are dropped, and an explicit Maximum Issues holds (#4102)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    // A number the model invents is dropped; the one the message names stays.
+    f.decision.state.answer = () => grantVerdict({ explicit: issues(12, 99), ranges: [{ repository: "", first: 98, last: 100 }] });
+    const { id: invented } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, invented, "Fix #12")).ok, true);
+    assert.deepEqual(f.db.getSession(invented)!.orchestratorPolicy!.issueScope!.issueNumbers, [12]);
+    assert.deepEqual(grantOf(f, invented).dropped!.map(({ number, reason }) => [number, reason]),
+      [[98, "not_in_message"], [99, "not_in_message"], [100, "not_in_message"]]);
+
+    // Another repository, named by the model or only by the message, never becomes scope, and an
+    // operation the launch did not grant never enters the boundary.
+    const text = "Fix other/repo#5 and https://github.com/other/repo/issues/6 and #12, but don't merge or close anything.";
+    f.decision.state.answer = () => grantVerdict({
+      explicit: [{ repository: "other/repo", number: 5 }, { repository: "", number: 6 }, { repository: "owner/repo", number: 12 }],
+      ranges: [{ repository: "elsewhere/repo", first: 5, last: 6 }],
+      selectionRequested: true, selectionRepository: "other/repo", selectionCount: 4,
+      narrowsOperations: true, operations: ["pr_merge", "implementation_question", "campaign_issue_scope", "question"],
+    });
+    const { id: narrowed } = await firstMessageLaunch(f, server, { operations: ["implementation_question", "issue_closure", "campaign_issue_scope", "question"] });
+    const launched = boundaryOf(f, narrowed).operations;
+    assert.equal(launched.includes("pr_merge"), false);
+    assert.equal((await f.sessions.promptFromHuman(f.human, narrowed, text)).ok, true);
+    const boundary = boundaryOf(f, narrowed);
+    assert.equal(boundary.repository, "owner/repo");
+    assert.deepEqual(f.db.getSession(narrowed)!.orchestratorPolicy!.issueScope!.issueNumbers, [12]);
+    assert.deepEqual(boundary.operations, ["implementation_question", "campaign_issue_scope", "question"], "issue_closure removed, pr_merge never added");
+    const grant = grantOf(f, narrowed);
+    assert.deepEqual(grant.ceilings.removedOperations, ["issue_closure"]);
+    assert.deepEqual(grant.ceilings.repositories, ["owner/repo"]);
+    assert.equal(grant.selection, undefined, "a selection in another repository grants nothing");
+    assert.deepEqual(grant.dropped!.map(({ repository, number, reason }) => `${repository}#${number}:${reason}`),
+      ["other/repo#5:other_repository", "owner/repo#6:other_repository", "elsewhere/repo#5:other_repository", "elsewhere/repo#6:other_repository"].sort((a, b) =>
+        Number(a.split("#")[1]!.split(":")[0]) - Number(b.split("#")[1]!.split(":")[0])));
+    assert.equal(f.sent.some((message) => message.type === "campaign_issue_scope" && message.operation === "inspect" &&
+      (message.issues ?? []).some((n) => n === 5 || n === 6)), false, "a dropped number is never even read");
+
+    // An explicit Maximum Issues caps the named issues and the selection, and never grows.
+    f.decision.state.answer = () => grantVerdict({ explicit: issues(12, 13, 14), selectionRequested: true, selectionCount: 5,
+      selectionCriteria: "highest priority" });
+    const { id: capped } = await firstMessageLaunch(f, server, { issues: { maxIssues: 2 } });
+    assert.equal((await f.sessions.promptFromHuman(f.human, capped, "Fix #12, #13 and #14, then find 5 more high-priority issues.")).ok, true);
+    assert.deepEqual(f.db.getSession(capped)!.orchestratorPolicy!.issueScope!.issueNumbers, [12, 13]);
+    assert.equal(boundaryOf(f, capped).issueAuthority!.maxIssues, 2);
+    assert.deepEqual(grantOf(f, capped).selection, { repository: "owner/repo", count: 0, defaulted: false, requestedCount: 5, capped: true,
+      criteria: "highest priority", constraints: [] });
+    assert.deepEqual(grantOf(f, capped).ceilings.maxIssuesSource, "explicit");
+
+    // A defaulted selection is capped the same way: 3 wanted, 2 left beside 2 named issues under 4.
+    f.decision.state.answer = () => grantVerdict({ explicit: issues(12, 13), selectionRequested: true, selectionCriteria: "highest priority" });
+    const { id: room } = await firstMessageLaunch(f, server, { issues: { maxIssues: 4 } });
+    assert.equal((await f.sessions.promptFromHuman(f.human, room, "Fix #12 and #13 and the highest-priority issues.")).ok, true);
+    assert.deepEqual(grantOf(f, room).selection, { repository: "owner/repo", count: 2, defaulted: true, capped: true, criteria: "highest priority", constraints: [] });
+    assert.equal(boundaryOf(f, room).issueAuthority!.maxIssues, 4);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a selection without a count is recorded with the default count of 3, marked as defaulted (#4102)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    f.decision.state.answer = () => grantVerdict({ selectionRequested: true, selectionCriteria: "highest priority" });
+    const { id } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix the highest-priority issues")).ok, true);
+    const grant = grantOf(f, id);
+    assert.deepEqual(grant.selection, { repository: "owner/repo", count: SCOPE_GRANT_DEFAULT_SELECTION_COUNT, defaulted: true,
+      criteria: "highest priority", constraints: [] });
+    assert.equal(SCOPE_GRANT_DEFAULT_SELECTION_COUNT, 3);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, []);
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 4, "three selected plus one derived follow-up");
+  } finally { await server.close(); f.db.close(); }
+});
+
+for (const [name, answer, attempts, expected] of [
+  ["retries exhausted", () => ({ ok: false, errorClass: "provider_overloaded" }), 3, { status: "failed", failureClass: "provider_overloaded" }],
+  ["a non-transient failure", () => ({ ok: false, errorClass: "authentication" }), 1, { status: "failed", failureClass: "authentication" }],
+  ["an uncertain verdict", () => uncertainVerdict("It is unclear whether #12 is a request."), 1,
+    { status: "uncertain", reason: "It is unclear whether #12 is a request." }],
+] as Array<[string, () => ScopeGrantAnswer, number, Partial<FullControlScopeGrant>]>) {
+  test(`when the Decision Model ends in ${name}, the message is still delivered, no scope comes from text, and the Orchestrator's proposal is one typed owner approval (#4102)`, async () => {
+    const f = fixture();
+    const { server } = await app(f);
+    try {
+      f.decision.state.answer = answer;
+      const { id } = await firstMessageLaunch(f, server);
+      const text = "Fix #12 and #13. See #20.";
+      assert.equal((await f.sessions.promptFromHuman(f.human, id, text)).ok, true);
+      assert.equal(firstMessageDelivered(f, text), true, "the message is delivered so the Orchestrator can start");
+      assert.equal(f.decision.calls.length, attempts);
+      const root = f.db.getSession(id)!;
+      assert.equal(root.orchestratorPolicy!.firstMessageScope!.state, "established");
+      assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, [], "no scope comes from text parsing");
+      assert.deepEqual(boundaryOf(f, id).issueAuthority!.epics, []);
+      assert.equal(campaignBoundaryCurrent(root), true);
+      const grant = grantOf(f, id);
+      assert.deepEqual({ status: grant.status, ...(grant.failureClass ? { failureClass: grant.failureClass } : {}),
+        ...(grant.status === "uncertain" ? { reason: grant.reason } : {}) }, expected);
+      assert.deepEqual(grant.namedIssues, []);
+      const view = (await f.sessions.campaignIssueScope(id)).data!;
+      // The exact-reference fast path may have read #12, #13 and #20 while the model ran; reading grants nothing.
+      assert.equal(view.contextIssueNumbers, undefined, "no text-parsed reference is presented either");
+      const launchMax = boundaryOf(f, id).issueAuthority!.maxIssues;
+
+      // The Orchestrator proposes its scope as usual: exactly one typed, person-owned approval request.
+      const propose = (requestId: string, numbers: number[]) => f.sessions.proposeCampaignIssueScope(id, { requestId, expectedRevision: 2,
+        additions: numbers.map((number) => ({ repository: "owner/repo", number })), removals: [],
+        explanation: "These are the highest-value open issues the owner's message points at." });
+      const first = await propose("grant-review-1", [12, 13, 14, 15, 16]);
+      assert.equal(first.ok, true, first.error ?? "");
+      assert.equal(first.data!.authority, "human");
+      const snapshot = first.data!.resourceSnapshot as CampaignIssueScopeSnapshot;
+      assert.deepEqual(snapshot.additions, [12, 13, 14, 15, 16]);
+      assert.equal(snapshot.explanation, "These are the highest-value open issues the owner's message points at.");
+      assert.deepEqual(snapshot.grantReview, { cause: grant.status === "uncertain" ? "grant_uncertain" : "grant_failed",
+        ownerMessage: firstMessageObjective(text), messageDigest: firstMessageDigest(text), grantOccurrenceId: grant.occurrenceId,
+        ...(grant.failureClass ? { failureClass: grant.failureClass } : {}), ...(grant.reason ? { reason: grant.reason } : {}) });
+      assert.equal(f.db.getDecisionOccurrence(grant.occurrenceId!)!.humanRequestId, first.data!.occurrenceId, "the grant's audit names the request");
+      const pendingScope = () => f.db.unconsumedWorkflowDecisionsForController(id).filter((d) => d.category === "campaign_issue_scope");
+      assert.equal(pendingScope().length, 1);
+      // A revised proposal replaces it: still exactly one request.
+      const revised = await propose("grant-review-2", [12, 13, 14]);
+      assert.equal(revised.ok, true, revised.error ?? "");
+      assert.deepEqual(pendingScope().map((d) => d.occurrenceId), [revised.data!.occurrenceId]);
+      assert.equal(f.db.getDecisionOccurrence(grant.occurrenceId!)!.humanRequestId, first.data!.occurrenceId, "the first request stays the audited one");
+
+      // The owner approves it: the scope is theirs, and the derived limit grows to hold it.
+      const approved = f.sessions.resolveWorkflowDecision(id, id, revised.data!.occurrenceId, { outcome: "approve" }, "human",
+        { kind: "human", id: f.human.userId }, () => true);
+      assert.equal(approved.ok, true, approved.error ?? "");
+      assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12, 13, 14]);
+      assert.ok(boundaryOf(f, id).issueAuthority!.maxIssues >= Math.max(launchMax, 3 + boundaryOf(f, id).budgetAuthority!.acceptedFollowUps!));
+      assert.equal(campaignBoundaryCurrent(f.db.getSession(id)!), true);
+    } finally { await server.close(); f.db.close(); }
+  });
+}
+
+test("after a failed grant, reauthorizing with an explicit Maximum Issues ends the owner's approval growing the limit (#4102 review)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    f.decision.state.answer = () => ({ ok: false, errorClass: "authentication" });
+    const { id } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix the five worst bugs")).ok, true);
+    assert.equal(grantOf(f, id).status, "failed");
+    const first = () => f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope as Extract<FullControlFirstMessageScope, { state: "established" }>;
+    assert.deepEqual(first().derivedLimits, { acceptedFollowUps: true, maxIssues: true });
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    const payload = { overrides: { issues: { maxIssues: 2 } } };
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload });
+    assert.equal(checked.statusCode, 200, checked.body);
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    const reauthorized = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { ...payload, expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(reauthorized.statusCode, 200, reauthorized.body);
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 2);
+    assert.deepEqual(first().derivedLimits, { acceptedFollowUps: true, maxIssues: false }, "the current authorization's provenance");
+    assert.equal(first().grant!.status, "failed", "the grant itself is kept");
+    // The proposal still goes to the owner, but within the explicit limit: it never grows.
+    const revision = f.db.getSession(id)!.orchestratorPolicy!.issueScope!.revision;
+    const five = await f.sessions.proposeCampaignIssueScope(id, { requestId: "five-after-explicit", expectedRevision: revision,
+      additions: [21, 22, 23, 24, 25].map((number) => ({ repository: "owner/repo", number })), removals: [], explanation: "The five worst bugs" });
+    assert.equal(five.ok, false);
+    assert.deepEqual(five.errorDetails, { code: "capacity_exhausted", limit: 2, requested: 5 });
+    const two = await f.sessions.proposeCampaignIssueScope(id, { requestId: "two-after-explicit", expectedRevision: revision,
+      additions: [21, 22].map((number) => ({ repository: "owner/repo", number })), removals: [], explanation: "The two worst bugs" });
+    assert.equal(two.ok, true, two.error ?? "");
+    assert.equal((two.data!.resourceSnapshot as CampaignIssueScopeSnapshot).grantReview!.cause, "grant_failed");
+    assert.equal(f.sessions.resolveWorkflowDecision(id, id, two.data!.occurrenceId, { outcome: "approve" }, "human",
+      { kind: "human", id: f.human.userId }, () => true).ok, true);
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 2, "an explicit Maximum Issues never grows");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a runner or harness that cannot host Decision calls takes the failure route, and an explicit Maximum Issues still never grows (#4102)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    f.decision.state.resolution = { ok: false, errorClass: "runner_incapable" };
+    const { id } = await firstMessageLaunch(f, server, { issues: { maxIssues: 2 } });
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Claim and delegate issue 4090.")).ok, true);
+    assert.equal(f.decision.calls.length, 0, "no provider is called");
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, []);
+    assert.deepEqual({ status: grantOf(f, id).status, failureClass: grantOf(f, id).failureClass }, { status: "failed", failureClass: "runner_incapable" });
+    const refused = await f.sessions.proposeCampaignIssueScope(id, { requestId: "too-many", expectedRevision: 2,
+      additions: [4090, 4091, 4092].map((number) => ({ repository: "owner/repo", number })), removals: [], explanation: "Three issues" });
+    assert.equal(refused.ok, false);
+    assert.deepEqual(refused.errorDetails, { code: "capacity_exhausted", limit: 2, requested: 3 });
+
+    // A call the runtime refuses outright (it throws before any attempt) takes the same route:
+    // never a text-parsed scope.
+    f.sessions.setDecisionRuntime({ decide: async () => { throw new Error("the Decision input is too large"); } } as unknown as DecisionRuntime);
+    const { id: bare } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, bare, "Fix #12")).ok, true);
+    assert.deepEqual(f.db.getSession(bare)!.orchestratorPolicy!.issueScope!.issueNumbers, []);
+    assert.deepEqual({ status: grantOf(f, bare).status, failureClass: grantOf(f, bare).failureClass }, { status: "failed", failureClass: "configuration" });
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a selection grant's Orchestrator proposal goes to the owner until the Decision Model reviews selections (#4103), within the selection ceiling (#4102)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    f.decision.state.answer = () => grantVerdict({ selectionRequested: true, selectionCount: 2, selectionCriteria: "highest priority" });
+    const { id } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Find the 2 highest-priority issues and fix them")).ok, true);
+    const proposed = await f.sessions.proposeCampaignIssueScope(id, { requestId: "selection", expectedRevision: 2,
+      additions: [30, 31].map((number) => ({ repository: "owner/repo", number })), removals: [], explanation: "The two highest-priority issues" });
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "human");
+    const review = (proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).grantReview!;
+    assert.equal(review.cause, "selection");
+    assert.deepEqual(review.selection, { count: 2, defaulted: false, criteria: "highest priority", constraints: [] });
+    // A healthy grant without a selection keeps today's lineage rule.
+    f.decision.state.answer = () => grantVerdict({ explicit: issues(12) });
+    const { id: named } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, named, "Fix #12")).ok, true);
+    const refused = await f.sessions.proposeCampaignIssueScope(named, { requestId: "no-lineage", expectedRevision: 2,
+      additions: [{ repository: "owner/repo", number: 13 }], removals: [], explanation: "One more" });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.errorDetails?.code, "lineage_missing");
   } finally { await server.close(); f.db.close(); }
 });
 
@@ -2001,8 +2304,14 @@ test("context-only references stay disjoint from the scope, survive delivery, an
     const policy = f.db.getSession(id)!.orchestratorPolicy!;
     assert.deepEqual(policy.issueScope!.issueNumbers, [12]);
     assert.deepEqual(boundaryOf(f, id).issueAuthority!.epics, [12]);
-    assert.deepEqual(policy.firstMessageScope, { state: "established", messageDigest: firstMessageDigest(next),
-      establishedAt: (policy.firstMessageScope as { establishedAt: number }).establishedAt, contextIssueNumbers: [13, 14] });
+    const { grant, ...established } = policy.firstMessageScope as Extract<FullControlFirstMessageScope, { state: "established" }>;
+    assert.deepEqual(established, { state: "established", messageDigest: firstMessageDigest(next),
+      establishedAt: established.establishedAt, contextIssueNumbers: [13, 14], derivedLimits: { acceptedFollowUps: true, maxIssues: false } });
+    // The grant names what the explicit limit kept, and records #13 as over the ceiling (#4102).
+    assert.deepEqual(grant!.namedIssues, [12]);
+    assert.deepEqual(grant!.dropped, [{ repository: "owner/repo", number: 13, reason: "over_ceiling" }]);
+    assert.deepEqual(grant!.ceilings, { repositories: ["owner/repo"], maxIssues: 1, maxIssuesSource: "explicit",
+      operations: boundaryOf(f, id).operations });
     assert.deepEqual((await f.sessions.campaignIssueScope(id)).data!.contextIssueNumbers, [13, 14]);
   } finally { await server.close(); f.db.close(); }
 });

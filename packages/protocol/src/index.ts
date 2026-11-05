@@ -915,7 +915,7 @@ export * from "./review-run.js";
 export * from "./rate-priced-usage.js";
 export * from "./campaign-recovery.js";
 export * from "./project-location-inspection.js";
-import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
+import type { CampaignAuthorityOperation, CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
 export { CAMPAIGN_LAUNCH_INSPECTION_ERRORS } from "./campaign-control-launch.js";
 export type { CampaignLaunchInspectionFailure } from "./campaign-control-launch.js";
 export type {
@@ -3039,8 +3039,72 @@ export type FullControlFirstMessageScope =
   | { state: "pending"; derivedLimits?: FullControlDerivedLimits }
   /** `deliveryId` is the durable prompt command the message is admitted as, chosen before
    * admission: only that exact command, carrying the digest, can settle this delivery. */
-  | { state: "delivering"; messageDigest: string; deliveryId: string; derivedLimits?: FullControlDerivedLimits; contextIssueNumbers?: number[] }
-  | { state: "established"; messageDigest: string; establishedAt: number; contextIssueNumbers?: number[] };
+  | { state: "delivering"; messageDigest: string; deliveryId: string; derivedLimits?: FullControlDerivedLimits; contextIssueNumbers?: number[];
+      grant?: FullControlScopeGrant }
+  /** `derivedLimits` beside a grant (#4102) is the current authorization's: every later
+   * authorization or revoke replaces it, so a limit a person has since set is never treated as derived. */
+  | { state: "established"; messageDigest: string; establishedAt: number; contextIssueNumbers?: number[]; grant?: FullControlScopeGrant;
+      derivedLimits?: FullControlDerivedLimits };
+
+/** A selection without a stated count gets this many issues, capped by an explicit Maximum Issues (#4102). */
+export const SCOPE_GRANT_DEFAULT_SELECTION_COUNT = 3;
+
+/** Why a number the Decision Model returned grants nothing (#4102): it is not written in the
+ * message as a digit string, it belongs to a repository outside the campaign's boundary, the
+ * runner did not read it as an issue of the campaign repository, it ends a range the message does
+ * not write as one, it is in a range too wide to expand, or an explicit Maximum Issues left no room
+ * for it. */
+export type ScopeGrantDropReason = "not_in_message" | "other_repository" | "not_an_issue" | "range_not_in_message" | "range_too_wide" | "over_ceiling";
+
+/** Issues the owner's first message asked the campaign to choose (#4102), as the Decision Model
+ * read them. `count` is the ceiling selection admissions count against, never follow-up room;
+ * `defaulted` when the message stated none (`SCOPE_GRANT_DEFAULT_SELECTION_COUNT`), `capped` when an
+ * explicit Maximum Issues lowered it. `criteria` and `constraints` are the model's short paraphrase
+ * of the owner's words and grant nothing by themselves. */
+export interface ScopeGrantSelection {
+  repository: string;
+  count: number;
+  defaulted: boolean;
+  /** The count the message stated, when it stated one. */
+  requestedCount?: number;
+  capped?: true;
+  criteria: string;
+  constraints: string[];
+}
+
+/** The typed scope grant the Decision Model extracted from the owner's exact first message
+ * (#4102), after the server's deterministic floors. Bound to the message digest beside it and
+ * stored with the boundary the message established; server-owned, never accepted from a request.
+ *
+ * `granted`: the verified named issues became the scope and its epics, and the ceilings below hold.
+ * `uncertain` or `failed`: the model answered `uncertain`, or failed after its bounded retries or
+ * non-transiently. The scope is empty, the ceilings are the launch's, and no text-parsed reference
+ * is granted or shown; the Orchestrator's scope proposal goes to one typed, person-owned approval. */
+export interface FullControlScopeGrant {
+  version: 1;
+  status: "granted" | "uncertain" | "failed";
+  /** The audited Decision occurrence; absent only when no Decision Model runtime was available. */
+  occurrenceId?: string;
+  /** The model's verdict reason, for a granted or uncertain grant. */
+  reason?: string;
+  failureClass?: DecisionErrorClass;
+  /** The Decision Model that answered, without credentials. */
+  target?: DecisionModelResolvedTarget;
+  /** Verified explicit issues the grant scoped, in the campaign repository. */
+  namedIssues: number[];
+  dropped?: Array<{ repository: string; number: number; reason: ScopeGrantDropReason }>;
+  selection?: ScopeGrantSelection;
+  /** The hard ceilings: a repository in the campaign's boundary, the issue limit (named issues,
+   * the selection count and follow-up room), and the operations the message left. */
+  ceilings: {
+    repositories: string[];
+    maxIssues: number;
+    maxIssuesSource: "derived" | "explicit";
+    operations: CampaignAuthorityOperation[];
+    /** Present when the message narrowed the launch's operations. */
+    removedOperations?: CampaignAuthorityOperation[];
+  };
+}
 
 /** `blocked` means nothing is progressing without intervention: every unverified child failed,
  * stopped, or is held, or the campaign's own continuation is stalled (see
@@ -5220,6 +5284,29 @@ export interface CampaignIssueScopeSnapshot {
   issueAdmission?: CampaignIssueAdmission;
   /** Server-inspected exact payloads, including settlements approved through the human route. */
   verifiedPublications?: Array<{ publicationOccurrenceId: string; issue: number }>;
+  /** Present when the Orchestrator's own proposal is the owner's to approve because of the first
+   * message's scope grant (#4102). Server-derived; it changes who decides, never what is granted. */
+  grantReview?: CampaignScopeGrantReview;
+}
+
+/** Why an Orchestrator's scope proposal is the owner's one typed approval (#4102), with what the
+ * owner needs to decide it beside the proposed issues and the Orchestrator's rationale
+ * (`explanation`): the owner's own message and why no grant admits the proposal.
+ *
+ * - `grant_failed` / `grant_uncertain`: the Decision Model failed or was uncertain on the first
+ *   message, so there is no grant to review the proposal against.
+ * - `selection`: the proposal fills the grant's selection. Until the Decision Model reviews
+ *   selection proposals (#4103), the owner approves them. */
+export interface CampaignScopeGrantReview {
+  cause: "grant_failed" | "grant_uncertain" | "selection";
+  /** The owner's first message as the boundary records it: one line, at most 4000 characters. */
+  ownerMessage: string;
+  messageDigest: string;
+  grantOccurrenceId?: string;
+  failureClass?: DecisionErrorClass;
+  /** The model's uncertain reason, or for `selection` its reason for the grant. */
+  reason?: string;
+  selection?: Pick<ScopeGrantSelection, "count" | "defaulted" | "criteria" | "constraints">;
 }
 
 /** The follow-up a `campaign_follow_up_admission` decision admits (#2940): a recommendation the
@@ -5279,6 +5366,8 @@ export interface CampaignIssueScopeView {
   /** Issues a Full Control first message referenced only as context (#3920), less the current
    * scope. They carry no authority; adding one goes through scope review. */
   contextIssueNumbers?: number[];
+  /** The scope grant the owner's first message established (#4102), for Campaign Status. */
+  scopeGrant?: FullControlScopeGrant;
   outsideScope: Array<{ workItemId: string; title: string; issue: CampaignIssueRef; sessionId: string | null }>;
   candidates?: Array<{ issue: CampaignIssueRef; title: string; source: "umbrella" | "sub_issue" | "member_checklist" }>;
 }
@@ -7163,8 +7252,10 @@ export interface SessionNamingConnectionTestResult {
 
 /** A typed control-plane decision (#4101). Each kind has a fixed, versioned prompt and an output
  * schema registered in the control plane. `probe` is the fixed Test Decision Model question;
- * the Full Control callers (#4102–#4104) add their kinds here with their prompts. */
-export type DecisionKind = "probe" | "credential_screen";
+ * `scope_grant` reads a Full Control owner's first message into a typed scope grant (#4102), and
+ * `credential_screen` screens Full Control questions (#4104); the other Full Control callers add
+ * their kinds here with their prompts. */
+export type DecisionKind = "probe" | "scope_grant" | "credential_screen";
 
 /** Why one Decision attempt failed. The control plane, not the runner, decides what is transient:
  * see DECISION_TRANSIENT_ERROR_CLASSES. */

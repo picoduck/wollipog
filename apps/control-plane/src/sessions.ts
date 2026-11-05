@@ -35,11 +35,13 @@ import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignControlForRunner } from "./campaign-authority.js";
 import { genericRequestScreenData, implementationQuestionScreenData, ownerDecisionScreenData, screenCredentialRequest, type CredentialScreenSurface } from "./credential-screen.js";
-import { DecisionRuntime, hubDecisionTransport } from "./decision-runtime.js";
+import { DecisionRuntime, hubDecisionTransport, type DecisionOutcome } from "./decision-runtime.js";
 import { DecisionModelSettings } from "./decision-model-settings.js";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, credentialFormFloor, type CredentialScreenFact, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, fullControlAutomaticResponse, type CampaignAuthorityEvaluation, type FullControlAutomaticResponse, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
-import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective } from "./campaign-launch-admission.js";
-import { firstMessageIssueIntent, firstMessageTargetEpics } from "./first-message-issue-intent.js";
+import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
+import { firstMessageTargetEpics } from "./first-message-issue-intent.js";
+import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, scopeGrantCandidates, type ScopeGrantFields } from "./scope-grant.js";
+import type { CampaignScopeGrantReview, DecisionErrorClass, FullControlScopeGrant } from "@wollipog/protocol";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
   everyOutstandingScopeDecision } from "./campaign-issue-scope.js";
@@ -5758,15 +5760,24 @@ export class SessionsService {
     if (!text.trim() || slashCommand) return fail("Send this campaign's task as its first message.", 409);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
     const repository = control.boundary.repository.toLowerCase();
-    // Only references the message asks the campaign to act on become scope (#3920); the rest are
-    // verified the same way and recorded as context, which grants nothing.
-    const intent = firstMessageIssueIntent(text, repository);
-    const references = [...intent.scope, ...intent.context].sort((a, b) => a - b);
-    const verified = references.length ? await this.verifiedMessageIssues(session, repository, references) : [];
-    const issueNumbers = verified.filter((n) => intent.scope.includes(n));
+    const messageDigest = firstMessageDigest(text);
+    // The Decision Model reads only the exact message into a typed scope grant (#4102). Its exact
+    // references are a fast path only: the runner starts verifying them while the model reads, and
+    // they grant nothing the model's answer does not name.
+    const exact = issueReferencesInMessage(text, repository);
+    const exactVerified = exact.length ? this.verifiedMessageIssues(session, repository, exact) : Promise.resolve([] as number[]);
+    const outcome = await this.decideScopeGrant(session, text, messageDigest);
+    const fastVerified = await exactVerified;
+    // A failed or uncertain grant grants nothing and shows nothing: no reference parsed from the
+    // text stands in for it. The Orchestrator's proposal then goes to the owner.
+    const candidates = outcome?.outcome === "verdict" ? scopeGrantCandidates(text, outcome.fields as unknown as ScopeGrantFields, control.boundary) : null;
+    const references = candidates ? [...new Set([...candidates.explicit, ...candidates.context])].sort((a, b) => a - b) : [];
+    const unverified = references.filter((n) => !exact.includes(n));
+    const verified = new Set([...fastVerified, ...unverified.length ? await this.verifiedMessageIssues(session, repository, unverified) : []]);
+    const issueNumbers = (candidates?.explicit ?? []).filter((n) => verified.has(n));
     // A derived Maximum Issues leaves room for the verified members of target epics the message
     // names (#4061), so the Orchestrator can add them by epic lineage; an explicit one never grows.
-    const epics = policy.firstMessageScope?.state === "pending" && policy.firstMessageScope.derivedLimits?.maxIssues
+    const epics = candidates && policy.firstMessageScope?.state === "pending" && policy.firstMessageScope.derivedLimits?.maxIssues
       ? firstMessageTargetEpics(text, repository, issueNumbers) : [];
     const epicMembers = epics.length ? await this.verifiedEpicMembers(session, repository, epics) : [];
     const current = this.db.getSession(sessionId);
@@ -5775,30 +5786,41 @@ export class SessionsService {
     const currentControl = current?.orchestratorPolicy?.control;
     const pending = current?.orchestratorPolicy?.firstMessageScope;
     if (!current || pending?.state !== "pending" || !this.awaitingFirstMessage(current) || !scope || currentControl?.mode !== "full_control" ||
-        currentControl.boundary.revision !== revision) {
+        currentControl.boundary.revision !== revision || currentControl.boundary.repository.toLowerCase() !== repository) {
       return fail("This campaign's authorization changed; send the message again.", 409);
     }
     const now = Date.now();
-    const messageDigest = firstMessageDigest(text);
     // The durable prompt command the message is admitted as: its exact identity, chosen up front.
     const deliveryId = `first_message_${randomUUID()}`;
     const scoped = firstMessageIssues(currentControl.boundary, issueNumbers, pending.derivedLimits);
     // Context also keeps a requested issue an explicit Maximum Issues left out, so the owner sees it.
-    const contextIssueNumbers = verified.filter((n) => !scoped.includes(n));
+    const contextIssueNumbers = [...issueNumbers.filter((n) => !scoped.includes(n)),
+      ...(candidates?.context ?? []).filter((n) => verified.has(n) && !scoped.includes(n))].sort((a, b) => a - b);
+    const selection = candidates ? grantSelection(candidates.selection, scoped.length, currentControl.boundary, pending.derivedLimits) : undefined;
+    const operations = grantOperations(currentControl.boundary.operations, candidates?.operations ?? null);
     const nextScope: CampaignIssueScope = { repository: scope.repository, issueNumbers: scoped, revision: scope.revision + 1,
       authorizedByUserId: principal.userId, authorizedAt: now };
     const nextControl: CampaignControl = { mode: "full_control", boundary: firstMessageBoundary(currentControl.boundary,
       current.orchestratorPolicy!.behavior.followUps, scoped, firstMessageObjective(text), revision + 1, nextScope.revision, now,
-      pending.derivedLimits, epicMembers) };
+      pending.derivedLimits, epicMembers, { selectionCount: selection?.count ?? 0, operations }) };
+    const grant = this.firstMessageGrant(outcome, nextControl.boundary, currentControl.boundary, {
+      scoped, selection, pendingDerived: pending.derivedLimits?.maxIssues === true,
+      dropped: [...candidates?.dropped ?? [],
+        ...(candidates?.explicit ?? []).filter((n) => !verified.has(n)).map((number) => ({ repository, number, reason: "not_an_issue" as const })),
+        ...issueNumbers.filter((n) => !scoped.includes(n)).map((number) => ({ repository, number, reason: "over_ceiling" as const }))],
+    });
     let established: boolean;
     try {
       established = this.db.establishFirstMessageScope(sessionId, { control: nextControl, scope: nextScope, contextIssueNumbers,
-        messageDigest, deliveryId, expectedRevision: revision, now });
+        messageDigest, deliveryId, expectedRevision: revision, now, grant });
     } catch (error) { return fail((error as Error).message, 409); }
     if (!established) return fail("This campaign's authorization changed; send the message again.", 409);
     this.log.info(JSON.stringify({ event: "full_control_first_message_scope", sessionId, policyRevision: revision + 1,
-      scopeRevision: nextScope.revision, referencedIssues: references.length, scopedIssues: scoped.length,
-      contextIssues: contextIssueNumbers.length, targetEpics: epics.length, epicMembers: epicMembers.length, messageDigest }));
+      scopeRevision: nextScope.revision, grant: grant.status, decisionOccurrenceId: grant.occurrenceId ?? null,
+      failureClass: grant.failureClass ?? null, referencedIssues: references.length, scopedIssues: scoped.length,
+      contextIssues: contextIssueNumbers.length, droppedIssues: grant.dropped?.length ?? 0, selectionCount: selection?.count ?? 0,
+      selectionDefaulted: selection?.defaulted ?? false, removedOperations: grant.ceilings.removedOperations?.length ?? 0,
+      targetEpics: epics.length, epicMembers: epicMembers.length, messageDigest }));
     // A runner that misses this keeps its older revision, which authorizes no issue write; every
     // issue operation synchronizes again before it acts.
     await this.synchronizeCampaignIssueScope(sessionId);
@@ -5852,6 +5874,78 @@ export class SessionsService {
     // Only a fresh root waits for its owner's first message. A campaign with any history is
     // established at once, task-only without trusted issues, and its retained work runs under it.
     return { repository, issueNumbers, firstMessage: issueNumbers.length === 0 && !this.db.sessionHasConversationHistory(sessionId) };
+  }
+
+  /** The Decision Model's reading of the owner's exact first message (#4102): one audited
+   * `scope_grant` occurrence on the campaign runner's own harness under Automatic, within the
+   * runtime's time bound and retry budget. No tools, no repository and no issue content reach it.
+   * Its typed, person-owned request exists only once the Orchestrator proposes a scope, so routing
+   * creates none here (`proposeCampaignIssueScope` creates it and links it to the occurrence). Null
+   * when the call cannot be made at all (no organization, or inputs the runtime refuses), which the
+   * caller treats as a failure. */
+  private async decideScopeGrant(session: SessionView, text: string, messageDigest: string): Promise<DecisionOutcome | null> {
+    const organizationId = this.db.sessionScope(session.id)?.organizationId;
+    if (!organizationId) return null;
+    try {
+      return await this.decisionRuntime.decide({
+        organizationId,
+        kind: "scope_grant",
+        campaignSessionId: session.id,
+        // One occurrence per message at this policy revision: a resent message after an undelivered
+        // one is a new revision and gets a fresh reading.
+        occurrenceKey: `scope_grant:${session.id}:${session.parentControlPolicy?.revision ?? 0}:${messageDigest}`,
+        automaticHarness: session.agentId ? { runnerId: session.runnerId, agentId: session.agentId, driver: session.driver } : null,
+        inputs: { ownerMessage: text, data: {} },
+        routeToHuman: () => null,
+      });
+    } catch (error) {
+      this.log.warn(JSON.stringify({ event: "full_control_scope_grant_unavailable", sessionId: session.id, error: (error as Error).message.slice(0, 200) }));
+      return null;
+    }
+  }
+
+  /** The stored scope grant (#4102): what the floors kept of a verdict, or the failure route's
+   * empty grant, with the ceilings of the boundary the first message establishes. */
+  private firstMessageGrant(outcome: DecisionOutcome | null, next: CampaignAuthorityBoundary, launch: CampaignAuthorityBoundary, facts: {
+    scoped: number[]; selection: FullControlScopeGrant["selection"]; pendingDerived: boolean; dropped: NonNullable<FullControlScopeGrant["dropped"]>;
+  }): FullControlScopeGrant {
+    const occurrence = outcome ? this.db.getDecisionOccurrence(outcome.occurrenceId) : null;
+    const removed = launch.operations.filter((operation) => !next.operations.includes(operation));
+    const ceilings: FullControlScopeGrant["ceilings"] = {
+      repositories: boundaryRepositories(next),
+      maxIssues: next.issueAuthority?.maxIssues ?? 0,
+      maxIssuesSource: facts.pendingDerived ? "derived" : "explicit",
+      operations: [...next.operations],
+      ...(removed.length ? { removedOperations: removed } : {}),
+    };
+    const common = { version: 1 as const, ...(outcome ? { occurrenceId: outcome.occurrenceId } : {}),
+      ...(occurrence?.target ? { target: occurrence.target } : {}) };
+    if (outcome?.outcome === "verdict") {
+      return { ...common, status: "granted", reason: outcome.reason, namedIssues: [...facts.scoped],
+        ...(facts.dropped.length ? { dropped: facts.dropped } : {}), ...(facts.selection ? { selection: facts.selection } : {}), ceilings };
+    }
+    const failureClass: DecisionErrorClass | undefined = outcome ? outcome.failureClass : "configuration";
+    return { ...common, status: outcome?.cause === "uncertain" ? "uncertain" : "failed",
+      ...(outcome?.reason ? { reason: outcome.reason } : {}), ...(failureClass ? { failureClass } : {}), namedIssues: [], ceilings };
+  }
+
+  /** Why an Orchestrator's issue additions without lineage are the owner's one typed approval
+   * (#4102), or undefined when they are not and the ordinary lineage rules apply: the first
+   * message's grant failed or was uncertain, or the grant asked the campaign to select issues. */
+  private scopeGrantReview(root: SessionView): CampaignScopeGrantReview | undefined {
+    const first = root.orchestratorPolicy?.firstMessageScope;
+    const grant = first && first.state !== "pending" ? first.grant : undefined;
+    const control = root.orchestratorPolicy?.control;
+    if (!first || first.state === "pending" || !grant || control?.mode !== "full_control") return undefined;
+    const base = { ownerMessage: control.boundary.objective, messageDigest: first.messageDigest,
+      ...(grant.occurrenceId ? { grantOccurrenceId: grant.occurrenceId } : {}) };
+    if (grant.status !== "granted") {
+      return { cause: grant.status === "uncertain" ? "grant_uncertain" : "grant_failed", ...base,
+        ...(grant.failureClass ? { failureClass: grant.failureClass } : {}), ...(grant.reason ? { reason: grant.reason } : {}) };
+    }
+    if (!grant.selection || grant.selection.count < 1) return undefined;
+    const { count, defaulted, criteria, constraints } = grant.selection;
+    return { cause: "selection", ...base, ...(grant.reason ? { reason: grant.reason } : {}), selection: { count, defaulted, criteria, constraints } };
   }
 
   /** The referenced issues the runner reads as issues of the campaign repository. A pull request,
@@ -11188,6 +11282,10 @@ export class SessionsService {
         if (settlements.length) snapshot.verifiedPublications = settlements;
       }
       const boundary = issueBoundary(latest);
+      // Issue additions without lineage that the first message's scope grant cannot admit go to the
+      // owner as this one typed request (#4102), with the owner's message and why, never refused
+      // and never decided from text.
+      const grantReview = !human && snapshot.additions.length && !snapshot.lineage ? this.scopeGrantReview(latest) : undefined;
       if (!human && boundary && boundary.operations.includes("campaign_issue_scope")) {
         // Each refusal names the one condition that failed, in a fixed sentence and code (#2940).
         const refuse = (code: CampaignScopeAdmissionFailure, details: Record<string, number> = {}): ServiceResult<WorkflowDecisionView> => {
@@ -11197,11 +11295,17 @@ export class SessionsService {
           return { ok: false, status: refusal.status, error: refusal.message, errorDetails: { code, ...details } };
         };
         const excludedReservation = snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined;
-        const requested = snapshot.before.length + snapshot.additions.length - snapshot.removals.length + reservedPublicationSlots(this.db, latest, excludedReservation);
-        const limit = this.db.campaignIssueLimit(sessionId, boundary.issueAuthority!.maxIssues);
+        const scopeSize = snapshot.before.length + snapshot.additions.length - snapshot.removals.length;
+        const requested = scopeSize + reservedPublicationSlots(this.db, latest, excludedReservation);
+        // The owner's approval of a failed or uncertain grant's proposal sets the derived limit that
+        // grant could not, so only the limit it may reach applies here.
+        const limit = this.db.campaignIssueLimit(sessionId,
+          (grantReview ? grantReviewMaxIssues(latest.orchestratorPolicy, { grantReview }, boundary, scopeSize) : undefined) ?? boundary.issueAuthority!.maxIssues);
         if (requested > limit) return refuse("capacity_exhausted", { limit, requested });
         let evidence: unknown = { removals: snapshot.removals };
-        if (snapshot.additions.length) {
+        if (grantReview) {
+          // No admission: the decision is the owner's.
+        } else if (snapshot.additions.length) {
           if (!snapshot.lineage) return refuse("lineage_missing");
           if (snapshot.lineage.kind === "epic") {
             if (!boundary.issueAuthority!.epics.includes(snapshot.lineage.epic)) return refuse("epic_not_authorized");
@@ -11257,8 +11361,9 @@ export class SessionsService {
               publicationAuthority: approval ? "human_approval" : "bounded_admission", ...(approval ? { approvalBasis: approval.basis, approvalObjective: approval.objective } : {}), outcome: "admitted" }));
           }
         }
-        snapshot.issueAdmission = { boundaryRevision: boundary.revision, evidenceDigest: issueEvidenceDigest(evidence) };
+        if (!grantReview) snapshot.issueAdmission = { boundaryRevision: boundary.revision, evidenceDigest: issueEvidenceDigest(evidence) };
       }
+      if (grantReview) snapshot.grantReview = grantReview;
       const current = this.db.getSession(sessionId);
       if (!current || (current.orchestratorPolicy?.issueScope?.revision ?? 0) !== snapshot.expectedRevision ||
           snapshot.issueAdmission && issueBoundary(current)?.revision !== snapshot.issueAdmission.boundaryRevision) return fail("Issue authority changed during lineage inspection; refresh the proposal", 409);
@@ -11267,8 +11372,13 @@ export class SessionsService {
           this.evaluateWorkflowDecisionAuthority(controller.session, controller.policy, sessionId, snapshot).effectiveOwner === "human")) {
         snapshot.affectedDecisions = everyOutstandingScopeDecision(this.db, sessionId);
       }
-      return this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: `campaign_issue_scope:${sessionId}`,
+      const created = this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: `campaign_issue_scope:${sessionId}`,
         resourceSnapshot: snapshot }, canAccess, { trustedIssueScope: true });
+      // The failed or uncertain grant's audit names the one typed request it led to.
+      if (created.ok && created.data && grantReview?.grantOccurrenceId && grantReview.cause !== "selection") {
+        this.db.linkDecisionHumanRequest(grantReview.grantOccurrenceId, created.data.occurrenceId);
+      }
+      return created;
     } catch { return fail("GitHub issue validation timed out or failed. Try a smaller explicit proposal and verify the runner's GitHub access, then retry.", 409); }
   }
 
@@ -12464,6 +12574,7 @@ export class SessionsService {
       const latest = scopeSnapshot(this.db, currentChild, snapshot.repository, request);
       if (latest && snapshot.issueAdmission) latest.issueAdmission = snapshot.issueAdmission;
       if (latest && snapshot.verifiedPublications) latest.verifiedPublications = snapshot.verifiedPublications;
+      if (latest && snapshot.grantReview) latest.grantReview = snapshot.grantReview;
       if (latest && authority === "human" && currentChild.orchestratorPolicy?.control?.mode === "full_control") {
         latest.affectedDecisions = everyOutstandingScopeDecision(this.db, childSessionId);
       }
@@ -12476,7 +12587,11 @@ export class SessionsService {
       // within the scope limit that boundary names, counting the slots consumed publications still
       // hold other than those this change admits: only a fresh authorization can raise that limit.
       const control = currentChild.orchestratorPolicy?.control;
-      const maxIssues = authority === "human" && control?.mode === "full_control" ? control.boundary.issueAuthority?.maxIssues : undefined;
+      // The owner approving a failed or uncertain grant's proposal sets the derived limit it could not (#4102).
+      const maxIssues = authority === "human" && control?.mode === "full_control"
+        ? grantReviewMaxIssues(currentChild.orchestratorPolicy, snapshot, control.boundary,
+          snapshot.before.length + snapshot.additions.length - snapshot.removals.length) ?? control.boundary.issueAuthority?.maxIssues
+        : undefined;
       const limit = maxIssues === undefined ? undefined : this.db.campaignIssueLimit(childSessionId, maxIssues);
       const held = limit === undefined ? 0 : this.db.unsettledPublicationSlots(childSessionId, scopeSettlements(snapshot));
       const total = snapshot.before.length + snapshot.additions.length - snapshot.removals.length + held;
