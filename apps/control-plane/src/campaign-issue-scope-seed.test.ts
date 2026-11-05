@@ -133,7 +133,7 @@ test("a seed never comes from text: a failed, uncertain or floor-dropped reading
     ["retries exhausted", "Orchestrate epic #40.", () => ({ errorClass: "provider_overloaded" }), DECISION_MAX_ATTEMPTS],
     ["a non-transient failure", "Orchestrate epic #40.", () => ({ errorClass: "authentication" }), 1],
     ["an uncertain verdict", "Orchestrate epic #40.", () => ({ verdict: "uncertain", reason: "It is unclear which issue is the epic.", fields: EMPTY_FIELDS }), 1],
-    ["an invented number", "Orchestrate epic #40.", () => named(4000), 1],
+    ["an invented number, never read by the runner", "Orchestrate epic #40.", () => named(4000), 1],
     ["another repository's issue", "Orchestrate other/repo#40.", () => named(40), 1],
     ["an issue the runner cannot read", "Orchestrate epic #13.", () => named(13), 1],
   ];
@@ -148,9 +148,46 @@ test("a seed never comes from text: a failed, uncertain or floor-dropped reading
       assert.equal(held.ok, false, name);
       assert.match(held.error!, /Confirm the epic's authorized issue scope/u, name);
       assert.equal(h.occurrences().length, 1, `${name}: one audited occurrence`);
+      if (name.startsWith("an invented number")) assert.deepEqual(h.inspections, [], "the runner never reads a number the message does not write");
       assert.equal(h.db.campaignDecisionSubject(h.occurrences()[0]!.occurrenceId)?.surface, "issue_scope_seed", name);
     } finally { h.db.close(); }
   }
+});
+
+test("the owner may continue without an epic when the seed is theirs; nobody else can, and a seeded epic is never released", async () => {
+  for (const [name, prompt, reading] of [
+    ["a failed reading", "Refactor the v2 parser.", () => ({ errorClass: "authentication" })],
+    ["a floor-dropped reading", "Refactor the v2 parser.", () => named(7)],
+  ] as Array<[string, string, Reading]>) {
+    const h = harness(prompt, reading);
+    try {
+      await h.settled();
+      const seed = h.policy().issueScopeSeed!;
+      assert.equal(seed.state, "owner", name);
+      assert.equal(h.delegate().ok, false, `${name}: held, and the scope approval would need an issue this campaign does not have`);
+      const owner = { kind: "human" as const, id: h.db.localIdentityContext().userId };
+      const stranger = h.svc.classifyCampaignDecision(h.id, seed.occurrenceId!, { classification: "orchestrator" }, { kind: "human", id: "someone-else" });
+      assert.equal(stranger.status, 403, name);
+      const declined = h.svc.classifyCampaignDecision(h.id, seed.occurrenceId!, { classification: "decline" }, owner);
+      assert.equal(declined.status, 400, name);
+      const released = h.svc.classifyCampaignDecision(h.id, seed.occurrenceId!, { classification: "orchestrator" }, owner);
+      assert.ok(released.ok, released.error ?? name);
+      assert.equal(released.data!.classification, "orchestrator");
+      assert.equal(h.policy().issueScopeSeed!.state, "none", name);
+      assert.equal(h.policy().issueScopeProposalEpic, undefined, `${name}: releasing seeds and grants nothing`);
+      assert.equal(h.policy().issueScope, undefined);
+      assert.equal(h.delegate().ok, true, name);
+      assert.equal(h.svc.classifyCampaignDecision(h.id, seed.occurrenceId!, { classification: "orchestrator" }, owner).status, 409, `${name}: once`);
+    } finally { h.db.close(); }
+  }
+  const seeded = harness("Orchestrate epic #40.", () => named(40));
+  try {
+    await seeded.settled();
+    const owner = { kind: "human" as const, id: seeded.db.localIdentityContext().userId };
+    const refused = seeded.svc.classifyCampaignDecision(seeded.id, seeded.policy().issueScopeSeed!.occurrenceId!, { classification: "orchestrator" }, owner);
+    assert.equal(refused.status, 409, "a seeded epic waits for the scope approval itself");
+    assert.equal(seeded.policy().issueScopeProposalEpic, 40);
+  } finally { seeded.db.close(); }
 });
 
 test("a transient failure that succeeds on retry seeds the epic with nobody asked", async () => {

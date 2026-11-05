@@ -76,12 +76,19 @@ for (const [label, viewport] of [["1440", { width: 1440, height: 900 }], ["390",
     await expect(items).toHaveCount(6);
     await expect(items.nth(4)).toContainText("Epic Seed");
     await expect(items.nth(4)).toContainText("Message Read");
-    await expect(items.nth(4)).toContainText("An epic it names seeds the issue scope you approve; otherwise nothing waits.");
-    await expect(items.nth(5)).toContainText("Waiting for you to approve the campaign's issue scope.");
+    await expect(items.nth(4)).toContainText("It seeded the epic's issues; approve the issue scope before work is delegated.");
+    await expect(items.nth(4).getByRole("button")).toHaveText(["Open Session"]);
+    await expect(items.nth(5)).toContainText("Waiting for you: approve the campaign's issue scope, or continue without an epic.");
     await expect(items.nth(5)).toContainText("Provider Overloaded");
-    for (const index of [4, 5]) await expect(items.nth(index).getByRole("button")).toHaveText(["Open Session"]);
+    await expect(items.nth(5).getByRole("button")).toHaveText(["Continue Without an Epic", "Open Session"]);
     await items.nth(4).scrollIntoViewIfNeeded();
-    await page.screenshot({ path: testInfo.outputPath(`epic-seed-${label}.png`) });
+    await page.screenshot({ path: testInfo.outputPath(`epic-seed-${label}-before.png`) });
+    await items.nth(5).getByRole("button", { name: "Continue Without an Epic" }).click();
+    await expect(items.nth(5)).toContainText("You let the Orchestrator delegate without an epic.");
+    await expect(items.nth(5).getByRole("button")).toHaveText(["Open Session"]);
+    expect(await page.evaluate(() => (window as unknown as { __CLASSIFIED__: unknown }).__CLASSIFIED__))
+      .toEqual({ occurrenceId: "seed_failed", classification: "orchestrator" });
+    await page.screenshot({ path: testInfo.outputPath(`epic-seed-${label}-after.png`) });
     const geometry = await section.evaluate((element) => ({ clientWidth: element.clientWidth, scrollWidth: element.scrollWidth }));
     expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
   });

@@ -12508,6 +12508,15 @@ export class ControlPlaneDb {
 
   /** The owner's one classification of an uncertain or failed screen, by compare-and-set: only an
    * occurrence that routed to a person and has no classification yet accepts one. */
+  /** Record the owner's Continue Without an Epic on an epic seed's reading (#4104), once. The seed's
+   * own `owner` state, not the occurrence's, is what lets the owner release it. */
+  releaseCampaignIssueScopeSeedSubject(occurrenceId: string, userId: string, now: number): boolean {
+    return Number(this.stmt(
+      `UPDATE campaign_decision_subjects SET classification='orchestrator', classified_by=?, classified_at=?
+       WHERE occurrence_id=? AND surface='issue_scope_seed' AND classification IS NULL`,
+    ).run(userId, now, occurrenceId).changes) > 0;
+  }
+
   classifyCampaignDecision(occurrenceId: string, classification: "decline" | "orchestrator", userId: string, now: number): boolean {
     return Number(this.stmt(
       `UPDATE campaign_decision_subjects SET classification=?, classified_by=?, classified_at=?
@@ -17276,13 +17285,15 @@ export class ControlPlaneDb {
     return this.sessionOrchestratorPolicy(id)?.issueNumbers ?? null;
   }
 
-  /** Settle a Custom campaign's pending epic seed (#4104), compare-and-set on the policy: only a seed
-   * still pending for this exact message changes, and only `seeded` names the epic. A scope a person
-   * approved meanwhile keeps the seed pending forever; it holds nothing once a scope exists. */
+  /** Settle a Custom campaign's epic seed (#4104), compare-and-set on the policy: only a seed still in
+   * `from` (pending, unless the owner releases an `owner` seed) for this exact message changes, and
+   * only `seeded` names the epic. A scope a person approved meanwhile leaves the seed as it was; it
+   * holds nothing once a scope exists. */
   settleCampaignIssueScopeSeed(id: string, messageDigest: string,
-    next: { state: "seeded"; epic: number; occurrenceId: string } | { state: "none" | "owner"; occurrenceId?: string }, now: number): boolean {
+    next: { state: "seeded"; epic: number; occurrenceId: string } | { state: "none" | "owner"; occurrenceId?: string }, now: number,
+    from: "pending" | "owner" = "pending"): boolean {
     const policy = this.sessionOrchestratorPolicy(id);
-    if (!policy || policy.issueScope || policy.issueScopeSeed?.state !== "pending" || policy.issueScopeSeed.messageDigest !== messageDigest) return false;
+    if (!policy || policy.issueScope || policy.issueScopeSeed?.state !== from || policy.issueScopeSeed.messageDigest !== messageDigest) return false;
     const previous = JSON.stringify(policy);
     policy.issueScopeSeed = { state: next.state, messageDigest, ...(next.occurrenceId ? { occurrenceId: next.occurrenceId } : {}) };
     if (next.state === "seeded") policy.issueScopeProposalEpic = next.epic;

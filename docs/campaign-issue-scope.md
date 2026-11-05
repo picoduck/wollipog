@@ -16,8 +16,13 @@ delegation waits while it is pending. One `scope_grant` reading then decides it:
 | No issue named, several, a range or a selection, or a named issue without members | `none` | Proceeds |
 | Failed, uncertain, a floor dropped the named issue, or the runner couldn't read it | `owner`: no seed | Waits for the person's scope approval |
 
-A seed left pending with no reading in flight (a control-plane restart) settles as `owner`. A message
-without digits makes no Decision call.
+A seed left pending with no reading in flight (a control-plane restart) settles as `owner`, with its
+reading recorded as failed. A message without digits makes no Decision call.
+
+Approving a scope needs at least one issue, and a campaign whose message names none would otherwise
+wait forever. So the owner may also release an `owner` seed: **Continue Without an Epic** on its
+Epic Seed row in Campaign Status (the classification route, `orchestrator`). The seed becomes `none`.
+Releasing seeds, scopes and grants nothing, and a `seeded` epic cannot be released.
 
 Campaign Status exposes Authorized Issue Scope, revision, and recorded work outside authority. A campaign
 owner can inspect an epic's umbrella and members, select candidates, and request exact additions/removals.

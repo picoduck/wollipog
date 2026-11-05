@@ -154,9 +154,11 @@ Its outcome:
 - The runner must read members for that issue: sub-issues or checklist members.
 
 A failed or uncertain reading, or one the floors or the runner cannot confirm, falls back to today's
-Custom human scope approval with no seed. It never falls back to parsing the text. The occurrence is
-recorded with the `issue_scope_seed` subject, so Campaign Status shows the reading under Decision
-Model Checks as **Epic Seed**. See `docs/campaign-issue-scope.md` for the states.
+Custom human scope approval with no seed. It never falls back to parsing the text. That is the
+typed, person-owned request: the owner approves a scope, or chooses **Continue Without an Epic**.
+The occurrence is recorded with the `issue_scope_seed` subject, so Campaign Status shows the reading
+under Decision Model Checks as **Epic Seed**, with the seed's state. See
+`docs/campaign-issue-scope.md` for the states.
 
 ## Audit and Usage
 

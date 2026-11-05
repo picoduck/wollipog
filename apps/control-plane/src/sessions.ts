@@ -40,7 +40,8 @@ import { DecisionModelSettings } from "./decision-model-settings.js";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, credentialFormFloor, type CredentialScreenFact, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, fullControlAutomaticResponse, type CampaignAuthorityEvaluation, type FullControlAutomaticResponse, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
 import { firstMessageTargetEpics } from "./first-message-issue-intent.js";
-import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, scopeGrantCandidates, type ScopeGrantFields } from "./scope-grant.js";
+import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, scopeGrantCandidates, writtenAsDigits,
+  type ScopeGrantFields } from "./scope-grant.js";
 import { recordUnfinishedDecision, runCampaignCheck, type CampaignCheckOutcome } from "./campaign-decision-checks.js";
 import { DecisionInputError } from "./decision-kinds.js";
 import type { CampaignScopeGrantReview, DecisionErrorClass, FullControlScopeGrant } from "@wollipog/protocol";
@@ -486,6 +487,11 @@ function boundedCampaignEventText(text: string): string {
 }
 
 /** One member's correctable publication refusal for one recommendation (#4065), hashed. */
+/** The one Decision occurrence that reads a Custom campaign's first message for its epic seed (#4104). */
+function issueScopeSeedKey(rootId: string, messageDigest: string): string {
+  return `scope_grant:issue_scope_seed:${rootId}:${messageDigest}`;
+}
+
 function publicationRefusalCoordinate(sessionId: string, recommendationId: string): string {
   return recoveryCoordinate(`publication_refusal:${sessionId}:${recommendationId}`);
 }
@@ -5941,7 +5947,20 @@ export class SessionsService {
   private settleInterruptedIssueScopeSeed(root: SessionView): void {
     const seed = root.orchestratorPolicy?.issueScopeSeed;
     if (seed?.state !== "pending" || this.issueScopeSeeds.has(root.id)) return;
-    if (this.db.settleCampaignIssueScopeSeed(root.id, seed.messageDigest, { state: "owner" }, Date.now())) this.hub.sessionChangedById(root.id);
+    // The interrupted reading is recorded as failed (joining its occurrence when it had one), so
+    // Campaign Status shows it and its owner can continue without an epic.
+    const organizationId = this.db.sessionScope(root.id)?.organizationId;
+    const now = Date.now();
+    let occurrenceId: string | undefined;
+    if (organizationId) {
+      occurrenceId = recordUnfinishedDecision(this.db, { kind: "scope_grant", organizationId, campaignSessionId: root.id,
+        occurrenceKey: issueScopeSeedKey(root.id, seed.messageDigest), inputs: { data: {} } }, "provider_failed", now);
+      this.db.recordCampaignDecisionSubject({ occurrenceId, campaignSessionId: root.id, sessionId: root.id, surface: "issue_scope_seed",
+        requestId: `issue_scope_seed:${seed.messageDigest}` }, now);
+    }
+    if (this.db.settleCampaignIssueScopeSeed(root.id, seed.messageDigest, { state: "owner", ...(occurrenceId ? { occurrenceId } : {}) }, now)) {
+      this.hub.sessionChangedById(root.id);
+    }
   }
 
   /**
@@ -5963,7 +5982,7 @@ export class SessionsService {
     };
     const organizationId = this.db.sessionScope(rootId)?.organizationId;
     if (!organizationId || firstMessageDigest(text) !== messageDigest) return settle({ state: "owner" });
-    const occurrenceKey = `scope_grant:issue_scope_seed:${rootId}:${messageDigest}`;
+    const occurrenceKey = issueScopeSeedKey(rootId, messageDigest);
     const inputs = { ownerMessage: text, data: {} };
     let outcome: DecisionOutcome | null = null;
     let occurrenceId: string;
@@ -5986,6 +6005,8 @@ export class SessionsService {
     const fields = outcome.fields as unknown as ScopeGrantFields;
     const epic = seedEpicCandidate(fields);
     if (epic === null) return settle({ state: "none", occurrenceId });
+    // The floor that needs no runner runs first: a number the message never writes is not read at all.
+    if (!writtenAsDigits(text, epic)) return settle({ state: "owner", occurrenceId });
     const inspected = await this.inspectSeedEpic(root, epic);
     if (!inspected) return settle({ state: "owner", occurrenceId });
     const kept = scopeGrantCandidates(text, fields, { repository: inspected.repository }).explicit;
@@ -12261,6 +12282,7 @@ export class SessionsService {
     if (actor.kind !== "human" || !actor.id || !this.db.campaignOwnerUser(campaignSessionId, actor.id)) {
       return fail("Only the campaign's owner can classify a question the Decision Model could not screen", 403);
     }
+    if (subject.surface === "issue_scope_seed") return this.releaseCampaignIssueScopeSeed(campaignSessionId, occurrenceId, request, actor);
     if (occurrence.state !== "uncertain" && occurrence.state !== "failed") {
       return fail("the Decision Model already screened this request", 409);
     }
@@ -12322,6 +12344,28 @@ export class SessionsService {
     this.publishCampaignAttentionTransition(root);
     this.hub.sessionChangedById(session.id);
     if (session.id !== root.id) this.hub.sessionChangedById(root.id);
+    return ok(this.db.campaignDecisionSubject(occurrenceId)!);
+  }
+
+  /** The owner's Continue Without an Epic (#4104): an epic seed the Decision Model could not settle
+   * holds delegation until the owner approves an issue scope, which needs at least one issue. A
+   * campaign that names none would wait forever, so the owner may instead release the hold with no
+   * seed. It grants nothing: it only lets the Orchestrator delegate as a campaign without an epic. */
+  private releaseCampaignIssueScopeSeed(rootId: string, occurrenceId: string, request: ClassifyCampaignDecisionRequest,
+    actor: GovernanceActor): ServiceResult<CampaignDecisionSubject> {
+    if (request.classification !== "orchestrator") return fail("An epic seed can only be released: choose Continue Without an Epic", 400);
+    const root = this.db.getSession(rootId);
+    const seed = root?.orchestratorPolicy?.issueScopeSeed;
+    if (!root || root.orchestratorPolicy?.issueScope || seed?.state !== "owner" || seed.occurrenceId !== occurrenceId) {
+      return fail("This campaign's epic seed no longer waits for you", 409);
+    }
+    const now = Date.now();
+    if (!actor.id || !this.db.releaseCampaignIssueScopeSeedSubject(occurrenceId, actor.id, now) ||
+        !this.db.settleCampaignIssueScopeSeed(rootId, seed.messageDigest, { state: "none", occurrenceId }, now, "owner")) {
+      return fail("This campaign's epic seed changed concurrently; read it again", 409);
+    }
+    this.log.info(JSON.stringify({ event: "campaign_issue_scope_seed_released", campaignSessionId: rootId, occurrenceId }));
+    this.hub.sessionChangedById(rootId);
     return ok(this.db.campaignDecisionSubject(occurrenceId)!);
   }
 

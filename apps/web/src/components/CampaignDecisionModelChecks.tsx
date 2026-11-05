@@ -62,11 +62,15 @@ function checkOutcomeText(decision: CampaignDecision): string {
 }
 
 /** What a Custom campaign's epic seed did: a named epic seeds the scope the owner approves, and a
- * reading that failed or was unsure leaves that scope to them with no seed. */
+ * reading that could not settle it leaves that scope to them with no seed. */
 function seedOutcomeText(decision: CampaignDecision): string {
-  if (decision.state === "pending") return "Work waits to be delegated until the check finishes.";
-  if (decision.state === "decided") return "An epic it names seeds the issue scope you approve; otherwise nothing waits.";
-  return "Waiting for you to approve the campaign's issue scope.";
+  if (decision.subject?.classification === "orchestrator") return "You let the Orchestrator delegate without an epic.";
+  switch (decision.subject?.seed) {
+    case "seeded": return "It seeded the epic's issues; approve the issue scope before work is delegated.";
+    case "none": return "It named no epic, so nothing waits.";
+    case "owner": return "Waiting for you: approve the campaign's issue scope, or continue without an epic.";
+    default: return decision.state === "pending" ? "Work waits to be delegated until the check finishes." : "A later reading replaced it.";
+  }
 }
 
 /** What the screen's outcome did to the request it affected, in the order it happened. */
@@ -151,6 +155,8 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
           // the model could not check is decided on its own request.
           const awaiting = decision.kind === "credential_screen" && (decision.state === "uncertain" || decision.state === "failed") &&
             !subject?.classification;
+          // An epic seed the model could not settle waits for the owner, who may continue without one.
+          const seedAwaiting = decision.kind === "scope_grant" && subject?.seed === "owner" && !subject.classification;
           // An owner decision stays the owner's: classifying it only lets them choose an option.
           const ownerDecision = subject?.surface === "owner_decision";
           const label = subject ? SURFACE_LABELS[subject.surface] : "Request";
@@ -180,6 +186,11 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
               </dl>
               {(subject || (awaiting && canClassify)) && (
                 <div className="campaign-screen-actions" role="group" aria-label={`${label} Actions`}>
+                  {seedAwaiting && canClassify && (
+                    <BusyButton className="btn sm" busy={busy === `${decision.occurrenceId}:orchestrator`}
+                      progress="Letting the Orchestrator delegate…" disabled={busy !== null}
+                      onClick={() => void classify(decision.occurrenceId, "orchestrator")}>Continue Without an Epic</BusyButton>
+                  )}
                   {awaiting && canClassify && <>
                     <BusyButton className="btn sm" busy={busy === `${decision.occurrenceId}:decline`} progress="Declining the question…" disabled={busy !== null}
                       onClick={() => void classify(decision.occurrenceId, "decline")}>Decline</BusyButton>
