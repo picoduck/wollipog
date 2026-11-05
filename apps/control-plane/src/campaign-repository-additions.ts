@@ -121,9 +121,11 @@ export class CampaignRepositoryAdditions {
       return fail(`${repository} is already one of this campaign's repositories; that Location joins it through its owner, not an addition`);
     }
     // The inspection ran on another machine; the campaign or the Location may have changed meanwhile.
+    // Access is checked with the owner as they are now: a role can change while a runner inspects.
     const still = this.root(principal, rootId);
     if (!still.ok) return fail(still.error!, still.status);
-    if (still.data!.owner.userId !== owner.userId || !this.stillBound(location, root.projectId!, owner)) {
+    if (still.data!.owner.userId !== owner.userId || still.data!.root.projectId !== root.projectId ||
+        !this.stillBound(location, root.projectId!, still.data!.owner)) {
       return fail("That Location changed while it was being inspected; ask again");
     }
     const resourceKey = `campaign_repository_addition:${repository}`;
@@ -192,9 +194,12 @@ export class CampaignRepositoryAdditions {
       const still = this.root(principal, rootId);
       if (!still.ok) return fail(still.error!, still.status);
       const current = still.data!.root;
+      const currentOwner = still.data!.owner;
       const fullControl = (session: SessionView) => session.orchestratorPolicy?.control?.mode === "full_control";
-      if (still.data!.owner.userId !== owner.userId || !this.stillBound(location, root.projectId!, owner) ||
-          (ownBefore && !this.stillBound(ownBefore, root.projectId!, owner))) {
+      // The owner as they are now (a role can change meanwhile), and the campaign still in the same Project.
+      if (currentOwner.userId !== owner.userId || current.projectId !== root.projectId ||
+          !this.stillBound(location, root.projectId!, currentOwner) ||
+          (ownBefore && !this.stillBound(ownBefore, root.projectId!, currentOwner))) {
         return fail("That Location or the campaign's access to it changed while it was being inspected; ask again for a fresh approval");
       }
       if (fullControl(current) !== fullControl(root) || current.projectLocationId !== root.projectLocationId ||

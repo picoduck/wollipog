@@ -2922,6 +2922,56 @@ test("an approved addition is refused when the owner loses access to the Locatio
   } finally { await c.server.close(); f.db.close(); }
 });
 
+test("an approved addition checks access with the owner's current role, not the one it started with (#4117)", async () => {
+  const f = fixture();
+  const c = await repositoryAdditionCampaign(f);
+  try {
+    const before = c.boundary().revision;
+    const decision = (await c.request("demoted")).data!;
+    assert.equal(c.resolve(decision.occurrenceId, "approve", { kind: "human", id: f.human.userId }).ok, true);
+    const target = holdInspection(f, "/fixture/two/third");
+    const executing = c.additions.execute(c.rootId, decision.occurrenceId, decision.resourceDigest, c.orchestrator);
+    await target.taken();
+    // The owner is demoted to an operator, and an operator can't reach the target workspace.
+    const resolvePrincipal = f.db.operatingHumanPrincipal.bind(f.db);
+    f.db.operatingHumanPrincipal = (userId, organizationId) => {
+      const principal = resolvePrincipal(userId, organizationId);
+      return principal && userId === f.human.userId ? { ...principal, role: "operator" } : principal;
+    };
+    const access = f.db.canAccessWorkspace.bind(f.db);
+    f.db.canAccessWorkspace = (principal, runnerId, workspaceId) =>
+      !(principal.kind === "human" && principal.role === "operator" && runnerId === "r2" && workspaceId === "c") && access(principal, runnerId, workspaceId);
+    target.release("third/repo", "r2");
+    const executed = await executing;
+    assert.equal(executed.ok, false);
+    assert.equal(f.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "approved");
+    assert.equal(c.boundary().revision, before);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("an approved addition is refused when the campaign moves to another Project while it is inspected (#4117)", async () => {
+  const f = fixture();
+  const c = await repositoryAdditionCampaign(f);
+  try {
+    const before = c.boundary().revision;
+    const decision = (await c.request("campaign-moved")).data!;
+    assert.equal(c.resolve(decision.occurrenceId, "approve", { kind: "human", id: f.human.userId }).ok, true);
+    const target = holdInspection(f, "/fixture/two/third");
+    const executing = c.additions.execute(c.rootId, decision.occurrenceId, decision.resourceDigest, c.orchestrator);
+    await target.taken();
+    // The campaign's own Location moves, taking the campaign with it; the target stays behind.
+    const elsewhere = f.db.createProject({ name: "Elsewhere", scope: f.scope });
+    f.db.moveProjectLocation(c.p.launchLocation.id, elsewhere.id, Date.now(), f.human.userId);
+    assert.equal(f.db.getSession(c.rootId)!.projectId, elsewhere.id);
+    target.release("third/repo", "r2");
+    const executed = await executing;
+    assert.equal(executed.ok, false);
+    assert.equal(f.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "approved");
+    assert.equal(c.boundary().revision, before);
+    assert.equal(c.boundary().repositories!.some((entry) => entry.repository === "third/repo"), false);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
 test("agent text, a generic decision request or a Location outside the Project never adds a repository (#4117)", async () => {
   const f = fixture();
   const c = await repositoryAdditionCampaign(f);
