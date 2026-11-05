@@ -8632,8 +8632,12 @@ export class SessionManager {
         !job.assistantResultPersistedAt && !job.continuationMissingResultAt && !job.continuationRetryExhaustedAt);
     // A continuation held after bounded launch failures (#3542) waits for a person and keeps no
     // permit, unless detached work is running beside it: an owed result keeps the aggregate state at
-    // continuation_pending, so a live job's pending id is what still holds the permit then.
-    const onlyHeldResults = backgroundContinuationsAllLaunchHeld(meta) && !meta.pendingBackgroundTaskIds?.length;
+    // continuation_pending, so a live job's pending id is what still holds the permit then. An
+    // orphaned job's id is a diagnostic, not execution, until its recovery observes it live again.
+    const orphan = meta.orphanedWork;
+    const livePendingTaskIds = (meta.pendingBackgroundTaskIds ?? []).filter((id) => !orphan ||
+      !orphan.pendingTaskIds.includes(id) || !!orphan.recoveryObservedTaskIds?.includes(id));
+    const onlyHeldResults = backgroundContinuationsAllLaunchHeld(meta) && livePendingTaskIds.length === 0;
     return continuationPending && !onlyHeldResults &&
       automaticClaudeRecoveryAllowed(meta) && !this.backgroundRecoveryHeld(meta);
   }

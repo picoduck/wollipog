@@ -2073,6 +2073,19 @@ test("a continuation that keeps failing before provider acceptance is held after
     f.drivers[0]!.cb.onBackgroundWork?.({ state: null, pendingTaskIds: [],
       terminalJobs: [{ ...monitor, status: "killed", terminalAt: Date.now(), continuationRequired: false }] });
     assert.equal(f.internals.hasAuthoritativeBackgroundWork(f.store.readMeta("s1")), false);
+    // An orphaned job's id beside the held result is a diagnostic, not running work, once its one
+    // recovery was attempted; recovery observing it live again makes it running work.
+    const orphaned = {
+      ...f.store.readMeta("s1")!, pendingBackgroundTaskIds: ["monitor-3"],
+      orphanedWork: { markedAt: Date.now(), reason: "process_exit" as const, pendingTaskIds: ["monitor-3"],
+        recoveryAttemptedAt: Date.now() },
+    };
+    assert.equal(orphaned.backgroundWorkState, "continuation_pending");
+    assert.equal(f.internals.hasAuthoritativeBackgroundWork(orphaned), false,
+      "an orphaned id beside a held result keeps no active-work slot");
+    assert.equal(f.internals.hasAuthoritativeBackgroundWork({
+      ...orphaned, orphanedWork: { ...orphaned.orphanedWork, recoveryObservedTaskIds: ["monitor-3"] },
+    }), true, "a recovered job observed live does");
     assert.equal(f.internals.backgroundFollowUp(held), null, "it is not presented as queued");
     await f.settle();
     assert.equal(attempts(), 3, "nothing retries on its own");
