@@ -49,17 +49,19 @@ export function CampaignRepositories({ campaignId, boundary, canInclude }: {
                 {location.name}
                 {location.isDefault && <> <span className="project-location-default">Default</span></>}{" "}
                 <StatusBadge meta={location.availability === "removed" ? REMOVED : projectAvailabilityMeta(location.availability)} />
-                {joinedAt.has(location.locationId) && <span className="campaign-status-meta">Joined at boundary revision {joinedAt.get(location.locationId)}.</span>}
+                {joinedAt.has(location.locationId) && <span className="campaign-status-meta">{joinedAt.get(location.locationId)
+                  ? `Joined at boundary revision ${joinedAt.get(location.locationId)}.` : "Joined after launch."}</span>}
               </li>)}
             </ul>}
             {!usable && <span className="campaign-status-meta">No Location of this repository is available, so it can't take new work until one is.</span>}
           </dd>
         </div>;
       })}
-      <div>
+      {/* A Custom campaign's list has no authority boundary, so it has no revision to show. */}
+      {boundary.revision > 0 && <div>
         <dt>Boundary Revision</dt>
         <dd>{boundary.revision}</dd>
-      </div>
+      </div>}
     </dl>
     {boundary.excludedLocations.length > 0 && <>
       <h4 className="section-title">Excluded Locations</h4>

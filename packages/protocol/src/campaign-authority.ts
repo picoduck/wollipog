@@ -63,6 +63,13 @@ export function campaignBoundaryRepository(boundary: Pick<CampaignAuthorityBound
   return campaignBoundaryRepositories(boundary).find((entry) => entry.repository.toLowerCase() === wanted) ?? null;
 }
 
+/** A campaign's repository list on its own: one entry per repository, unique Location ids, within
+ * bounds. A Full Control boundary also requires its first entry to be the boundary's repository. */
+export function validCampaignRepositoryList(value: unknown): value is CampaignBoundaryRepository[] {
+  return Array.isArray(value) && value.length > 0 && typeof (value[0] as CampaignBoundaryRepository | null)?.repository === "string" &&
+    validBoundaryRepositories(value, (value[0] as CampaignBoundaryRepository).repository);
+}
+
 function validBoundaryRepositories(value: unknown, repository: string): boolean {
   if (!Array.isArray(value) || value.length < 1 || value.length > CAMPAIGN_BOUNDARY_REPOSITORIES_MAX) return false;
   const repositories = new Set<string>();
@@ -109,6 +116,9 @@ export interface CampaignAuthorityEvaluation {
     /** #4062: a Full Control merge whose closures nothing reads (a GitLab merge, or a GitHub merge
      * from a runner older than the closing-reference check) and whose declared ones prove nothing. */
     "unverified_closures" |
+    /** #4119: a merge in a repository without required checks whose head reports no checks at
+     * all. Nothing reported is never green, so it stays the person's in every mode. */
+    "no_checks" |
     /** #4058: a Full Control closure of an issue inside the boundary that failed delegated proof.
      * It stays the person's; the closure snapshot's `deliveryGaps` name what a new request needs. */
     "closure_proof_incomplete" |
@@ -152,9 +162,10 @@ const operations: CampaignAuthorityOperation[] = ["implementation_question", "pr
 export function campaignWorkflowOwner(control: CampaignControl | undefined, decisions: ParentControlDecisionPolicy,
   category: WorkflowDecisionCategory, supported: boolean, fullControlReviewExtensions = false): "human" | "orchestrator" {
   // A follow-up past the campaign's approval limit is the Human's in every mode (#2940), and so is a
-  // decision its owner kept (#4064). A Location switch widens a session's reach (#4138).
+  // decision its owner kept (#4064). A Location switch widens a session's reach (#4138), and a
+  // repository addition widens the campaign's (#4117).
   if (!supported || category === "automation_creation" || category === "campaign_follow_up_admission" ||
-      category === "owner_decision" || category === "location_switch") return "human";
+      category === "owner_decision" || category === "location_switch" || category === "campaign_repository_addition") return "human";
   if (category === "issue_closure" || category === "campaign_issue_scope") return control?.mode === "full_control" &&
     validCampaignControl(control) && control.boundary.issueAuthority && control.boundary.operations.includes(category) ? "orchestrator" : "human";
   if (!control || control.mode === "custom") return decisions[category];
@@ -431,7 +442,8 @@ export function resolveCampaignAuthority(input: {
   if (Boolean(request) === Boolean(input.snapshot)) return result("human", "human_required", "unverified_intent");
   // The owner kept this decision (#4064): no mode, boundary or grant makes it an agent's.
   if (category === "owner_decision") return result("human", "human_required", "owner_kept");
-  if (category === "automation_creation" || category === "campaign_follow_up_admission" || category === "location_switch") {
+  if (category === "automation_creation" || category === "campaign_follow_up_admission" || category === "location_switch" ||
+      category === "campaign_repository_addition") {
     return result("human", "human_required", "protected_request");
   }
   if (!input.supported) return result("human", "human_required", "unsupported_provider");
@@ -451,7 +463,7 @@ export function resolveCampaignAuthority(input: {
     // the server-enforced cap of its pull request (#4075). Past the cap they stay the person's.
     if (!eligible && category === "review_round_extension" && input.control?.mode === "full_control" && !input.root &&
         input.reviewExtensionCap !== undefined && validCampaignControl(input.control) && input.trustedSource === "workflow_route" &&
-        input.snapshot!.repository.toLowerCase() === input.control.boundary.repository.toLowerCase()) {
+        campaignBoundaryRepository(input.control.boundary, input.snapshot!.repository) !== null) {
       return input.reviewExtensionCap === "within" ? result("orchestrator", "campaign_delegation", "authorized_operation")
         : result("human", "human_required", "review_extension_cap_reached");
     }
@@ -462,8 +474,10 @@ export function resolveCampaignAuthority(input: {
   const boundary = input.control.boundary;
   if (category === "follow_up_issue_publication" && boundary.issueAuthority &&
       !(input.snapshot && "issueAdmission" in input.snapshot && input.snapshot.issueAdmission)) return result("human", "human_required", "unverified_intent");
+  // A gate is in the boundary when its repository is one of the boundary's entries (#4119); the
+  // server checks the requester's own place and the gate's evidence against that entry.
   if (!boundary.operations.includes(operation) || (input.snapshot && "repository" in input.snapshot &&
-      input.snapshot.repository.toLowerCase() !== boundary.repository.toLowerCase())) return result("human", "human_required", "outside_boundary");
+      campaignBoundaryRepository(boundary, input.snapshot.repository) === null)) return result("human", "human_required", "outside_boundary");
   if (category) {
     if (input.trustedSource !== "workflow_route") return result("human", "human_required", "unverified_intent");
     if (category === "implementation_question") {
