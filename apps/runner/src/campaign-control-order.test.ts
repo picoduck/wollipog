@@ -52,7 +52,19 @@ test("a relaunch never replaces a newer held control and keeps the saved copy of
     { strictProjectIsolation: false, issueScope: scope(1), control: fullControl(6), controlRevision: 6 }, "a current relaunch applies");
   assert.equal(launchOrchestratorMeta({ ...saved, issueScope: scope(2) }, { strictProjectIsolation: false, issueScope: scope(1), control: fullControl(6), controlRevision: 6 })!
     .issueScope!.revision, 2, "a saved newer scope stays, as before");
-  assert.deepEqual(launchOrchestratorMeta(saved, { strictProjectIsolation: false, issueScope: scope(1) }),
-    { strictProjectIsolation: false, issueScope: scope(1) }, "a relaunch without control keeps today's behavior");
   assert.equal(launchOrchestratorMeta(saved, undefined), saved);
+  // Without ordered control held, a relaunch without control keeps today's behavior.
+  assert.deepEqual(launchOrchestratorMeta({ strictProjectIsolation: true, issueScope: scope(1), control: fullControl(2) },
+    { strictProjectIsolation: false, issueScope: scope(1) }), { strictProjectIsolation: false, issueScope: scope(1) });
+});
+
+test("a relaunch without control keeps the ordering fence, so no stale update applies after it", () => {
+  const scope = { repository: "example/project", issueNumbers: [1], revision: 1, authorizedByUserId: "owner", authorizedAt: 1 };
+  const saved = { strictProjectIsolation: true, issueScope: scope, control: custom, controlRevision: 5 };
+  const relaunched = launchOrchestratorMeta(saved, { strictProjectIsolation: false, issueScope: scope })!;
+  assert.deepEqual(relaunched, { strictProjectIsolation: false, issueScope: scope, control: custom, controlRevision: 5 });
+  assert.deepEqual(nextCampaignControl(relaunched, { control: fullControl(4) }),
+    { control: custom, controlRevision: 5, outcome: "kept_newer" }, "an unordered stale Full Control");
+  assert.deepEqual(nextCampaignControl(relaunched, { control: fullControl(4), controlRevision: 4 }),
+    { control: custom, controlRevision: 5, outcome: "kept_newer" }, "a delayed ordered update");
 });

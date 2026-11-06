@@ -43,13 +43,15 @@ export function nextCampaignControl(held: OrderedCampaignControl | undefined, in
 type OrchestratorMeta = OrderedCampaignControl & { issueScope?: { revision: number } };
 
 /** The Orchestrator metadata a (re)launch persists: a saved copy at a newer issue-scope revision
- * stays, as before; otherwise the launch's own, except that a control the launch carries never
- * replaces a newer one the runner already holds (#3363). A launch without control keeps today's
- * behavior and persists none. */
+ * stays, as before; otherwise the launch's own, except that its control follows the same order as
+ * a synchronization's (#3363). A control the launch carries never replaces a newer one the runner
+ * already holds, and a launch without control (an older control plane's relaunch) keeps the held
+ * ordered control and its revision, so the fence survives the relaunch. Without an ordered control
+ * held, a launch without control keeps today's behavior and persists none. */
 export function launchOrchestratorMeta<P extends OrchestratorMeta, S extends OrchestratorMeta>(
   saved: P | undefined, spec: S | undefined): P | S | undefined {
   if ((saved?.issueScope?.revision ?? 0) > (spec?.issueScope?.revision ?? 0) || !spec) return saved;
-  if (spec.control === undefined) return spec;
+  if (spec.control === undefined && saved?.controlRevision === undefined) return spec;
   const ordered = nextCampaignControl(saved, spec);
   const { control: _control, controlRevision: _revision, ...rest } = spec;
   return { ...rest, ...(ordered.control === undefined ? {} : { control: ordered.control }),
