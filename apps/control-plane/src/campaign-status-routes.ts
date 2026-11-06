@@ -81,13 +81,13 @@ export function workItemForPrincipal<T extends CampaignWorkItemSummary>(
  * own Orchestrator. Everyone else gets `unavailable{not_authorized}`, with no last value; reported
  * stages and pull-request references stay visible to every reader.
  */
-export function forgeFactsForPrincipal<T extends CampaignWorkItemDetail>(item: T, visible: boolean | ((repository: string) => boolean)): T {
+export function forgeFactsForPrincipal<T extends CampaignWorkItemDetail>(item: T, visible: boolean | ((ref: CampaignPullRequestRef) => boolean)): T {
   if (visible === true || !item.observed.pullRequests) return item;
   return {
     ...item,
     observed: {
       ...item.observed,
-      pullRequests: item.observed.pullRequests.map((entry) => visible !== false && visible(entry.ref.repository) ? entry
+      pullRequests: item.observed.pullRequests.map((entry) => visible !== false && visible(entry.ref) ? entry
         : { ref: entry.ref, fact: FORGE_NOT_AUTHORIZED }),
     },
   };
@@ -100,9 +100,12 @@ interface CampaignReader {
   rootId: string;
   /** Session-cost visibility for this principal; null is a deleted attempt session. */
   canSee(sessionId: string | null): boolean;
-  /** Whether this principal may see forge facts read by the runner hosting the root, or about a
-   * repository's pull requests by the runner that reads those. */
+  /** Whether this principal has access to the runner hosting the root, or to the runner that would
+   * read a repository's pull requests now: what causing a read needs. */
   forgeVisible(repository?: string): boolean;
+  /** Whether this principal may see this pull request's fact: access to the runner whose login
+   * supplied it, whichever would read it next (#4119). */
+  forgeFactVisible(ref: CampaignPullRequestRef): boolean;
 }
 
 function text(query: Record<string, unknown>, name: string): string | undefined {
@@ -178,7 +181,12 @@ export function registerCampaignStatusRoutes(
       }
       return result;
     };
-    return { principal, rootId, canSee, forgeVisible };
+    const forgeFactVisible = (ref: CampaignPullRequestRef): boolean => {
+      if (principal.kind === "agent") return true;
+      const supplier = db.campaignForgeObservations.supplier(rootId, ref);
+      return supplier ? db.canAccessRunner(principal, supplier) : forgeVisible(ref.repository);
+    };
+    return { principal, rootId, canSee, forgeVisible, forgeFactVisible };
   };
 
   const everySessionVisible = (read: CampaignReader) =>
@@ -265,7 +273,7 @@ export function registerCampaignStatusRoutes(
       revision: ledger.revision(read.rootId),
       item: forgeFactsForPrincipal(
         workItemForPrincipal(item, item.attempts.map((attempt) => attempt.sessionId), read.canSee),
-        read.forgeVisible,
+        read.forgeFactVisible,
       ),
     };
     return reply.send(response);
@@ -290,7 +298,7 @@ export function registerCampaignStatusRoutes(
     const item = ledger.detail(read.rootId, itemId, Date.now());
     const response: CampaignForgeRefreshResponse = {
       revision: ledger.revision(read.rootId),
-      pullRequests: item ? forgeFactsForPrincipal(item, read.forgeVisible).observed.pullRequests ?? [] : [],
+      pullRequests: item ? forgeFactsForPrincipal(item, read.forgeFactVisible).observed.pullRequests ?? [] : [],
     };
     return reply.send(response);
   });

@@ -28,7 +28,7 @@ import type { AgentPrincipal, AuthPrincipal, HumanPrincipal } from "./identity.j
 import { registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
 import { campaignBoundaryRepositoryAt } from "./campaign-repository-boundary.js";
 import { CampaignForgeObserver } from "./campaign-forge-observations.js";
-import { forgeFactsForPrincipal } from "./campaign-status-routes.js";
+import { registerCampaignStatusRoutes } from "./campaign-status-routes.js";
 import { inspectCampaignWorkspace, inspectProjectLocation } from "./project-location-inspection.js";
 import { CampaignRepositoryAdditions } from "./campaign-repository-additions.js";
 import { CampaignLocations, registerCampaignLocationRoutes } from "./campaign-locations.js";
@@ -5489,10 +5489,88 @@ test("a closure's delivery facts are read by a Location of the pull request's re
     assert.deepEqual(reads, []);
     assert.deepEqual(f.db.campaignForgeObservations.facts(id, [unseen], Date.now())[0]!.fact, { availability: "unavailable", reason: "runner_unsupported" });
 
-    // A viewer who can't reach that runner neither sees its facts nor causes a read through its login.
-    assert.deepEqual(forgeFactsForPrincipal(item(), (repository) => repository !== "other/repo").observed.pullRequests,
-      [{ ref: pull, fact: { availability: "unavailable", reason: "not_authorized" } }]);
     observer.dispose();
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a forge fact is shown only to viewers of the runner whose login supplied it, whichever Location would read next (#4119)", async () => {
+  const { f, p, server, id, propose, approve } = await multiRepositoryCampaign();
+  try {
+    f.db.updateSessionStatus(id, "running", Date.now());
+    const seeded = await propose("seed", [["other/repo", 40]]);
+    assert.equal(approve(seeded.data!.occurrenceId).ok, true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // other/repo has a second Location on r3. The viewer can reach r3 and the root's runner, not r2.
+    f.db.registerRunner({ runnerId: "r3", hostname: "r3", os: "linux", version: "test", agents: [], workspaces: [{ id: "c", name: "r3 c", path: "/fixture/three/other" }],
+      runtime: { ...runtime } }, Date.now(), PROTOCOL_VERSION);
+    const second = f.db.addProjectLocation(p.project.id, { runnerId: "r3", workspaceId: "c" });
+    const policy = f.db.getSession(id)!.orchestratorPolicy!;
+    if (policy.control?.mode !== "full_control") throw new Error("fixture control expected");
+    policy.control.boundary.repositories = policy.control.boundary.repositories!.map((entry) => entry.repository === "other/repo"
+      ? { ...entry, locationIds: [p.other.id, second.id] } : entry);
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), id);
+    const access = f.db.canAccessRunner.bind(f.db);
+    f.db.canAccessRunner = (principal, runnerId) => runnerId !== "r2" && access(principal, runnerId);
+
+    const rollup = { state: "passing" as const, passing: 1, failing: 0, pending: 0 };
+    const value = { state: "open" as const, draft: false, headSha: "b".repeat(40), baseRef: "main", reviewDecision: "approved" as const, checks: rollup, requiredChecks: rollup, mergeQueue: null, mergeCommitSha: null };
+    const answers = new Map<string, "ok" | "forge_not_found">([["r2", "ok"], ["r3", "forge_not_found"]]);
+    const reads: string[] = [];
+    const send = f.hub.sendToRunner.bind(f.hub);
+    f.hub.sendToRunner = (runnerId, message) => {
+      if (message.type !== "campaign_forge_observe") return send(runnerId, message);
+      reads.push(runnerId);
+      const answer = answers.get(runnerId);
+      queueMicrotask(() => f.hub.resolveRunnerRequest({ type: "campaign_forge_observe_result", requestId: message.requestId, sessionId: message.sessionId, observedAt: Date.now(), ok: true,
+        results: message.pullRequests.map((ref) => answer === "ok" ? { ref, ok: true as const, observation: value } : { ref, ok: false as const, failure: "forge_not_found" as const }) }, runnerId));
+      return true;
+    };
+    let count = 0;
+    const observer = new CampaignForgeObserver({
+      observingRunner: (campaignId, repository) => f.db.campaignForgeObservingRunner(campaignId, repository, (runnerId) => f.hub.isRunnerOnline(runnerId)),
+      requestFromRunner: (runnerId, requestId, message, timeout) => f.hub.requestFromRunner(runnerId, requestId, message, timeout),
+      store: f.db.campaignForgeObservations, backgroundTargets: () => [], changed: () => undefined, warn: () => undefined, newRequestId: () => `forge_${++count}`,
+    });
+    const pull = { repository: "other/repo", number: 10 };
+    const item = () => ({ id: "wi-40", issue: { repository: "other/repo", number: 40 }, primaryState: "delivered", currentAttempt: null, attempts: [], verifications: [],
+      observed: { pullRequests: f.db.campaignForgeObservations.facts(id, [pull], Date.now()) } }) as unknown as CampaignWorkItemDetail;
+    const ledger = f.db.campaignWorkLedger;
+    ledger.detail = (() => item()) as unknown as typeof ledger.detail;
+    const status = Fastify();
+    registerCampaignStatusRoutes(status, { db: f.db, requestPrincipal: () => f.human, refreshForge: (campaignId, refs) => observer.refresh(campaignId, refs) });
+    await status.ready();
+    const fact = async () => (await status.inject({ method: "GET", url: `/api/sessions/${id}/campaign/work-items/wi-40`, headers: { authorization: "Bearer human" } })).json().item.observed.pullRequests[0].fact;
+    const refreshed = async () => (await status.inject({ method: "POST", url: `/api/sessions/${id}/campaign/work-items/wi-40/forge-refresh`, headers: { authorization: "Bearer human" } })).json().pullRequests[0].fact;
+    const hidden = { availability: "unavailable", reason: "not_authorized" };
+
+    // r2 leads the entry and supplies the value: this viewer can't reach r2, and can't cause its read either.
+    await observer.readNow(id, [pull]);
+    assert.deepEqual(reads.splice(0), ["r2"]);
+    assert.deepEqual(await fact(), hidden);
+    assert.deepEqual(await refreshed(), hidden);
+    assert.deepEqual(reads.splice(0), [], "no access to the reader, no read through its login");
+
+    // r2 goes offline, so r3 would read next. The stored value is still r2's, and stays hidden.
+    const online = f.hub.isRunnerOnline;
+    f.hub.isRunnerOnline = (runnerId) => runnerId !== "r2" && online(runnerId);
+    assert.deepEqual(await fact(), hidden);
+
+    // r3's failure replaces it: r2's value is gone, not kept as a last value r3's viewers could read.
+    await observer.readNow(id, [pull]);
+    assert.deepEqual(reads.splice(0), ["r3"]);
+    assert.deepEqual(await fact(), { availability: "unavailable", reason: "forge_not_found" });
+    assert.deepEqual({ ...f.db.raw().prepare("SELECT runner_id, value_json FROM campaign_forge_observations WHERE campaign_session_id=? AND number=10").get(id) }, { runner_id: "r3", value_json: null });
+
+    // A value r3 itself read is this viewer's to see, and its own later failure keeps it as a last value.
+    answers.set("r3", "ok");
+    await observer.readNow(id, [pull]);
+    assert.equal((await fact()).availability, "fresh");
+    answers.set("r3", "forge_not_found");
+    await observer.readNow(id, [pull]);
+    const after = await fact();
+    assert.deepEqual([after.reason, after.lastValue?.headSha], ["forge_not_found", "b".repeat(40)]);
+    observer.dispose();
+    await status.close();
   } finally { await server.close(); f.db.close(); }
 });
 

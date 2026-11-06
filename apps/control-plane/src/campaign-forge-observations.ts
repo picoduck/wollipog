@@ -54,6 +54,7 @@ export type ForgeObserverState = "online" | "offline" | "unsupported";
 interface ObservationRow {
   repository_key: string;
   number: number;
+  runner_id: string;
   value_json: string | null;
   observed_at: number | null;
   failure_reason: CampaignForgeObservationFailure | null;
@@ -109,9 +110,16 @@ export class CampaignForgeObservationStore {
 
   private row(campaignId: string, ref: CampaignPullRequestRef): ObservationRow | undefined {
     return this.stmt(
-      `SELECT repository_key, number, value_json, observed_at, failure_reason, failed_at
+      `SELECT repository_key, number, runner_id, value_json, observed_at, failure_reason, failed_at
        FROM campaign_forge_observations WHERE campaign_session_id=? AND repository_key=? AND number=?`,
     ).get(campaignId, ref.repository.toLowerCase(), ref.number) as ObservationRow | undefined;
+  }
+
+  /** Whose login this pull request's stored fact came from, or null when none is stored. A stored
+   * value always came from this runner (see `record`), so a reader's access is checked against it,
+   * whichever runner would read the repository next (#4119). */
+  supplier(campaignId: string, ref: CampaignPullRequestRef): string | null {
+    return this.row(campaignId, ref)?.runner_id ?? null;
   }
 
   /** One fact per ref, in order. A ref is one point lookup; an item names at most 16. */
@@ -155,14 +163,18 @@ export class CampaignForgeObservationStore {
         ).run(campaignId, key, result.ref.number, runnerId, json, at);
         if (!before || before.value_json !== json || before.failure_reason !== null) changed = true;
       } else if (result.failure && FAILURES.has(result.failure)) {
+        // A failure keeps the last value only when it came from the same runner: a row names one
+        // supplier, and another runner's login must not vouch for, or expose, this one's value (#4119).
         this.stmt(
           `INSERT INTO campaign_forge_observations
              (campaign_session_id, repository_key, number, runner_id, value_json, observed_at, failure_reason, failed_at)
            VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)
            ON CONFLICT(campaign_session_id, repository_key, number) DO UPDATE SET
+             value_json=CASE WHEN runner_id=excluded.runner_id THEN value_json END,
+             observed_at=CASE WHEN runner_id=excluded.runner_id THEN observed_at END,
              runner_id=excluded.runner_id, failure_reason=excluded.failure_reason, failed_at=excluded.failed_at`,
         ).run(campaignId, key, result.ref.number, runnerId, result.failure, at);
-        if (!before || before.failure_reason !== result.failure) changed = true;
+        if (!before || before.failure_reason !== result.failure || (before.runner_id !== runnerId && before.value_json !== null)) changed = true;
       }
     }
     return changed;
