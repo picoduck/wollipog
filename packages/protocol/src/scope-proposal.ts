@@ -319,7 +319,7 @@ export function scopeProposalMaterial(snapshot: ScopeProposalSnapshot): string {
   if (proposal.withheldOperations.length) lines.push(`**Withheld operations:** ${proposal.withheldOperations.map(campaignOperationLabel).join(", ")}`, "");
   lines.push("**Rationale**", "", escapeMarkdown(snapshot.explanation), "");
   const includes = listed(proposal.checks.map((check) => CHECK_PHRASES[check])) || "nothing the server could check";
-  const reason = proposal.constraintCheck?.reason ? ` (${escapeMarkdown(proposal.constraintCheck.reason)})` : "";
+  const reason = proposal.constraintCheck?.reason ? ` (${escapeMarkdown(proposal.constraintCheck.reason.replace(/\.$/u, ""))})` : "";
   const why = proposal.ownerCause === "proposal_unstructured"
     ? "the Orchestrator's machine can't send a structured proposal, so nothing could check it"
     : proposal.ownerCause === "constraint_check_uncertain"

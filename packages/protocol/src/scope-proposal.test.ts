@@ -122,7 +122,7 @@ test("the owner's approval is presented as an Owner Question: Approve Scope, Dec
     scopeProposal: { ...record, ownerCause: "constraint_check_uncertain", constraintCheck: { occurrenceId: "dec_1", verdict: "uncertain",
       reason: "The answer on 'Count Matches Your Message' is below the 80% confidence threshold." } } } } } as unknown as PendingApproval;
   assert.match(presentOwnerQuestionRequest(uncertainCard).questions![0]!.context!,
-    /and the Decision Model couldn't confirm them \(The answer on 'Count Matches Your Message' is below the 80% confidence threshold\.\)\./u);
+    /and the Decision Model couldn't confirm them \(The answer on 'Count Matches Your Message' is below the 80% confidence threshold\)\./u);
   // An admitted (Orchestrator-owned) change is never presented to the owner.
   const admitted = { ...card, workflowDecision: { ...card.workflowDecision!, authority: "orchestrator" } } as PendingApproval;
   assert.equal(isOwnerQuestionRequest(admitted), false);
