@@ -752,6 +752,11 @@ export class ClaudeCodeDriver implements Driver {
     return this.sessionEstablished ? this.sessionId : null;
   }
 
+  /** A retiring process takes no further prompt: the next one waits for it, then spawns (#3542). */
+  providerProcessLive(): boolean {
+    return !this.disposed && this.child != null && this.retiringPersistentTransport == null;
+  }
+
   agentTurnId(): string | null {
     // Claude's CLI forks the current transcript, not an individual provider turn. SessionManager
     // therefore records this stable provider coordinate and exposes only the latest checkpoint.
