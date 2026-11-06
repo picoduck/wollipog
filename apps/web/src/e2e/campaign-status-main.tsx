@@ -871,8 +871,8 @@ const SCOPE_PROPOSALS_ACROSS_REPOSITORIES: import("@wollipog/protocol").Campaign
   occurrenceId: "wd_scope_3", createdAt: NOW - 60_000, outcome: "waiting_for_owner",
   explanation: "You named team/repo#123 and team/api#123. I chose the worst open API bug by priority label.",
   proposal: { initial: true, messageDigest: "a".repeat(64), requestedCount: null, constraints: [], withheldOperations: [],
-    repositoryConstraint: { name: "the service repo", repository: null }, checks: ["chosen_issues", "repository_name_unresolved"], route: "owner",
-    ownerCause: "repository_name_unresolved", ownerMessage: "Fix team/repo#123 and team/api#123, then the worst open bug in the service repo.",
+    repositoryConstraints: [{ name: "the service repo", repository: null }, { name: "team/api", repository: "team/api" }], checks: ["chosen_issues", "repository_name_unresolved"], route: "owner",
+    ownerCause: "repository_name_unresolved", ownerMessage: "Fix team/repo#123 and team/api#123, then the worst open bug in the service repo or team/api, and nothing else.",
     issues: [
       { number: 123, origin: "owner_named", rationale: "You named it.", title: "Composer Epic" },
       { repository: "team/api", number: 123, origin: "owner_named", rationale: "You named it, in the API repository.", title: "Token Refresh Races" },
