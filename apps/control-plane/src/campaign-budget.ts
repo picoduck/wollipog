@@ -389,15 +389,33 @@ export class CampaignBudgetLedger {
     return row ? { costBudgetUsd: row.user_cost_limit, maxToolCalls: row.user_tool_limit } : undefined;
   }
 
-  prepare(rootId: string, sessionId: string, requested: { costUsd?: number; toolCalls?: number }): CampaignBudgetAllocation {
+  /** Whether a session reviews for a campaign member rather than working in one of its slots. Its
+   * review record is written before its session row, so this holds from the start of admission. */
+  private reviewer(sessionId: string): boolean {
+    return Boolean(this.sql.prepare("SELECT 1 FROM review_sessions WHERE review_session_id=?").get(sessionId) ??
+      this.sql.prepare("SELECT 1 FROM delegated_image_reviews WHERE reviewer_session_id=?").get(sessionId));
+  }
+
+  /** A worker's default reservation divides the unreserved allowance among the free slots. A
+   * reviewer takes no slot, so at one free slot or none that division would hand it the whole
+   * remainder and refuse every concurrent review until it settled (#3618). It is instead one more
+   * claimant beside the free slots, counting at least two claimants: it leaves each free slot a share
+   * as large as its own, and at least half of what it found for whoever comes next. A reviewer's own
+   * ceiling only lowers that share. `admit` still checks the result against the unreserved allowance
+   * inside the insertion transaction, so reservations never exceed the allowance. */
+  prepare(rootId: string, sessionId: string, requested: { costUsd?: number; toolCalls?: number },
+    reviewer = this.reviewer(sessionId)): CampaignBudgetAllocation {
     const view = this.view(rootId); if (!view || view.state !== "active") throw new Error(view?.reason ?? "campaign allowance unavailable");
-    const slots = Math.max(1, (view.authority.concurrency ?? 1) - view.occupied);
+    const free = Math.max(0, (view.authority.concurrency ?? 1) - view.occupied);
+    const slots = reviewer ? Math.max(2, free + 1) : Math.max(1, free);
     const prior = this.allocation(sessionId);
+    const cost = (view.remaining.costUsd ?? 0) / slots, tools = Math.floor((view.remaining.toolCalls ?? 0) / slots);
+    const bounded = (own: number | undefined, share: number) => reviewer && own !== undefined ? Math.min(own, share) : own;
     return { sessionId,
       ...(view.authority.costUsd === undefined ? requested.costUsd === undefined ? {} : { costUsd: requested.costUsd } :
-        { costUsd: requested.costUsd ?? prior?.costUsd ?? (view.remaining.costUsd ?? 0) / slots }),
+        { costUsd: bounded(requested.costUsd, cost) ?? prior?.costUsd ?? cost }),
       ...(view.authority.toolCalls === undefined ? requested.toolCalls === undefined ? {} : { toolCalls: requested.toolCalls } :
-        { toolCalls: requested.toolCalls ?? prior?.toolCalls ?? Math.floor((view.remaining.toolCalls ?? 0) / slots) }) };
+        { toolCalls: bounded(requested.toolCalls, tools) ?? prior?.toolCalls ?? tools }) };
   }
 
   members(rootId: string): string[] {
@@ -634,9 +652,7 @@ export class CampaignBudgetLedger {
       const spentCost = old ? old.live_cost > 0 ? roundUsdMicros(old.cost + old.live_cost) : old.cost : 0;
       if (old) allocation = { ...allocation, costUsd: allocation.costUsd ?? old.cost_limit ?? undefined, toolCalls: allocation.toolCalls ?? old.tool_limit ?? undefined };
       if (old && old.root_id !== rootId) throw new Error("session belongs to another allowance");
-      const review = this.sql.prepare("SELECT 1 FROM review_sessions WHERE review_session_id=?").get(allocation.sessionId) ??
-        this.sql.prepare("SELECT 1 FROM delegated_image_reviews WHERE reviewer_session_id=?").get(allocation.sessionId);
-      if (!review && launch && !old?.occupying && allocation.sessionId !== rootId && v.authority.concurrency !== undefined && v.occupied >= v.authority.concurrency) throw new Error("campaign concurrency allowance reached");
+      if (!this.reviewer(allocation.sessionId) && launch && !old?.occupying && allocation.sessionId !== rootId && v.authority.concurrency !== undefined && v.occupied >= v.authority.concurrency) throw new Error("campaign concurrency allowance reached");
       for (const [requested, spent, ceiling, userCeiling, remaining, prior] of [
         [allocation.costUsd, spentCost, v.authority.costUsd, old ? old.user_cost_limit : userLimits.costUsd, v.remaining.costUsd, old?.active ? Math.max(0,(old.cost_limit ?? 0)-spentCost) : 0],
         [allocation.toolCalls, old?.tools ?? 0, v.authority.toolCalls, old ? old.user_tool_limit : userLimits.toolCalls, v.remaining.toolCalls, old?.active ? Math.max(0,(old.tool_limit ?? 0)-old.tools) : 0],
