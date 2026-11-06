@@ -4601,7 +4601,7 @@ test("a reviewed enable settles a Location that was waiting for Include in Campa
   } finally { await server.close(); await c.server.close(); f.db.close(); }
 });
 
-test("a waiting Location that a reviewed enable finds offline joins when its runner reconnects, with no Include step (#4117)", async () => {
+test("a waiting Location a reviewed enable can't read keeps waiting: reconnecting never joins it, and only Include in Campaign does (#4117)", async () => {
   const f = fixture();
   saveBudget(f, savedBudget);
   const c = await launchedMultiRepositoryCampaign(f);
@@ -4620,14 +4620,20 @@ test("a waiting Location that a reviewed enable finds offline joins when its run
     const enabled = await server.inject({ method: "POST", url: `/api/sessions/${c.rootId}/orchestrator-campaign/full-control`,
       headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: reviewed.digest } });
     assert.equal(enabled.statusCode, 200, enabled.body);
+    // The owner never saw which repository it is, so it isn't authorized: it keeps waiting.
     const view = f.db.campaignProjection(c.rootId)!.repositoryBoundary!;
-    assert.equal(view.pendingLocations.some((item) => item.locationId === third.id), false, "excluded, not waiting for Include");
-    assert.ok(view.excludedLocations.some((item) => item.locationId === third.id));
-    // The machine returns: the excluded Location is inspected again and joins.
+    assert.ok(view.pendingLocations.some((item) => item.locationId === third.id), "still waiting for Include");
+    assert.equal(view.excludedLocations.some((item) => item.locationId === third.id), false, "an exclusion would join on reconnect");
+    // The machine returns: nothing joins on its own.
     f.hub.isRunnerOnline = online;
     await c.locations.runnerReconnected("r2");
+    assert.equal(c.boundary().repositories!.some((entry) => entry.repository === "third/repo"), false, "reconnecting adds no repository");
+    assert.ok(c.policy().pendingLocations!.some((item) => item.locationId === third.id));
+    // Only the owner's Include in Campaign adds it, after inspecting it.
+    const included = await c.locations.include(c.rootId, third.id, f.human);
+    assert.equal(included.ok, true);
     assert.ok(c.boundary().repositories!.some((entry) => entry.repository === "third/repo" && entry.locationIds.includes(third.id)));
-    assert.equal(f.db.campaignProjection(c.rootId)!.repositoryBoundary!.excludedLocations.some((item) => item.locationId === third.id), false);
+    assert.equal(c.policy().pendingLocations?.some((item) => item.locationId === third.id) ?? false, false);
   } finally { await server.close(); await c.server.close(); f.db.close(); }
 });
 

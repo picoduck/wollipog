@@ -21293,13 +21293,15 @@ export class ControlPlaneDb {
       campaign.launchDisclosure = structuredClone(launchDisclosure);
     } else delete campaign.launchDisclosure;
     if (excludedLocations) {
-      if (excludedLocations.length) campaign.excludedLocations = structuredClone(excludedLocations);
-      else delete campaign.excludedLocations;
-      // The owner just reviewed every Location of the Project, so none still waits for Include in Campaign.
-      const reviewed = new Set([...excludedLocations.map((item) => item.locationId),
-        ...(control.mode === "full_control" ? control.boundary.repositories ?? [] : []).flatMap((entry) => entry.locationIds)]);
-      const pending = (campaign.pendingLocations ?? []).filter((item) => !reviewed.has(item.locationId));
+      // A waiting Location someone else added leaves the wait only once the owner has reviewed the
+      // repository it verified as. One that couldn't be read keeps waiting for Include in Campaign
+      // and isn't recorded as excluded, since an exclusion would join on reconnect with no owner step.
+      const joined = new Set((control.mode === "full_control" ? control.boundary.repositories ?? [] : []).flatMap((entry) => entry.locationIds));
+      const pending = (campaign.pendingLocations ?? []).filter((item) => !joined.has(item.locationId));
       if (pending.length) campaign.pendingLocations = pending; else delete campaign.pendingLocations;
+      const stillWaiting = new Set(pending.map((item) => item.locationId));
+      const excluded = excludedLocations.filter((item) => !stillWaiting.has(item.locationId));
+      if (excluded.length) campaign.excludedLocations = structuredClone(excluded); else delete campaign.excludedLocations;
     }
     this.db.exec("BEGIN");
     try {
