@@ -997,7 +997,7 @@ const client = {
       ? { ...decision, subject: { ...decision.subject!, classification } } : decision);
     return screenDecisions.find((decision) => decision.occurrenceId === occurrenceId)!.subject!;
   },
-  campaignIssueScope: async (id: string) => params.get("scope") === "unsupported-target" ? api.campaignIssueScope(id)
+  campaignIssueScope: async (id: string, epic?: number, _signal?: AbortSignal, epicRepository?: string) => params.get("scope") === "unsupported-target" ? api.campaignIssueScope(id)
     : ({ campaignSessionId: id, repository: "team/repo", issueNumbers: [], revision: 0,
     ...scopeCompatibility, outsideScope: [{ workItemId: "scope-fixture", title: "Member work", issue: { repository: "team/repo", number: 124 }, sessionId: "s_child" }],
     candidates: [{ issue: { repository: "team/repo", number: 123 }, title: "Composer Epic", source: "umbrella" as const },
@@ -1015,6 +1015,12 @@ const client = {
     ...(params.get("scope") === "proposal-waiting" ? { issueNumbers: [], scopeProposals: [] } : {}),
     ...(params.get("scope") === "proposal-repositories" ? { issueNumbers: [], scopeProposals: SCOPE_PROPOSALS_ACROSS_REPOSITORIES, repositories: [
       { repository: "team/repo", issueNumbers: [], state: "verified" as const }, { repository: "team/api", issueNumbers: [], state: "verified" as const }] } : {}),
+    // An epic resolved in another repository (#4118): team/repo#123 is held, so team/api#123 is another issue.
+    ...(params.get("scope") === "epic-repositories" ? { issueNumbers: [123], revision: 2, outsideScope: [],
+      repositories: [{ repository: "team/repo", issueNumbers: [123], state: "verified" as const }, { repository: "team/api", issueNumbers: [], state: "verified" as const }],
+      candidates: epic !== undefined && epicRepository === "team/api" ? [
+        { issue: { repository: "team/api", number: epic }, title: "Token Refresh Epic", source: "umbrella" as const },
+        { issue: { repository: "team/api", number: 140 }, title: "Timeouts Under Load", source: "sub_issue" as const }] : [] } : {}),
     // `activity=…` (#4146): the authorized scope covers every work item, so nothing reads as outside it.
     ...(activityScenario ? { repository: "picoduck/wollipog", revision: 1, canPropose: false, outsideScope: [], candidates: [],
       issueNumbers: [...new Set(items.flatMap((item) => item.issue ? [item.issue.number] : []))] } : {}),

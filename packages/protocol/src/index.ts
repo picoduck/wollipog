@@ -1007,7 +1007,15 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      Admitting the initial scope re-mints the boundary without the other repositories, and their
 //      Locations show as available in Campaign Status. A v320 runner sends one name to a v318 or v319
 //      control plane, and refuses several. Older dashboards don't show available Locations.
-export const PROTOCOL_VERSION = 320;
+// 322: a campaign's epics are repository-qualified (#4118). `issueAuthority.otherEpics` holds the
+//      boundary's other repositories' epics and is stripped for an older runner, which keeps reading
+//      `epics` as the launch repository's. `lineage.epic` and `get_campaign_issue_scope` take an optional
+//      `repository`. `campaign_launch_inspect` takes `epic` and returns `candidates`, sent only to a
+//      v322 runner; an older one is refused by name and nothing changes. A v322 runner sends a
+//      repository only to a v322 control plane. A Full Control launch's `otherIssues` are read through a
+//      Location of each repository with today's plain issue read. (This change first claimed 317 and
+//      319, which no released version uses for it; 321 is claimed by an open pull request.)
+export const PROTOCOL_VERSION = 322;
 
 export * from "./campaign-authority.js";
 export * from "./decision-questions.js";
@@ -1613,6 +1621,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   repositoryQualifiedProposals: 318,
   /** v320 reads `proposal.repositoryNames` and narrows a campaign's boundary to them (#4117). */
   campaignRepositoryLimits: 320,
+  /** v322 reads `issueAuthority.otherEpics` and resolves an epic's members through a Location (#4118). */
+  repositoryQualifiedEpics: 322,
 } as const;
 
 /* ========================================================================== */
@@ -5523,7 +5533,8 @@ export interface CampaignIssueScopeRequest {
   explanation: string;
   /** `selection` fills the owner's selection from the first message's scope grant (#4103). Under a
    * healthy selection grant a proposal without lineage takes the same route. */
-  lineage?: { kind: "epic"; epic: number } | { kind: "follow_up"; publicationOccurrenceId: string } | { kind: "selection" };
+  lineage?: { kind: "epic"; epic: number; /** The epic's repository, defaulting to the launch repository (#4118). */ repository?: string } |
+    { kind: "follow_up"; publicationOccurrenceId: string } | { kind: "selection" };
   /** The Orchestrator's structured proposal (#4282, protocol 308): each addition's origin and
    * rationale, the count, constraints and withheld operations it read from the owner's message. */
   proposal?: import("./scope-proposal.js").CampaignScopeProposalInput;

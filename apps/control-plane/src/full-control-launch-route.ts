@@ -1,7 +1,8 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   PROJECT_LOCATION_INSPECTION_FAILURES, supportsPacedVideoReviewPeer, humanRequiredRulesExist, runnerSupportsProtocol, campaignLaunchDisclosure,
-  type CampaignLaunchInspectionResult, type CampaignIssueScope, type PreparedCampaignLaunch, type ProjectLocationInspection,
+  campaignScopeIssues, campaignScopeWithIssues, canonicalCampaignIssues,
+  type CampaignLaunchInspectionResult, type CampaignIssueRef, type CampaignIssueScope, type PreparedCampaignLaunch, type ProjectLocationInspection,
 } from "@wollipog/protocol";
 import type { AuthPrincipal } from "./identity.js";
 import type { ControlPlaneDb } from "./db.js";
@@ -109,6 +110,7 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
     const survey = projectLocationSurvey(db, hub, principal, { projectId, launchLocationId,
       rootProtocolVersion: runner.protocolVersion, timeoutMs: dependencies.inspectionTimeoutMs });
     let inspection: CampaignLaunchInspectionResult | undefined;
+    let otherIssuesRead = false;
     try {
       const [launched] = await Promise.all([
         inspectCampaignWorkspace(hub, runner, initial.plan.workspaceId, [...(body.issueNumbers ?? [])].sort((a, b) => a - b),
@@ -116,6 +118,7 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
         survey.inspect(lifetime.signal),
       ]);
       inspection = launched;
+      otherIssuesRead = await survey.readOtherIssues(canonicalCampaignIssues(body.otherIssues ?? []) ?? [], lifetime.signal);
     } finally { reply.raw.off("close", onClose); }
     if (lifetime.signal.aborted) {
       request.log.info({ event: "full_control_launch_preflight_cancelled", requestId: request.id,
@@ -141,7 +144,7 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
     const agent = runnerNow.agents.find((candidate) => candidate.id === plan.agentId);
     const policyIds = body.overrides?.delegatablePolicyIds ?? [];
     const { preflight, proposal } = campaignLaunchPreflight({
-      request: body, plan, runner: runnerNow, inspection, organizationId: principal.organizationId,
+      request: body, plan, runner: runnerNow, inspection, organizationId: principal.organizationId, otherIssuesRead,
       projectLocations: survey.settled(),
       projectDefaults: plan.projectId ? db.projectChildSessionDefaults(plan.projectId) : null,
       accountingError: (costProtected) => db.campaignBudgetAccountingError(plan.driver, plan.config.model, costProtected),
@@ -169,8 +172,9 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
     }
     // The one explicit Human authorization mints scope and authority from the reviewed inspection.
     const now = Date.now();
-    const issueScope: CampaignIssueScope = { repository: proposal.repository, issueNumbers: [...proposal.issueNumbers],
+    const launchScope: CampaignIssueScope = { repository: proposal.repository, issueNumbers: [...proposal.issueNumbers],
       revision: 1, authorizedByUserId: principal.userId, authorizedAt: now };
+    const issueScope = proposal.otherIssues ? campaignScopeWithIssues(launchScope, [...campaignScopeIssues(launchScope), ...proposal.otherIssues]) : launchScope;
     const control = authorizeFullControl(principal, issueScope, proposal, 1, now);
     if (control?.mode !== "full_control") return reply.code(409).send({ error: "the reviewed proposal is outside the Full Control schema", preflight });
     const evidence = preflight.summary.evidence;
@@ -227,6 +231,23 @@ function projectLocationSurvey(db: ControlPlaneDb, hub: Hub, principal: AuthPrin
       const results = await Promise.all(others.map((location) => inspectProjectLocation({ db, hub }, location.id, { projectId: projectId!,
         signal, timeoutMs: input.timeoutMs, requireProtocol: "campaignRepositoryBoundary" })));
       others.forEach((location, index) => inspections.set(location.id, results[index]!));
+    },
+    /** Reads each issue a launch names in another repository (#4118) through a Location of that
+     * repository, never through the launch runner, once `inspect` has said which is which. */
+    async readOtherIssues(issues: readonly CampaignIssueRef[], signal: AbortSignal): Promise<boolean> {
+      const groups = new Map<string, number[]>();
+      for (const issue of issues) groups.set(issue.repository, [...groups.get(issue.repository) ?? [], issue.number]);
+      const reads = await Promise.all([...groups].map(async ([repository, issueNumbers]) => {
+        const location = others.find((candidate) => {
+          const inspection = inspections.get(candidate.id);
+          return inspection?.ok && inspection.location.repository === repository;
+        });
+        if (!location) return false;
+        const read = await inspectProjectLocation({ db, hub }, location.id, { projectId: projectId!, signal,
+          timeoutMs: input.timeoutMs, requireProtocol: "campaignRepositoryBoundary", issueNumbers });
+        return read.ok && read.location.repository === repository;
+      }));
+      return reads.every(Boolean);
     },
     settled(): { launchLocationId: string | null; locations: CampaignProjectLocation[]; inspections: Map<string, ProjectLocationInspection> } | null {
       if (!locations) return null;

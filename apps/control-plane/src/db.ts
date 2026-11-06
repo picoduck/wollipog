@@ -18110,7 +18110,7 @@ export class ControlPlaneDb {
         return location && location.projectId === root.projectId ? [{ locationId, name: location.name, repository: entry.repository.toLowerCase() }] : [];
       })) : [];
       const reminted = boundary && (agentSessionId ? narrowed : this.boundaryTrailsHumanScope(root.id, policy))
-        ? remintCampaignBoundary(boundaryWithScopedEpics(narrowed ? { ...boundary, repositories: kept! } : boundary, scope.issueNumbers), scope, userId, now) : null;
+        ? remintCampaignBoundary(boundaryWithScopedEpics(narrowed ? { ...boundary, repositories: kept! } : boundary, scope), scope, userId, now) : null;
       if (narrowed && reminted?.mode !== "full_control") { this.db.exec("ROLLBACK"); return null; }
       // The owner approving the proposal a failed or uncertain scope grant routed to them (#4102)
       // also sets the derived issue limit that grant could not.
@@ -18162,7 +18162,7 @@ export class ControlPlaneDb {
         if (reminted && memberPolicy.control?.mode === "full_control") memberPolicy.control = structuredClone(reminted);
         else if (memberPolicy.control?.mode === "full_control") {
           // Whoever approved it, an issue the scope no longer holds is no longer an epic (#3920).
-          memberPolicy.control = { ...memberPolicy.control, boundary: boundaryWithScopedEpics(memberPolicy.control.boundary, scope.issueNumbers) };
+          memberPolicy.control = { ...memberPolicy.control, boundary: boundaryWithScopedEpics(memberPolicy.control.boundary, scope) };
           if (agentSessionId) {
             memberPolicy.control.boundary.issueScopeRevision = scope.revision;
             if (agentGrown !== undefined && memberPolicy.control.boundary.issueAuthority) memberPolicy.control.boundary.issueAuthority.maxIssues = agentGrown;
@@ -18259,7 +18259,7 @@ export class ControlPlaneDb {
       const control = policy?.control, scope = policy?.issueScope;
       const reminted = policy && control?.mode === "full_control" && scope && scope.revision !== control.boundary.issueScopeRevision &&
         scope.authorizedByUserId === userId && this.boundaryTrailsHumanScope(rootId, policy)
-        ? remintCampaignBoundary(boundaryWithScopedEpics(control.boundary, scope.issueNumbers), scope, userId, scope.authorizedAt) : null;
+        ? remintCampaignBoundary(boundaryWithScopedEpics(control.boundary, scope), scope, userId, scope.authorizedAt) : null;
       if (reminted?.mode !== "full_control" || reminted.boundary.issueAuthority &&
           campaignScopeIssues(scope!).length + this.unsettledPublicationSlots(rootId) > this.campaignIssueLimit(rootId, reminted.boundary.issueAuthority.maxIssues)) {
         this.db.exec("ROLLBACK"); return null;

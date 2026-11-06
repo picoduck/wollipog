@@ -1232,8 +1232,8 @@ export function createApiClient(transport: ApiTransport) {
       `/api/sessions/${encodeURIComponent(id)}/descendant-requests`,
       { signal },
     ),
-  campaignIssueScope: (id: string, epic?: number, signal?: AbortSignal) =>
-    req<import("@wollipog/protocol").CampaignIssueScopeView>(`/api/sessions/${encodeURIComponent(id)}/campaign/issue-scope${epic === undefined ? "" : `?epic=${epic}`}`, { signal }),
+  campaignIssueScope: (id: string, epic?: number, signal?: AbortSignal, repository?: string) =>
+    req<import("@wollipog/protocol").CampaignIssueScopeView>(`/api/sessions/${encodeURIComponent(id)}/campaign/issue-scope${epic === undefined ? "" : `?epic=${epic}${repository ? `&repository=${encodeURIComponent(repository)}` : ""}`}`, { signal }),
   proposeCampaignIssueScope: (id: string, proposal: import("@wollipog/protocol").CampaignIssueScopeRequest) =>
     req<import("@wollipog/protocol").WorkflowDecisionView>(`/api/sessions/${encodeURIComponent(id)}/campaign/issue-scope/proposals`, { method: "POST", body: JSON.stringify(proposal) }),
   /** The campaign's Decision Model checks (#4101, #4104), each beside the request it affected. */

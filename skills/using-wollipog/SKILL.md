@@ -852,7 +852,8 @@ the work needs one; once the owner adds it, it joins the campaign on its own.
 
 ## Inspecting and Changing Campaign Issue Scope
 
-Before delegating an epic, use `get_campaign_issue_scope` (CLI: `wollipog issue-scope get --epic <number>`).
+Before delegating an epic, use `get_campaign_issue_scope` (CLI: `wollipog issue-scope get --epic <number>`,
+with `--repository <owner/name>` for an epic outside the launch repository).
 It returns authorized repository-qualified issues grouped by repository under `repositories` (one entry
 per campaign repository, the launch repository first, with whether one of its Locations is online), a
 revision, recorded work outside scope, and reviewable umbrella/member candidates. Native GitHub sub-issues and leading checklist entries under Units, Members,
@@ -868,7 +869,7 @@ refuses the whole request by name. A repository outside the campaign is refused 
 `repository_outside_boundary` before any runner call: if the campaign's Project has a Location of it,
 ask the owner with `request_campaign_repository_addition`, then retry once it is carried out. Custom requires an authenticated human to approve the exact change. In Full Control with a separate
 human-established issue boundary, use `lineage: {kind: "epic", epic: <number>}` for verified intended
-members or `{kind: "follow_up", publicationOccurrenceId: <id>}` for an exact authorized publication.
+members (adding `repository` for an epic outside the launch repository; its members must all be in it) or `{kind: "follow_up", publicationOccurrenceId: <id>}` for an exact authorized publication.
 A publication the boundary's author or a campaign owner approved as a person under the current
 objective also qualifies.
 

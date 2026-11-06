@@ -47,13 +47,21 @@ export function campaignRepositoryLimits(policy: Pick<OrchestratorCampaignPolicy
 }
 
 /** The runner's diagnostic copy of a campaign's control. A pre-v288 runner rejects a boundary with
- * a `repositories` list (#4117), so it receives the boundary without it, which names the same first
- * repository. The server keeps and enforces the full boundary. */
+ * a `repositories` list (#4117), and a pre-v322 one an issue authority with `otherEpics` (#4118), so
+ * each receives the boundary without them, which names the same first repository and its epics. The
+ * server keeps and enforces the full boundary. */
 export function campaignControlForRunner(control: CampaignControl, protocolVersion: number | null | undefined): CampaignControl {
-  if (control.mode !== "full_control" || control.boundary.repositories === undefined ||
-      runnerSupportsProtocol(protocolVersion, "campaignRepositoryBoundary")) return control;
-  const { repositories: _repositories, ...boundary } = control.boundary;
-  return { mode: "full_control", boundary };
+  if (control.mode !== "full_control") return control;
+  let boundary = control.boundary;
+  if (boundary.repositories !== undefined && !runnerSupportsProtocol(protocolVersion, "campaignRepositoryBoundary")) {
+    const { repositories: _repositories, ...rest } = boundary;
+    boundary = rest;
+  }
+  if (boundary.issueAuthority?.otherEpics !== undefined && !runnerSupportsProtocol(protocolVersion, "repositoryQualifiedEpics")) {
+    const { otherEpics: _otherEpics, ...issueAuthority } = boundary.issueAuthority;
+    boundary = { ...boundary, issueAuthority };
+  }
+  return boundary === control.boundary ? control : { mode: "full_control", boundary };
 }
 
 /** The authoritative order of the runner's copy of a campaign's control (#3363): the campaign
@@ -83,10 +91,14 @@ export function remintCampaignBoundary(boundary: CampaignAuthorityBoundary, scop
 
 /** The boundary with its authorized epics narrowed to the issue scope it will name (#3920): an
  * issue removed from the scope is no longer an epic whose members lineage can add. Additions never
- * become epics here; only an authorization that names them as its issues does. */
-export function boundaryWithScopedEpics(boundary: CampaignAuthorityBoundary, issueNumbers: readonly number[]): CampaignAuthorityBoundary {
+ * become epics here; only an authorization that names them as its issues does. An epic is narrowed
+ * by its own repository's part of the scope (#4118). */
+export function boundaryWithScopedEpics(boundary: CampaignAuthorityBoundary, scope: Pick<CampaignIssueScope, "repository" | "issueNumbers" | "issues">): CampaignAuthorityBoundary {
   const issues = boundary.issueAuthority;
-  return issues ? { ...boundary, issueAuthority: { ...issues, epics: issues.epics.filter((n) => issueNumbers.includes(n)) } } : boundary;
+  if (!issues) return boundary;
+  const { otherEpics, ...rest } = issues;
+  const kept = otherEpics?.filter((epic) => campaignScopeHolds(scope, epic));
+  return { ...boundary, issueAuthority: { ...rest, epics: issues.epics.filter((n) => scope.issueNumbers.includes(n)), ...(kept?.length ? { otherEpics: kept } : {}) } };
 }
 
 export function campaignBoundaryCurrent(controller: Pick<SessionView, "orchestratorPolicy" | "parentControlPolicy">): boolean {

@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 import { campaignScopeChangeGroups, type CampaignIssueScopeSnapshot, type CampaignIssueScopeView, type SessionView } from "@wollipog/protocol";
 import { browserRandomUUID } from "../browser-crypto.js";
-import { Checkbox } from "./ui/ChoiceControls.js";
+import { Checkbox, Select } from "./ui/ChoiceControls.js";
 import { useApi } from "../api-context.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
@@ -66,10 +66,11 @@ export function CampaignIssueScopePanel({ session, campaignId, policyRevision, b
   const [view, setView] = useState<CampaignIssueScopeView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
-  const [selected, setSelected] = useState<number[]>([]);
+  const [selected, setSelected] = useState<Array<{ repository: string; number: number }>>([]);
   const [additions, setAdditions] = useState("");
   const [removals, setRemovals] = useState("");
   const [epic, setEpic] = useState("");
+  const [epicRepository, setEpicRepository] = useState("");
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState(false);
   const revision = session.orchestratorPolicy?.issueScope?.revision ?? 0;
@@ -109,6 +110,13 @@ export function CampaignIssueScopePanel({ session, campaignId, policyRevision, b
   const grouped = repositories.length > 1;
   const held = (repository: string, number: number) =>
     repositories.some((entry) => entry.repository.toLowerCase() === repository.toLowerCase() && entry.issueNumbers.includes(number));
+  // The same number in two repositories is two issues, so a selection names its repository.
+  const isSelected = (repository: string, number: number) =>
+    selected.some((issue) => issue.number === number && issue.repository === repository.toLowerCase());
+  const toggleSelected = (repository: string, number: number, checked: boolean) => setSelected((current) => {
+    const rest = current.filter((issue) => !(issue.number === number && issue.repository === repository.toLowerCase()));
+    return checked ? [...rest, { repository: repository.toLowerCase(), number }] : rest;
+  });
   const parse = (text: string) => {
     const names = repositories.map((entry) => entry.repository.toLowerCase());
     const result = new Map<string, { repository: string; number: number }>();
@@ -127,8 +135,7 @@ export function CampaignIssueScopePanel({ session, campaignId, policyRevision, b
     if (!view || busy) return;
     setBusy(true); setError(null);
     try {
-      const launch = view.repository.toLowerCase();
-      const add = [...new Map([...selected.map((number) => ({ repository: launch, number })), ...parse(additions)]
+      const add = [...new Map([...selected, ...parse(additions)]
         .map((issue) => [`${issue.repository}#${issue.number}`, issue] as const)).values()].filter((issue) => !held(issue.repository, issue.number));
       const remove = parse(removals);
       if (!add.length && !remove.length) throw new Error("Select at least one issue addition or removal.");
@@ -144,7 +151,9 @@ export function CampaignIssueScopePanel({ session, campaignId, policyRevision, b
     setBusy(true); setError(null);
     try {
       if (!/^[1-9][0-9]*$/u.test(epic) || !Number.isSafeInteger(Number(epic))) throw new Error("Enter a positive epic issue number.");
-      const next = await api.campaignIssueScope(campaignId, Number(epic));
+      // The launch repository is the default, so it is never named.
+      const named = epicRepository && epicRepository !== view?.repository.toLowerCase() ? epicRepository : undefined;
+      const next = await api.campaignIssueScope(campaignId, Number(epic), undefined, named);
       setView(next); setSelected([]);
     } catch (e) { setError(e instanceof Error ? e.message : "Could not resolve epic members."); }
     finally { setBusy(false); }
@@ -192,20 +201,22 @@ export function CampaignIssueScopePanel({ session, campaignId, policyRevision, b
       {!view.supported ? <Notice tone="neutral" title="Scope Changes Unavailable" actions={error ? undefined : refreshButton}>{view.compatibilityMessage}</Notice> : view.canPropose ? <>
         {view.candidates && view.candidates.length > 0 && <fieldset className="field"><legend>Proposed Epic Members</legend>
           <p>Choose the umbrella issue and intended members. Dependencies and incidental references are excluded.</p>
-          <ul className="campaign-detail-list">{view.candidates.map((candidate) => <li key={candidate.issue.number}><Checkbox
-            checked={selected.includes(candidate.issue.number)} disabled={view.issueNumbers.includes(candidate.issue.number) || busy}
+          <ul className="campaign-detail-list">{view.candidates.map((candidate) => <li key={`${candidate.issue.repository}#${candidate.issue.number}`}><Checkbox
+            checked={isSelected(candidate.issue.repository, candidate.issue.number)} disabled={held(candidate.issue.repository, candidate.issue.number) || busy}
             label={`${candidate.issue.repository}#${candidate.issue.number}`} helper={candidate.title}
-            onChange={(checked) => setSelected((current) => checked ? [...current, candidate.issue.number] : current.filter((n) => n !== candidate.issue.number))}
+            onChange={(checked) => toggleSelected(candidate.issue.repository, candidate.issue.number, checked)}
           /></li>)}</ul>
         </fieldset>}
         {selectable && <div className="field" role="group" aria-labelledby={contextLabelId} aria-describedby={contextHelpId}>
           <span id={contextLabelId}>Context-Only References</span>
           <p className="field-helper" id={contextHelpId}>The first message mentioned these issues without asking the campaign to work on them, so they grant no authority. Select any to add them through scope approval.</p>
           <ul className="campaign-detail-list">{context.map((n) => <li key={n}><Checkbox
-            checked={selected.includes(n)} disabled={busy} label={`${view.repository}#${n}`}
-            onChange={(checked) => setSelected((current) => checked ? [...current, n] : current.filter((value) => value !== n))}
+            checked={isSelected(view.repository, n)} disabled={busy} label={`${view.repository}#${n}`}
+            onChange={(checked) => toggleSelected(view.repository, n, checked)}
           /></li>)}</ul>
         </div>}
+        {grouped && <div className="field"><span>Epic Repository</span><Select label="Epic Repository" value={epicRepository || view.repository.toLowerCase()}
+          options={repositories.map((entry) => ({ value: entry.repository.toLowerCase(), label: entry.repository }))} onChange={setEpicRepository} disabled={busy} /></div>}
         <label className="field"><span>Epic Issue Number</span><input type="text" inputMode="numeric" value={epic} onChange={(e) => setEpic(e.target.value)} disabled={busy} /></label>
         <BusyButton className="btn ghost sm" busy={busy} progress="Resolving epic members…" onClick={() => void resolveEpic()}>Resolve Epic Members</BusyButton>
         <label className="field"><span>Issue Additions</span><input type="text" value={additions} onChange={(e) => setAdditions(e.target.value)} disabled={busy} /></label>
