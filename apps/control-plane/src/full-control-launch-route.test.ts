@@ -742,12 +742,12 @@ test("an empty launch scope delegates no issue writes: additions are refused and
     assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, []);
     assert.deepEqual(control.boundary.issueAuthority!.epics, []);
 
-    // The Orchestrator cannot widen an empty scope: an addition needs epic or in-scope lineage.
+    // The Orchestrator cannot widen an empty scope: an addition without lineage only asks the owner (#4267).
     const addition = await f.sessions.proposeCampaignIssueScope(root.id, { requestId: "add-5", expectedRevision: 1,
       additions: [{ repository: "owner/repo", number: 5 }], removals: [], explanation: "Fixture addition without lineage" });
-    assert.equal(addition.ok, false);
-    assert.equal(addition.status, 403);
-    assert.match(addition.error!, /authorized epic or exact related-publication lineage/);
+    assert.equal(addition.ok, true, addition.error ?? "");
+    assert.equal(addition.data!.authority, "human");
+    assert.equal(addition.data!.status, "pending");
     const epic = await f.sessions.proposeCampaignIssueScope(root.id, { requestId: "add-epic", expectedRevision: 1,
       additions: [{ repository: "owner/repo", number: 5 }], removals: [], explanation: "Fixture epic addition", lineage: { kind: "epic", epic: 5 } });
     assert.equal(epic.ok, false);
@@ -2124,14 +2124,18 @@ test("a selection grant's healthy proposal is reviewed, and a healthy grant with
     assert.equal(proposed.ok, true, proposed.error ?? "");
     assert.equal(proposed.data!.authority, "orchestrator");
     assert.deepEqual((proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).lineage, { kind: "selection" });
-    // A healthy grant without a selection keeps today's lineage rule.
+    // A healthy grant without a selection keeps the lineage rule: an addition without lineage is not
+    // admitted, and goes to the owner as one typed approval instead of a refusal (#4267).
     f.decision.state.answer = () => grantVerdict({ explicit: issues(12) });
     const { id: named } = await firstMessageLaunch(f, server);
     assert.equal((await f.sessions.promptFromHuman(f.human, named, "Fix #12")).ok, true);
-    const refused = await f.sessions.proposeCampaignIssueScope(named, { requestId: "no-lineage", expectedRevision: 2,
+    const owners = await f.sessions.proposeCampaignIssueScope(named, { requestId: "no-lineage", expectedRevision: 2,
       additions: [{ repository: "owner/repo", number: 13 }], removals: [], explanation: "One more" });
-    assert.equal(refused.ok, false);
-    assert.equal(refused.errorDetails?.code, "lineage_missing");
+    assert.equal(owners.ok, true, owners.error ?? "");
+    assert.equal(owners.data!.authority, "human");
+    const snapshot = owners.data!.resourceSnapshot as CampaignIssueScopeSnapshot;
+    assert.equal(snapshot.ownerReview?.cause, "lineage_missing");
+    assert.equal(snapshot.grantReview, undefined); assert.equal(snapshot.issueAdmission, undefined);
   } finally { await server.close(); f.db.close(); }
 });
 
@@ -3318,6 +3322,35 @@ test("a scope holds issues in every boundary repository, each verified through a
     assert.equal(moved.ok, false);
     assert.match(moved.error!, /could not verify every proposed change in other\/repo/u);
     assert.ok(p.other.id);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("an Orchestrator's proposal without lineage counts every repository's additions toward the owner's Maximum Issues increase (#4118, #4267)", async () => {
+  const { f, server, id, approve } = await multiRepositoryCampaign();
+  try {
+    const maxIssues = () => (f.db.getSession(id)!.orchestratorPolicy!.control as { boundary: { issueAuthority?: { maxIssues: number } } }).boundary.issueAuthority!.maxIssues;
+    assert.equal(maxIssues(), 4);
+    const propose = (requestId: string, numbers: number[]) => f.sessions.proposeCampaignIssueScope(id, { requestId,
+      expectedRevision: f.db.getSession(id)!.orchestratorPolicy!.issueScope!.revision,
+      additions: numbers.map((number) => ({ repository: "other/repo", number })), removals: [], explanation: "Three issues in the other repository" });
+    // Only other/repo's three additions take the scope of two past four: none is the launch repository's.
+    const proposed = await propose("other-without-lineage", [40, 41, 42]);
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "human");
+    const snapshot = proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot;
+    assert.deepEqual({ additions: snapshot.additions, otherRepositories: snapshot.otherRepositories, ownerReview: snapshot.ownerReview }, {
+      additions: [], otherRepositories: [{ repository: "other/repo", before: [], additions: [40, 41, 42], removals: [] }],
+      ownerReview: { cause: "lineage_missing", maxIssuesIncrease: { from: 4, increase: 1 } } });
+    assert.equal(f.db.campaignOwnerDecisions(id)?.items[0]?.summary, "Add other/repo#40, other/repo#41, other/repo#42, raising Maximum Issues from 4 to 5");
+    // A repeat of the same change returns that request; one differing only in the other repository is a new one.
+    assert.equal((await propose("other-without-lineage-again", [40, 41, 42])).data!.occurrenceId, proposed.data!.occurrenceId);
+    const different = await propose("other-without-lineage-different", [40, 41, 43]);
+    assert.equal(different.ok, true, different.error ?? "");
+    assert.notEqual(different.data!.occurrenceId, proposed.data!.occurrenceId);
+    assert.equal(approve(different.data!.occurrenceId).ok, true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issues, [{ repository: "other/repo", number: 40 },
+      { repository: "other/repo", number: 41 }, { repository: "other/repo", number: 43 }, { repository: "owner/repo", number: 7 }, { repository: "owner/repo", number: 12 }]);
+    assert.equal(maxIssues(), 5);
   } finally { await server.close(); f.db.close(); }
 });
 

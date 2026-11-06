@@ -279,7 +279,34 @@ consumed, controlled by the root, in its repository, never used to admit an issu
 still in scope, published payload matching exactly, and scope plus reservations within `maxIssues`.
 The admission evidence names which kind it was. Each Orchestrator refusal returns a fixed sentence
 and a bounded `code`, such as `publication_approver_not_owner`, `origin_outside_scope` or
-`lineage_missing`. A campaign owner can still propose any change from Campaign Status.
+`epic_not_authorized`. A campaign owner can still propose any change from Campaign Status.
+
+### Owner Approval of Additions Without Lineage (#4267)
+
+An Orchestrator proposal that adds issues without any lineage, and that no scope grant review takes
+(below), is not refused. It becomes exactly one pending, human-owned `campaign_issue_scope` request
+whose snapshot carries a server-derived `ownerReview: { cause: "lineage_missing" }`, with the exact
+additions, any removals and the Orchestrator's `explanation`. That is the route for an issue the
+owner asks for in conversation after launch: the owner approves or denies the proposal in one step
+from their Inbox or from Campaign Status's **Waiting for You**, where it is listed as a Scope
+Approval, instead of retyping it.
+
+- When the scope plus the slots consumed publications still hold would exceed the campaign's issue
+  limit, the request states the Maximum Issues increase it needs as `ownerReview.maxIssuesIncrease: { from, increase }`.
+  Approving it applies the additions and re-mints the boundary with Maximum Issues raised from
+  `from` by exactly `increase`; denying applies neither. The Follow-Up Limit does not change. A
+  proposal that would need more than the 100-issue ceiling is still refused as `capacity_exhausted`,
+  and so is a lineage-bearing proposal over the limit. Pending and approved publications are not
+  counted, because the owner's approval revokes them, exactly as its resolution counts the limit.
+- Proposing the same additions and removals at the same scope revision while the request is pending
+  returns that same occurrence, whatever the explanation now says.
+- Only the owner can approve it, as any human-owned scope request: an Orchestrator can neither
+  resolve nor consume it, and an agent cannot supply an `ownerReview` or a larger increase itself.
+  Approval still revokes and lists every outstanding decision (#3915). If Maximum Issues moved since
+  the request (any boundary change revokes it anyway), approving it is refused as stale and applies
+  nothing.
+
+Epic, follow-up and selection lineage, the selection review below and Custom campaigns are unchanged.
 
 When the owner's first message asked the campaign to choose issues (a scope grant with a selection,
 #4102), the Orchestrator proposes the issues it chose with `lineage: {kind: "selection"}` and its

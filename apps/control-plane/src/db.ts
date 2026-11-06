@@ -34,7 +34,7 @@ import { PullRequestWatches } from "./pull-request-watches.js";
 import { SessionWaits } from "./session-waits.js";
 import { ReviewSettingsStore, type ReviewPolicyCapture } from "./review-settings.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
-import { campaignScopeChangeBefore, campaignScopeChangeResult, campaignScopeForRepository, campaignScopeIssues, campaignScopeNumbers, campaignScopeWithIssues, canonicalCampaignIssues } from "@wollipog/protocol";
+import { campaignScopeChangeBefore, campaignScopeChangeGroups, campaignScopeChangeResult, campaignScopeForRepository, campaignScopeIssues, campaignScopeNumbers, campaignScopeWithIssues, canonicalCampaignIssues } from "@wollipog/protocol";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
 import {
   isProviderLoginFailureCode, isSessionLaunchFailureCode, type SessionLaunchFailureCode, PROJECT_CREATION_REQUEST_WINDOW_MS,
@@ -44,7 +44,7 @@ import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-
 import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignDispatchScopeRefusal, campaignBoundaryCurrent, campaignIssueInScope, campaignLaunchRepository, campaignScopeRepositories, remintCampaignBoundary } from "./campaign-authority.js";
 import { genericRequestScreenData, storedCredentialScreenFact } from "./credential-screen.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
-import { grantReviewMaxIssues } from "./scope-grant.js";
+import { grantReviewMaxIssues, ownerReviewMaxIssues } from "./scope-grant.js";
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
 import { validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
@@ -17961,6 +17961,14 @@ export class ControlPlaneDb {
       // also sets the derived issue limit that grant could not.
       const grown = reminted?.mode === "full_control" ? grantReviewMaxIssues(policy, snapshot, reminted.boundary, after.length) : undefined;
       if (grown !== undefined && reminted?.mode === "full_control") reminted.boundary.issueAuthority!.maxIssues = grown;
+      // The owner approving an Orchestrator's proposal without lineage (#4267) also raises Maximum
+      // Issues by exactly the increase the request stated, against the limit it was computed from. An
+      // approval that cannot re-mint the boundary, or a limit that moved since, applies nothing.
+      if (snapshot.ownerReview?.maxIssuesIncrease) {
+        const raised = boundary && reminted?.mode === "full_control" ? ownerReviewMaxIssues(snapshot, boundary) : null;
+        if (raised == null || reminted?.mode !== "full_control") { this.db.exec("ROLLBACK"); return null; }
+        reminted.boundary.issueAuthority!.maxIssues = raised;
+      }
       // The re-minted boundary's issue limit holds the scope and every slot a consumed publication
       // still reserves, as an explicit authorization's does.
       if (reminted?.mode === "full_control" && reminted.boundary.issueAuthority && after.length +
@@ -23496,10 +23504,12 @@ export class ControlPlaneDb {
   }
 
   /** The pending decisions a campaign's owner kept (#4064), oldest first, for Campaign Status: the
-   * root's owner decisions, the occurrences it handed over, and those an owner rule kept (#4137). */
+   * root's owner decisions, the occurrences it handed over, those an owner rule kept (#4137), and
+   * the Orchestrator's scope proposals that wait for the owner for want of lineage (#4267). */
   campaignOwnerDecisions(controllingSessionId: string): NonNullable<OrchestratorCampaignProjection["ownerDecisions"]> | null {
     const where = `controlling_session_id=? AND status='pending' AND authority='human'
-      AND (category='owner_decision' OR owner_handoff IS NOT NULL OR owner_rule IS NOT NULL)`;
+      AND (category='owner_decision' OR owner_handoff IS NOT NULL OR owner_rule IS NOT NULL
+        OR category='campaign_issue_scope' AND session_id=controlling_session_id AND json_type(resource_snapshot, '$.ownerReview')='object')`;
     const total = Number((this.stmt(`SELECT COUNT(*) AS count FROM workflow_decisions WHERE ${where}`)
       .get(controllingSessionId) as { count: number }).count);
     if (!total) return null;
@@ -34973,7 +34983,18 @@ function ownerDecisionSummary(snapshot: WorkflowDecisionView["resourceSnapshot"]
       case "merged_branch_deletion": return `Delete branch ${snapshot.branch} in ${snapshot.repository}`;
       case "issue_closure": return `Close ${snapshot.repository}#${snapshot.issue}`;
       case "follow_up_issue_publication": return `Publish ${JSON.stringify(snapshot.sanitizedTitle)} in ${snapshot.repository}`;
-      case "campaign_issue_scope": return `Change the campaign's issue scope in ${snapshot.repository}`;
+      case "campaign_issue_scope": {
+        // An Orchestrator's proposal waiting for the owner names its exact change (#4267).
+        if (!snapshot.ownerReview) return `Change the campaign's issue scope in ${snapshot.repository}`;
+        // Every repository's part, each issue qualified by its own repository (#4118).
+        const groups = campaignScopeChangeGroups(snapshot);
+        const refs = (pick: (group: (typeof groups)[number]) => number[]) =>
+          groups.flatMap((group) => pick(group).map((n) => `${group.repository}#${n}`)).join(", ");
+        const removals = refs((group) => group.removals);
+        const raise = snapshot.ownerReview.maxIssuesIncrease;
+        return `Add ${refs((group) => group.additions)}${removals ? ` and remove ${removals}` : ""}` +
+          (raise ? `, raising Maximum Issues from ${raise.from} to ${raise.from + raise.increase}` : "");
+      }
       case "ui_evidence_approval": return `Review ${snapshot.evidence.length} UI evidence item${snapshot.evidence.length === 1 ? "" : "s"}`;
       default: return snapshot.category;
     }

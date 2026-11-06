@@ -43,12 +43,12 @@ import { DecisionModelSettings } from "./decision-model-settings.js";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, credentialFormFloor, type CredentialScreenFact, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, fullControlAutomaticResponse, type CampaignAuthorityEvaluation, type FullControlAutomaticResponse, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
 import { firstMessageTargetEpics } from "./first-message-issue-intent.js";
-import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, scopeGrantCandidates, writtenAsDigits,
+import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, ownerReviewMaxIssues, scopeGrantCandidates, writtenAsDigits,
   type ScopeGrantFields } from "./scope-grant.js";
 import { recordUnfinishedDecision, runCampaignCheck, type CampaignCheckOutcome } from "./campaign-decision-checks.js";
 import { DecisionInputError } from "./decision-kinds.js";
 import { scopeGrantDigest, scopeReviewInputDigest, scopeReviewInputs, scopeReviewKey } from "./scope-selection.js";
-import { boundedIssueNumbers, validCampaignIssueFacts, type CampaignIssueFacts, type CampaignScopeGrantReview, type DecisionErrorClass, type FullControlScopeGrant } from "@wollipog/protocol";
+import { boundedIssueNumbers, validCampaignIssueFacts, type CampaignIssueFacts, type CampaignScopeGrantReview, type CampaignScopeOwnerReview, type DecisionErrorClass, type FullControlScopeGrant } from "@wollipog/protocol";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
   everyOutstandingScopeDecision, participantScope, participantScopeRefusal, repositoryOutsideBoundary, scopeRequestOutsideBoundary } from "./campaign-issue-scope.js";
@@ -11993,6 +11993,10 @@ export class SessionsService {
       // grant's proposal still goes to the owner, and a healthy grant without one is refused.
       const lineageless = !snapshot.lineage || snapshot.lineage.kind === "selection";
       const grantReview = !human && additionCount && lineageless ? this.scopeGrantReview(latest) : undefined;
+      // Additions without any lineage that no grant review takes go to the owner as one typed request
+      // too (#4267), never refused: the owner approves or denies the exact proposal, with any Maximum
+      // Issues increase it needs, instead of retyping it in Campaign Status.
+      let ownerReview: CampaignScopeOwnerReview | undefined;
       if (!human && boundary && boundary.operations.includes("campaign_issue_scope")) {
         // Each refusal names the one condition that failed, in a fixed sentence and code (#2940).
         const refuse = (code: CampaignScopeAdmissionFailure, details: Record<string, number> = {}): ServiceResult<WorkflowDecisionView> => {
@@ -12003,17 +12007,28 @@ export class SessionsService {
         };
         const excludedReservation = snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined;
         const scopeSize = campaignScopeChangeResult(snapshot).length;
-        const requested = scopeSize + reservedPublicationSlots(this.db, latest, excludedReservation);
+        const toOwner = !grantReview && additionCount > 0 && !snapshot.lineage;
+        // The owner's approval revokes every outstanding decision (#3915), pending and approved
+        // publications included, so only the slots consumed publications still hold count against
+        // it, exactly as its resolution counts them; an Orchestrator's own admission counts them all.
+        const requested = scopeSize + (toOwner ? this.db.unsettledPublicationSlots(sessionId) : reservedPublicationSlots(this.db, latest, excludedReservation));
         // The owner's approval of a failed or uncertain grant's proposal sets the derived limit that
         // grant could not, so only the limit it may reach applies here.
         const limit = this.db.campaignIssueLimit(sessionId,
           (grantReview ? grantReviewMaxIssues(latest.orchestratorPolicy, { grantReview }, boundary, scopeSize) : undefined) ?? boundary.issueAuthority!.maxIssues);
-        if (requested > limit) return refuse("capacity_exhausted", { limit, requested });
+        if (toOwner) {
+          ownerReview = { cause: "lineage_missing" };
+          // The owner's approval raises Maximum Issues by exactly what the additions need, never past
+          // the 100-issue ceiling no authorization can raise.
+          if (requested > limit) {
+            if (requested > 100) return refuse("capacity_exhausted", { limit, requested });
+            ownerReview.maxIssuesIncrease = { from: boundary.issueAuthority!.maxIssues, increase: requested - limit };
+          }
+        } else if (requested > limit) return refuse("capacity_exhausted", { limit, requested });
         let evidence: unknown = { removals: snapshot.removals, ...(snapshot.otherRepositories ? { otherRepositories: snapshot.otherRepositories } : {}) };
-        if (grantReview) {
+        if (grantReview || ownerReview) {
           // No admission: the decision is the owner's.
-        } else if (additionCount) {
-          if (!snapshot.lineage) return refuse("lineage_missing");
+        } else if (additionCount && snapshot.lineage) {
           if (snapshot.lineage.kind === "selection") return refuse("selection_not_granted");
           if (snapshot.lineage.kind === "epic") {
             if (!boundary.issueAuthority!.epics.includes(snapshot.lineage.epic)) return refuse("epic_not_authorized");
@@ -12073,12 +12088,30 @@ export class SessionsService {
               publicationAuthority: approval ? "human_approval" : "bounded_admission", ...(approval ? { approvalBasis: approval.basis, approvalObjective: approval.objective } : {}), outcome: "admitted" }));
           }
         }
-        if (!grantReview) snapshot.issueAdmission = { boundaryRevision: boundary.revision, evidenceDigest: issueEvidenceDigest(evidence) };
+        if (!grantReview && !ownerReview) snapshot.issueAdmission = { boundaryRevision: boundary.revision, evidenceDigest: issueEvidenceDigest(evidence) };
       }
       if (grantReview) snapshot.grantReview = grantReview;
+      if (ownerReview) snapshot.ownerReview = ownerReview;
       const current = this.db.getSession(sessionId);
       if (!current || (current.orchestratorPolicy?.issueScope?.revision ?? 0) !== snapshot.expectedRevision ||
-          snapshot.issueAdmission && issueBoundary(current)?.revision !== snapshot.issueAdmission.boundaryRevision) return fail("Issue authority changed during lineage inspection; refresh the proposal", 409);
+          snapshot.issueAdmission && issueBoundary(current)?.revision !== snapshot.issueAdmission.boundaryRevision ||
+          ownerReview && issueBoundary(current)?.revision !== boundary?.revision) return fail("Issue authority changed during lineage inspection; refresh the proposal", 409);
+      if (ownerReview) {
+        // One owner request per proposal: re-proposing the same change at this revision while it is
+        // pending returns that request rather than replacing it, whatever the explanation now says.
+        const pending = this.db.pendingWorkflowDecisionsForController(sessionId).find((d) => {
+          const s = d.resourceSnapshot;
+          return d.sessionId === sessionId && d.authority === "human" && s.category === "campaign_issue_scope" && s.ownerReview !== undefined &&
+            s.expectedRevision === snapshot.expectedRevision && JSON.stringify(s.additions) === JSON.stringify(snapshot.additions) &&
+            JSON.stringify(s.removals) === JSON.stringify(snapshot.removals) && JSON.stringify(s.ownerReview) === JSON.stringify(ownerReview) &&
+            // Other repositories' parts are part of the exact change too (#4118).
+            JSON.stringify(s.otherRepositories ?? []) === JSON.stringify(snapshot.otherRepositories ?? []);
+        });
+        if (pending) return ok(pending);
+        this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "scope_proposal", sessionId, requestId: request.requestId,
+          boundaryRevision: boundary!.revision, scopeRevision: snapshot.expectedRevision, lineage: "none", outcome: "owner_review", cause: ownerReview.cause,
+          ...(ownerReview.maxIssuesIncrease ? { maxIssuesIncrease: ownerReview.maxIssuesIncrease.increase } : {}) }));
+      }
       const controller = this.workflowDecisionController(current, "campaign_issue_scope");
       if (current.orchestratorPolicy?.control?.mode === "full_control" && (!controller ||
           this.evaluateWorkflowDecisionAuthority(controller.session, controller.policy, sessionId, snapshot).effectiveOwner === "human")) {
@@ -13675,6 +13708,7 @@ export class SessionsService {
       if (latest && snapshot.verifiedPublications) latest.verifiedPublications = snapshot.verifiedPublications;
       if (latest && snapshot.grantReview) latest.grantReview = snapshot.grantReview;
       if (latest && snapshot.selectionReview) latest.selectionReview = snapshot.selectionReview;
+      if (latest && snapshot.ownerReview) latest.ownerReview = snapshot.ownerReview;
       if (latest && authority === "human" && currentChild.orchestratorPolicy?.control?.mode === "full_control") {
         latest.affectedDecisions = everyOutstandingScopeDecision(this.db, childSessionId);
       }
@@ -13696,9 +13730,18 @@ export class SessionsService {
       // within the scope limit that boundary names, counting the slots consumed publications still
       // hold other than those this change admits: only a fresh authorization can raise that limit.
       const control = currentChild.orchestratorPolicy?.control;
+      // The owner approving an Orchestrator's proposal without lineage raises Maximum Issues by
+      // exactly the increase it states (#4267). A limit that moved since it was requested makes the
+      // request stale: approving it then applies neither the scope nor the increase.
+      const raised = authority === "human" && snapshot.ownerReview?.maxIssuesIncrease
+        ? control?.mode === "full_control" ? ownerReviewMaxIssues(snapshot, control.boundary) ?? null : null : undefined;
+      if (raised === null) {
+        this.revokeWorkflowDecision(decision, { reason: "approval_refused_stale", triggeredBy: actor });
+        return fail("Campaign authority or its Maximum Issues changed since this request. Refresh Campaign Status and request approval of a new exact proposal.", 409);
+      }
       // The owner approving a failed or uncertain grant's proposal sets the derived limit it could not (#4102).
       const maxIssues = authority === "human" && control?.mode === "full_control"
-        ? grantReviewMaxIssues(currentChild.orchestratorPolicy, snapshot, control.boundary,
+        ? raised ?? grantReviewMaxIssues(currentChild.orchestratorPolicy, snapshot, control.boundary,
           scopeSize) ?? control.boundary.issueAuthority?.maxIssues
         : undefined;
       const limit = maxIssues === undefined ? undefined : this.db.campaignIssueLimit(childSessionId, maxIssues);
