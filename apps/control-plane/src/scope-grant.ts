@@ -202,6 +202,19 @@ export function grantReviewMaxIssues(
   return Math.min(MAX_MESSAGE_ISSUES, Math.max(issues.maxIssues, followUps === undefined ? MAX_MESSAGE_ISSUES : scopeSize + followUps));
 }
 
+/** The Maximum Issues the owner's approval of an Orchestrator proposal without lineage re-mints
+ * (#4267): the boundary's limit raised by exactly the increase the request stated. Undefined when it
+ * states none. Null when the boundary no longer holds the limit the increase was computed against, or
+ * names no issue limit at all: the request is stale and approving it must not apply. */
+export function ownerReviewMaxIssues(snapshot: Pick<CampaignIssueScopeSnapshot, "ownerReview">,
+  boundary: CampaignAuthorityBoundary): number | null | undefined {
+  const raise = snapshot.ownerReview?.maxIssuesIncrease;
+  if (!raise) return undefined;
+  const issues = boundary.issueAuthority;
+  if (!issues || issues.maxIssues !== raise.from || raise.from + raise.increase > MAX_MESSAGE_ISSUES) return null;
+  return raise.from + raise.increase;
+}
+
 /** The operations a grant leaves: the launch's own, intersected with what the message allows. A
  * grant can never add one. */
 export function grantOperations(launch: readonly CampaignAuthorityOperation[], allowed: readonly string[] | null): CampaignAuthorityOperation[] {

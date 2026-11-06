@@ -103,9 +103,10 @@ export function publicationEvidenceCheck(db: ControlPlaneDb, root: SessionView,
 }
 
 /** Why the server refused an Orchestrator's own Full Control scope change (#2940). Each code names
- * the one condition that failed and maps to a fixed sentence; neither carries issue or payload text. */
+ * the one condition that failed and maps to a fixed sentence; neither carries issue or payload text.
+ * Additions without any lineage are not refused: they become the owner's typed approval (#4267). */
 export type CampaignScopeAdmissionFailure =
-  | "capacity_exhausted" | "lineage_missing" | "epic_not_authorized" | "epic_members_unverified"
+  | "capacity_exhausted" | "epic_not_authorized" | "epic_members_unverified"
   | "follow_ups_not_authorized" | "follow_up_not_single" | "publication_not_found" | "publication_not_consumed"
   | "publication_already_admitted" | "publication_unapproved" | "publication_approved_under_earlier_boundary" | "publication_approver_not_owner"
   | "publication_authority_changed" | "recommendation_not_found" | "recommendation_not_accepted" | "resulting_issue_mismatch" | "origin_outside_scope" | "payload_mismatch"
@@ -120,8 +121,6 @@ export const CAMPAIGN_SCOPE_ADMISSION_REFUSALS: Readonly<Record<CampaignScopeAdm
   capacity_exhausted: { status: 409, message: "Scope and publication reservations exceed this campaign's Maximum Issues, the issue limit " +
     "its Full Control authorization set. Only the person who authorized Full Control can raise it: in Campaign Status, raise the " +
     "Follow-Up Limit, which raises Maximum Issues by as much, or choose No Limit. Ask that person; an Orchestrator can't raise it." },
-  lineage_missing: { status: 403, message: "Scope additions require authorized epic or exact related-publication lineage; incidental references cannot grant scope. " +
-    `Name a human-authorized epic or the consumed publication of an accepted follow-up, or ${HUMAN_SCOPE_ROUTE}.` },
   epic_not_authorized: { status: 403, message: `The named epic is not one this campaign's Full Control boundary authorizes; ${HUMAN_SCOPE_ROUTE}.` },
   epic_members_unverified: { status: 409, message: "Additions are not verified members of a human-authorized epic" },
   follow_ups_not_authorized: { status: 403, message: `This campaign's Full Control boundary does not authorize related follow-ups; ${HUMAN_SCOPE_ROUTE}.` },

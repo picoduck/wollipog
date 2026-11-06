@@ -163,7 +163,9 @@ issue of the campaign repository; they then become the campaign's `issueNumbers`
 them, or a runner older than the issue scope protocol, grants none and leaves the reading with the
 owner. So does a message the server can't show the campaign's owner wrote: only the owner's create
 request or first prompt grants issues. Nothing is granted at creation: the reading settles after
-`createSession` returns, and the campaign holds no issue numbers until then.
+`createSession` returns, and the campaign holds no issue numbers until then. A v302 runner then
+receives the granted numbers for the live Orchestrator without a relaunch (#4269, see
+`docs/campaign-issue-scope.md`); the delivery carries only what the reading granted.
 
 A failed or uncertain reading, or one the floors or the runner cannot confirm, falls back to today's
 Custom human scope approval with no seed. It never falls back to parsing the text. That is the

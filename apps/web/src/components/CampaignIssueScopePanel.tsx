@@ -7,13 +7,30 @@ import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { CampaignScopeGrantSection, ScopeGrantReviewFacts } from "./CampaignScopeGrant.js";
 
+const issueCount = (count: number) => `${count} issue${count === 1 ? "" : "s"}`;
+
+/** Why an Orchestrator's proposal waits for the owner (#4267), and what approving or denying does to
+ * the scope and its Maximum Issues. */
+function ScopeOwnerReviewFacts({ review }: { review: NonNullable<CampaignIssueScopeSnapshot["ownerReview"]> }) {
+  const raise = review.maxIssuesIncrease;
+  return <p>
+    The Orchestrator proposed this change. No authorized epic, published follow-up or issue selection admits it, so it needs your approval.
+    {raise
+      ? ` It needs ${issueCount(raise.increase)} more than Maximum Issues allows. Approving adds the issues and raises Maximum Issues from ${raise.from} to ${raise.from + raise.increase}; denying leaves both unchanged.`
+      : " Denying leaves the scope unchanged."}
+  </p>;
+}
+
 export function CampaignIssueScopeSummary({ snapshot }: { snapshot: CampaignIssueScopeSnapshot }) {
   const refs = (numbers: number[]) => numbers.length ? numbers.map((n) => `${snapshot.repository}#${n}`).join(", ") : "None";
+  const raise = snapshot.ownerReview?.maxIssuesIncrease;
   return <>
     {snapshot.grantReview && <ScopeGrantReviewFacts review={snapshot.grantReview} />}
+    {snapshot.ownerReview && <ScopeOwnerReviewFacts review={snapshot.ownerReview} />}
     <p>{snapshot.explanation}</p>
     <dl className="facts">
       <div><dt>Scope Revision</dt><dd>{snapshot.expectedRevision} to {snapshot.expectedRevision + 1}</dd></div>
+      {raise && <div><dt>Maximum Issues</dt><dd>{raise.from} to {raise.from + raise.increase}</dd></div>}
       <div><dt>Additions</dt><dd>{refs(snapshot.additions)}</dd></div>
       <div><dt>Removals</dt><dd>{refs(snapshot.removals)}</dd></div>
       <div><dt>Affected Assignments</dt><dd>{snapshot.affectedAssignments.length ? snapshot.affectedAssignments.map((a) => `${snapshot.repository}#${a.issue}: ${a.sessionId}`).join(", ") : "None"}</dd></div>

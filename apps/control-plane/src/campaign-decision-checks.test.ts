@@ -44,7 +44,7 @@ function harness(answer: Answer = (kind) => ({ verdict: HEALTHY_VERDICTS[kind]! 
         repository: "team/repo", duplicateSearch: "subject" as const,
         publicationDigest: issueEvidenceDigest({ sanitizedTitle: message.sanitizedTitle, sanitizedBody: message.sanitizedBody, labels: message.labels }) };
       return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: true, repository: "team/repo",
-        ...(message.operation === "synchronize" ? { revision: message.scope.revision } : { candidates: (message.issues ?? [100]).map((number) =>
+        ...(message.operation === "synchronize" ? { revision: message.scope.revision } : message.operation === "grant_issue_numbers" ? { issueNumbersGrant: "applied" as const } : { candidates: (message.issues ?? [100]).map((number) =>
           ({ issue: { repository: "team/repo", number }, title: `Issue ${number}`, source: "sub_issue" as const })) }) };
     }
     if (message.type === "github_issue_closure") {
