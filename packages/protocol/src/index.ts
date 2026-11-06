@@ -925,15 +925,23 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      contract in session-waits.ts. An older control plane refuses the report and the runner
 //      stops reporting that call; an older dashboard ignores the field and shows the lifecycle.
 //      (292, 300, 301 and 302 are claimed by open pull requests.)
-// 301: repository-qualified campaign issue scope (#4118). The control plane stores the scope as
+// 302: granted issue numbers reach a live Custom Orchestrator (#4269). When a Custom campaign's
+//      first-message reading grants issue numbers, the control plane sends its v302 runner a
+//      `campaign_issue_scope` `grant_issue_numbers` operation naming the campaign session and those
+//      numbers. The runner sets them on the live launch policy (the routine-write classifier reads
+//      it on each ask) and on the stored launch metadata (the issue-closure checks read it), only for
+//      that live root Orchestrator and only while it holds no issue numbers and no issue scope; the
+//      same numbers again are a no-op. An older runner is never sent it and keeps the next-launch
+//      path. (299 to 301 are claimed by pull requests still open.)
+// 304: repository-qualified campaign issue scope (#4118). The control plane stores the scope as
 //      `issues`, `{ repository, number }` pairs across the boundary's repositories, and sends each
 //      participating runner only its own Location repository's numbers, in the earlier shape. A
-//      v301 runner accepts that part when its origin is any repository of the boundary, not only
-//      the launch one. An Orchestrator participant in another boundary repository needs v301;
+//      v304 runner accepts that part when its origin is any repository of the boundary, not only
+//      the launch one. An Orchestrator participant in another boundary repository needs v304;
 //      one-repository campaigns are unchanged for older runners. (This change first claimed 290,
-//      293 and 299, which no released version uses; 299, 300, 302 and 303 are claimed by open
+//      293, 299 and 301, which no released version uses; 299, 300 and 303 are claimed by open
 //      pull requests.)
-export const PROTOCOL_VERSION = 301;
+export const PROTOCOL_VERSION = 304;
 
 export * from "./campaign-authority.js";
 export * from "./workflow-decision-owner-rule.js";
@@ -1507,8 +1515,12 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   campaignRepositoryBoundary: 288,
   /** v291 reports issue facts (kind, state, labels, assignees) for selection scope (#4103). */
   campaignIssueFacts: 291,
-  /** v301 synchronizes its own repository's part of a multi-repository issue scope (#4118). */
-  repositoryQualifiedIssueScope: 301,
+  /** v302 (#4269): a `campaign_issue_scope` `grant_issue_numbers` operation hands the issue numbers a
+   * Custom campaign's first-message reading granted to its live Orchestrator. Sent only to a v302
+   * runner; an older one gets the numbers at the provider's next launch, as before. */
+  campaignIssueNumberGrant: 302,
+  /** v304 synchronizes its own repository's part of a multi-repository issue scope (#4118). */
+  repositoryQualifiedIssueScope: 304,
 } as const;
 
 /* ========================================================================== */
@@ -5579,7 +5591,11 @@ export type CampaignIssueScopeMessage = {
        /** v291 (#4103): also report `issueFacts` for each of `issues`. */
        facts?: true } |
      { operation: "publication_inspect"; sanitizedTitle: string; sanitizedBody: string; labels: string[] } |
-     { operation: "synchronize"; scope: CampaignIssueScope; control?: CampaignControl });
+     { operation: "synchronize"; scope: CampaignIssueScope; control?: CampaignControl } |
+     /** v302 (#4269): the issue numbers a Custom campaign's first-message reading granted, for its
+      * live root Orchestrator `campaignSessionId` (always the addressed session). It may only set
+      * numbers on a session holding none and no issue scope; it never widens, scopes or re-targets. */
+     { operation: "grant_issue_numbers"; campaignSessionId: string; issueNumbers: number[] });
 
 /** Bounded host-placement diagnostic; never carries configuration values or runner output. */
 export type HostExecutionTargetRefusalReason =
@@ -5589,6 +5605,21 @@ export type HostExecutionTargetRefusalReason =
   | "filesystem_mismatch"
   | "stale_network_policy"
   | "unsupported_host_boundaries";
+
+/** Why a runner refused a `grant_issue_numbers` delivery (#4269). */
+export type CampaignIssueNumberGrantRefusal =
+  /** The message's issue numbers or campaign session are malformed. */
+  | "invalid"
+  /** The addressed session is not a runner-local Orchestrator. */
+  | "not_orchestrator"
+  /** The grant names another campaign than the addressed session. */
+  | "other_campaign"
+  /** The session has no live provider (stopped, finished, or not launched). */
+  | "not_live"
+  /** The session already holds other issue numbers. */
+  | "issue_numbers_held"
+  /** The session already holds an authorized issue scope. */
+  | "issue_scope_held";
 
 export interface CampaignIssueScopeResultMessage {
   type: "campaign_issue_scope_result";
@@ -5606,6 +5637,11 @@ export interface CampaignIssueScopeResultMessage {
   publicationDigest?: string;
   /** v291 (#4103): the facts of each requested issue, when the inspection asked for them. */
   issueFacts?: CampaignIssueFacts[];
+  /** v302 (#4269): a `grant_issue_numbers` answer. `applied` set the numbers on the live session;
+   * `unchanged` found exactly these numbers already held (a duplicate delivery). A refusal is
+   * `ok: false` with `grantRefusal`. */
+  issueNumbersGrant?: "applied" | "unchanged";
+  grantRefusal?: CampaignIssueNumberGrantRefusal;
   /** Duplicate inspection searched and compared titles by their subject, without a type tag
    * (#2940). Older runners omit it: their search and comparison keep the tag, so they can miss an
    * existing issue that differs only by it, and no bounded publication is admitted through them. */

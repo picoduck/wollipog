@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { CampaignForgeGitLabMergeRequestObservation, CampaignWorkItemSummary } from "@wollipog/protocol";
+import { CAMPAIGN_AUTOMATION_HOLD_REASONS, type CampaignForgeGitLabMergeRequestObservation, type CampaignWorkItemSummary } from "@wollipog/protocol";
 import {
   CAMPAIGN_STATUS_UNSUPPORTED_REASON,
   CAMPAIGN_ORIGIN_FILTER_OPTIONS,
@@ -12,6 +12,7 @@ import {
   RESPONSIBLE_ACTOR_LABELS,
   applyCampaignWorkFilters,
   campaignCostView,
+  campaignRecoveryAutomationNotice,
   campaignStatusAvailability,
   campaignSummaryView,
   campaignWorkItemsQuery,
@@ -396,4 +397,45 @@ test("GitHub facts: no required checks is not passing, an unconfirmed rollup is 
     assert.doesNotMatch(text, /passing|approved|merged/iu, `${reason} never suggests a favourable value`);
     assert.deepEqual(forgePullRequestView({ availability: "unavailable", reason }, now), { kind: "unavailable", forge: "GitHub", reason: text, lastObservedAt: null });
   }
+});
+
+test("a finished campaign's recovery hold reads as neutral or nothing, and real blockers still warn (#3361)", () => {
+  const complete = { state: "lifecycle_held" as const, reason: CAMPAIGN_AUTOMATION_HOLD_REASONS.complete };
+  // Finished: nothing to recover, so nothing shows, even when an older server still sends a reason.
+  for (const status of ["verified_complete", "complete_needs_cleanup", "complete_with_handoffs"] as const) {
+    assert.equal(campaignRecoveryAutomationNotice(status, complete), null, `${status} shows no recovery notice`);
+    assert.equal(campaignRecoveryAutomationNotice(status, { state: "lifecycle_held" }), null);
+    assert.equal(campaignRecoveryAutomationNotice(status, { state: "authority_unavailable", reason: "Boundary gone." }), null,
+      `${status}: a finished campaign has nothing left to recover`);
+  }
+  // Nothing left to recover while the campaign still runs or waits for its owner: neutral, not a warning.
+  for (const status of ["active", "waiting_human", undefined] as const) {
+    assert.deepEqual(campaignRecoveryAutomationNotice(status, complete),
+      { tone: "neutral", title: "No Recovery Needed", body: CAMPAIGN_AUTOMATION_HOLD_REASONS.complete });
+  }
+  // Stuck or Blocked: nothing progresses, so even that hold keeps explaining itself as a warning.
+  for (const status of ["stuck", "blocked"] as const) {
+    assert.equal(campaignRecoveryAutomationNotice(status, complete)?.tone, "warning");
+  }
+  // Genuine blockers keep their warning and the server's exact reason on every unfinished status.
+  const blockers = [
+    { state: "lifecycle_held" as const, reason: CAMPAIGN_AUTOMATION_HOLD_REASONS.lifecycle },
+    { state: "lifecycle_held" as const, reason: CAMPAIGN_AUTOMATION_HOLD_REASONS.recoveryHeld },
+    { state: "authority_unavailable" as const, reason: "The current authority boundary is unavailable; recovery cannot enlarge it." },
+    { state: "unsupported_capability" as const, reason: "The current provider cannot enforce authorized recovery." },
+    { state: "budget_held" as const, reason: "Automatic continuation is blocked by current accounting or an existing allowance." },
+    // The completion wording under any other state is not the server's completion hold.
+    { state: "unsupported_capability" as const, reason: CAMPAIGN_AUTOMATION_HOLD_REASONS.complete },
+  ];
+  for (const status of ["active", "waiting_human", "stuck", "blocked"] as const) {
+    for (const automation of blockers) {
+      assert.deepEqual(campaignRecoveryAutomationNotice(status, automation),
+        { tone: "warning", title: "Authorized Recovery Unavailable", body: automation.reason }, `${status} ${automation.state}`);
+    }
+  }
+  // No reason, or recovery available: nothing to say.
+  assert.equal(campaignRecoveryAutomationNotice("active", { state: "available" }), null);
+  assert.equal(campaignRecoveryAutomationNotice("stuck", { state: "lifecycle_held" }), null);
+  assert.equal(campaignRecoveryAutomationNotice("stuck", undefined), null);
+  for (const title of ["No Recovery Needed", "Authorized Recovery Unavailable"]) assert.equal(titleCaseLabel(title), title);
 });

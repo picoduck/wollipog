@@ -27,9 +27,32 @@ owner rather than granting part of it.
 
 `createSession` is synchronous and the reading isn't, so a campaign is created with no issue numbers.
 Until the reading settles, delegation waits and every GitHub write on an issue takes the person's
-ordinary approval path. The runner's Orchestrator receives the issue numbers at its next provider
-launch, so its routine writes on them keep that approval path until then. Enabling Full Control waits
-for a pending reading.
+ordinary approval path. Enabling Full Control waits for a pending reading.
+
+Once the reading grants issue numbers, the control plane stores them and delivers them to the live
+Orchestrator (#4269): it sends the campaign's runner a `campaign_issue_scope` `grant_issue_numbers`
+operation naming the campaign session and the granted numbers. The runner sets them on the live
+launch policy, which the Claude Code routine-write classifier reads on each ask, and on the stored
+launch metadata, which its issue-closure checks read, so neither needs a relaunch. A provider still
+launching adopts them before it starts, including a restart (of a stopped session, too) whose spec
+predates the grant: the runner remembers each grant it applied and re-applies it wherever a launch
+rebuilds its metadata, but only to a policy holding no issue numbers and no issue scope. The next
+launch carries the same numbers from the control plane. Only Claude Code classifies issue writes this way; other harnesses ask for each write.
+
+The delivery can only fill an empty grant with numbers this control plane already granted:
+
+- The control plane sends it only to the campaign's own root Orchestrator, only while that session
+  holds exactly the granted numbers and no `issueScope`, and never to a stopped, failed, completed or
+  archived session, to a member, or to another campaign's session.
+- The runner refuses it again (`grantRefusal`) for a session already holding other issue numbers or
+  any `issueScope`, one with no live or launching provider, a grant naming another campaign than the
+  addressed session, or malformed numbers. A delivery of the numbers the session already holds is a
+  no-op (`unchanged`).
+- It names no repository, revision, scope or operation, so it can't widen a scope, raise a ceiling,
+  change a repository or grant an operation. An authoritative scope keeps the `synchronize` path.
+- Only a v302 runner (`campaignIssueNumberGrant`) is sent it. An older runner, a disconnected one, or
+  a failed delivery keeps the earlier behavior: the stored numbers reach the provider at its next
+  launch, and its routine writes on them take the person's approval path until then.
 
 Only a message the server knows the campaign's owner wrote grants issues: the owner's create request,
 whose issues carry the launch provenance (`issueNumbersSource: "human_launch_request"`) that Full
@@ -107,7 +130,7 @@ other revocation, or an approval that was never armed stays terminal.
 
 Protocol v208 capability-gates the complete operation before any update. Every active Orchestrator
 participant must run in a Location of one of the campaign's repositories (#4118); finish or move
-incompatible participants first. A participant outside the launch repository needs a v301 runner.
+incompatible participants first. A participant outside the launch repository needs a v304 runner.
 
 ## Repository-Qualified Scope
 

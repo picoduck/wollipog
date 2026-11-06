@@ -120,7 +120,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 301);
+  assert.equal(PROTOCOL_VERSION, 304);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -358,8 +358,12 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 301", () => {
-  assert.equal(PROTOCOL_VERSION, 301);
+test("PROTOCOL_VERSION is 304", () => {
+  assert.equal(PROTOCOL_VERSION, 304);
+  // Only a v302 runner takes a granted issue-number delivery to a live Orchestrator (#4269).
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueNumberGrant, 302);
+  assert.equal(runnerSupportsProtocol(301, "campaignIssueNumberGrant"), false);
+  assert.equal(runnerSupportsProtocol(302, "campaignIssueNumberGrant"), true);
   // Campaign activity statuses reach dashboards from v297 (#4146).
   assert.equal(runnerSupportsProtocol(296, "campaignActivityStatus"), false);
   assert.equal(runnerSupportsProtocol(297, "campaignActivityStatus"), true);
@@ -383,9 +387,9 @@ test("PROTOCOL_VERSION is 301", () => {
   assert.equal(runnerSupportsProtocol(284, "forgeDecisionActions"), true);
   assert.equal(runnerSupportsProtocol(287, "campaignRepositoryBoundary"), false);
   assert.equal(runnerSupportsProtocol(288, "campaignRepositoryBoundary"), true);
-  // A multi-repository issue scope needs a v301 participant outside the launch repository (#4118).
-  assert.equal(runnerSupportsProtocol(300, "repositoryQualifiedIssueScope"), false);
-  assert.equal(runnerSupportsProtocol(301, "repositoryQualifiedIssueScope"), true);
+  // A multi-repository issue scope needs a v304 participant outside the launch repository (#4118).
+  assert.equal(runnerSupportsProtocol(303, "repositoryQualifiedIssueScope"), false);
+  assert.equal(runnerSupportsProtocol(304, "repositoryQualifiedIssueScope"), true);
   // Every name Git accepts is tracked, including `+`, `#` and non-ASCII (#4067).
   for (const name of ["agent/s_f0be1d3165d8", "fix/4067-branches", "release/v0.33.0", "feature/foo+bar", "fix/issue#4067", "ok/é"]) {
     assert.equal(forgeActionBranchName(name), true, name);
