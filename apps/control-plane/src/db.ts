@@ -2992,6 +2992,8 @@ CREATE TABLE IF NOT EXISTS decision_occurrences (
   reason                 TEXT,
   failure_class          TEXT,
   fields                 TEXT,
+  -- #4283: a typed occurrence's questions, answers and threshold; NULL on single-verdict records.
+  typed_answers          TEXT,
   target                 TEXT,
   human_route_claimed_at INTEGER,
   human_routed_at        INTEGER,
@@ -5373,6 +5375,7 @@ interface DecisionOccurrenceRow {
   reason: string | null;
   failure_class: string | null;
   fields: string | null;
+  typed_answers: string | null;
   target: string | null;
   human_route_claimed_at: number | null;
   human_routed_at: number | null;
@@ -5398,6 +5401,8 @@ export interface DecisionOccurrenceRecord {
   failureClass: string | null;
   /** The kind's extra output fields, validated and projected to its schema. */
   fields: Record<string, unknown>;
+  /** A typed occurrence's questions, answers and threshold (#4283); null on single-verdict ones. */
+  typedAnswers: import("@wollipog/protocol").DecisionTypedAnswersView | null;
   target: DecisionModelResolvedTarget | null;
   humanRouteClaimedAt: number | null;
   /** Set once the caller's routing finished, with or without a request. A claim without it was
@@ -6850,6 +6855,12 @@ export class ControlPlaneDb {
     }
     try {
       db.exec("ALTER TABLE skill_git_auto_updates ADD COLUMN checked_modes TEXT");
+    } catch {
+      /* column already present */
+    }
+    try {
+      // #4283: typed Decision answers. Existing occurrences keep their single-verdict form (NULL).
+      db.exec("ALTER TABLE decision_occurrences ADD COLUMN typed_answers TEXT");
     } catch {
       /* column already present */
     }
@@ -12783,10 +12794,11 @@ export class ControlPlaneDb {
     reason?: string;
     failureClass?: string;
     fields?: Record<string, unknown>;
+    typedAnswers?: import("@wollipog/protocol").DecisionTypedAnswersView;
     now: number;
   }): boolean {
     return Number(this.stmt(
-      `UPDATE decision_occurrences SET state=?, verdict=?, reason=?, failure_class=?, fields=?, decided_at=?
+      `UPDATE decision_occurrences SET state=?, verdict=?, reason=?, failure_class=?, fields=?, typed_answers=?, decided_at=?
        WHERE occurrence_id=? AND state='pending'`,
     ).run(
       outcome.state,
@@ -12794,6 +12806,7 @@ export class ControlPlaneDb {
       outcome.reason ?? null,
       outcome.failureClass ?? null,
       outcome.fields ? JSON.stringify(outcome.fields) : null,
+      outcome.typedAnswers ? JSON.stringify(outcome.typedAnswers) : null,
       outcome.now,
       occurrenceId,
     ).changes) === 1;
@@ -12823,6 +12836,10 @@ export class ControlPlaneDb {
     try {
       fields = row.fields ? JSON.parse(row.fields) as Record<string, unknown> : {};
     } catch { /* unreadable fields read as none */ }
+    let typedAnswers: DecisionOccurrenceRecord["typedAnswers"] = null;
+    try {
+      typedAnswers = row.typed_answers ? JSON.parse(row.typed_answers) as NonNullable<DecisionOccurrenceRecord["typedAnswers"]> : null;
+    } catch { /* unreadable answers read as none; the verdict and reason remain */ }
     try {
       target = row.target ? JSON.parse(row.target) as DecisionModelResolvedTarget : null;
     } catch { /* an unreadable target reads as absent */ }
@@ -12843,6 +12860,7 @@ export class ControlPlaneDb {
       reason: row.reason,
       failureClass: row.failure_class,
       fields,
+      typedAnswers,
       target,
       humanRouteClaimedAt: row.human_route_claimed_at,
       humanRoutedAt: row.human_routed_at,
