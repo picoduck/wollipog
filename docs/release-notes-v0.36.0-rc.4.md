@@ -1,6 +1,6 @@
 # Wollipog v0.36.0-rc.4 — Release Candidate
 
-This fourth release candidate for Wollipog v0.36.0 includes the previous candidates and changes merged through #4218. The additions below cover changes since v0.36.0-rc.3; see the [previous candidate’s notes](https://github.com/picoduck/wollipog/releases/tag/v0.36.0-rc.3) for earlier v0.36.0 changes.
+This fourth release candidate for Wollipog v0.36.0 includes the previous candidates and changes on main through commit `bf9d1cc0764a8d79f7db2b36bc57409b2a326b0f` (#4218). The additions below cover changes since v0.36.0-rc.3; see the [previous candidate’s notes](https://github.com/picoduck/wollipog/releases/tag/v0.36.0-rc.3) for earlier v0.36.0 changes.
 
 ## Install the Prerelease
 
@@ -26,6 +26,8 @@ Runner-log retention remains active for organizations that have archived-history
 
 The control plane continues to advertise the `wollipog-control-plane` service identity. Desktop v0.15.0 and later accept both the current and legacy service identities. Older clients may report `The address is not a Wollipog control plane.` and must be upgraded before connecting.
 
+Automatic launches check the effective default provider account. If the default is signed out or unavailable, choose a ready account explicitly or repair the default. Older control planes connected to a v317 runner see an unavailable default as an unavailable agent; upgrade the control plane first.
+
 Existing Custom campaigns created before the scope-grant upgrade may pause until their epic seed is settled. Review the campaign's scope and any owner question before resuming work.
 
 ## Changes Since rc.3
@@ -36,6 +38,7 @@ Existing Custom campaigns created before the scope-grant upgrade may pause until
 - Sessions can continue at an approved location on the same machine when a task belongs to another repository. Project locations can be renamed, and the composer’s **@** picker supports fuzzy folder matching.
 - Campaign and session status more clearly distinguish active work, deliberate waits, stalled work, completed campaigns, and cleanup. Oversized turn diffs no longer make session history unreadable.
 - Runner recovery requires proof that a previous process is gone before releasing capacity. Background continuations recover after worktree retirement, and sandboxed providers receive a writable temporary directory.
+- Full Control campaigns can merge in repositories without required checks only after all reported checks pass, using compatible runners (protocol v315 or later).
 - Pull request summaries count the latest run of each check. Merged branches are rechecked for cleanup, GitLab merge decisions verify closing patterns, and concurrent campaign reviews share the remaining allowance.
 - Usage pricing identifies its rate source without exposing credentials. CI and regression coverage include recovery, retention, workspace search, skill restoration, and release diagnostics.
 
