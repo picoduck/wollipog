@@ -3354,6 +3354,7 @@ test("campaign report verification and normalized follow-up deduplication surviv
     initial.createSession(newSession({ id: "campaign", config: { permissionMode: "orchestrator" } }));
     initial.createSession(newSession({ id: "child", parentSessionId: "campaign" }));
     initial.updateSessionStatus("child", "idle", 999);
+    initial.updateSessionStatus("campaign", "idle", 999); // A queued root is live work (#4146).
     const report = initial.appendEvent("child", {
       kind: "agent_message", text: "Final report", final: true,
     }, 1_000);
@@ -3382,7 +3383,7 @@ test("campaign report verification and normalized follow-up deduplication surviv
     reopened.updateSessionStatus("child", "stopped", 2_001);
     assert.equal(reopened.campaignChildReportVerified("campaign", "child"), false,
       "ending resumed work without a new report cannot resurrect an old verification");
-    assert.equal(reopened.campaignProjection("campaign")?.status, "blocked");
+    assert.equal(reopened.campaignProjection("campaign")?.status, "stuck");
     reopened.updateSessionStatus("child", "idle", 2_002);
     const newerReport = reopened.appendEvent("child", {
       kind: "agent_message", text: "New final report", final: true,
@@ -3500,6 +3501,7 @@ test("verified campaign children survive an event cache reset without a history 
     }));
     db.createSession(newSession({ id: "child", parentSessionId: "campaign" }));
     db.updateSessionStatus("child", "idle", 999);
+    db.updateSessionStatus("campaign", "idle", 999); // A queued root is live work (#4146).
     db.reconcileRunnerHistory("child", 1, 1);
     const report = db.appendEvent("child", {
       kind: "agent_message", text: "Final report", final: true,
@@ -3532,6 +3534,7 @@ test("a Full Control root's summary carries its campaign status, identical to th
       operations: ["implementation_question"], delegatablePolicyIds: [] } }, 1, 2), true);
     db.createSession(newSession({ id: "child", parentSessionId: "campaign" }));
     db.updateSessionStatus("child", "idle", 999);
+    db.updateSessionStatus("campaign", "idle", 999); // A queued root is live work (#4146).
     const report = db.appendEvent("child", { kind: "agent_message", text: "Final report", final: true }, 1_000);
     db.verifyCampaignChildReport("campaign", "child", report.seq, 1_001);
 
@@ -3594,17 +3597,23 @@ test("a failed or result-less campaign continuation is visible at the projection
     db.updateCampaignContinuationForCommand("cmd-first", "failed", 1_004, "provider refused the turn");
     let projection = db.campaignProjection("campaign")!;
     assert.equal(projection.continuation?.state, "failed");
-    assert.equal(projection.children.active, 2, "the children alone would still read as active");
-    assert.equal(projection.status, "blocked", "a failed continuation no longer reports the campaign active");
+    assert.equal(projection.children.active, 2);
+    // #4146: running children are live work, so the campaign is Active beside the stall.
+    assert.equal(projection.status, "active", "the running children keep the campaign active");
     assert.equal(projection.stalled, "continuation_failed");
+    db.updateSessionStatus("child", "idle", 1_004);
+    db.updateSessionStatus("nested", "idle", 1_004);
+    projection = db.campaignProjection("campaign")!;
+    assert.equal(projection.status, "stuck", "with nothing live, a stalled continuation leaves the campaign stuck");
+    assert.ok(projection.stuck?.items.some((item) => item.kind === "continuation" && item.state === "failed"));
 
     db.updateCampaignContinuationForCommand("cmd-first", "missing_result", 1_005, "no terminal result");
     projection = db.campaignProjection("campaign")!;
-    assert.equal(projection.status, "blocked");
+    assert.equal(projection.status, "stuck");
     assert.equal(projection.stalled, "continuation_missing_result");
     assert.equal(db.campaignProjection("nested")?.stalled, undefined,
       "like continuation, the stall belongs to the root campaign's own view");
-    assert.equal(db.campaignProjection("nested")?.status, "active");
+    assert.equal(db.campaignProjection("nested")?.status, "stuck", "a nested view reads the same campaign status");
 
     assert.ok(db.createWorkflowDecision({
       requestId: "human-merge", occurrenceId: "workflow-human-merge", sessionId: "child",
@@ -3621,7 +3630,7 @@ test("a failed or result-less campaign continuation is visible at the projection
     db.updateCampaignContinuationForCommand("cmd-first", "acknowledged", 1_008);
     projection = db.campaignProjection("campaign")!;
     assert.equal(projection.stalled, undefined, "acknowledgement clears the stall");
-    assert.equal(projection.status, "active");
+    assert.equal(projection.status, "stuck", "the children's reports still wait for verification, and nothing is live");
   } finally {
     db.close();
   }
