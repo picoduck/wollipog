@@ -43,7 +43,7 @@ import { DecisionModelSettings } from "./decision-model-settings.js";
 import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, credentialFormFloor, type CredentialScreenFact, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, fullControlAutomaticResponse, type CampaignAuthorityEvaluation, type FullControlAutomaticResponse, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
-import { firstMessageTargetEpics } from "./first-message-issue-intent.js";
+import { digitRangeMembers, firstMessageTargetEpics } from "./first-message-issue-intent.js";
 import { onlyOtherRepositories, proposalMaxIssues } from "./scope-grant.js";
 import { normalizeScopeProposalInput, scopeProposalAgentQuestions, scopeProposalAnswer, scopeProposalChecks, scopeProposalOfRequest,
   type CampaignScopeProposal, type ScopeProposalCheck, type ScopeProposalOwnerCause } from "@wollipog/protocol";
@@ -547,6 +547,12 @@ const CUSTOM_SEED_PROPOSAL_REQUIRED = "This campaign's first message names issue
 
 function issueScopeSeedKey(rootId: string, messageDigest: string): string {
   return `scope_grant:issue_scope_seed:${rootId}:${messageDigest}`;
+}
+
+/** The key prefix every constraint check of one Custom seed shares (#4282), whatever it proposes:
+ * the seed's check budget counts all of them, so varying the issues buys no further check. */
+function issueScopeSeedCheckPrefix(rootId: string, messageDigest: string): string {
+  return `scope_check:issue_scope_seed:${rootId}:${messageDigest}:`;
 }
 
 /** The seed a Custom campaign's trimmed first message starts (#4104): `pending` for a reading, or
@@ -2351,6 +2357,9 @@ export class SessionsService {
   private decisionRuntime: DecisionRuntime;
   /** Custom epic seeds being read, by campaign root (#4104). */
   private readonly issueScopeSeeds = new Map<string, Promise<void>>();
+  /** Custom roots with a first-message seed proposal being checked (#4282): one at a time, so
+   * concurrent proposals can't each pass the seed's check budget. */
+  private readonly seedProposalsInFlight = new Set<string>();
   /** Generic request screens in flight, by session and occurrence, so a restored card never starts two. */
   private readonly credentialScreensInFlight = new Set<string>();
 
@@ -6189,8 +6198,9 @@ export class SessionsService {
    * 1. floors, no model: additions only, in the campaign repository; every number written in the
    *    person's exact message (as digits, or inside a range it writes) and not only another
    *    repository's; each one an issue the runner reads in the campaign repository;
-   * 2. the typed constraint check (`scope_check`) against that message, unless nothing is checkable
-   *    (only issues the message references, all of them proposed, nothing else stated);
+   * 2. the typed constraint check (`scope_check`) against that message, always, as the server reading
+   *    always ran: an empty proposal and one that adds every referenced issue are checked too, so
+   *    the Orchestrator alone never decides that a number is only background or that no epic is named;
    * 3. an admit grants exactly what the reading granted: one issue with sub-issues or checklist
    *    members is the seeded epic, which still waits for the person's scope approval or Continue
    *    Without an Epic; otherwise the issues become the campaign's issue numbers with no person step,
@@ -6198,12 +6208,27 @@ export class SessionsService {
    *    issues needs nothing: the seed is `none`.
    *
    * A refusal (a floor, or the check's) names why and the seed stays pending while the Orchestrator
-   * revises, with at most three distinct checks; past them, and on an uncertain or failed check, an
+   * revises, with at most three distinct checks per seed whatever each proposes, and one proposal
+   * checked at a time; past them, and on an uncertain or failed check, an
    * unstructured proposal, or a message the server can't confirm, the seed is the owner's (today's
    * person route). Nothing is parsed from the text. Null when this path doesn't apply, so the
    * ordinary Custom scope route handles the request.
    */
   async proposeCampaignSeedScope(sessionId: string, request: CampaignIssueScopeRequest): Promise<ServiceResult<CampaignSeedProposalResult> | null> {
+    if (this.seedProposalsInFlight.has(sessionId)) {
+      const seed = this.db.getSession(sessionId)?.orchestratorPolicy?.issueScopeSeed;
+      return seed?.state === "pending" && seed.proposal ? { ok: false, status: 409, error: "A first-message proposal is already being checked. Wait for its result.",
+        errorDetails: { code: "seed_proposal_in_flight" } } : null;
+    }
+    this.seedProposalsInFlight.add(sessionId);
+    try {
+      return await this.proposeCampaignSeedScopeOnce(sessionId, request);
+    } finally {
+      this.seedProposalsInFlight.delete(sessionId);
+    }
+  }
+
+  private async proposeCampaignSeedScopeOnce(sessionId: string, request: CampaignIssueScopeRequest): Promise<ServiceResult<CampaignSeedProposalResult> | null> {
     const root = this.db.getSession(sessionId);
     const policy = root?.orchestratorPolicy;
     const seed = policy?.issueScopeSeed;
@@ -6246,18 +6271,23 @@ export class SessionsService {
     // Floor: the campaign repository, read from its checkout.
     const numbers = proposal.issues.map((issue) => issue.number);
     const single = numbers.length === 1 ? numbers[0]! : null;
-    const epicRead = single !== null ? await this.inspectSeedEpic(root, single) : null;
-    const repository = epicRead?.repository ?? (numbers.length ? await this.inspectCampaignRepository(root) : await this.inspectCampaignRepository(root));
+    const repository = await this.inspectCampaignRepository(root);
     if (!repository) return refused("repository_unverified", "The runner couldn't read the campaign repository from its checkout. Check its GitHub access, then propose again.");
     if (proposal.issues.some((issue) => issue.repository.toLowerCase() !== repository)) {
       return refused("repository_outside_boundary", "Every proposed issue must be in the campaign repository.");
     }
-    // Floor: every number is written in the person's exact message, or inside a range it writes, and
-    // not only as another repository's.
+    // Floor: every number is written in the person's exact message, or inside a range it writes
+    // ("#3-#5", or "issue 1201 through 1207" as the reading allowed), and not only as another
+    // repository's.
     const references = issueReferencesInMessage(text, repository);
-    const unwritten = numbers.find((n) => (!writtenAsDigits(text, n) && !references.includes(n)) || onlyOtherRepositories(text, n, [repository]));
+    const ranges = digitRangeMembers(text);
+    const unwritten = numbers.find((n) => (!writtenAsDigits(text, n) && !references.includes(n) && !ranges.includes(n)) ||
+      onlyOtherRepositories(text, n, [repository]));
     if (unwritten !== undefined) return refused("owner_named_not_in_message", CAMPAIGN_SCOPE_ADMISSION_REFUSALS.owner_named_not_in_message.message, { issue: unwritten });
-    // Floor: each one an issue the runner reads in the campaign repository.
+    // Floor: each one an issue the runner reads in the campaign repository. One issue alone is read
+    // for its members first: with any, it is the epic candidate.
+    const epicRead = single !== null ? await this.inspectSeedEpic(root, single) : null;
+    if (epicRead && epicRead.repository !== repository) return refused("repository_unverified", "The runner read the issue in another repository.");
     if (numbers.length && !epicRead?.members.length) {
       const verified = await this.verifiedMessageIssues(root, repository, numbers);
       if (verified.length !== numbers.length) {
@@ -6265,36 +6295,37 @@ export class SessionsService {
           { issue: numbers.find((n) => !verified.includes(n))! });
       }
     }
-    // What needs checking; a range member the message doesn't write as digits always does.
+    // The constraint check always runs, as the server reading always did: the message writes a
+    // number, so whether it asks for that issue, only mentions it, or names an epic the proposal
+    // leaves out is the check's to answer, never the Orchestrator's alone (an empty proposal too).
     const checks = [...scopeProposalChecks(proposal, references),
       ...(numbers.some((n) => !writtenAsDigits(text, n)) ? ["unreferenced_named_issues" as const] : [])];
     const base: CampaignScopeProposal = { initial: true, messageDigest, requestedCount: proposal.requestedCount, constraints: proposal.constraints,
       withheldOperations: proposal.withheldOperations, checks: [...new Set(checks)], route: "admitted",
       issues: proposal.issues.map((issue) => ({ number: issue.number, origin: issue.origin, rationale: issue.rationale, title: "" })) };
-    let checkOccurrenceId: string | undefined;
-    if (checks.length) {
-      const facts = numbers.length ? await this.seedIssueFacts(root, repository, numbers) : [];
-      if (!facts) return owner("configuration", ownerMessage);
-      const key = scopeCheckKey(sessionId, 0, 0, base);
-      const earlier = this.db.decisionOccurrencesByKeyPrefix(sessionId, scopeCheckAdditionsPrefix(sessionId, 0, 0, numbers), SCOPE_CHECKS_PER_ADDITIONS + 1);
-      if (!earlier.some((occurrence) => occurrence.occurrenceKey === key) && earlier.length >= SCOPE_CHECKS_PER_ADDITIONS) {
-        return owner("configuration", ownerMessage);
-      }
-      const occurrence = await this.scopeProposalCheck(root, organizationId, key,
-        scopeCheckInputs(text, { ...base, issues: base.issues.map((issue) => ({ ...issue, title: facts.find((fact) => fact.number === issue.number)?.title ?? "" })) },
-          request.explanation, facts, { repository, operations: [], inScope: [] }));
-      this.db.recordCampaignDecisionSubject({ occurrenceId: occurrence.occurrenceId, campaignSessionId: sessionId, sessionId, surface: "issue_scope_seed",
-        requestId: `issue_scope_seed:${messageDigest}` }, Date.now());
-      if (occurrence.state === "decided" && occurrence.verdict === "refuse") {
-        return refused("constraint_check_refused", `${CAMPAIGN_SCOPE_ADMISSION_REFUSALS.constraint_check_refused.message}${occurrence.reason ? ` ${occurrence.reason}` : ""}`,
-          { occurrenceId: occurrence.occurrenceId, ...(occurrence.reason ? { reason: occurrence.reason } : {}) });
-      }
-      if (occurrence.state !== "decided" || occurrence.verdict !== "admit") {
-        return owner(occurrence.state === "uncertain" ? "configuration" : "provider_failed", ownerMessage, occurrence.occurrenceId);
-      }
-      checkOccurrenceId = occurrence.occurrenceId;
+    const facts = numbers.length ? await this.seedIssueFacts(root, repository, numbers) : [];
+    if (!facts) return owner("configuration", ownerMessage);
+    // At most three distinct checks per seed, whatever each proposes; a repeat joins its recorded check.
+    const seedPrefix = issueScopeSeedCheckPrefix(sessionId, messageDigest);
+    const key = `${seedPrefix}${scopeCheckKey(sessionId, 0, 0, base)}`;
+    const earlier = this.db.decisionOccurrencesByKeyPrefix(sessionId, seedPrefix, SCOPE_CHECKS_PER_ADDITIONS + 1);
+    if (!earlier.some((recorded) => recorded.occurrenceKey === key) && earlier.length >= SCOPE_CHECKS_PER_ADDITIONS) {
+      return owner("configuration", ownerMessage);
     }
-    const occurrence = checkOccurrenceId ? { occurrenceId: checkOccurrenceId } : {};
+    const check = await this.scopeProposalCheck(root, organizationId, key,
+      scopeCheckInputs(text, { ...base, issues: base.issues.map((issue) => ({ ...issue, title: facts.find((fact) => fact.number === issue.number)?.title ?? "" })) },
+        request.explanation, facts, { repository, operations: [], inScope: [] }));
+    this.db.recordCampaignDecisionSubject({ occurrenceId: check.occurrenceId, campaignSessionId: sessionId, sessionId, surface: "issue_scope_seed",
+      requestId: `issue_scope_seed:${messageDigest}` }, Date.now());
+    if (check.state === "decided" && check.verdict === "refuse") {
+      return refused("constraint_check_refused", `${CAMPAIGN_SCOPE_ADMISSION_REFUSALS.constraint_check_refused.message}${check.reason ? ` ${check.reason}` : ""}`,
+        { occurrenceId: check.occurrenceId, ...(check.reason ? { reason: check.reason } : {}) });
+    }
+    if (check.state !== "decided" || check.verdict !== "admit") {
+      return owner(check.state === "uncertain" ? "configuration" : "provider_failed", ownerMessage, check.occurrenceId);
+    }
+    const checkOccurrenceId = check.occurrenceId;
+    const occurrence = { occurrenceId: checkOccurrenceId };
     // A proposal of no issues: the message asks for no issue work, so nothing waits.
     if (!numbers.length) {
       if (this.db.settleCampaignIssueScopeSeed(sessionId, messageDigest, { state: "none", ...occurrence }, Date.now())) this.hub.sessionChangedById(sessionId);

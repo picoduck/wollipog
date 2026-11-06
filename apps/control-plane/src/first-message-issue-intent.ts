@@ -78,6 +78,25 @@ export function firstMessageTargetEpics(text: string, repository: string, scope:
   return epics.size > MAX_TARGET_EPICS ? [] : [...epics].sort((a, b) => a - b);
 }
 
+const DIGIT_RANGE = new RegExp(String.raw`(?<![\w./#\-–—])#?([1-9][0-9]{0,15})${SEPARATOR}#?([1-9][0-9]{0,15})(?![\w\-–—]|\.\.)`, "giu");
+
+/** The members of every range a message writes between two digit strings, with or without `#`
+ * ("issue 1201 through 1207", "#3-#5"), each range under 100 issues and all of them within 100
+ * (#4282). It is a floor for a Custom campaign's first-message seed only: a number a proposal says
+ * the person named must be written in the message or inside such a range, and the constraint check
+ * still decides whether the message asks for it. It never adds a number to anything by itself. */
+export function digitRangeMembers(text: string): number[] {
+  const members = new Set<number>();
+  for (const match of text.matchAll(DIGIT_RANGE)) {
+    const from = Number(match[1]);
+    const to = Number(match[2]);
+    if (!Number.isSafeInteger(to) || from >= to || to - from >= MAX_MESSAGE_ISSUES) continue;
+    if (members.size + (to - from + 1) > MAX_MESSAGE_ISSUES) return [];
+    for (let n = from; n <= to; n++) members.add(n);
+  }
+  return [...members].sort((a, b) => a - b);
+}
+
 /** At most this many range members are expanded in one message; more expands no range. */
 export const MAX_EXPANDED_REFERENCES = 1000;
 export const MAX_MESSAGE_ISSUES = 100;
