@@ -32,7 +32,7 @@ test("the scope check asks only checkable questions, never about priority, impor
   const definition = DECISION_KINDS.scope_check;
   assert.equal(definition.typed, SCOPE_CHECK_TYPED);
   assert.deepEqual(SCOPE_CHECK_TYPED.questions.map((question) => question.questionId),
-    ["count_consistent", "named_asked_for", "constraint_met", "constraints_complete", "repository_limit", "nothing_omitted", "operations_respected"]);
+    ["count_consistent", "named_asked_for", "constraint_met", "constraints_complete", "repository_limit", "repository_limits_complete", "nothing_omitted", "operations_respected"]);
   assert.deepEqual(SCOPE_CHECK_TYPED.verdicts, { admit: "admit", refuse: "refuse" });
   assert.equal(SCOPE_CHECK_TYPED.confidenceThreshold, 0.8);
   // Ranking words appear only to rule them out: no question asks the model to judge them.
@@ -52,8 +52,8 @@ test("a repository limit reaches the check as the agent's claim, and the check j
   assert.match(complete.text, /a limit to any other repository, or one the message excludes, does not/u);
   // The server proved the name is written and what it matches, never what the owner meant by it.
   const instructions = DECISION_KINDS.scope_check.instructions;
-  assert.match(instructions, /the agent's claim that the owner limited the work to one repository/u);
-  assert.match(instructions, /Whether the owner's words really limit the work to it is for you to judge/u);
+  assert.match(instructions, /the agent's claim that the owner limited the work to those repositories/u);
+  assert.match(instructions, /Whether the owner's words really limit the work to them is for you to judge/u);
   assert.doesNotMatch(instructions, /settled/u);
   const question = SCOPE_CHECK_TYPED.questions.find((candidate) => candidate.questionId === "repository_limit")!;
   assert.equal(question.parameterized, true);
@@ -62,7 +62,7 @@ test("a repository limit reaches the check as the agent's claim, and the check j
   const limited = proposal({ constraints: ["open"], repositoryConstraint: { name: "r2 a", repository: "owner/api" },
     issues: [{ repository: "owner/api", number: 91, origin: "orchestrator_chosen", rationale: "Open bug.", title: "Bug 91" }] });
   const inputs = scopeCheckInputs("Fix the top open bug in r2 a.", limited, "Ranked by label.", [{ ...fact(91), repository: "owner/api" }], CAMPAIGN)!;
-  assert.deepEqual(JSON.parse(inputs.data!.proposal!).repositoryConstraint, { name: "r2 a", repository: "owner/api" }, "a Location's name can't be resolved from the message alone");
+  assert.deepEqual(JSON.parse(inputs.data!.proposal!).repositoryConstraints, [{ name: "r2 a", repository: "owner/api" }], "a Location's name can't be resolved from the message alone");
   assert.equal(JSON.parse(inputs.data!.issues!)[0].repository, "owner/api");
   assert.deepEqual(scopeCheckParameters(REPO, limited)!.repository_limit, ["r2 a — owner/api"], "asked once, with the owner's words and what they matched");
   assert.equal(scopeCheckParameters(REPO, proposal())!.repository_limit, undefined, "no limit, no question");
@@ -72,12 +72,22 @@ test("a repository limit reaches the check as the agent's claim, and the check j
   // A later addition reads the limit the initial scope was admitted with.
   const later = scopeCheckInputs("Fix the top open bug in r2 a.", limited, "Ranked by label.", [{ ...fact(91), repository: "owner/api" }],
     { ...CAMPAIGN, admitted: { admittedAt: 1, occurrenceId: "dec_1", requestedCount: null, constraints: [], withheldOperations: [], repositoryLimit: "owner/api" } })!;
-  assert.equal(JSON.parse(later.data!.campaign!).admitted.repositoryLimit, "owner/api");
+  assert.deepEqual(JSON.parse(later.data!.campaign!).admitted.repositoryLimits, ["owner/api"], "a one-name record reads as a one-entry list");
   // Unlimited proposals read and key as they did.
-  assert.equal(JSON.parse(scopeCheckInputs(MESSAGE, proposal(), "Ranked.", FACTS, CAMPAIGN)!.data!.proposal!).repositoryConstraint, undefined);
+  assert.equal(JSON.parse(scopeCheckInputs(MESSAGE, proposal(), "Ranked.", FACTS, CAMPAIGN)!.data!.proposal!).repositoryConstraints, undefined);
   assert.notEqual(scopeCheckKey("root", 2, 3, limited), scopeCheckKey("root", 2, 3, { ...limited, repositoryConstraint: undefined }), "the limit is part of what was checked");
   assert.equal(scopeCheckKey("root", 2, 3, limited), scopeCheckKey("root", 2, 3, { ...limited, repositoryConstraint: { name: "the api repo", repository: "owner/api" } }),
     "another name for the same repository buys no second verdict");
+  // Several names are each judged; one that resolved to nothing leaves no limit to judge (#4117).
+  const api = { name: "r2 a", repository: "owner/api" }, web = { name: "the web repo", repository: "owner/web" };
+  const { repositoryConstraint: _single, ...listed } = limited;
+  assert.deepEqual(scopeCheckParameters(REPO, { ...listed, repositoryConstraints: [api, web] })!.repository_limit, ["r2 a — owner/api", "the web repo — owner/web"]);
+  assert.equal(scopeCheckParameters(REPO, { ...listed, repositoryConstraints: [api, { name: "repo", repository: null }] })!.repository_limit, undefined);
+  assert.equal(scopeCheckKey("root", 2, 3, { ...listed, repositoryConstraints: [api] }), scopeCheckKey("root", 2, 3, limited), "one name keeps the key a record with one name has");
+  assert.equal(scopeCheckKey("root", 2, 3, { ...listed, repositoryConstraints: [api, web] }), scopeCheckKey("root", 2, 3, { ...listed, repositoryConstraints: [web, api] }), "order buys nothing");
+  assert.notEqual(scopeCheckKey("root", 2, 3, { ...listed, repositoryConstraints: [api, web] }), scopeCheckKey("root", 2, 3, { ...listed, repositoryConstraints: [api] }));
+  // The check reads every repository the owner's words could limit the campaign to.
+  assert.deepEqual(JSON.parse(scopeCheckInputs(MESSAGE, proposal(), "Ranked.", FACTS, { ...CAMPAIGN, repositories: [REPO, "owner/api"] })!.data!.campaign!).repositories, [REPO, "owner/api"]);
 });
 
 test("the questions are parameterized per owner-named issue and per chosen issue and constraint, naming both", () => {
@@ -104,7 +114,7 @@ test("the questions are parameterized per owner-named issue and per chosen issue
   // Nothing named and nothing chosen asks neither kind of question; the fixed four still go.
   const none = prepareDecision(DECISION_KINDS.scope_check, scopeCheckInputs(MESSAGE, proposal({ issues: [], constraints: [] }), "Why.", [], CAMPAIGN)!);
   assert.deepEqual(none.questions!.map((question) => question.questionId),
-    ["count_consistent", "constraints_complete", "nothing_omitted", "operations_respected"]);
+    ["count_consistent", "constraints_complete", "repository_limits_complete", "nothing_omitted", "operations_respected"]);
   // Too many chosen issues times constraints for one call is never checked in part: the inputs are refused.
   const crowded = proposal({ issues: Array.from({ length: 10 }, (_, index) => ({ number: 100 + index, origin: "orchestrator_chosen" as const,
     rationale: "r", title: "t" })), constraints: ["a", "b", "c"] });
@@ -163,7 +173,7 @@ function harness(answers: Array<(message: RunDecisionMessage) => Partial<RunDeci
 /** Every question answered, satisfied unless `value` names another answer for an instance id. */
 function answers(message: RunDecisionMessage, value: (questionId: string) => string | undefined = () => undefined): Record<string, unknown> {
   const satisfied: Record<string, string> = { count_consistent: "consistent", named_asked_for: "asked_for", constraint_met: "satisfies",
-    constraints_complete: "complete", nothing_omitted: "complete", operations_respected: "respected" };
+    constraints_complete: "complete", repository_limits_complete: "complete", nothing_omitted: "complete", operations_respected: "respected" };
   return Object.fromEntries(Object.keys((message.outputSchema as { properties: object }).properties).map((id) =>
     [id, { value: value(id) ?? satisfied[id.split("__")[0]!], confidence: 0.95, evidence: "From the owner's words and the issue's labels." }]));
 }
@@ -179,8 +189,8 @@ for (const [harnessName, target] of [["Claude Code", TARGET], ["Codex App Server
     // The schema is the kind's own, whatever the data says: the same question ids and answer types.
     assert.deepEqual(Object.keys((prepared.outputSchema as { properties: object }).properties), ["count_consistent", "constraint_met__1",
       "constraint_met__2", "constraint_met__3", "constraint_met__4", "constraint_met__5", "constraint_met__6", "constraints_complete",
-      "nothing_omitted", "operations_respected"]);
-    assert.equal(prepared.rendered.match(/<question /gu)?.length, 10, "quoted content cannot open a question");
+      "repository_limits_complete", "nothing_omitted", "operations_respected"]);
+    assert.equal(prepared.rendered.match(/<question /gu)?.length, 11, "quoted content cannot open a question");
     assert.equal(prepared.rendered.includes("<question id=\"verdict\""), false);
 
     const run = harness([

@@ -243,7 +243,8 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
     await expect(row("Issues")).toContainText("team/repo#123 Composer Epic");
     await expect(row("Issues")).toContainText("team/api#123 Token Refresh Races");
     await expect(row("Issues")).toContainText("team/api#140 Timeouts Under Load");
-    await expect(row("Repository You Named")).toHaveText("the service repo: matches no repository in this campaign, or more than one");
+    await expect(row("Repositories You Named")).toContainText("the service repo: matches no repository in this campaign, or more than one");
+    await expect(row("Repositories You Named")).toContainText("team/api: team/api");
     const geometry = await section.evaluate((element) => ({ client: element.clientWidth, scroll: element.scrollWidth }));
     expect(geometry.scroll).toBeLessThanOrEqual(geometry.client + 1);
     // Tall enough to show the whole panel, so the screenshot is complete evidence at each width.

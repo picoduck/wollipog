@@ -86,6 +86,19 @@ export function CampaignRepositories({ campaignId, boundary, canInclude }: {
         </li>)}
       </ul>
     </>}
+    {(boundary.availableLocations?.length ?? 0) > 0 && <>
+      <h4 className="section-title">Available but Not in This Campaign</h4>
+      <p className="section-note">
+        Your first message limited this campaign to {boundary.repositoryLimits?.join(", ") ?? "some of its repositories"}. These
+        Locations are in the Project, but they join only if the Orchestrator asks to add their repository and you approve it.
+      </p>
+      <ul className="campaign-detail-list" aria-label="Locations Available but Not in This Campaign">
+        {boundary.availableLocations!.map((location) => <li key={location.locationId}>
+          {location.name}
+          <span className="campaign-status-meta">{location.repository}</span>
+        </li>)}
+      </ul>
+    </>}
     {error && <Notice tone="danger" role="alert" title="Couldn't Include the Location">{error}</Notice>}
   </section>;
 }
