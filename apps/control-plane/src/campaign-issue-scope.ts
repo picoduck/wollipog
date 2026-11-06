@@ -162,6 +162,20 @@ export function campaignAwaitsInitialScope(root: Pick<SessionView, "orchestrator
   return campaignScopeIsProposed(root) && first?.state === "established" && !first.initialScope;
 }
 
+/** The issues still in scope that an applied Orchestrator proposal added as its own choice (#4282),
+ * so a later addition's chosen issues count against the admitted count with them. */
+export function admittedChosenIssues(db: ControlPlaneDb, rootId: string, inScope: readonly number[]): number[] {
+  const chosen = new Set<number>();
+  for (const decision of db.scopeProposalDecisions(rootId, 100)) {
+    const snapshot = decision.resourceSnapshot;
+    if (decision.status !== "consumed" || snapshot.category !== "campaign_issue_scope" || !snapshot.scopeProposal) continue;
+    for (const issue of snapshot.scopeProposal.issues) {
+      if (issue.origin === "orchestrator_chosen" && inScope.includes(issue.number)) chosen.add(issue.number);
+    }
+  }
+  return [...chosen].sort((a, b) => a - b);
+}
+
 /** The Orchestrator's proposals for Campaign Status (#4282), newest first, each with what it led to. */
 export function scopeProposalViews(db: ControlPlaneDb, rootId: string): CampaignScopeProposalView[] {
   return db.scopeProposalDecisions(rootId).flatMap((decision) => {

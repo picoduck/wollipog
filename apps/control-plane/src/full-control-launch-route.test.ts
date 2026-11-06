@@ -28,7 +28,13 @@ import { CampaignLocations, registerCampaignLocationRoutes } from "./campaign-lo
 import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, PROJECT_LOCATION_INSPECTION_FAILURES, campaignBoundaryRepositories, validCampaignControl, type CampaignControl } from "@wollipog/protocol";
 import type { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
-import { fakeScopeGrantRuntime, grantVerdict, issues, ownerMessageOf, reviewVerdict, uncertainVerdict, type ScopeGrantAnswer } from "./scope-grant-test-fixture.js";
+import { fakeScopeGrantRuntime, grantVerdict, issues, ownerMessageOf, reviewVerdict, scopeCheckAnswer, scopeCheckParametersOf, uncertainVerdict,
+  type ScopeGrantAnswer } from "./scope-grant-test-fixture.js";
+import type { RunDecisionMessage } from "@wollipog/protocol";
+
+/** A `scope_check` (#4282) whose every answer is below the confidence threshold: uncertain. */
+const uncertainCheck = (message: RunDecisionMessage): ScopeGrantAnswer =>
+  scopeCheckAnswer(message, () => ({ value: "cannot_tell", confidence: 0.5, evidence: "The message doesn't say." }));
 import { scopeGrantDigest, scopeReviewKey, selectionProposalView } from "./scope-selection.js";
 import { fakeDecisionRuntime, type FakeDecisionStep } from "./credential-screen-test-fixture.js";
 import { createHash } from "node:crypto";
@@ -1530,18 +1536,22 @@ test("\"Fix #12 and #13\": exactly #12 and #13 are admitted after the floors wit
   } finally { await server.close(); f.db.close(); }
 });
 
-test("an owner-named number the message writes only as a plain number is the owner's, and an admitted proposal is re-checked for other campaigns when applied (#4282)", async () => {
+test("an owner-named number the message writes only as a plain number goes to the check, and an admitted proposal is re-checked for other campaigns when applied (#4282)", async () => {
   const f = fixture();
   const { server } = await app(f);
   try {
-    // "3" is a count here, not an issue: the floor finds the digits, but the fast path needs an issue reference.
+    // "3" is a count here, not an issue: the floor finds the digits, but the fast path needs an issue
+    // reference, so the constraint check decides, and it finds #3 isn't asked for.
     const plain = await proposalCampaign(f, server, "Fix 3 flaky tests in issue 12.");
-    const proposed = await plain.propose([named(3), named(12)]);
-    assert.equal(proposed.ok, true, proposed.error ?? "");
-    assert.equal(proposed.data!.authority, "human");
-    assert.deepEqual((proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.checks, ["unreferenced_named_issues"]);
-    assert.equal(plain.ownerRequests().length, 1);
-    assert.equal(f.decision.calls.length + f.decision.reviewCalls.length, 0);
+    f.decision.state.check = (message) => scopeCheckAnswer(message, (_id, parameter) =>
+      parameter?.startsWith("owner/repo#3 ") ? { value: "only_mentioned", evidence: "3 counts flaky tests; it is not an issue." } : undefined);
+    const refusedPlain = await plain.propose([named(3), named(12)]);
+    assert.equal(refusedPlain.ok, false);
+    assert.equal(refusedPlain.errorDetails?.code, "constraint_check_refused");
+    assert.equal(refusedPlain.errorDetails?.question, "named_asked_for__1");
+    assert.equal(f.decision.checkCalls.length, 1);
+    assert.equal(plain.ownerRequests().length, 0, "a refusal asks nobody");
+    f.decision.state.check = (message) => scopeCheckAnswer(message);
 
     // Two campaigns' floors admit the same issue; the first to apply it holds it, and the other's apply is refused.
     const first = await proposalCampaign(f, server, "Fix #61.");
@@ -1558,7 +1568,9 @@ test("an owner-named number the message writes only as a plain number is the own
 
     // The owner's approval is re-checked the same way: approving after another campaign took the issue applies nothing.
     const third = await proposalCampaign(f, server, "Fix #71 and one more open bug.");
+    f.decision.state.check = uncertainCheck;
     const waiting = await third.propose([named(71), chosen(72)], { constraints: ["open"] });
+    f.decision.state.check = (message) => scopeCheckAnswer(message);
     assert.equal(waiting.data!.authority, "human");
     const taker = await proposalCampaign(f, server, "Fix #72.");
     const takes = await taker.propose([named(72)]);
@@ -1608,12 +1620,19 @@ test("each deterministic floor refuses a proposal with its fixed code and the is
       proposal: { issues: [named(13)], requestedCount: null, constraints: [], withheldOperations: [] } });
     assert.equal(mismatch.status, 400);
     assert.match(mismatch.error!, /exactly the additions/u);
-    // Already in scope, after the initial scope is applied.
+    // A count the message doesn't write, and more chosen issues than the count allows (3 by default).
+    await refusedWith(await c.propose([chosen(14)], { requestedCount: 7 }), { code: "requested_count_not_in_message", requested: 7 });
+    await refusedWith(await c.propose([chosen(14), chosen(15), chosen(16), chosen(17)]), { code: "proposal_count_exceeded", limit: 3, requested: 4 });
+    assert.equal(f.decision.calls.length + f.decision.reviewCalls.length + f.decision.checkCalls.length, 0, "no floor refusal reaches a model");
+    assert.equal(f.db.listCampaignDecisionOccurrences(c.id).length, 0);
+    // Already in scope, after the initial scope is applied. The message also mentions #13 and others
+    // the proposal leaves out, so the constraint check confirms #12 alone before it is admitted.
     const first = await c.propose([named(12)]);
+    assert.equal(first.data!.authority, "orchestrator");
+    assert.equal(f.decision.checkCalls.length, 1);
     assert.equal(c.apply(first.data!.occurrenceId).ok, true);
     await refusedWith(await c.propose([named(12)]), { code: "already_in_scope", issue: 12 });
-    assert.equal(f.decision.calls.length + f.decision.reviewCalls.length, 0);
-    assert.equal(f.db.listCampaignDecisionOccurrences(c.id).length, 0);
+    assert.equal(f.decision.checkCalls.length, 1, "the floor refuses before any further check");
 
     // An explicit Maximum Issues is never exceeded.
     const capped = await proposalCampaign(f, server, "Fix #21, #22 and #23.", { issues: { maxIssues: 2 } });
@@ -1623,7 +1642,7 @@ test("each deterministic floor refuses a proposal with its fixed code and the is
   } finally { await server.close(); f.db.close(); }
 });
 
-test("a proposal with checkable constraints gets exactly one owner approval, as an Owner Question, with no model call and no priority question (#4282)", async () => {
+test("\"Find the 5 highest-priority open issues and fix them\": the check confirms count 5 and open, admits with no person prompt, and asks no priority question (#4282)", async () => {
   const f = fixture();
   const { server } = await app(f);
   try {
@@ -1632,21 +1651,66 @@ test("a proposal with checkable constraints gets exactly one owner approval, as 
     const issues = [31, 32, 33, 34, 35].map((n) => chosen(n));
     const proposed = await c.propose(issues, { requestedCount: 5, constraints: ["open"] }, "Ranked by priority label, then age.");
     assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "orchestrator", "admitted with no person prompt");
+    assert.equal(c.ownerRequests().length, 0);
+    const snapshot = proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot;
+    assert.equal(snapshot.scopeProposal!.route, "admitted");
+    assert.deepEqual(snapshot.scopeProposal!.checks, ["chosen_issues", "requested_count", "constraints"]);
+    assert.equal(snapshot.scopeProposal!.constraintCheck!.verdict, "admit");
+    assert.ok(snapshot.issueAdmission, "the check's admit is the admission evidence");
+    // One call, with the owner's exact message, the proposal and the issues' facts as quoted data.
+    assert.equal(f.decision.checkCalls.length, 1);
+    const call = f.decision.checkCalls[0]!;
+    assert.equal(ownerMessageOf(call), message);
+    for (const field of ["proposal", "issues", "campaign"]) assert.match(call.input, new RegExp(`<untrusted_data name="${field}">`, "u"));
+    // Only checkable questions: the count, each chosen issue against "open", completeness and operations.
+    const asked = Object.keys((call.outputSchema as { properties: object }).properties);
+    assert.deepEqual(asked, ["count_consistent", "constraint_met__1", "constraint_met__2", "constraint_met__3", "constraint_met__4",
+      "constraint_met__5", "constraints_complete", "nothing_omitted", "operations_respected"]);
+    assert.deepEqual(Object.values(scopeCheckParametersOf(call)), [31, 32, 33, 34, 35].map((n) => `owner/repo#${n} Issue ${n} — open`));
+    // Nothing asks about priority, importance, impact or effort, whatever the ranking words in the message.
+    const questionText = [...call.input.matchAll(/<question [^>]*>\n([^<]*)/gu)].map((match) => match[1]!).join("\n");
+    assert.doesNotMatch(questionText, /\b(which|whether)[^.?]*\b(priority|important|importance|impact|effort)/iu);
+    assert.ok(asked.every((id) => !/priority|importance|impact|effort|rank/iu.test(id)));
+    // Applying it opens dispatch, and Campaign Status shows each question with its answer and the verdict.
+    assert.equal(c.apply(proposed.data!.occurrenceId).ok, true);
+    assert.deepEqual(f.db.getSession(c.id)!.orchestratorPolicy!.issueScope!.issueNumbers, [31, 32, 33, 34, 35]);
+    assert.deepEqual(establishedOf(f, c.id).initialScope!.constraints, ["open"]);
+    assert.notEqual(c.delegate().errorDetails?.code, "initial_scope_not_admitted");
+    const [view] = (await f.sessions.campaignIssueScope(c.id)).data!.scopeProposals!;
+    assert.equal(view!.outcome, "applied");
+    assert.deepEqual([view!.check!.state, view!.check!.verdict], ["decided", "admit"]);
+    assert.equal(view!.check!.typedAnswers!.answers.length, 9);
+    assert.ok(view!.check!.typedAnswers!.answers.every((answer) => answer.assessment === "satisfied" && answer.confidence >= 0.8));
+    assert.equal(f.decision.calls.length + f.decision.reviewCalls.length, 0, "no first-message reading, no selection review");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("an uncertain constraint check gets exactly one owner approval, as an Owner Question; a reworded repeat asks nobody again (#4282)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const message = "Find the 5 highest-priority open issues and fix them.";
+    const c = await proposalCampaign(f, server, message);
+    f.decision.state.check = uncertainCheck;
+    const issues = [31, 32, 33, 34, 35].map((n) => chosen(n));
+    const proposed = await c.propose(issues, { requestedCount: 5, constraints: ["open"] }, "Ranked by priority label, then age.");
+    assert.equal(proposed.ok, true, proposed.error ?? "");
     assert.equal(proposed.data!.authority, "human");
     const snapshot = proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot;
     assert.equal(snapshot.issueAdmission, undefined, "the owner's approval carries no admission");
     assert.deepEqual(snapshot.scopeProposal!.checks, ["chosen_issues", "requested_count", "constraints"]);
     assert.equal(snapshot.scopeProposal!.route, "owner");
-    assert.equal(snapshot.scopeProposal!.ownerCause, "constraint_check_unavailable");
+    assert.equal(snapshot.scopeProposal!.ownerCause, "constraint_check_uncertain");
+    assert.equal(snapshot.scopeProposal!.constraintCheck!.verdict, "uncertain");
+    assert.match(snapshot.scopeProposal!.constraintCheck!.reason!, /can't be settled/u);
     assert.equal(snapshot.scopeProposal!.ownerMessage, firstMessageObjective(message));
     assert.deepEqual(snapshot.scopeProposal!.constraints, ["open"]);
-    // Exactly one request: the same issues again, even reworded, return it.
+    // Exactly one request: the same issues again, even reworded, return it, and nothing is asked again.
     const repeated = await c.propose(issues, { requestedCount: 5, constraints: ["open"] }, "Reworded rationale.");
     assert.equal(repeated.data!.occurrenceId, proposed.data!.occurrenceId);
     assert.equal(c.ownerRequests().length, 1);
-    // Nothing reached a Decision Model, so nothing could be asked about priority; nothing was parsed.
-    assert.equal(f.decision.calls.length + f.decision.reviewCalls.length, 0);
-    assert.equal(f.db.listCampaignDecisionOccurrences(c.id).length, 0);
+    assert.equal(f.decision.checkCalls.length, 1, "uncertain is a real answer: never retried, never asked twice");
     assert.deepEqual(f.db.getSession(c.id)!.orchestratorPolicy!.issueScope!.issueNumbers, []);
     assert.equal(c.delegate().errorDetails?.code, "initial_scope_not_admitted");
 
@@ -1674,12 +1738,29 @@ test("a proposal with checkable constraints gets exactly one owner approval, as 
     assert.ok(boundaryOf(f, c.id).issueAuthority!.maxIssues >= 5);
     assert.equal(campaignBoundaryCurrent(f.db.getSession(c.id)!), true);
     assert.notEqual(c.delegate().errorDetails?.code, "initial_scope_not_admitted");
-    assert.deepEqual((await f.sessions.campaignIssueScope(c.id)).data!.scopeProposals!.map((p) => p.outcome), ["owner_approved"]);
+    const [approvedView] = (await f.sessions.campaignIssueScope(c.id)).data!.scopeProposals!;
+    assert.equal(approvedView!.outcome, "owner_approved");
+    assert.equal(approvedView!.check!.state, "uncertain");
 
-    // Later additions take the same route: an owner-named one is admitted, a chosen one is the owner's.
-    const later = await c.propose([chosen(36)]);
-    assert.equal(later.data!.authority, "human");
-    assert.equal((later.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.initial, false);
+    // Later additions take the same flow within the admitted bounds: a sixth chosen issue is past the
+    // admitted count of 5, so the floor refuses it before any model call, whatever count it claims.
+    f.decision.state.check = (message) => scopeCheckAnswer(message);
+    const before = f.decision.checkCalls.length;
+    for (const claimed of [null, 6]) {
+      const later = await c.propose([chosen(36)], claimed === null ? {} : { requestedCount: claimed });
+      assert.equal(later.ok, false);
+      assert.deepEqual(later.errorDetails, claimed === null ? { code: "proposal_count_exceeded", limit: 5, requested: 6 }
+        : { code: "requested_count_not_in_message", requested: 6 });
+    }
+    assert.equal(f.decision.checkCalls.length, before);
+    // An owner-named later addition is still the fast path's.
+    const named7 = await proposalCampaign(f, server, "Fix #70 now; later also #71.");
+    const firstNamed = await named7.propose([named(70)]);
+    assert.equal(firstNamed.data!.authority, "orchestrator", "the check confirms #71 was left for later");
+    assert.equal(named7.apply(firstNamed.data!.occurrenceId).ok, true);
+    const laterNamed = await named7.propose([named(71)]);
+    assert.equal(laterNamed.data!.authority, "orchestrator");
+    assert.equal((laterNamed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.initial, false);
   } finally { await server.close(); f.db.close(); }
 });
 
@@ -1688,6 +1769,8 @@ test("an owner's own words decline the proposal and reach the Orchestrator; Decl
   const { server } = await app(f);
   try {
     const c = await proposalCampaign(f, server, "Fix #12 and #13, but don't merge anything.");
+    // The constraint check can't settle these proposals, so each is the owner's one approval.
+    f.decision.state.check = uncertainCheck;
     const proposed = await c.propose([named(12), named(13)], { withheldOperations: ["pr_merge"] });
     assert.equal(proposed.data!.authority, "human");
     assert.deepEqual((proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.checks, ["withheld_operations"]);
@@ -1761,6 +1844,7 @@ test("a restart keeps the dispatch hold and the owner's pending proposal, and ad
   const { server } = await app(f);
   try {
     const c = await proposalCampaign(f, server, "Find two quick wins and fix them.");
+    f.decision.state.check = uncertainCheck;
     const proposed = await c.propose([chosen(51), chosen(52)], { requestedCount: 2 });
     assert.equal(proposed.data!.authority, "human");
     // A control-plane restart: a new service on the same database.
@@ -1788,6 +1872,41 @@ test("a restart keeps the dispatch hold and the owner's pending proposal, and ad
     assert.deepEqual(f.db.getSession(c.id)!.orchestratorPolicy!.issueScope!.issueNumbers, [51, 52]);
     assert.ok(establishedOf(f, c.id).initialScope);
     assert.equal(f.decision.calls.length + f.decision.reviewCalls.length, 0);
+    // Across both restarts the proposal was checked once: its recorded outcome was read, never asked again.
+    assert.equal(f.decision.checkCalls.length, 1);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a check that is still running when the control plane restarts is settled as timed out and goes to the owner once (#4282)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const c = await proposalCampaign(f, server, "Fix the 2 most important open bugs.");
+    // The first control plane stops mid-check: its occurrence stays pending with nothing running it.
+    let release: () => void = () => {};
+    f.decision.state.check = () => new Promise<ScopeGrantAnswer>((resolve) => { release = () => resolve({ ok: false, errorClass: "transport" }); });
+    const stuck = c.propose([chosen(81), chosen(82)], { requestedCount: 2, constraints: ["open"] }, "First rationale.");
+    while (f.decision.checkCalls.length === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+    const pending = f.db.listCampaignDecisionOccurrences(c.id).find((occurrence) => occurrence.kind === "scope_check")!;
+    assert.equal(pending.state, "pending");
+    // Age it past the runtime's bound, as a process that stopped long ago would leave it.
+    f.db.raw().prepare("UPDATE decision_occurrences SET created_at=? WHERE occurrence_id=?").run(Date.now() - 10 * 60_000, pending.occurrenceId);
+    const restarted = new SessionsService(f.db, f.hub, { info() {}, warn() {}, error() {} });
+    restarted.setDecisionRuntime(f.decision.runtime);
+    const reproposed = await restarted.proposeCampaignIssueScope(c.id, { requestId: randomUUID(), expectedRevision: c.revision(),
+      additions: [81, 82].map((number) => ({ repository: "owner/repo", number })), removals: [], explanation: "Reworded after restart.",
+      proposal: { issues: [chosen(81), chosen(82)], requestedCount: 2, constraints: ["open"], withheldOperations: [] } });
+    assert.equal(reproposed.ok, true, reproposed.error ?? "");
+    assert.equal(reproposed.data!.authority, "human");
+    const record = (reproposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!;
+    assert.deepEqual([record.ownerCause, record.constraintCheck!.verdict], ["constraint_check_failed", "failed"]);
+    assert.equal(f.db.getDecisionOccurrence(pending.occurrenceId)!.failureClass, "timed_out");
+    assert.equal(c.ownerRequests().length, 1);
+    f.decision.state.check = () => ({ ok: false, errorClass: "transport" });
+    release();
+    await stuck.catch(() => undefined);
+    assert.equal(c.ownerRequests().length, 1, "the stopped call's late outcome asks nobody again");
+    assert.equal(c.delegate().errorDetails?.code, "initial_scope_not_admitted");
   } finally { await server.close(); f.db.close(); }
 });
 

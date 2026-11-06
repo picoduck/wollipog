@@ -59,6 +59,39 @@ export function exactReferenceAnswer(text: string, repository = "owner/repo"): S
     context: issues(...[...context].filter((n) => !explicit.has(n))) });
 }
 
+/** One typed answer of a `scope_check` attempt (#4282): its value, confidence and evidence. */
+export type ScopeCheckAnswerOverride = { value: string; confidence?: number; evidence?: string };
+
+/** The satisfying value of each `scope_check` question template. */
+const SCOPE_CHECK_SATISFIED: Record<string, string> = {
+  count_consistent: "consistent", named_asked_for: "asked_for", constraint_met: "satisfies",
+  constraints_complete: "complete", nothing_omitted: "complete", operations_respected: "respected",
+};
+
+/** The question parameters a `scope_check` attempt carries, by instance id, read from its rendered input. */
+export function scopeCheckParametersOf(message: RunDecisionMessage): Record<string, string> {
+  const found: Record<string, string> = {};
+  for (const match of message.input.matchAll(/<question id="([a-z_]+__\d+)"[^>]*>[\s\S]*?<untrusted_data name="parameter">\n([\s\S]*?)\n<\/untrusted_data>/gu)) {
+    found[match[1]!] = JSON.parse(match[2]!) as string;
+  }
+  return found;
+}
+
+/** A complete `scope_check` output for the attempt's own schema: every question satisfied with
+ * confidence 0.95, except where `override` returns an answer for an instance id and its parameter. */
+export function scopeCheckAnswer(message: RunDecisionMessage,
+  override: (questionId: string, parameter: string | undefined) => ScopeCheckAnswerOverride | undefined = () => undefined): ScopeGrantAnswer {
+  const properties = (message.outputSchema as { properties: Record<string, unknown> }).properties;
+  const parameters = scopeCheckParametersOf(message);
+  const output = Object.fromEntries(Object.keys(properties).map((questionId) => {
+    const chosen = override(questionId, parameters[questionId]);
+    const template = questionId.split("__")[0]!;
+    return [questionId, { value: chosen?.value ?? SCOPE_CHECK_SATISFIED[template], confidence: chosen?.confidence ?? 0.95,
+      evidence: chosen?.evidence ?? "The owner's words say so." }];
+  }));
+  return { ok: true, outputText: JSON.stringify(output) };
+}
+
 /** A `scope_review` verdict (#4103). */
 export function reviewVerdict(verdict: "admit" | "refuse" | "uncertain", reason = "The issues fit the owner's selection."): ScopeGrantAnswer {
   return { ok: true, outputText: JSON.stringify({ verdict, reason }) };
@@ -76,8 +109,13 @@ export function fakeScopeGrantRuntime(db: ControlPlaneDb, options: {
 } = {}) {
   const calls: RunDecisionMessage[] = [];
   const reviewCalls: RunDecisionMessage[] = [];
+  /** Every `scope_check` attempt (#4282); by default each is answered with every question satisfied. */
+  const checkCalls: RunDecisionMessage[] = [];
   const state = { answer: options.answer ?? ((text: string) => exactReferenceAnswer(text)), resolution: options.resolution,
-    review: ((_message: RunDecisionMessage, _attempt: number) => reviewVerdict("admit")) as (message: RunDecisionMessage, attempt: number) => ScopeGrantAnswer | Promise<ScopeGrantAnswer> };
+    review: ((_message: RunDecisionMessage, _attempt: number) => reviewVerdict("admit")) as (message: RunDecisionMessage, attempt: number) => ScopeGrantAnswer | Promise<ScopeGrantAnswer>,
+    check: ((message: RunDecisionMessage, _attempt: number) => scopeCheckAnswer(message)) as
+      (message: RunDecisionMessage, attempt: number) => ScopeGrantAnswer | Promise<ScopeGrantAnswer> };
+  const scopeCheck = (message: RunDecisionMessage) => message.instructions === DECISION_KINDS.scope_check.instructions;
   const other = options.other ??
     (() => ({ ok: true as const, outputText: JSON.stringify({ verdict: "discusses", reason: "The request discusses access as a design subject." }) }));
   const scopeGrant = (message: RunDecisionMessage) => message.instructions === DECISION_KINDS.scope_grant.instructions;
@@ -88,13 +126,15 @@ export function fakeScopeGrantRuntime(db: ControlPlaneDb, options: {
     transport: async (_runnerId, message) => {
       if (scopeGrant(message)) calls.push(message);
       if (scopeReview(message)) reviewCalls.push(message);
+      if (scopeCheck(message)) checkCalls.push(message);
       const answer = scopeGrant(message) ? state.answer(ownerMessageOf(message), message.attempt)
-        : scopeReview(message) ? await state.review(message, message.attempt) : other(message);
+        : scopeReview(message) ? await state.review(message, message.attempt)
+          : scopeCheck(message) ? await state.check(message, message.attempt) : other(message);
       return { type: "run_decision_result", requestId: message.requestId, provider: "claude", model: FAKE_DECISION_TARGET.model,
         usage: { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 }, ...answer } as RunDecisionResultMessage;
     },
     sleep: async () => {},
     random: () => 0.5,
   });
-  return { runtime, calls, reviewCalls, state };
+  return { runtime, calls, reviewCalls, checkCalls, state };
 }

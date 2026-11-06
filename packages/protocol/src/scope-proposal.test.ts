@@ -47,8 +47,12 @@ test("only owner-named issues with nothing else stated take the no-model fast pa
   assert.deepEqual(scopeProposalChecks(base, referenced), []);
   assert.deepEqual(scopeProposalChecks({ ...base, requestedCount: 1 }, referenced), [], "a count that is exactly the named issues needs no check");
   assert.deepEqual(scopeProposalChecks({ ...base, requestedCount: 2 }, referenced), ["requested_count"]);
-  assert.deepEqual(scopeProposalChecks({ ...base, issues: [issue("orchestrator_chosen")] }, referenced), ["chosen_issues"]);
-  assert.deepEqual(scopeProposalChecks({ ...base, issues: [issue("orchestrator_chosen")], requestedCount: 1 }, referenced), ["chosen_issues", "requested_count"]);
+  // A referenced issue the proposal chose rather than marked owner-named still needs the named-or-mentioned check.
+  assert.deepEqual(scopeProposalChecks({ ...base, issues: [issue("orchestrator_chosen")] }, referenced), ["chosen_issues", "unproposed_references"]);
+  assert.deepEqual(scopeProposalChecks({ ...base, issues: [issue("orchestrator_chosen")], requestedCount: 1 }, referenced),
+    ["chosen_issues", "unproposed_references", "requested_count"]);
+  // "See #7 for background; fix #8": proposing only #8 leaves #7 to the check, which decides whether it was asked for.
+  assert.deepEqual(scopeProposalChecks({ ...base, issues: [{ ...issue("owner_named"), number: 8 }] }, [7, 8]), ["unproposed_references"]);
   assert.deepEqual(scopeProposalChecks({ ...base, constraints: ["open"] }, referenced), ["constraints"]);
   assert.deepEqual(scopeProposalChecks({ ...base, withheldOperations: ["pr_merge"] }, referenced), ["withheld_operations"]);
   assert.deepEqual(scopeProposalChecks({ ...base, issues: [] }, []), [], "a task that needs no issues");
@@ -68,6 +72,19 @@ test("a recorded proposal is exact: only an admitted one carries an admission, a
   assert.equal(validScopeProposal({ ...record, route: "admitted" }), false, "an admitted proposal has nothing left to check");
   assert.equal(validScopeProposal({ ...record, extra: true }), false);
   assert.equal(validScopeProposal({ ...record, ownerCause: undefined }), false);
+  // A constraint check's admit is the only way past the floors for a proposal with anything checkable,
+  // and an owner route names its check's outcome exactly.
+  const admittedByCheck = { ...record, route: "admitted", ownerCause: undefined, ownerMessage: undefined,
+    constraintCheck: { occurrenceId: "dec_1", verdict: "admit", reason: "Every answer is satisfied with at least 80% confidence." } };
+  delete (admittedByCheck as Partial<CampaignScopeProposal>).ownerCause; delete (admittedByCheck as Partial<CampaignScopeProposal>).ownerMessage;
+  assert.equal(validScopeProposal(admittedByCheck), true);
+  assert.equal(validScopeProposal({ ...admittedByCheck, constraintCheck: { occurrenceId: "dec_1", verdict: "uncertain" } }), false);
+  assert.equal(validScopeProposal({ ...record, ownerCause: "constraint_check_uncertain", constraintCheck: { occurrenceId: "dec_1", verdict: "uncertain" } }), true);
+  assert.equal(validScopeProposal({ ...record, ownerCause: "constraint_check_uncertain" }), false, "an uncertain route names its check");
+  assert.equal(validScopeProposal({ ...record, ownerCause: "constraint_check_failed", constraintCheck: { occurrenceId: "dec_1", verdict: "uncertain" } }), false);
+  assert.equal(validScopeProposal({ ...record, constraintCheck: { occurrenceId: "dec_1", verdict: "failed" } }), false,
+    "a check that never ran names no outcome");
+  assert.equal(validScopeProposal({ ...record, ownerCause: "constraint_check_failed", constraintCheck: { occurrenceId: "dec 1", verdict: "failed" } }), false);
   const snapshot = { category: "campaign_issue_scope", repository: "owner/repo", expectedRevision: 2, before: [], additions: [12, 31], removals: [],
     explanation: "Why.", affectedAssignments: [], affectedDecisions: [], activeChildren: [], scopeProposal: record };
   assert.ok(normalizeCampaignIssueScopeSnapshot(snapshot));
@@ -96,8 +113,16 @@ test("the owner's approval is presented as an Owner Question: Approve Scope, Dec
   assert.equal(question!.allowOther, true);
   assert.match(question!.context!, /> Fix \\#12 and one open bug, but don't merge\./u);
   assert.match(question!.context!, /owner\/repo#31 Sync \(the Orchestrator chose it\): Top label\./u);
-  assert.match(question!.context!, /\*\*Withheld operations:\*\* `pr_merge`/u);
+  // Operations read as the labels Campaign Status shows, never raw tokens.
+  assert.match(question!.context!, /\*\*Withheld operations:\*\* PR Merge\n/u);
+  assert.doesNotMatch(question!.context!, /pr_merge/u);
   assert.match(question!.context!, /because it includes issues the Orchestrator chose, constraints it read from your message and operations your message rules out, which no Decision Model has checked\./u);
+  // An uncertain constraint check says so, with the server's reason.
+  const uncertainCard = { ...card, workflowDecision: { ...card.workflowDecision!, resourceSnapshot: { ...card.workflowDecision!.resourceSnapshot,
+    scopeProposal: { ...record, ownerCause: "constraint_check_uncertain", constraintCheck: { occurrenceId: "dec_1", verdict: "uncertain",
+      reason: "The answer on 'Count Matches Your Message' is below the 80% confidence threshold." } } } } } as unknown as PendingApproval;
+  assert.match(presentOwnerQuestionRequest(uncertainCard).questions![0]!.context!,
+    /and the Decision Model couldn't confirm them \(The answer on 'Count Matches Your Message' is below the 80% confidence threshold\.\)\./u);
   // An admitted (Orchestrator-owned) change is never presented to the owner.
   const admitted = { ...card, workflowDecision: { ...card.workflowDecision!, authority: "orchestrator" } } as PendingApproval;
   assert.equal(isOwnerQuestionRequest(admitted), false);
