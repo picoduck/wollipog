@@ -241,12 +241,13 @@ owner asks for in conversation after launch: the owner approves or denies the pr
 from their Inbox or from Campaign Status's **Waiting for You**, where it is listed as a Scope
 Approval, instead of retyping it.
 
-- When the scope plus publication reservations would exceed the campaign's issue limit, the request
-  states the Maximum Issues increase it needs as `ownerReview.maxIssuesIncrease: { from, increase }`.
+- When the scope plus the slots consumed publications still hold would exceed the campaign's issue
+  limit, the request states the Maximum Issues increase it needs as `ownerReview.maxIssuesIncrease: { from, increase }`.
   Approving it applies the additions and re-mints the boundary with Maximum Issues raised from
   `from` by exactly `increase`; denying applies neither. The Follow-Up Limit does not change. A
   proposal that would need more than the 100-issue ceiling is still refused as `capacity_exhausted`,
-  and so is a lineage-bearing proposal over the limit.
+  and so is a lineage-bearing proposal over the limit. Pending and approved publications are not
+  counted, because the owner's approval revokes them, exactly as its resolution counts the limit.
 - Proposing the same additions and removals at the same scope revision while the request is pending
   returns that same occurrence, whatever the explanation now says.
 - Only the owner can approve it, as any human-owned scope request: an Orchestrator can neither

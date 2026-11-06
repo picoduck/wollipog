@@ -2523,6 +2523,32 @@ test("#4267 only the owner resolves an owner request; the Orchestrator cannot ap
   } finally { h.db.close(); }
 });
 
+test("#4267 an owner request counts only the publication slots its approval keeps, as its resolution does", async () => {
+  // At the ceiling and below it: a pending admitted publication is revoked by the owner's approval,
+  // so it neither refuses the addition nor asks for a Maximum Issues increase.
+  for (const [maximum, issues] of [[100, [...Array.from({ length: 98 }, (_, i) => i + 1), 100]], [2, [100]]] as const) {
+    const h = harness(true, maximum, [...issues]);
+    try {
+      const rec = h.svc.recordCampaignFollowUp("root", { originSessionId: "child", repository: "team/repo", title: "Pending repair", originWorkItemIds: [h.item.id] });
+      assert.ok(rec.ok, rec.error ?? "recommendation");
+      assert.ok(h.svc.adjudicateCampaignRecommendation("root", { recommendationId: rec.data!.id, disposition: "accepted", reason: "Observed related work", publicationRequired: true }).ok);
+      const publication = await h.svc.createWorkflowDecisionWithVideo("root", { requestId: "pending-publication", resourceKey: "publication",
+        resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "Pending repair", sanitizedBody: body, labels: [], recommendationId: rec.data!.id } });
+      assert.ok(publication.ok, publication.error ?? "publication");
+      assert.equal(publication.data!.status, "pending"); assert.ok((publication.data!.resourceSnapshot as { issueAdmission?: unknown }).issueAdmission);
+      const addition = 500;
+      const proposed = await proposeWithoutLineage(h, `final-${maximum}`, [addition]);
+      assert.ok(proposed.ok, proposed.error ?? "refused");
+      assert.equal(proposed.data!.authority, "human");
+      assert.deepEqual((proposed.data!.resourceSnapshot as ScopeSnapshot).ownerReview, { cause: "lineage_missing" });
+      assert.ok(h.approve(proposed.data!).ok);
+      assert.ok(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers!.includes(addition));
+      assert.equal(boundaryMaxIssues(h), maximum);
+      assert.equal(h.db.workflowDecisionByOccurrence(publication.data!.occurrenceId)!.status, "revoked");
+    } finally { h.db.close(); }
+  }
+});
+
 test("#4267 lineage admissions and Custom proposals keep their routes", async () => {
   const full = harness(true, 5);
   try {

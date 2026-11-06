@@ -11917,12 +11917,16 @@ export class SessionsService {
         };
         const excludedReservation = snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined;
         const scopeSize = snapshot.before.length + snapshot.additions.length - snapshot.removals.length;
-        const requested = scopeSize + reservedPublicationSlots(this.db, latest, excludedReservation);
+        const toOwner = !grantReview && snapshot.additions.length > 0 && !snapshot.lineage;
+        // The owner's approval revokes every outstanding decision (#3915), pending and approved
+        // publications included, so only the slots consumed publications still hold count against
+        // it, exactly as its resolution counts them; an Orchestrator's own admission counts them all.
+        const requested = scopeSize + (toOwner ? this.db.unsettledPublicationSlots(sessionId) : reservedPublicationSlots(this.db, latest, excludedReservation));
         // The owner's approval of a failed or uncertain grant's proposal sets the derived limit that
         // grant could not, so only the limit it may reach applies here.
         const limit = this.db.campaignIssueLimit(sessionId,
           (grantReview ? grantReviewMaxIssues(latest.orchestratorPolicy, { grantReview }, boundary, scopeSize) : undefined) ?? boundary.issueAuthority!.maxIssues);
-        if (!grantReview && snapshot.additions.length && !snapshot.lineage) {
+        if (toOwner) {
           ownerReview = { cause: "lineage_missing" };
           // The owner's approval raises Maximum Issues by exactly what the additions need, never past
           // the 100-issue ceiling no authorization can raise.
