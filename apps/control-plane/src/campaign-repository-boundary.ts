@@ -45,12 +45,18 @@ export interface CampaignProjectLocation { id: string; name: string }
  * follow in the Project order of their first Location. Within an entry, Locations keep Project
  * order, so the default Location leads whenever it verified. A failed Location is excluded with
  * its reason and never blocks the launch. Past the boundary's size bounds, the remaining
- * Locations are excluded as unreadable rather than dropped silently. */
+ * Locations are excluded as unreadable rather than dropped silently.
+ *
+ * `carried` is what an existing campaign already holds when it is enabled again: the owner already
+ * authorized those repositories, so an inspection can add to them but never take one away. A carried
+ * Location that can't be read now stays where it is, rather than being listed as excluded, and a
+ * repository that lost every Location keeps its entry. */
 export function launchBoundaryRepositories(input: {
   launchRepository: string;
   launchLocationId: string | null;
   locations: readonly CampaignProjectLocation[];
   inspections: ReadonlyMap<string, ProjectLocationInspection>;
+  carried?: readonly CampaignBoundaryRepository[] | undefined;
 }): { repositories: CampaignBoundaryRepository[]; excluded: CampaignExcludedLocation[] } {
   const launch = input.launchRepository.toLowerCase();
   const entries = new Map<string, CampaignBoundaryRepository>([[launch, { repository: launch, locationIds: [] }]]);
@@ -78,5 +84,21 @@ export function launchBoundaryRepositories(input: {
     else entries.set(inspection.repository, { repository: inspection.repository, locationIds: [location.id] });
     locationCount += 1;
   }
-  return { repositories: [...entries.values()], excluded };
+  for (const carried of input.carried ?? []) {
+    const repository = carried.repository.toLowerCase();
+    let entry = entries.get(repository);
+    if (!entry) {
+      if (entries.size >= CAMPAIGN_BOUNDARY_REPOSITORIES_MAX) continue;
+      entry = { repository, locationIds: [] };
+      entries.set(repository, entry);
+    }
+    for (const id of carried.locationIds) {
+      // A Location that verified now, as any repository, is already placed by what it verified as.
+      if ([...entries.values()].some((item) => item.locationIds.includes(id)) || locationCount >= CAMPAIGN_BOUNDARY_LOCATIONS_MAX) continue;
+      entry.locationIds.push(id);
+      locationCount += 1;
+    }
+  }
+  const held = new Set([...entries.values()].flatMap((entry) => entry.locationIds));
+  return { repositories: [...entries.values()], excluded: excluded.filter((item) => !held.has(item.locationId)) };
 }

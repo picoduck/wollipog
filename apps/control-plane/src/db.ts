@@ -21256,7 +21256,9 @@ export class ControlPlaneDb {
     derivedLimits?: import("@wollipog/protocol").FullControlDerivedLimits,
     /** What this Full Control authorization disclosed (#2940). It replaces any earlier record, and
      * a revoke, or an authorization without one, drops it so no stale record outlives its boundary. */
-    launchDisclosure?: import("@wollipog/protocol").CampaignLaunchDisclosure): boolean {
+    launchDisclosure?: import("@wollipog/protocol").CampaignLaunchDisclosure,
+    /** A reviewed enable's excluded Project Locations (#4117), replacing any earlier list. */
+    excludedLocations?: import("@wollipog/protocol").CampaignExcludedLocation[]): boolean {
     const campaign = this.sessionOrchestratorPolicy(id);
     const policy = this.parentControlPolicy(id);
     if (!campaign || !policy || policy.revision !== expectedRevision || !validCampaignControl(control) ||
@@ -21290,6 +21292,10 @@ export class ControlPlaneDb {
     if (control.mode === "full_control" && launchDisclosure && validCampaignLaunchDisclosure(launchDisclosure)) {
       campaign.launchDisclosure = structuredClone(launchDisclosure);
     } else delete campaign.launchDisclosure;
+    if (excludedLocations) {
+      if (excludedLocations.length) campaign.excludedLocations = structuredClone(excludedLocations);
+      else delete campaign.excludedLocations;
+    }
     this.db.exec("BEGIN");
     try {
       const changed = this.stmt(`UPDATE sessions SET orchestrator_policy=?, parent_control_policy_revision=parent_control_policy_revision+1,

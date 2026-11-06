@@ -30,7 +30,7 @@ import { inspectCampaignWorkspace, inspectProjectLocation } from "./project-loca
 import { CampaignRepositoryAdditions } from "./campaign-repository-additions.js";
 import { CampaignLocations, registerCampaignLocationRoutes } from "./campaign-locations.js";
 import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, PROJECT_LOCATION_INSPECTION_FAILURES, campaignBoundaryRepositories, validCampaignControl, type CampaignControl,
-  type CampaignRepositoryAdditionRequest } from "@wollipog/protocol";
+  type CampaignAuthorityBoundary, type CampaignRepositoryAdditionRequest } from "@wollipog/protocol";
 import type { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
 import { fakeScopeGrantRuntime, grantVerdict, issues, ownerMessageOf, reviewVerdict, scopeCheckAnswer, scopeCheckParametersOf, uncertainVerdict,
@@ -4470,6 +4470,7 @@ test("in Custom, an approved addition extends the campaign's repository list fro
   const f = fixture();
   const c = await repositoryAdditionCampaign(f);
   try {
+    const launched = c.boundary();
     const revoked = f.sessions.setCampaignControl(c.rootId, { mode: "custom" }, f.db.getSession(c.rootId)!.parentControlPolicy!.revision, f.human);
     assert.equal(revoked.ok, true, revoked.error ?? "");
     assert.equal(f.db.getSession(c.rootId)!.orchestratorPolicy!.control?.mode ?? "custom", "custom");
@@ -4490,5 +4491,121 @@ test("in Custom, an approved addition extends the campaign's repository list fro
     ]);
     // A participant at that Location takes that repository's part of the scope.
     assert.equal(f.db.campaignParticipantRepository(f.db.getSession(c.rootId)!, { id: "member", runnerId: "r2", workspaceId: "c" }), "third/repo");
+    // Enabling Full Control again keeps the list the owner grew in Custom.
+    const grown = f.db.getSession(c.rootId)!.orchestratorPolicy!.repositories;
+    const enabled = f.sessions.setCampaignControl(c.rootId, reauthorization(launched),
+      f.db.getSession(c.rootId)!.parentControlPolicy!.revision, f.human);
+    assert.equal(enabled.ok, true, enabled.error ?? "");
+    assert.deepEqual(c.boundary().repositories, grown);
   } finally { await c.server.close(); f.db.close(); }
+});
+
+/** The grants an owner submits again to re-authorize Full Control, taken from a boundary. */
+function reauthorization(boundary: CampaignAuthorityBoundary) {
+  return { mode: "full_control" as const, objective: boundary.objective, operations: boundary.operations,
+    delegatablePolicyIds: boundary.delegatablePolicyIds, issueAuthority: boundary.issueAuthority, budgetAuthority: boundary.budgetAuthority };
+}
+
+test("re-authorizing Full Control keeps every repository the campaign covers, including ones that joined later (#4117)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  try {
+    const third = f.db.addProjectLocation(c.p.project.id, { runnerId: "r2", workspaceId: "c", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(third.id, f.human);
+    const before = c.boundary();
+    assert.deepEqual(before.repositories!.map((entry) => entry.repository), ["owner/repo", "other/repo", "third/repo"]);
+    const reauthorized = f.sessions.setCampaignControl(c.rootId, reauthorization(before),
+      f.db.getSession(c.rootId)!.parentControlPolicy!.revision, f.human);
+    assert.equal(reauthorized.ok, true, reauthorized.error ?? "");
+    const after = c.boundary();
+    assert.equal(after.revision, before.revision + 1);
+    assert.deepEqual(after.repositories, before.repositories, "no repository falls back out of the boundary");
+    assert.ok(campaignBoundaryCurrent(f.db.getSession(c.rootId)!));
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("re-authorizing keeps a campaign whose child runs in another boundary Location, and refuses one outside the boundary (#4117, #4119)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  try {
+    const child = (id: string, workspaceId: string, runnerId = "r2") => {
+      f.db.createSession({ id, parentSessionId: c.rootId, runnerId, workspaceId, agentId: "claude", title: id, useWorktree: false,
+        driver: "claude-code", creationActor: "agent", scope: f.scope, config: { model: "claude-opus-5-5" }, now: Date.now() });
+      f.db.updateSessionStatus(id, "running", Date.now());
+    };
+    child("child-in-other-repo", "a");
+    const reauthorize = () => f.sessions.setCampaignControl(c.rootId, reauthorization(c.boundary()),
+      f.db.getSession(c.rootId)!.parentControlPolicy!.revision, f.human);
+    const kept = reauthorize();
+    assert.equal(kept.ok, true, kept.error ?? "");
+    assert.deepEqual(c.boundary().repositories!.map((entry) => entry.repository), ["owner/repo", "other/repo"]);
+    // A folder that is no Location of a boundary repository is still refused.
+    child("child-outside", "c");
+    const refused = reauthorize();
+    assert.equal(refused.ok, false);
+    assert.match(refused.error!, /must run in a Location of a repository in the campaign's boundary/u);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a reviewed enable keeps a repository whose only Location is offline, instead of dropping or excluding it (#4117)", async () => {
+  const f = fixture();
+  saveBudget(f, savedBudget);
+  const c = await launchedMultiRepositoryCampaign(f);
+  const { server } = await app(f);
+  try {
+    const third = f.db.addProjectLocation(c.p.project.id, { runnerId: "r2", workspaceId: "c", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(third.id, f.human);
+    const before = c.boundary().repositories!;
+    assert.ok(before.some((entry) => entry.repository === "third/repo"));
+    // Every Location of the second machine, third/repo's only one, is unreachable when the owner reviews.
+    const online = f.hub.isRunnerOnline;
+    f.hub.isRunnerOnline = (runnerId) => runnerId !== "r2" && online(runnerId);
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${c.rootId}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload: {} });
+    assert.equal(checked.statusCode, 200, checked.body);
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    assert.equal(reviewed.ready, true, JSON.stringify(reviewed.summary.blockers));
+    assert.deepEqual(reviewed.summary.repositories!.map((entry) => entry.repository), ["owner/repo", "other/repo", "third/repo"],
+      "the owner reviews every repository the campaign already holds");
+    assert.equal(reviewed.summary.excludedLocations!.some((item) => item.locationId === third.id), false, "held, so not excluded");
+    const enabled = await server.inject({ method: "POST", url: `/api/sessions/${c.rootId}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    const entry = c.boundary().repositories!.find((item) => item.repository === "third/repo")!;
+    assert.deepEqual(entry.locationIds, [third.id]);
+    assert.ok(campaignBoundaryCurrent(f.db.getSession(c.rootId)!));
+  } finally { await server.close(); await c.server.close(); f.db.close(); }
+});
+
+test("enabling Full Control on an existing campaign builds its boundary from every verified Project Location, as a launch does (#4117)", async () => {
+  const f = fixture();
+  saveBudget(f, savedBudget);
+  const p = multiRepositoryProject(f);
+  const { server } = await app(f);
+  try {
+    const rootId = customCampaign(f, "enable-multi");
+    f.db.raw().prepare("UPDATE sessions SET project_id=?, project_location_id=? WHERE id=?").run(p.project.id, p.launchLocation.id, rootId);
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${rootId}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload: {} });
+    assert.equal(checked.statusCode, 200, checked.body);
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    assert.equal(reviewed.ready, true, JSON.stringify(reviewed.summary.blockers));
+    assert.deepEqual(reviewed.summary.repositories, [
+      { repository: "owner/repo", locations: [{ locationId: p.twin.id, name: "r2 b" }, { locationId: p.launchLocation.id, name: "Fixture Repo" }] },
+      { repository: "other/repo", locations: [{ locationId: p.other.id, name: "r2 a" }] },
+    ]);
+    const excluded = Object.fromEntries(reviewed.summary.excludedLocations!.map((item) => [item.locationId, item.failure]));
+    assert.deepEqual(excluded, { [p.plain.id]: "not_repository", [p.offline.id]: "runner_offline", [p.old.id]: "runner_too_old", [p.v2.id]: "runner_too_old" });
+    const enabled = await server.inject({ method: "POST", url: `/api/sessions/${rootId}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    const policy = f.db.getSession(rootId)!.orchestratorPolicy!;
+    const boundary = (policy.control as Extract<CampaignControl, { mode: "full_control" }>).boundary;
+    assert.deepEqual(boundary.repositories, [
+      { repository: "owner/repo", locationIds: [p.twin.id, p.launchLocation.id] },
+      { repository: "other/repo", locationIds: [p.other.id] },
+    ]);
+    assert.deepEqual(policy.excludedLocations, reviewed.summary.excludedLocations);
+    assert.ok(campaignBoundaryCurrent(f.db.getSession(rootId)!));
+  } finally { await server.close(); f.db.close(); }
 });
