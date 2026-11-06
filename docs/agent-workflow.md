@@ -21,6 +21,11 @@ fetched remote default branch before releasing implementation. A bootstrap promp
 recorded work-item assignment.
 Do not claim atomic creation, omit required protected admission, or update the hosting stack to
 make an unavailable interface appear. Report an unsupported mandatory path during preflight.
+Full Control launches with no preflight form or question (#2940), so the root Orchestrator posts
+this preflight as its first report, after `get_campaign` and before its first child: objective and
+issue scope, Human Required exceptions, unsupported or degraded capabilities, and each unresolved
+mandatory human rule with its exact source and typed route to the owner. It asks nothing and waits
+for nobody; the shipped authority reference lists what it names.
 
 Installed or user-authored workflows are independent instructions. Name any unresolved mandatory
 human rule with its exact file, quoted requirement and affected action before proceeding to that

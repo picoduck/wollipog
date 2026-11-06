@@ -32,6 +32,25 @@ through its normal review and merge gates. A committed policy change does not ch
 session's higher-priority instructions or installed skills. Continue independent work while a
 required decision is pending.
 
+Full Control launches with zero overhead: no form, budget, preflight panel or question comes before
+the first message. The root Orchestrator (no parent session) therefore makes this preflight visible
+after launch, in one user-visible first report posted after `get_campaign` and before its first
+`create_session`. The report names:
+
+- the objective and the authorized issue scope;
+- the Human Required exceptions (`fullControlHumanRequired`, or none);
+- every unsupported or degraded capability: `uiEvidenceReview` and `videoEvidenceReview` status
+  with their reasons, whether mandatory review runs through controlled review sessions or a native
+  reviewer outside them (`budget.requiredNativeReview`), and execution isolation where a runner
+  reports it (otherwise unknown);
+- every unresolved mandatory human rule from installed skills or user-authored instructions, with
+  its exact source file and quoted requirement, and that each such gate will reach the owner typed
+  as described below, never only in prose.
+
+The report is not a question: it asks nothing, waits for nobody, and dispatch continues in the same
+turn. A nested Orchestrator does not repeat it. The always-injected Orchestrator preset carries the
+same requirement.
+
 When such a rule keeps a gate for a person, the gate reaches the owner as a typed request, never
 only as prose:
 
