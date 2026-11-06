@@ -5400,6 +5400,21 @@ export interface CampaignIssueScopeSnapshot {
   /** The Decision Model's `admit` of a selection proposal (#4103), which the server's
    * `issueAdmission` evidence binds: the review occurrence, the grant it read and its reason. */
   selectionReview?: CampaignSelectionReview;
+  /** Present when a Full Control Orchestrator proposed additions that no lineage or selection grant
+   * admits, so the proposal is the owner's one typed approval rather than a refusal (#4267).
+   * Server-derived; it changes who decides, never what is granted. */
+  ownerReview?: CampaignScopeOwnerReview;
+}
+
+/** Why an Orchestrator's scope proposal waits for the owner (#4267), and the Maximum Issues increase
+ * its additions need. Approving applies the change and raises Maximum Issues by exactly `increase`;
+ * denying applies neither. */
+export interface CampaignScopeOwnerReview {
+  /** The proposal named no epic, published follow-up or selection lineage. */
+  cause: "lineage_missing";
+  /** Present when the scope plus publication reservations would exceed the campaign's issue limit:
+   * the Maximum Issues the boundary held when it was requested, and how many more the additions need. */
+  maxIssuesIncrease?: { from: number; increase: number };
 }
 
 export interface CampaignSelectionReview {

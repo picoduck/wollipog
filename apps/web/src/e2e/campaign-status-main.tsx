@@ -465,6 +465,7 @@ const projectionFor = (rev: number) => campaignProjection(
     ...(automationHold ? { recovery: { unattendedReady: false, automation: automationHold, automatic: 0, waitingHuman: 0, blocked: 0,
       records: [], truncated: false } } : {}),
     ...ownerProjection,
+    ...ownerScopeProjection,
   },
 );
 
@@ -495,6 +496,25 @@ const ownerProjection = ownerScenario === "after" ? { status: "waiting_human" as
 ] } } : ownerScenario === "rule" ? { status: "waiting_human" as const, ownerDecisions: { total: 1, items: [
   { occurrenceId: "occ_1", sessionId: "s_child_3", category: "pr_merge" as const, summary: "Merge picoduck/wollipog#4141", handedOff: false,
     ownerRule, createdAt: NOW - 8 * MINUTE },
+] } } : {};
+
+/** `ownerScope=1` (#4267): the Orchestrator's proposal without lineage, waiting for the owner with
+ * the Maximum Issues increase its additions need. */
+const ownerScopeSnapshot = { category: "campaign_issue_scope" as const, repository: "team/repo", expectedRevision: 3,
+  before: [130, 131, 132, 133, 134], additions: [141, 142], removals: [],
+  explanation: "You asked me to start #141 and #142 after launch. Neither is an epic member or a published follow-up.",
+  affectedAssignments: [], affectedDecisions: ["occ_1"], activeChildren: [],
+  ownerReview: { cause: "lineage_missing" as const, maxIssuesIncrease: { from: 6, increase: 1 } } };
+const ownerScopeCard: import("@wollipog/protocol").PendingApproval | null = params.get("ownerScope") === "1" ? {
+  requestId: "wd_scope_141", occurrenceId: "wd_scope_141", kind: "workflow_decision", title: "Campaign Issue Scope Approval Required",
+  options: [{ optionId: "approve", name: "Approve", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }],
+  workflowDecision: { requestId: "scope-141", occurrenceId: "wd_scope_141", sessionId: "s_root", controllingSessionId: "s_root",
+    category: "campaign_issue_scope", resourceKey: "campaign_issue_scope:s_root", resourceSnapshot: ownerScopeSnapshot,
+    resourceDigest: "d".repeat(64), policyRevision: 1, authority: "human", status: "pending", createdAt: NOW - 2 * MINUTE },
+} : null;
+const ownerScopeProjection = ownerScopeCard ? { status: "waiting_human" as const, ownerDecisions: { total: 1, items: [
+  { occurrenceId: "wd_scope_141", sessionId: "s_root", category: "campaign_issue_scope" as const,
+    summary: "Add team/repo#141, team/repo#142, raising Maximum Issues from 6 to 7", handedOff: false, createdAt: NOW - 2 * MINUTE },
 ] } } : {};
 
 /** The root's own Pending Decision cards for the follow-ups past the limit (`followUps=pending`). */
@@ -529,7 +549,8 @@ function sessionsFor(rev: number): SessionView[] {
   const root = baseSession({ orchestratorCampaign: projectionFor(rev),
     ...(followUpCards.length ? { pendingApproval: { ...followUpCards[0]!, additionalRequests: followUpCards.slice(1) } } : {}),
     ...(ownerCard ? { pendingApproval: ownerCard } : {}),
-    ...(selectionCard ? { pendingApproval: selectionCard } : {}) });
+    ...(selectionCard ? { pendingApproval: selectionCard } : {}),
+    ...(ownerScopeCard ? { pendingApproval: ownerScopeCard } : {}) });
   const child = baseSession({
     id: "s_child", title: "#2417 Slice 7: Campaign Status Panel", parentSessionId: "s_root",
     ...(scenario === "legacy" ? {} : { campaignMembership: { campaignSessionId: "s_root", currentWorkItemId: "cwi_2", currentAttemptId: "catt_2" } }),
@@ -566,7 +587,10 @@ const ownerRequests = (owners: "before" | "after" | "rule"): DescendantRequestVi
 };
 
 /** The request the blocked item's recorded blocker names, pending on its child. */
-const descendantRequests: DescendantRequestView[] = ownerScenario ? ownerRequests(ownerScenario) : scenario === "campaign" ? [{
+const ownerScopeRequests: DescendantRequestView[] = ownerScopeCard ? [{ sessionId: "s_root", sessionTitle: "Full Control Campaign",
+  runnerId: "runner-1", runnerOnline: true, eventEpoch: 1, createdAt: NOW - 2 * MINUTE, responseOwner: "human",
+  occurrenceId: "wd_scope_141", request: ownerScopeCard }] : [];
+const descendantRequests: DescendantRequestView[] = ownerScopeCard ? ownerScopeRequests : ownerScenario ? ownerRequests(ownerScenario) : scenario === "campaign" ? [{
   sessionId: "s_child_3",
   sessionTitle: "#2417 Slice 5: Read API",
   runnerId: "runner-1",

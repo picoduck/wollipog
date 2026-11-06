@@ -241,9 +241,13 @@ label a Human Required rule names; choose another issue rather than asking. A pr
 is reviewed by the Decision Model against the owner's words: an admitted one returns an
 Orchestrator-owned scope change that you resolve and apply yourself; a refused one returns its
 `reason`, so propose a different issue; an uncertain or failed review becomes the owner's one typed
-approval, and proposing the same issues again returns that same request. The server
-refuses incidental references, foreign repositories and changes beyond human-set limits, naming the
-failed condition in a bounded `code`; a campaign owner can still propose the change from Campaign Status.
+approval, and proposing the same issues again returns that same request. For any other addition,
+such as an issue the owner asks for mid-run, propose it without lineage: it becomes the owner's one
+typed approval, stating any Maximum Issues increase it needs, and the returned occurrence tells you
+what to ask the owner to approve in their Inbox or Campaign Status; proposing the same issues again
+returns that same request. The server refuses incidental references, foreign repositories and
+lineage changes beyond human-set limits, naming the failed condition in a bounded `code`; a campaign
+owner can still propose the change from Campaign Status.
 Resolution applies and consumes scope atomically; do not separately consume it. A root can resolve
 only an eligible occurrence backed by its standing human authorization: when the effective owner is
 `orchestrator`, resolve it with `resolve_descendant_workflow_decision` and its own session ID as

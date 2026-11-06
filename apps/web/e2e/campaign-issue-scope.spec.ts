@@ -202,3 +202,19 @@ test("scope approval request shows exact changes and affected assignments",async
   await expect(page.getByText("closure-member-124",{exact:true})).toBeVisible();
   await expect(page.getByText(/Issue closure still requires its own human approval/)).toBeVisible();
 });
+
+for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "phone", width: 390, height: 844 }]) {
+  test(`an Orchestrator's proposal without lineage is one card with its issues and Maximum Issues increase filled in, ${viewport.name} (#4267)`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto("/request-surfaces-e2e.html?scenario=issue-scope&ownerReview=1");
+    const card = page.locator(".request-dock");
+    await expect(card).toContainText("The Orchestrator proposed this change. No authorized epic, published follow-up or issue selection admits it, so it needs your approval.");
+    await expect(card).toContainText("Approving adds the issues and raises Maximum Issues from 6 to 7; denying leaves both unchanged.");
+    await expect(card).toContainText("You asked me to start #141 and #142 after launch.");
+    await expect(card.getByText("team/repo#141, team/repo#142", { exact: true })).toBeVisible();
+    await expect(card.getByText("Maximum Issues", { exact: true })).toBeVisible();
+    await expect(card.getByText("6 to 7", { exact: true })).toBeVisible();
+    await expect(card.locator(".request-card-foot").getByRole("button", { name: /^Approve/u })).toBeEnabled();
+    await expect(card.locator(".request-card-foot").getByRole("button", { name: /^Deny/u })).toBeEnabled();
+  });
+}

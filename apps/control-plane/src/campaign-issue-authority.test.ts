@@ -499,9 +499,12 @@ test("scope rejects incidental references, unapproved epics, foreign repositorie
   const h = harness();
   try {
     assert.equal((await h.proposal("dependency",999)).ok,false);
-    for (const change of [{lineage:undefined},{lineage:{kind:"epic" as const,epic:999}},{additions:[{repository:"other/repo",number:101}]}]) {
+    for (const change of [{lineage:{kind:"epic" as const,epic:999}},{additions:[{repository:"other/repo",number:101}]}]) {
       assert.equal((await h.svc.proposeCampaignIssueScope("root", {requestId:JSON.stringify(change),expectedRevision:1,additions:[{repository:"team/repo",number:101}],removals:[],explanation:"Claim",lineage:{kind:"epic",epic:100},...change})).ok,false);
     }
+    // Without lineage nothing is admitted: the addition waits for the owner (#4267).
+    const unadmitted = await h.svc.proposeCampaignIssueScope("root", {requestId:"no-lineage",expectedRevision:1,additions:[{repository:"team/repo",number:101}],removals:[],explanation:"Claim"});
+    assert.ok(unadmitted.ok, unadmitted.error ?? "refused"); assert.equal(unadmitted.data!.authority,"human");
     const p = await h.proposal("race"); assert.ok(p.ok);
     h.db.createSession({id:"later",runnerId:"r",workspaceId:"w",agentId:"codex",title:"Later",parentSessionId:"root",driver:"codex-app-server",config:{},useWorktree:false,now:Date.now()});
     assert.equal(h.approve(p.data!).ok,false);
@@ -2405,11 +2408,10 @@ test("#2940 Orchestrator scope refusals name their condition with a bounded code
   try {
     const propose = (requestId: string, change: Partial<import("@wollipog/protocol").CampaignIssueScopeRequest>) => h.svc.proposeCampaignIssueScope("root",
       { requestId, expectedRevision: 1, additions: [{ repository: "team/repo", number: 101 }], removals: [], explanation: "Secret-looking explanation text", ...change });
-    const none = await propose("no-lineage", {});
-    assert.equal(refusalCode(none), "lineage_missing"); assert.equal(none.status, 403);
-    assert.match(none.error!, /incidental references cannot grant scope.*Campaign Status/);
-    assert.equal(JSON.stringify(none).includes("Secret-looking"), false);
-    assert.equal(refusalCode(await propose("other-epic", { lineage: { kind: "epic", epic: 999 } })), "epic_not_authorized");
+    const otherEpic = await propose("other-epic", { lineage: { kind: "epic", epic: 999 } });
+    assert.equal(refusalCode(otherEpic), "epic_not_authorized"); assert.equal(otherEpic.status, 403);
+    assert.match(otherEpic.error!, /Campaign Status/);
+    assert.equal(JSON.stringify(otherEpic).includes("Secret-looking"), false);
     assert.equal(refusalCode(await propose("unknown-publication", { lineage: { kind: "follow_up", publicationOccurrenceId: "missing" } })), "publication_not_found");
     assert.equal(refusalCode(await propose("two-follow-ups", { additions: [{ repository: "team/repo", number: 101 }, { repository: "team/repo", number: 102 }],
       lineage: { kind: "follow_up", publicationOccurrenceId: "missing" } })), "follow_up_not_single");
@@ -2424,6 +2426,148 @@ test("#2940 Orchestrator scope refusals name their condition with a bounded code
       issueAuthority:{epics:[100],relatedFollowUps:false,maxIssues:5,closureReasons:[]}},2,noFollowUps.principal).ok);
     assert.equal(refusalCode(await followUpScope(noFollowUps, "no-follow-ups", "missing")), "follow_ups_not_authorized");
   } finally { noFollowUps.db.close(); }
+});
+
+const pendingScopeRequests = (h: ReturnType<typeof harness>) =>
+  h.db.pendingWorkflowDecisionsForController("root").filter((d) => d.category === "campaign_issue_scope");
+const boundaryMaxIssues = (h: ReturnType<typeof harness>) => {
+  const control = h.db.getSession("root")!.orchestratorPolicy!.control;
+  return control?.mode === "full_control" ? control.boundary.issueAuthority?.maxIssues : undefined;
+};
+const proposeWithoutLineage = (h: ReturnType<typeof harness>, requestId: string, numbers: number[], explanation = "The owner asked for these in chat") =>
+  h.svc.proposeCampaignIssueScope("root", { requestId, expectedRevision: 1, additions: numbers.map((number) => ({ repository: "team/repo", number })),
+    removals: [], explanation });
+
+test("#4267 additions without lineage become exactly one pending owner request instead of a 403, and a repeat returns it", async () => {
+  const h = harness(true, 5);
+  try {
+    // An outstanding decision the owner's approval will revoke, as every Full Control human scope approval does (#3915).
+    const question = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "question", resourceKey: "question",
+      resourceSnapshot: { category: "implementation_question", question: "Which layout?", options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } });
+    assert.ok(question.ok, question.error ?? "question");
+    const proposed = await proposeWithoutLineage(h, "owner-asked", [101, 102]);
+    assert.ok(proposed.ok, proposed.error ?? "refused");
+    assert.equal(proposed.data!.authority, "human"); assert.equal(proposed.data!.status, "pending");
+    const snapshot = proposed.data!.resourceSnapshot as ScopeSnapshot;
+    assert.deepEqual(snapshot.additions, [101, 102]);
+    assert.equal(snapshot.explanation, "The owner asked for these in chat");
+    assert.deepEqual(snapshot.ownerReview, { cause: "lineage_missing" });
+    assert.equal(snapshot.issueAdmission, undefined); assert.equal(snapshot.lineage, undefined);
+    assert.deepEqual(snapshot.affectedDecisions, [question.data!.occurrenceId]);
+    assert.deepEqual(pendingScopeRequests(h).map((d) => d.occurrenceId), [proposed.data!.occurrenceId]);
+    // Re-proposing the same additions, reworded under a new request id, returns the same request.
+    const again = await proposeWithoutLineage(h, "owner-asked-again", [102, 101], "Reworded rationale");
+    assert.ok(again.ok, again.error ?? "refused");
+    assert.equal(again.data!.occurrenceId, proposed.data!.occurrenceId);
+    assert.deepEqual(pendingScopeRequests(h).map((d) => d.occurrenceId), [proposed.data!.occurrenceId]);
+    // Campaign Status lists it under Waiting for You so the owner can open the request.
+    assert.deepEqual(h.db.campaignOwnerDecisions("root")?.items.map(({ occurrenceId, category, summary, handedOff }) => ({ occurrenceId, category, summary, handedOff })),
+      [{ occurrenceId: proposed.data!.occurrenceId, category: "campaign_issue_scope", summary: "Add team/repo#101, team/repo#102", handedOff: false }]);
+    // The owner approves it in one step: the scope holds the additions and the outstanding decision is revoked.
+    assert.ok(h.approve(proposed.data!).ok);
+    assert.equal(h.db.campaignOwnerDecisions("root"), null);
+    assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100, 101, 102]);
+    assert.equal(h.db.workflowDecisionByOccurrence(question.data!.occurrenceId)!.status, "revoked");
+    assert.equal(boundaryMaxIssues(h), 5);
+  } finally { h.db.close(); }
+});
+
+test("#4267 an owner request states the Maximum Issues increase its additions need; approving applies both and denying neither", async () => {
+  for (const outcome of ["approve", "deny"] as const) {
+    const h = harness(true, 2);
+    try {
+      const proposed = await proposeWithoutLineage(h, `over-limit-${outcome}`, [101, 102]);
+      assert.ok(proposed.ok, proposed.error ?? "refused");
+      assert.equal(proposed.data!.authority, "human");
+      assert.deepEqual((proposed.data!.resourceSnapshot as ScopeSnapshot).ownerReview, { cause: "lineage_missing", maxIssuesIncrease: { from: 2, increase: 1 } });
+      assert.equal(h.db.campaignOwnerDecisions("root")?.items[0]?.summary, "Add team/repo#101, team/repo#102, raising Maximum Issues from 2 to 3");
+      const resolved = h.svc.resolveWorkflowDecision("root", "root", proposed.data!.occurrenceId, { outcome }, "human", { kind: "human", id: h.principal.userId }, () => true);
+      assert.ok(resolved.ok, resolved.error ?? outcome);
+      if (outcome === "approve") {
+        assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100, 101, 102]);
+        assert.equal(boundaryMaxIssues(h), 3);
+      } else {
+        assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100]);
+        assert.equal(boundaryMaxIssues(h), 2);
+        assert.equal(h.db.workflowDecisionByOccurrence(proposed.data!.occurrenceId)!.status, "denied");
+      }
+    } finally { h.db.close(); }
+  }
+  // A lineage-bearing proposal past the limit is still refused, naming the owner's route (#4061).
+  const epic = harness(true, 1);
+  try {
+    const refused = await epic.proposal("epic-over-limit");
+    assert.equal(refusalCode(refused), "capacity_exhausted"); assert.equal(refused.status, 409);
+  } finally { epic.db.close(); }
+});
+
+test("#4267 only the owner resolves an owner request; the Orchestrator cannot approve, consume or widen it", async () => {
+  const h = harness(true, 2);
+  try {
+    const proposed = await proposeWithoutLineage(h, "owner-only", [101, 102]);
+    assert.ok(proposed.ok, proposed.error ?? "refused");
+    const occurrenceId = proposed.data!.occurrenceId;
+    const asAgent = h.svc.resolveWorkflowDecision("root", "root", occurrenceId, { outcome: "approve" }, "human", { kind: "agent", id: "root" }, () => true);
+    assert.equal(asAgent.ok, false);
+    const asOrchestrator = h.svc.resolveWorkflowDecision("root", "root", occurrenceId, { outcome: "approve" }, "orchestrator", { kind: "agent", id: "root" }, () => true);
+    assert.equal(asOrchestrator.ok, false);
+    const consumed = await h.svc.consumeWorkflowDecision("root", occurrenceId, { resourceSnapshot: proposed.data!.resourceSnapshot });
+    assert.equal(consumed.ok, false); assert.equal(consumed.status, 403);
+    // An agent cannot hand the server its own owner review or a larger increase.
+    const forged = await h.svc.createWorkflowDecisionWithVideo("root", { requestId: "forged", resourceKey: "campaign_issue_scope:root",
+      resourceSnapshot: { ...(proposed.data!.resourceSnapshot as ScopeSnapshot), ownerReview: { cause: "lineage_missing", maxIssuesIncrease: { from: 2, increase: 50 } } } });
+    assert.equal(forged.ok, false); assert.equal(forged.status, 403);
+    assert.equal(h.db.workflowDecisionByOccurrence(occurrenceId)!.status, "pending");
+    assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100]);
+    assert.equal(boundaryMaxIssues(h), 2);
+  } finally { h.db.close(); }
+});
+
+test("#4267 an owner request counts only the publication slots its approval keeps, as its resolution does", async () => {
+  // At the ceiling and below it: a pending admitted publication is revoked by the owner's approval,
+  // so it neither refuses the addition nor asks for a Maximum Issues increase.
+  for (const [maximum, issues] of [[100, [...Array.from({ length: 98 }, (_, i) => i + 1), 100]], [2, [100]]] as const) {
+    const h = harness(true, maximum, [...issues]);
+    try {
+      const rec = h.svc.recordCampaignFollowUp("root", { originSessionId: "child", repository: "team/repo", title: "Pending repair", originWorkItemIds: [h.item.id] });
+      assert.ok(rec.ok, rec.error ?? "recommendation");
+      assert.ok(h.svc.adjudicateCampaignRecommendation("root", { recommendationId: rec.data!.id, disposition: "accepted", reason: "Observed related work", publicationRequired: true }).ok);
+      const publication = await h.svc.createWorkflowDecisionWithVideo("root", { requestId: "pending-publication", resourceKey: "publication",
+        resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "Pending repair", sanitizedBody: body, labels: [], recommendationId: rec.data!.id } });
+      assert.ok(publication.ok, publication.error ?? "publication");
+      assert.equal(publication.data!.status, "pending"); assert.ok((publication.data!.resourceSnapshot as { issueAdmission?: unknown }).issueAdmission);
+      const addition = 500;
+      const proposed = await proposeWithoutLineage(h, `final-${maximum}`, [addition]);
+      assert.ok(proposed.ok, proposed.error ?? "refused");
+      assert.equal(proposed.data!.authority, "human");
+      assert.deepEqual((proposed.data!.resourceSnapshot as ScopeSnapshot).ownerReview, { cause: "lineage_missing" });
+      assert.ok(h.approve(proposed.data!).ok);
+      assert.ok(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers!.includes(addition));
+      assert.equal(boundaryMaxIssues(h), maximum);
+      assert.equal(h.db.workflowDecisionByOccurrence(publication.data!.occurrenceId)!.status, "revoked");
+    } finally { h.db.close(); }
+  }
+});
+
+test("#4267 lineage admissions and Custom proposals keep their routes", async () => {
+  const full = harness(true, 5);
+  try {
+    const epic = await full.proposal("epic-member");
+    assert.ok(epic.ok, epic.error ?? "refused");
+    assert.equal(epic.data!.authority, "orchestrator");
+    assert.equal((epic.data!.resourceSnapshot as ScopeSnapshot).ownerReview, undefined);
+    // Selection lineage under a grant without a selection is still refused (#4103).
+    const selection = await full.svc.proposeCampaignIssueScope("root", { requestId: "selection", expectedRevision: 1,
+      additions: [{ repository: "team/repo", number: 102 }], removals: [], explanation: "Chosen", lineage: { kind: "selection" } });
+    assert.equal(refusalCode(selection), "selection_not_granted");
+  } finally { full.db.close(); }
+  const custom = harness(false, 5);
+  try {
+    const proposed = await proposeWithoutLineage(custom, "custom", [101]);
+    assert.ok(proposed.ok, proposed.error ?? "refused");
+    assert.equal(proposed.data!.authority, "human");
+    assert.equal((proposed.data!.resourceSnapshot as ScopeSnapshot).ownerReview, undefined);
+  } finally { custom.db.close(); }
 });
 
 test("#2940 the bounded publication path admits unchanged and refuses with the new codes", async () => {
@@ -3336,9 +3480,12 @@ test("#4062 a refused epic-member addition cannot be delivered through a dispatc
 test("#4062 a refused follow-up addition cannot be delivered through a recommit, a dispatch and a merge that closes it", async () => {
   const h = scopeGuardHarness();
   try {
-    const refused = await h.svc.proposeCampaignIssueScope("root", { requestId: "add-follow-up", expectedRevision: 1,
+    // Without lineage the addition waits for the owner (#4267); until a person approves it, the scope is unchanged.
+    const unadmitted = await h.svc.proposeCampaignIssueScope("root", { requestId: "add-follow-up", expectedRevision: 1,
       additions: [{ repository: "team/repo", number: 103 }], removals: [], explanation: "Verified follow-up" });
-    assert.equal(refusalCode(refused), "lineage_missing");
+    assert.ok(unadmitted.ok, unadmitted.error ?? "refused");
+    assert.equal(unadmitted.data!.authority, "human"); assert.equal(unadmitted.data!.status, "pending");
+    assert.equal(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers!.includes(103), false);
     const followUp = h.itemFor("follow-up:103", 103);
     assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: followUp, commitment: { state: "scope_removed", reason: "Not in scope." } }).ok);
     // Recommitting the item is recording, which stays allowed; dispatching it is not.

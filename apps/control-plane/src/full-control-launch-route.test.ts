@@ -742,12 +742,12 @@ test("an empty launch scope delegates no issue writes: additions are refused and
     assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, []);
     assert.deepEqual(control.boundary.issueAuthority!.epics, []);
 
-    // The Orchestrator cannot widen an empty scope: an addition needs epic or in-scope lineage.
+    // The Orchestrator cannot widen an empty scope: an addition without lineage only asks the owner (#4267).
     const addition = await f.sessions.proposeCampaignIssueScope(root.id, { requestId: "add-5", expectedRevision: 1,
       additions: [{ repository: "owner/repo", number: 5 }], removals: [], explanation: "Fixture addition without lineage" });
-    assert.equal(addition.ok, false);
-    assert.equal(addition.status, 403);
-    assert.match(addition.error!, /authorized epic or exact related-publication lineage/);
+    assert.equal(addition.ok, true, addition.error ?? "");
+    assert.equal(addition.data!.authority, "human");
+    assert.equal(addition.data!.status, "pending");
     const epic = await f.sessions.proposeCampaignIssueScope(root.id, { requestId: "add-epic", expectedRevision: 1,
       additions: [{ repository: "owner/repo", number: 5 }], removals: [], explanation: "Fixture epic addition", lineage: { kind: "epic", epic: 5 } });
     assert.equal(epic.ok, false);
@@ -2104,14 +2104,18 @@ test("a selection grant's healthy proposal is reviewed, and a healthy grant with
     assert.equal(proposed.ok, true, proposed.error ?? "");
     assert.equal(proposed.data!.authority, "orchestrator");
     assert.deepEqual((proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).lineage, { kind: "selection" });
-    // A healthy grant without a selection keeps today's lineage rule.
+    // A healthy grant without a selection keeps the lineage rule: an addition without lineage is not
+    // admitted, and goes to the owner as one typed approval instead of a refusal (#4267).
     f.decision.state.answer = () => grantVerdict({ explicit: issues(12) });
     const { id: named } = await firstMessageLaunch(f, server);
     assert.equal((await f.sessions.promptFromHuman(f.human, named, "Fix #12")).ok, true);
-    const refused = await f.sessions.proposeCampaignIssueScope(named, { requestId: "no-lineage", expectedRevision: 2,
+    const owners = await f.sessions.proposeCampaignIssueScope(named, { requestId: "no-lineage", expectedRevision: 2,
       additions: [{ repository: "owner/repo", number: 13 }], removals: [], explanation: "One more" });
-    assert.equal(refused.ok, false);
-    assert.equal(refused.errorDetails?.code, "lineage_missing");
+    assert.equal(owners.ok, true, owners.error ?? "");
+    assert.equal(owners.data!.authority, "human");
+    const snapshot = owners.data!.resourceSnapshot as CampaignIssueScopeSnapshot;
+    assert.equal(snapshot.ownerReview?.cause, "lineage_missing");
+    assert.equal(snapshot.grantReview, undefined); assert.equal(snapshot.issueAdmission, undefined);
   } finally { await server.close(); f.db.close(); }
 });
 
