@@ -128,6 +128,8 @@ export interface PullRequestWaitDeps {
   signal?: AbortSignal;
   /** PULL_REQUEST_WAIT_READ_GRACE_MS, or what remains of it after a caller's own read. */
   readGraceMs?: number;
+  /** Called after each complete, successful observation: the wait's progress signal (#1280). */
+  onObservation?: () => void;
 }
 
 export type PullRequestWaitResult =
@@ -886,6 +888,7 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     // Only a complete observation, rules included, resets the transient-failure budget.
     transientFailures = 0;
     last = seen;
+    deps.onObservation?.();
 
     seen.removal = headRemoval(seen);
     if (seen.queue) {
