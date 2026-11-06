@@ -4332,8 +4332,9 @@ export interface RunnerRuntimeInfo {
   campaignReview?: import("./campaign-review-job.js").ControlledReviewCapability;
   /** Exact read-only workspace inspection path only; never Full Control readiness. Version 2
    * accepts `campaign_launch_inspect_cancel` and repository-only (zero-issue) inspection.
-   * Version 3 accepts authorized project location paths and returns closed failure codes. */
-  campaignLaunchInspection?: { version: 1 | 2 | 3 };
+   * Version 3 accepts authorized project location paths and returns closed failure codes.
+   * Version 4 also inspects a follow-up `publication` in that Location's repository (#4119). */
+  campaignLaunchInspection?: { version: 1 | 2 | 3 | 4 };
   /** Runner-mediated cross-model review for sessions (#3306). Missing is unsupported. */
   sessionReview?: import("./session-review-job.js").SessionReviewCapability;
   /** Review sessions (#3368): the reviewer harnesses this runner can launch. Missing is unsupported. */

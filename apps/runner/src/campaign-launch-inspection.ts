@@ -4,7 +4,7 @@ import { realpath } from "node:fs/promises";
 import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, type CampaignLaunchInspectionFailure, type CampaignLaunchInspectionMessage, type CampaignLaunchInspectionResult } from "@wollipog/protocol";
 import { githubSlug } from "./git-ops.js";
 import { gitlabIssueOrigin } from "./gitlab-issue-closure.js";
-import { inspectCampaignIssueScope } from "./campaign-issue-scope.js";
+import { inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
 
 /** Runner-side ceiling, independent of whether the caller's cancellation ever arrives. */
 export const CAMPAIGN_LAUNCH_INSPECTION_LIFETIME_MS = 60_000;
@@ -12,7 +12,9 @@ export const CAMPAIGN_LAUNCH_INSPECTION_LIFETIME_MS = 60_000;
 type Run = (cwd: string, command: string, args: string[], signal: AbortSignal) => Promise<string>;
 const nativeRead: Run = (cwd, command, args, signal) => new Promise((resolve, reject) => {
   // `signal` terminates only this inspection's own child process.
-  execFile(command, args, { cwd, timeout: 15_000, maxBuffer: 1024 * 1024, signal }, (error, stdout) => {
+  // A publication's duplicate search reads up to 200 issues, so it gets the root's own read limits.
+  execFile(command, args, { cwd, timeout: 25_000, maxBuffer: 2 * 1024 * 1024, signal,
+    env: { ...process.env, GH_PROMPT_DISABLED: "1", GH_PAGER: "cat", NO_PROMPT: "1" } }, (error, stdout) => {
     if (error) reject(new Error("registered workspace inspection failed"));
     else resolve(stdout);
   });
@@ -36,7 +38,14 @@ export async function inspectCampaignLaunch(
   };
   let failure: CampaignLaunchInspectionFailure = "invalid_request";
   try {
-    if (Object.keys(message).some((key) => !["type", "requestId", "workspaceId", "workspacePath", "issueNumbers"].includes(key)) ||
+    const publication = message.publication;
+    if (Object.keys(message).some((key) => !["type", "requestId", "workspaceId", "workspacePath", "issueNumbers", "publication"].includes(key)) ||
+        (publication !== undefined && (!publication || typeof publication !== "object" || Array.isArray(publication) ||
+          Object.keys(publication).some((key) => !["sanitizedTitle", "sanitizedBody", "labels"].includes(key)) ||
+          typeof publication.sanitizedTitle !== "string" || typeof publication.sanitizedBody !== "string" ||
+          !Array.isArray(publication.labels) || publication.labels.some((label) => typeof label !== "string") ||
+          // One published issue at most is checked against a payload.
+          !Array.isArray(message.issueNumbers) || message.issueNumbers.length > 1)) ||
         typeof message.requestId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(message.requestId) ||
         typeof message.workspaceId !== "string" || !message.workspaceId || message.workspaceId.length > 256 ||
         (message.workspacePath !== undefined && (typeof message.workspacePath !== "string" || !message.workspacePath.trim() || message.workspacePath.includes("\0"))) ||
@@ -57,13 +66,24 @@ export async function inspectCampaignLaunch(
     if (!githubSlug(origin) && !gitlabIssueOrigin(origin)) throw new Error("unsupported origin");
     failure = "issue_read_failed";
     const issueNumbers = [...message.issueNumbers].sort((a, b) => a - b);
-    const { repository, candidates } = await inspectCampaignIssueScope((command, args) =>
-      command === "git" && args[0] === "remote" ? Promise.resolve(origin) : owned(cwd, command, args), undefined, issueNumbers);
+    const read = (command: string, args: string[]) =>
+      command === "git" && args[0] === "remote" ? Promise.resolve(origin) : owned(cwd, command, args);
+    // #4119: with an issue number, the issue must be published with exactly this payload; the read
+    // refuses any difference in its title, body or labels. The root reads its own the same way.
+    const published = issueNumbers.length ? publication : undefined;
+    if (published) failure = "publication_refused";
+    const { repository, candidates } = await inspectCampaignIssueScope(read, undefined, issueNumbers, published);
     if (JSON.stringify(candidates.map((c) => c.issue.number).sort((a, b) => a - b)) !== JSON.stringify(issueNumbers)) throw new Error("issue mismatch");
+    // #4119: with none, the same publication inspection the root runs in its own checkout, here in
+    // this Location's repository, with this runner's own forge login.
+    failure = "publication_refused";
+    const inspected = publication && !published ? await inspectCampaignPublication(read, publication) : undefined;
+    if (inspected && inspected.repository !== repository) throw new Error("publication repository mismatch");
     if (signal.aborted) throw new InspectionCancelled();
     // No origin URL, issue body/title, local path, command output or environment leaves this helper.
     const digest = createHash("sha256").update(JSON.stringify([cwd, repository, head, issueNumbers])).digest("hex");
-    return { ...base, ok: true, repository, issueNumbers, digest };
+    return { ...base, ok: true, repository, issueNumbers, digest,
+      ...(inspected ? { publicationDigest: inspected.publicationDigest, duplicateSearch: inspected.duplicateSearch } : {}) };
   } catch {
     if (signal.aborted) return { ...base, ok: false, cancelled: true, error: "Inspection was cancelled before it completed; no launch was admitted." };
     return { ...base, ok: false, failure, error: CAMPAIGN_LAUNCH_INSPECTION_ERRORS[failure] };

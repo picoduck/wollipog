@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   PROJECT_LOCATION_INSPECTION_FAILURES, campaignRepositoryLocation, runnerSupportsProtocol,
-  type CampaignLaunchInspectionFailure, type CampaignLaunchInspectionResult, type ProjectLocationInspection,
+  type CampaignLaunchInspectionFailure, type CampaignLaunchInspectionMessage, type CampaignLaunchInspectionResult, type ProjectLocationInspection,
   type ProjectLocationInspectionFailure, type RunnerProtocolCapability, type RunnerView,
 } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
@@ -10,14 +10,18 @@ import { RunnerRequestTimeoutError, type Hub } from "./hub.js";
 export const CAMPAIGN_LAUNCH_INSPECTION_TIMEOUT_MS = 60_000;
 /** Runners that inspect an authorized Location path and return closed failure codes (#4090). */
 export const PROJECT_LOCATION_INSPECTION_MIN_VERSION = 3;
+/** Runners that also inspect a follow-up publication in a Location's repository (#4119). */
+export const LOCATION_PUBLICATION_INSPECTION_MIN_VERSION = 4;
 
 /** Ask the runner to inspect the workspace origin and issues. Expiry or cancellation of the caller
  * drops the pending request (so a late result is discarded, never admitted) and, on a version-2
  * runner, stops that one inspection. Older runners stay bounded by their per-command timeouts. */
 export async function inspectCampaignWorkspace(hub: Hub, runner: RunnerView, workspaceId: string, issueNumbers: number[],
-  signal: AbortSignal, timeoutMs = CAMPAIGN_LAUNCH_INSPECTION_TIMEOUT_MS, workspacePath?: string): Promise<CampaignLaunchInspectionResult | undefined> {
+  signal: AbortSignal, timeoutMs = CAMPAIGN_LAUNCH_INSPECTION_TIMEOUT_MS, workspacePath?: string,
+  publication?: NonNullable<CampaignLaunchInspectionMessage["publication"]>): Promise<CampaignLaunchInspectionResult | undefined> {
   const version = runner.runtime?.campaignLaunchInspection?.version ?? 0;
-  if (version < PROJECT_LOCATION_INSPECTION_MIN_VERSION || !workspacePath || signal.aborted) return undefined;
+  if (version < (publication ? LOCATION_PUBLICATION_INSPECTION_MIN_VERSION : PROJECT_LOCATION_INSPECTION_MIN_VERSION) ||
+      !workspacePath || signal.aborted) return undefined;
   const requestId = `campaign_launch_${randomUUID()}`;
   const stopRunner = () => {
     if (version >= 2) hub.sendToRunner(runner.runnerId, { type: "campaign_launch_inspect_cancel", requestId });
@@ -28,7 +32,7 @@ export async function inspectCampaignWorkspace(hub: Hub, runner: RunnerView, wor
   signal.addEventListener("abort", onAbort, { once: true });
   try {
     const result = await hub.requestFromRunner(runner.runnerId, requestId, {
-      type: "campaign_launch_inspect", requestId, workspaceId, workspacePath, issueNumbers,
+      type: "campaign_launch_inspect", requestId, workspaceId, workspacePath, issueNumbers, ...(publication ? { publication } : {}),
     }, timeoutMs);
     if (signal.aborted || result.type !== "campaign_launch_inspection_result" || result.requestId !== requestId) return undefined;
     return result;
@@ -102,4 +106,59 @@ export async function inspectProjectLocation(
     locationId, projectId: current.projectId, runnerId: current.runnerId, workspaceId: current.workspaceId,
     repository: result.repository!.toLowerCase(), digest: result.digest, verifiedAt: (options.now ?? Date.now)(),
   } };
+}
+
+/** Check a follow-up's payload in a boundary repository other than the root's own (#4119), through
+ * the first of its entry's Locations that is active in the root's Project and whose runner is online
+ * and inspects publications. That runner reads the Location's own path with its own forge login.
+ * Only an exact success for that Location and repository is returned; null otherwise. */
+async function inspectPublicationAtLocation(
+  dependencies: { db: ControlPlaneDb; hub: Hub },
+  root: { projectId?: string | null },
+  entry: { repository: string; locationIds: readonly string[] },
+  publication: NonNullable<CampaignLaunchInspectionMessage["publication"]>,
+  issueNumbers: number[],
+  timeoutMs: number,
+): Promise<CampaignLaunchInspectionResult | null> {
+  const { db, hub } = dependencies;
+  const location = entry.locationIds.map((id) => db.getProjectLocation(id)).find((candidate) => candidate &&
+    candidate.availability !== "runner_removed" && Boolean(root.projectId) && candidate.projectId === root.projectId &&
+    hub.isRunnerOnline(candidate.runnerId) &&
+    (db.getRunner(candidate.runnerId)?.runtime?.campaignLaunchInspection?.version ?? 0) >= LOCATION_PUBLICATION_INSPECTION_MIN_VERSION);
+  const runner = location ? db.getRunner(location.runnerId) : undefined;
+  const workspacePath = location ? db.getWorkspacePath(location.runnerId, location.workspaceId) : undefined;
+  if (!location || !runner || !workspacePath) return null;
+  const result = await inspectCampaignWorkspace(hub, runner, location.workspaceId, issueNumbers, new AbortController().signal, timeoutMs,
+    workspacePath, publication);
+  // Runner frames are not validated on the wire.
+  return result?.ok === true && result.cancelled === undefined && result.workspaceId === location.workspaceId &&
+    typeof result.repository === "string" && result.repository.toLowerCase() === entry.repository.toLowerCase() &&
+    JSON.stringify(result.issueNumbers ?? []) === JSON.stringify(issueNumbers) ? result : null;
+}
+
+/** Content screening and the duplicate search by subject before a follow-up is published in that
+ * repository, as the root's publication inspection does: its payload's digest, or null. */
+export async function inspectBoundaryPublication(
+  dependencies: { db: ControlPlaneDb; hub: Hub },
+  root: { projectId?: string | null },
+  entry: { repository: string; locationIds: readonly string[] },
+  publication: NonNullable<CampaignLaunchInspectionMessage["publication"]>,
+  timeoutMs = CAMPAIGN_LAUNCH_INSPECTION_TIMEOUT_MS,
+): Promise<string | null> {
+  const result = await inspectPublicationAtLocation(dependencies, root, entry, publication, [], timeoutMs);
+  return result?.duplicateSearch === "subject" && typeof result.publicationDigest === "string" && /^[a-f0-9]{64}$/.test(result.publicationDigest)
+    ? result.publicationDigest : null;
+}
+
+/** Whether an issue of that repository was published with exactly this payload, before it joins the
+ * campaign's scope: a v4 runner reads its title, body and labels, and refuses any difference. */
+export async function verifyBoundaryPublishedIssue(
+  dependencies: { db: ControlPlaneDb; hub: Hub },
+  root: { projectId?: string | null },
+  entry: { repository: string; locationIds: readonly string[] },
+  publication: NonNullable<CampaignLaunchInspectionMessage["publication"]>,
+  issue: number,
+  timeoutMs = CAMPAIGN_LAUNCH_INSPECTION_TIMEOUT_MS,
+): Promise<boolean> {
+  return Boolean(await inspectPublicationAtLocation(dependencies, root, entry, publication, [issue], timeoutMs));
 }

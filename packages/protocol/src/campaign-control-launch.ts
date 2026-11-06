@@ -96,6 +96,11 @@ export interface CampaignLaunchInspectionMessage {
   /** Resolved by authorized session preparation, never browser or agent input. */
   workspacePath?: string;
   issueNumbers: number[];
+  /** Version 4 (#4119): a follow-up's exact sanitized payload, checked in the Location's repository
+   * as the root checks its own. With no issue numbers: content screening and the duplicate search
+   * by subject, before publishing. With one issue number: that issue must be published with
+   * exactly this payload, before it joins the scope. */
+  publication?: { sanitizedTitle: string; sanitizedBody: string; labels: string[] };
 }
 
 export const CAMPAIGN_LAUNCH_INSPECTION_ERRORS = {
@@ -105,6 +110,7 @@ export const CAMPAIGN_LAUNCH_INSPECTION_ERRORS = {
   not_repository: "The project location is not a git repository with a valid HEAD.",
   unsupported_origin: "The project repository origin is unsupported; Full Control requires a github.com or GitLab repository.",
   issue_read_failed: "The selected issues could not be read and verified in the project repository.",
+  publication_refused: "The follow-up could not be inspected in the project repository, or an issue there already has its title.",
 } as const;
 export type CampaignLaunchInspectionFailure = keyof typeof CAMPAIGN_LAUNCH_INSPECTION_ERRORS;
 
@@ -127,6 +133,10 @@ export interface CampaignLaunchInspectionResult {
   failure?: CampaignLaunchInspectionFailure;
   /** Set when the inspection stopped because its request was cancelled. Never admits a launch. */
   cancelled?: true;
+  /** Version 4, for a `publication` request: the digest of the inspected payload, and how the
+   * duplicate search compared titles, as the root's publication inspection reports them. */
+  publicationDigest?: string;
+  duplicateSearch?: "subject";
 }
 
 export type CampaignLaunchCapabilityId =

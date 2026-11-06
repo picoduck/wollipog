@@ -147,7 +147,9 @@ export function normalizeCampaignIssueScopeSnapshot(input: Record<string, unknow
   if (input.verifiedPublications !== undefined && (!Array.isArray(input.verifiedPublications) || input.verifiedPublications.length > 100 ||
       input.verifiedPublications.some((p) => !p || typeof p !== "object" || Object.keys(p).length !== 2 || typeof p.publicationOccurrenceId !== "string" ||
         !p.publicationOccurrenceId || p.publicationOccurrenceId.length > 256 || !Number.isSafeInteger(p.issue) || p.issue < 1 ||
-        !Array.isArray(input.additions) || !input.additions.includes(p.issue)) ||
+        // The published issue is an addition of the launch repository or of another one (#4119).
+        !(Array.isArray(input.additions) && input.additions.includes(p.issue) || Array.isArray(input.otherRepositories) &&
+          input.otherRepositories.some((group: { additions?: unknown }) => Array.isArray(group?.additions) && group.additions.includes(p.issue)))) ||
       new Set(input.verifiedPublications.map((p) => p.publicationOccurrenceId)).size !== input.verifiedPublications.length)) return null;
   if (typeof input.repository !== "string" || !campaignRepositoryLocation(input.repository)) return null;
   const launch = input.repository.toLowerCase();

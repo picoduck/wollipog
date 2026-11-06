@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
-import { campaignPublicationSafe, campaignPublicationTitle, campaignScopeIssues, type CampaignPublicationAdmissionFailure, type SessionView, type GithubIssueClosureSnapshot,
+import { campaignBoundaryRepository, campaignPublicationSafe, campaignPublicationTitle, campaignScopeIssues, type CampaignPublicationAdmissionFailure, type SessionView, type GithubIssueClosureSnapshot,
   type WorkflowDecisionResourceSnapshot, type CampaignWorkItemDetail, type CampaignPullRequestRef, type CampaignRecommendation,
   ISSUE_CLOSURE_DELIVERY_GAPS_MAX, issueClosureDeliveryGap, type IssueClosureDeliveryGap, type IssueClosureDeliveryGapCode,
   type IssueClosureEpicMembers } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
-import { campaignBoundaryCurrent } from "./campaign-authority.js";
+import { campaignBoundaryCurrent, campaignIssueInScope } from "./campaign-authority.js";
 import { forgeRefKey, type ForgeFactEntry } from "./campaign-forge-observations.js";
 
 export const issueEvidenceDigest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -86,8 +86,9 @@ export function publicationEvidenceCheck(db: ControlPlaneDb, root: SessionView,
   snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>) {
   const failed = (failure: CampaignPublicationAdmissionFailure) => ({ failure });
   const boundary = issueBoundary(root);
-  if (!boundary?.issueAuthority?.relatedFollowUps || !boundary.operations.includes(snapshot.category) ||
-      snapshot.repository !== boundary.repository.toLowerCase()) return failed("no_issue_boundary");
+  if (!boundary?.issueAuthority?.relatedFollowUps || !boundary.operations.includes(snapshot.category)) return failed("no_issue_boundary");
+  // #4119: any repository of the boundary; another Project repository must be added first.
+  if (!campaignBoundaryRepository(boundary, snapshot.repository)) return failed("target_outside_boundary");
   if (!snapshot.recommendationId) return failed("recommendation_not_found");
   if (!campaignPublicationSafe(snapshot.sanitizedTitle, snapshot.sanitizedBody, snapshot.labels)) return failed("unsafe_payload");
   const recommendation = db.campaignWorkLedger.recommendation(root.id, snapshot.recommendationId);
@@ -97,7 +98,12 @@ export function publicationEvidenceCheck(db: ControlPlaneDb, root: SessionView,
   if (campaignPublicationTitle(recommendation.title) !== campaignPublicationTitle(snapshot.sanitizedTitle)) return failed("title_mismatch");
   if (!recommendation.originWorkItemIds.length) return failed("origin_outside_scope");
   const origins = recommendation.originWorkItemIds.map((id) => db.campaignWorkLedger.detail(root.id, id, Date.now())?.issue);
-  if (origins.some((issue) => !issue || issue.repository.toLowerCase() !== snapshot.repository || !root.orchestratorPolicy?.issueNumbers?.includes(issue.number))) return failed("origin_outside_scope");
+  // #4119: the originating work is in the campaign's scope, in whichever of its repositories.
+  if (origins.some((issue) => !issue || !campaignIssueInScope(root.orchestratorPolicy, issue))) return failed("origin_outside_scope");
+  // A follow-up in another repository than its origins records both in its lineage.
+  const originRefs = [...new Set(origins.map((issue) => `${issue!.repository.toLowerCase()}#${issue!.number}`))].sort();
+  const lineage = originRefs.some((ref) => !ref.startsWith(`${snapshot.repository}#`))
+    ? { target: snapshot.repository, origins: originRefs } : undefined;
   // Scope capacity includes every outstanding publication reservation, so concurrent approvals
   // cannot consume the same final slot. This hook composes with aggregate campaign limits.
   const grants = db.campaignPublicationReservations(root.id);
@@ -106,7 +112,8 @@ export function publicationEvidenceCheck(db: ControlPlaneDb, root: SessionView,
   if (heldCampaignIssues(root) + reservations >= db.campaignIssueLimit(root.id, boundary.issueAuthority.maxIssues)) {
     return failed("capacity_exhausted");
   }
-  return { evidence: { recommendation, origins, scopeRevision: boundary.issueScopeRevision, boundaryRevision: boundary.revision } };
+  return { evidence: { recommendation, origins, scopeRevision: boundary.issueScopeRevision, boundaryRevision: boundary.revision,
+    ...(lineage ? { lineage } : {}) } };
 }
 
 /** Why the server refused an Orchestrator's own Full Control scope change (#2940). Each code names

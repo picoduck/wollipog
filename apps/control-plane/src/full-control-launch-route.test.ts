@@ -904,6 +904,8 @@ test("an empty launch scope delegates no issue writes: additions are refused and
       dispositionReason: "Observed related work", repository: "owner/repo", title: "Fixture Follow-Up", originWorkItemIds: ["wi-5"] })) as unknown as typeof ledger.recommendation;
     const inScope = structuredClone(root);
     inScope.orchestratorPolicy!.issueNumbers = [5];
+    // A publication's origin must be in both copies of the scope (#4119), as a merge's closures are.
+    inScope.orchestratorPolicy!.issueScope!.issueNumbers = [5];
     const closure = { category: "issue_closure", repository: "owner/repo", issue: 5, title: "Issue 5", forgeDigest: "f".repeat(64),
       reason: "completed", explanation: "Fixture closure", evidence: [], activeChildren: [], openPullRequests: [],
       delivery: [{ number: 10, headSha: "b".repeat(40), mergeCommitSha: "c".repeat(40) }] } as unknown as GithubIssueClosureSnapshot;
