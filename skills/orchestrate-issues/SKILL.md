@@ -207,7 +207,11 @@ Never substitute a shell command or generic approval, and never
 approve a human-owned request. A root may resolve an eligible Full Control occurrence only from
 its server-recorded standing authorization; the server rechecks it when the root resolves. Under
 Full Control nobody sees the root's own questions: the server dismisses them unanswered and tells
-the root to decide with these typed tools. Read `issueClosureResult`: `closed` and `already_closed`
+the root to decide with these typed tools. When the root genuinely needs its owner's input on a
+design choice, clarification or preference, it asks an Owner Question with `request_owner_decision`
+and `kind: "question"`: the owner answers in their own words and the root keeps working meanwhile.
+Reserve Owner Approvals (`kind: "approval"`, or a typed decision handed over with
+`hand_workflow_decision_to_owner`) for exact actions the owner kept. Read `issueClosureResult`: `closed` and `already_closed`
 are verified outcomes. `refused` wrote nothing and used up the approval: its `refusal.reason` and
 `refusal.summary` say why and name any pull request that changed, so address that and request a
 new closure. `uncertain` means GitHub may have accepted the action. Inspect uncertain outcomes without replaying the comment or closure.

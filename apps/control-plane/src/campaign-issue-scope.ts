@@ -100,7 +100,7 @@ export function scopeSnapshot(db: ControlPlaneDb, root: SessionView, repository:
   } while (cursor);
   const changed = [...additions, ...removals];
   const unrelated = db.campaignWorkLedger.sessionsUnrelatedToIssues(root.id, repository, changed);
-  const affectedDecisions = db.unconsumedWorkflowDecisionsForController(root.id)
+  const affectedDecisions = db.authorityBoundWorkflowDecisionsForController(root.id)
     .filter((d) => d.category !== "campaign_issue_scope" && scopeChangeAffectsDecision(db, root.id, repository, changed, removals.length > 0, unrelated, d))
     .map((d) => d.occurrenceId).sort();
   return normalizeCampaignIssueScopeSnapshot({ category: "campaign_issue_scope", repository, expectedRevision: request.expectedRevision,
@@ -113,7 +113,7 @@ export function scopeSnapshot(db: ControlPlaneDb, root: SessionView, repository:
  * Full Control scope change re-authorizes the boundary all of them were evaluated under, so that
  * request lists, and its approval revokes, every one (#3915). */
 export function everyOutstandingScopeDecision(db: ControlPlaneDb, rootId: string): string[] {
-  return db.unconsumedWorkflowDecisionsForController(rootId).filter((d) => d.category !== "campaign_issue_scope").map((d) => d.occurrenceId).sort();
+  return db.authorityBoundWorkflowDecisionsForController(rootId).filter((d) => d.category !== "campaign_issue_scope").map((d) => d.occurrenceId).sort();
 }
 
 /** Whether a scope change that adds or removes `changed` invalidates an outstanding decision (#3915).
