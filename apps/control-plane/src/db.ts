@@ -12587,6 +12587,15 @@ export class ControlPlaneDb {
     return row ? this.decisionOccurrenceFromRow(row) : null;
   }
 
+  /** A campaign's occurrences whose idempotency key starts with `prefix` (#4282: every constraint check
+   * of one set of additions at one boundary and scope revision), oldest first and bounded. */
+  decisionOccurrencesByKeyPrefix(campaignSessionId: string, prefix: string, limit = 20): DecisionOccurrenceRecord[] {
+    const escaped = prefix.replace(/[\\%_]/gu, (character) => `\\${character}`);
+    return (this.stmt(`SELECT * FROM decision_occurrences WHERE campaign_session_id=? AND occurrence_key LIKE ? ESCAPE '\\'
+      ORDER BY created_at, occurrence_id LIMIT ?`).all(campaignSessionId, `${escaped}%`, limit) as unknown as DecisionOccurrenceRow[])
+      .map((row) => this.decisionOccurrenceFromRow(row));
+  }
+
   /** Record what a campaign occurrence affected (#4104). The first record wins. */
   recordCampaignDecisionSubject(input: { occurrenceId: string; campaignSessionId: string } & Omit<CampaignDecisionSubject, "classification">, now: number): void {
     this.stmt(

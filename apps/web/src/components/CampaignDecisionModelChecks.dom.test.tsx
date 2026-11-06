@@ -225,6 +225,8 @@ test("Campaign Status lists each Decision Model call in exactly one section: che
     closure_reason: ["Decision Model Checks", decision("closure_reason", { kind: "closure_reason", verdict: "fits", reason: "[closure_reason]",
       subject: { sessionId: "root-1", surface: "issue_closure", requestId: "team/repo#7" } })],
     scope_review: ["Decision Model Checks", decision("scope_review", { kind: "scope_review", verdict: "admit", reason: "[scope_review]", subject: undefined })],
+    // An Orchestrator scope proposal's constraint check (#4282) is a check beside the proposal it affects.
+    scope_check: ["Decision Model Checks", decision("scope_check", { kind: "scope_check", verdict: "refuse", reason: "[scope_check]", subject: undefined })],
     // Full Control's scope grant has no section of its own, so Decision Model lists it.
     scope_grant: ["Decision Model", decision("scope_grant", { kind: "scope_grant", verdict: "grant", reason: "[scope_grant]", subject: undefined })],
     probe: ["Decision Model", decision("probe", { kind: "probe", verdict: "confirm", reason: "[probe]", subject: undefined })],

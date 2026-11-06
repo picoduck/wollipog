@@ -101,24 +101,40 @@ export function scopeCheckInputDigest(inputs: DecisionInputs): string | null {
   }
 }
 
+/** How many distinct checks one set of additions gets at one boundary and scope revision. A revised
+ * proposal of the same issues (another constraint, another count) is checked again up to this many
+ * times; after that it is the owner's, so rewording a proposal can never shop for an admit. */
+export const SCOPE_CHECKS_PER_ADDITIONS = 3;
+
+/** The key prefix every check of these additions at this boundary and scope revision shares. */
+export function scopeCheckAdditionsPrefix(rootId: string, boundaryRevision: number, revision: number, additions: readonly number[]): string {
+  const subject = sha256(JSON.stringify([...additions].sort((a, b) => a - b))).slice(0, 24);
+  return `scope_check:${rootId}:${boundaryRevision}:${revision}:${subject}:`;
+}
+
+const normalized = (value: string) => oneLine(value).toLowerCase();
+
 /** One check per campaign, boundary revision, scope revision and proposal as structured: its
- * additions with their origins, the count, the constraints and the withheld operations. The
- * rationale stays out, so a reworded rationale joins the recorded occurrence and returns its
- * verdict, its owner request or its admission: rewording never buys a second verdict. */
+ * additions with their origins, the count, the constraints (normalized, deduplicated and sorted, so
+ * casing, spacing or order buys nothing) and the withheld operations. The rationale stays out, so a
+ * reworded rationale joins the recorded occurrence and returns its verdict, its owner request or its
+ * admission: rewording never buys a second verdict. */
 export function scopeCheckKey(rootId: string, boundaryRevision: number, revision: number,
   proposal: Pick<CampaignScopeProposal, "issues" | "requestedCount" | "constraints" | "withheldOperations">): string {
   const subject = sha256(JSON.stringify({
     issues: [...proposal.issues].map((issue) => [issue.number, issue.origin]).sort((a, b) => (a[0] as number) - (b[0] as number)),
-    requestedCount: proposal.requestedCount, constraints: proposal.constraints, withheldOperations: [...proposal.withheldOperations].sort(),
+    requestedCount: proposal.requestedCount, constraints: [...new Set(proposal.constraints.map(normalized))].sort(),
+    withheldOperations: [...new Set(proposal.withheldOperations)].sort(),
   })).slice(0, 32);
-  return `scope_check:${rootId}:${boundaryRevision}:${revision}:${subject}`;
+  return `${scopeCheckAdditionsPrefix(rootId, boundaryRevision, revision, proposal.issues.map((issue) => issue.number))}${subject}`;
 }
 
-/** The count a proposal's chosen issues may not exceed (#4282, as #4102): the count the owner
- * stated, else the admitted one for a later addition, else the default selection of 3. A floor
- * only: it narrows, and the constraint check still confirms the count against the message. */
+/** The count a proposal's chosen issues may not exceed (#4282, as #4102). A later addition is bound
+ * by the admitted count, never by its own; an initial proposal by the count it read, which a floor
+ * proves the message writes and the check confirms; with none, the default selection of 3. */
 export function scopeProposalChosenLimit(proposal: Pick<CampaignScopeProposal, "requestedCount">, admitted?: FullControlInitialScope): number {
-  return proposal.requestedCount ?? admitted?.requestedCount ?? SCOPE_GRANT_DEFAULT_SELECTION_COUNT;
+  if (admitted) return admitted.requestedCount ?? SCOPE_GRANT_DEFAULT_SELECTION_COUNT;
+  return proposal.requestedCount ?? SCOPE_GRANT_DEFAULT_SELECTION_COUNT;
 }
 
 /** A check's occurrence as Campaign Status shows it. */

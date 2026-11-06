@@ -47,11 +47,12 @@ import { firstMessageTargetEpics } from "./first-message-issue-intent.js";
 import { onlyOtherRepositories, proposalMaxIssues } from "./scope-grant.js";
 import { normalizeScopeProposalInput, scopeProposalAgentQuestions, scopeProposalAnswer, scopeProposalChecks, scopeProposalOfRequest,
   type CampaignScopeProposal, type ScopeProposalCheck, type ScopeProposalOwnerCause } from "@wollipog/protocol";
-import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, ownerReviewMaxIssues, scopeGrantCandidates, writtenAsDigits,
+import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, ownerReviewMaxIssues, scopeGrantCandidates, writtenAsCount, writtenAsDigits,
   type ScopeGrantFields } from "./scope-grant.js";
 import { recordUnfinishedDecision, runCampaignCheck, type CampaignCheckOutcome } from "./campaign-decision-checks.js";
 import { DecisionInputError, type DecisionInputs } from "./decision-kinds.js";
-import { scopeCheckInputDigest, scopeCheckInputs, scopeCheckKey, scopeProposalChosenLimit } from "./scope-check.js";
+import { SCOPE_CHECKS_PER_ADDITIONS, scopeCheckAdditionsPrefix, scopeCheckInputDigest, scopeCheckInputs, scopeCheckKey,
+  scopeProposalChosenLimit } from "./scope-check.js";
 import { scopeGrantDigest, scopeReviewInputDigest, scopeReviewInputs, scopeReviewKey } from "./scope-selection.js";
 import { boundedIssueNumbers, validCampaignIssueFacts, type CampaignIssueFacts, type CampaignScopeGrantReview, type CampaignScopeOwnerReview, type DecisionErrorClass, type FullControlScopeGrant } from "@wollipog/protocol";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
@@ -12210,7 +12211,11 @@ export class SessionsService {
       const labeled = facts.find((fact) => humanRequiredIssueLabel(policies, where, fact.labels) !== null);
       if (labeled) return refuse("human_required_label", { issue: labeled.number });
     }
-    // Floor 7: the issues the Orchestrator chose stay within the count the owner stated, the admitted
+    // Floor 7: a count the Orchestrator read is one the owner's message writes, as digits or a word.
+    if (structured && base.requestedCount !== null && !writtenAsCount(ownerMessage, base.requestedCount)) {
+      return refuse("requested_count_not_in_message", { requested: base.requestedCount });
+    }
+    // Floor 8: the issues the Orchestrator chose stay within the count the owner stated, the admitted
     // one for a later addition, or the default of 3 (as #4102). The check still confirms the count.
     const chosenCount = base.issues.filter((issue) => issue.origin === "orchestrator_chosen").length;
     const chosenLimit = scopeProposalChosenLimit(base, first.initialScope);
@@ -12252,7 +12257,16 @@ export class SessionsService {
     // The Decision Model's constraint check, on typed questions in one call (#4282, #4283).
     const organizationId = this.db.sessionScope(sessionId)?.organizationId;
     if (!organizationId) return ownerApproval(record);
-    const occurrence = await this.scopeProposalCheck(latest, organizationId, scopeCheckKey(sessionId, boundary.revision, request.expectedRevision, base),
+    const checkKey = scopeCheckKey(sessionId, boundary.revision, request.expectedRevision, base);
+    // A revised proposal of the same issues is checked again only a few times; past that it is the
+    // owner's, so rewording can never shop for an admit. A repeat of a checked proposal reads its outcome.
+    const earlierChecks = this.db.decisionOccurrencesByKeyPrefix(sessionId,
+      scopeCheckAdditionsPrefix(sessionId, boundary.revision, request.expectedRevision, additions), SCOPE_CHECKS_PER_ADDITIONS + 1);
+    if (!earlierChecks.some((earlier) => earlier.occurrenceKey === checkKey) && earlierChecks.length >= SCOPE_CHECKS_PER_ADDITIONS) {
+      log("owner_review", { checks, cause: "constraint_check_unavailable", repeatedChecks: earlierChecks.length });
+      return ownerApproval(record);
+    }
+    const occurrence = await this.scopeProposalCheck(latest, organizationId, checkKey,
       scopeCheckInputs(ownerMessage, base, request.explanation, facts ?? [], { repository, operations: latestBoundary.operations, inScope: before,
         ...(first.initialScope ? { admitted: first.initialScope } : {}) }));
     const reason = occurrence.reason ? occurrence.reason.slice(0, 300) : undefined;
