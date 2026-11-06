@@ -3842,9 +3842,12 @@ test("a follow-up in another boundary repository is inspected through its Locati
     const inspections: Array<{ runnerId: string; workspacePath?: string; publication?: unknown }> = [];
     const verifications: Array<{ issueNumbers: number[]; title?: string }> = [];
     let publishedPayloadMatches = true;
+    // Runs while the runner is answering, as a person changing the Location mid-request would.
+    let whileInspecting: (() => void) | null = null;
     const runner = h.hub.requestFromRunner;
     h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
       if (message.type !== "campaign_launch_inspect") return runner(runnerId, requestId, message, timeout);
+      whileInspecting?.();
       const result = { type: "campaign_launch_inspection_result" as const, requestId, workspaceId: message.workspaceId, ok: true, repository: "team/api",
         issueNumbers: message.issueNumbers, digest: "d".repeat(64) };
       // Reading issues, with a payload to match or without one, is not a duplicate search.
@@ -3948,7 +3951,33 @@ test("a follow-up in another boundary repository is inspected through its Locati
     assert.ok(localEvidence);
     assert.equal(localEvidence.lineage, undefined);
 
+    // A Location that changes while its runner answers is not the one the boundary lists: its answer
+    // proves nothing, whether it was repointed, moved to another Project, or removed.
+    const changes: Array<[string, () => void, () => void]> = [
+      ["repointed", () => h.db.registerRunner({ runnerId: "r2", hostname: "r2", os: "linux", version: "test", workspaces: [{ id: "a", name: "Api", path: "/repos/elsewhere" }], agents: [],
+        runtime: { maxConcurrentSessions: 4, campaignLaunchInspection: { version: 4 } } as RunnerMetadata["runtime"] }, 1, PROTOCOL_VERSION), () => register(4)],
+      ["moved", () => { h.db.raw().prepare("UPDATE project_locations SET project_id=? WHERE id=?").run(h.db.createProject({ name: "Elsewhere" }).id, api.id); },
+        () => { h.db.raw().prepare("UPDATE project_locations SET project_id=? WHERE id=?").run(project.id, api.id); }],
+      ["removed", () => { h.db.removeProjectLocation(api.id); }, () => {}],
+    ];
+    for (const [label, change, restore] of changes) {
+      let changed = false;
+      whileInspecting = () => { if (!changed) { changed = true; change(); } };
+      const midway = await request(`midway-${label}`, publication(`Api ${label} repair`, record(`Api ${label} repair`)));
+      whileInspecting = null;
+      assert.ok(changed, `${label}: the runner was asked`);
+      assert.ok(midway.ok, midway.error ?? label);
+      assert.equal(midway.data!.authorityEvaluation?.admissionFailure, "inspection_failed", label);
+      assert.equal(midway.data!.authority, "human", label);
+      restore();
+    }
+
     // A Location runner that cannot inspect publications proves nothing: the person decides.
+    const remaining = h.db.addProjectLocation(project.id, { runnerId: "r2", workspaceId: "a" });
+    const stored = h.db.getSession("root")!.orchestratorPolicy!;
+    if (stored.control?.mode !== "full_control") throw new Error("fixture control expected");
+    stored.control.boundary.repositories = [{ repository: "team/repo", locationIds: [] }, { repository: "team/api", locationIds: [remaining.id] }];
+    h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(stored));
     register(3);
     const askedBefore = inspections.length;
     const older = await request("older", publication("Api older repair", record("Api older repair")));

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   PROJECT_LOCATION_INSPECTION_FAILURES, campaignRepositoryLocation, runnerSupportsProtocol,
-  type CampaignLaunchInspectionFailure, type CampaignLaunchInspectionMessage, type CampaignLaunchInspectionResult, type ProjectLocationInspection,
+  type CampaignLaunchInspectionFailure, type CampaignLaunchInspectionMessage, type CampaignLaunchInspectionResult, type ProjectLocationInspection, type ProjectLocationView,
   type ProjectLocationInspectionFailure, type RunnerProtocolCapability, type RunnerView,
 } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
@@ -121,8 +121,9 @@ async function inspectPublicationAtLocation(
   timeoutMs: number,
 ): Promise<CampaignLaunchInspectionResult | null> {
   const { db, hub } = dependencies;
-  const location = entry.locationIds.map((id) => db.getProjectLocation(id)).find((candidate) => candidate &&
-    candidate.availability !== "runner_removed" && Boolean(root.projectId) && candidate.projectId === root.projectId &&
+  const inProject = (candidate: ProjectLocationView | null): candidate is ProjectLocationView => Boolean(candidate) &&
+    candidate!.availability !== "runner_removed" && Boolean(root.projectId) && candidate!.projectId === root.projectId;
+  const location = entry.locationIds.map((id) => db.getProjectLocation(id)).find((candidate) => inProject(candidate) &&
     hub.isRunnerOnline(candidate.runnerId) &&
     (db.getRunner(candidate.runnerId)?.runtime?.campaignLaunchInspection?.version ?? 0) >= LOCATION_PUBLICATION_INSPECTION_MIN_VERSION);
   const runner = location ? db.getRunner(location.runnerId) : undefined;
@@ -131,9 +132,14 @@ async function inspectPublicationAtLocation(
   const result = await inspectCampaignWorkspace(hub, runner, location.workspaceId, issueNumbers, new AbortController().signal, timeoutMs,
     workspacePath, publication);
   // Runner frames are not validated on the wire.
-  return result?.ok === true && result.cancelled === undefined && result.workspaceId === location.workspaceId &&
-    typeof result.repository === "string" && result.repository.toLowerCase() === entry.repository.toLowerCase() &&
-    JSON.stringify(result.issueNumbers ?? []) === JSON.stringify(issueNumbers) ? result : null;
+  if (result?.ok !== true || result.cancelled !== undefined || result.workspaceId !== location.workspaceId ||
+      typeof result.repository !== "string" || result.repository.toLowerCase() !== entry.repository.toLowerCase() ||
+      JSON.stringify(result.issueNumbers ?? []) !== JSON.stringify(issueNumbers)) return null;
+  // The answer describes the path that was inspected; a Location removed, moved to another Project
+  // or repointed meanwhile is not the Location the campaign's boundary lists.
+  const current = db.getProjectLocation(location.id);
+  return inProject(current) && current.runnerId === location.runnerId && current.workspaceId === location.workspaceId &&
+    db.getWorkspacePath(location.runnerId, location.workspaceId) === workspacePath ? result : null;
 }
 
 /** Content screening and the duplicate search by subject before a follow-up is published in that
