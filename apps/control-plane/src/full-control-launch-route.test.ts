@@ -11,7 +11,7 @@ import {
 import { ControlPlaneDb, RUNNER_REPORTED_STOP } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
-import type { DecisionRuntime } from "./decision-runtime.js";
+import { DECISION_MAX_ATTEMPTS, type DecisionRuntime } from "./decision-runtime.js";
 import { OrchestratorSettings, resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { authorizeFullControl, campaignBoundaryCurrent, campaignControlForRunner, evaluateCampaignAuthority } from "./campaign-authority.js";
 import { firstMessageBoundary, firstMessageDigest, firstMessageObjective } from "./campaign-launch-admission.js";
@@ -1761,6 +1761,118 @@ test("an uncertain constraint check gets exactly one owner approval, as an Owner
     const laterNamed = await named7.propose([named(71)]);
     assert.equal(laterNamed.data!.authority, "orchestrator");
     assert.equal((laterNamed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.initial, false);
+  } finally { await server.close(); f.db.close(); }
+});
+
+/** A `scope_check` that answers `value` for every instance whose quoted parameter `matches`, and
+ * satisfies everything else. Its decisions rest only on the parameters and data the call carries. */
+const checkAnswering = (matches: (parameter: string) => boolean, value: string, evidence = "The issue's own facts show it.") =>
+  (message: RunDecisionMessage): ScopeGrantAnswer => scopeCheckAnswer(message, (_id, parameter) =>
+    parameter !== undefined && matches(parameter) ? { value, evidence } : undefined);
+
+test("\"Fix the 3 most important UI bugs, skip anything labeled security\": an issue labeled security is refused, naming the issue and the constraint (#4282)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const c = await proposalCampaign(f, server, "Fix the 3 most important UI bugs, skip anything labeled security.");
+    for (const number of [91, 92]) f.issues.facts.set(number, { labels: ["ui", "bug"] });
+    f.issues.facts.set(93, { labels: ["ui", "bug", "security"] });
+    // The fake model reads #93's labels from the quoted facts the call carries.
+    f.decision.state.check = (message) => {
+      const facts = JSON.parse(JSON.parse(/<untrusted_data name="issues">\n(.*?)\n<\/untrusted_data>/su.exec(message.input)![1]!) as string) as
+        Array<{ number: number; labels: string[] }>;
+      const labeled = facts.filter((issue) => issue.labels.includes("security")).map((issue) => `owner/repo#${issue.number} `);
+      return checkAnswering((parameter) => parameter.endsWith("— skip anything labeled security") && labeled.some((prefix) => parameter.startsWith(prefix)),
+        "violates", "It is labeled security.")(message);
+    };
+    const constraints = ["UI only", "skip anything labeled security"];
+    const refused = await c.propose([chosen(91), chosen(92), chosen(93)], { requestedCount: 3, constraints }, "Ranked by priority label.");
+    assert.equal(refused.ok, false);
+    assert.equal(refused.status, 409);
+    assert.equal(refused.errorDetails?.code, "constraint_check_refused");
+    assert.equal(refused.errorDetails?.reason, "The answer violates 'owner/repo#93 Issue 93 — skip anything labeled security'.");
+    assert.match(refused.error!, /owner\/repo#93 Issue 93 — skip anything labeled security/u);
+    assert.equal(c.ownerRequests().length, 0, "a refusal narrows; nobody is asked");
+    // The same issues again with another rationale get the same refusal and no new call.
+    const repeat = await c.propose([chosen(91), chosen(92), chosen(93)], { requestedCount: 3, constraints }, "Reworded.");
+    assert.equal(repeat.errorDetails?.code, "constraint_check_refused");
+    assert.equal(f.decision.checkCalls.length, 1);
+    // Revised without #93, it is admitted with no person prompt.
+    f.issues.facts.set(94, { labels: ["ui", "bug"] });
+    const revised = await c.propose([chosen(91), chosen(92), chosen(94)], { requestedCount: 3, constraints }, "Ranked by priority label.");
+    assert.equal(revised.data!.authority, "orchestrator");
+    assert.equal(f.decision.checkCalls.length, 2);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("\"See #7 for background; fix #8\": a proposal marking #7 as owner-named is refused, and #8 alone is admitted (#4282)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const c = await proposalCampaign(f, server, "See #7 for background; fix #8.");
+    f.decision.state.check = checkAnswering((parameter) => parameter.startsWith("owner/repo#7 "), "only_mentioned",
+      "The message cites #7 for background.");
+    // #7 marked owner-named, #8 left out: the floor admits #7 (its number is in the message), and
+    // the check finds it only mentioned.
+    const background = await c.propose([named(7)]);
+    assert.equal(background.ok, false);
+    assert.equal(background.errorDetails?.code, "constraint_check_refused");
+    assert.equal(background.errorDetails?.question, "named_asked_for__1");
+    assert.equal(background.errorDetails?.reason, "The answer violates 'owner/repo#7 Issue 7'.");
+    // #8 alone leaves #7 to the check, which confirms #7 was background and #8 was asked for.
+    const asked = await c.propose([named(8)]);
+    assert.equal(asked.data!.authority, "orchestrator");
+    assert.deepEqual((asked.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.checks, ["unproposed_references"]);
+    assert.equal(f.decision.checkCalls.length, 2);
+    assert.equal(c.ownerRequests().length, 0);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a check that fails after the runtime's retries sends exactly one owner request, and nothing is parsed from the text (#4282)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const c = await proposalCampaign(f, server, "Fix the 2 most important open bugs.");
+    f.decision.state.check = () => ({ ok: false, errorClass: "provider_overloaded" });
+    const proposal = { requestedCount: 2, constraints: ["open"] };
+    const proposed = await c.propose([chosen(61), chosen(62)], proposal);
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "human");
+    const record = (proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!;
+    assert.deepEqual([record.route, record.ownerCause, record.constraintCheck!.verdict], ["owner", "constraint_check_failed", "failed"]);
+    assert.equal(f.decision.checkCalls.length, DECISION_MAX_ATTEMPTS, "the runtime retried a transient failure, then failed");
+    const again = await c.propose([chosen(61), chosen(62)], proposal, "Another rationale.");
+    assert.equal(again.data!.occurrenceId, proposed.data!.occurrenceId);
+    assert.equal(c.ownerRequests().length, 1);
+    assert.equal(f.decision.checkCalls.length, DECISION_MAX_ATTEMPTS, "a recorded failure is read, never retried by a repeat");
+    // Nothing was granted from the text: the scope is still empty and dispatch still waits.
+    assert.deepEqual(f.db.getSession(c.id)!.orchestratorPolicy!.issueScope!.issueNumbers, []);
+    assert.equal(c.delegate().errorDetails?.code, "initial_scope_not_admitted");
+    // The Owner Question says why it came to the owner.
+    const card = pendingRequests(f.db.getSession(c.id)!.pendingApproval).find((request) => scopeProposalOfRequest(request))!;
+    assert.match(presentOwnerQuestionRequest(card).questions![0]!.context!, /the Decision Model's check failed/u);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("rewording a refused proposal's constraints buys only a bounded number of checks; past it the proposal is the owner's (#4282)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const c = await proposalCampaign(f, server, "Fix the 2 most important open bugs.");
+    f.decision.state.check = checkAnswering((parameter) => parameter.startsWith("owner/repo#72 "), "violates", "It is closed upstream.");
+    const results = [];
+    for (const constraint of ["open", "open issues", "currently open", "open ones"]) {
+      results.push(await c.propose([chosen(71), chosen(72)], { requestedCount: 2, constraints: [constraint] }));
+    }
+    assert.deepEqual(results.map((result) => result.ok ? result.data!.authority : result.errorDetails?.code),
+      ["constraint_check_refused", "constraint_check_refused", "constraint_check_refused", "human"]);
+    assert.equal(f.decision.checkCalls.length, 3);
+    const record = (results[3]!.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!;
+    assert.equal(record.ownerCause, "constraint_check_unavailable");
+    // Casing and spacing alone are the same proposal: they read the recorded refusal.
+    const same = await c.propose([chosen(71), chosen(72)], { requestedCount: 2, constraints: ["  OPEN "] });
+    assert.equal(same.errorDetails?.code, "constraint_check_refused");
+    assert.equal(f.decision.checkCalls.length, 3);
   } finally { await server.close(); f.db.close(); }
 });
 
