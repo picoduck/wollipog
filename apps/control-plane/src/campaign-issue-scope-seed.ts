@@ -1,31 +1,18 @@
 import type { CampaignIssueScopeSeed, OrchestratorCampaignPolicy } from "@wollipog/protocol";
-import type { ScopeGrantFields } from "./scope-grant.js";
 
 /**
- * A Custom campaign's first-message reading (#4104, #4259). The Decision Model reads the person's
- * first message (`scope_grant`) and the runner checks what it named; no word list or grammar decides
- * whether a message names an epic or which issues it grants.
+ * A Custom campaign's first-message seed (#4104, #4259), on propose-then-check since #4282: the
+ * server reads nothing from the message. The Custom Orchestrator proposes the issues it names, the
+ * floors and the typed constraint check run against the person's own message, and an admit grants
+ * what the server reading did. No word list or grammar decides whether a message names an epic or
+ * which issues it grants.
  */
 
-/** Whether a Custom campaign's first message gets a reading at all: it writes a digit string, so it
- * can name an issue. A message without digits names no issue number and makes no Decision call; this
- * is a floor that only ever withholds a grant, never one that makes it. */
+/** Whether a Custom campaign's first message needs a proposal at all: it writes a digit string, so
+ * it can name an issue. A message without digits names no issue number, so nothing waits; this is a
+ * floor that only ever withholds a grant, never one that makes it. */
 export function needsCampaignIssueScopeSeed(text: string): boolean {
   return /(?<![0-9])[1-9][0-9]{0,15}(?![0-9])/u.test(text);
-}
-
-/** Whether a healthy reading names any issue to work on: an explicit issue or a range. Context
- * references and a selection without numbers name none, so they grant nothing here. */
-export function readingNamesIssues(fields: Pick<ScopeGrantFields, "explicit" | "ranges">): boolean {
-  return fields.explicit.length > 0 || fields.ranges.length > 0;
-}
-
-/** The one issue a healthy reading names as the work, when that is all it names: no range and no
- * selection. The caller still applies the scope grant's floors and has the runner verify the
- * issue's members before it seeds anything. */
-export function seedEpicCandidate(fields: Pick<ScopeGrantFields, "explicit" | "ranges" | "selectionRequested">): number | null {
-  if (fields.ranges.length || fields.selectionRequested || fields.explicit.length !== 1) return null;
-  return fields.explicit[0]!.number;
 }
 
 /** What Campaign Status shows for one epic seed reading: the seed's state when that reading is the

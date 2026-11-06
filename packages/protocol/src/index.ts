@@ -5443,6 +5443,12 @@ export interface CampaignIssueScopeSeed {
   /** SHA-256 of the exact first message the seed reads. */
   messageDigest: string;
   occurrenceId?: string;
+  /** #4282: a pending seed awaits the Custom Orchestrator's proposal (`proposal: true`), checked
+   * against the person's own message; one without it was a server reading in flight before #4282. */
+  proposal?: true;
+  /** Who wrote the first message, which decides what an admitted proposal may grant (#4259): only
+   * the owner's own launch request or message grants issue numbers. */
+  author?: "launch_request" | "owner" | "other" | "unattributed";
 }
 
 export interface CampaignIssueScope {

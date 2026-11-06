@@ -87,8 +87,14 @@ function checkOutcomeText(decision: CampaignDecision): string {
   return closure ? "Waiting for you to decide the closure." : "Waiting for you to decide the publication.";
 }
 
+/** Whether a decision is a Custom campaign's epic seed: the retired first-message reading (a scope
+ * grant) or, since #4282, the check of the Orchestrator's first-message proposal (a scope check). */
+function isEpicSeed(decision: CampaignDecision): boolean {
+  return decision.subject?.surface === "issue_scope_seed";
+}
+
 /** What a Custom campaign's epic seed did: a named epic seeds the scope the owner approves, and a
- * reading that could not settle it leaves that scope to them with no seed. */
+ * check that could not settle it leaves that scope to them with no seed. */
 function seedOutcomeText(decision: CampaignDecision): string {
   if (decision.subject?.classification === "orchestrator") return "You let the Orchestrator delegate without an epic.";
   switch (decision.subject?.seed) {
@@ -96,8 +102,11 @@ function seedOutcomeText(decision: CampaignDecision): string {
     case "none": return "It named no epic, so nothing waits.";
     case "owner": return "Waiting for you: approve the campaign's issue scope, or continue without an epic.";
     case "scoped": return "You approved the campaign's issue scope, so nothing waits.";
-    default: return decision.state === "pending" ? "Work waits to be delegated until the check finishes." : "A later reading replaced it.";
   }
+  if (decision.state === "pending") return "Work waits to be delegated until the check finishes.";
+  // A refused proposal goes back to the Orchestrator, which revises it; nothing else changed.
+  if (decision.kind === "scope_check" && decision.verdict === "refuse") return "Refused back to the Orchestrator, which revises it.";
+  return decision.kind === "scope_check" ? "A later proposal replaced it." : "A later reading replaced it.";
 }
 
 /** What the screen's outcome did to the request it affected, in the order it happened. */
@@ -105,7 +114,7 @@ function outcomeText(decision: CampaignDecision): string {
   if (decision.kind === "scope_review") {
     return decision.selectionProposal ? SELECTION_OUTCOMES[decision.selectionProposal.outcome] : SELECTION_OUTCOMES.reviewing;
   }
-  if (decision.kind === "scope_grant") return seedOutcomeText(decision);
+  if (isEpicSeed(decision) || decision.kind === "scope_grant") return seedOutcomeText(decision);
   if (decision.kind === "scope_check") return scopeCheckOutcomeText(decision);
   if (decision.kind !== "credential_screen") return checkOutcomeText(decision);
   const classification = decision.subject?.classification;
@@ -180,8 +189,9 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
       <h3 id={headingId} className="section-title">Decision Model Checks</h3>
       <p className="section-note">
         The Decision Model checks whether a question asks for a credential, sign-in or access, whether a follow-up
-        belongs to the work you asked for, whether a closure's reason fits its issue, which epic a campaign's first
-        message names, and whether issues the Orchestrator chose fit the selection you asked for. When it can't tell,
+        belongs to the work you asked for, whether a closure's reason fits its issue, whether the epic or issues the
+        Orchestrator read in a campaign's first message are the ones it names, and whether issues the Orchestrator chose
+        fit the selection you asked for. When it can't tell,
         the request waits for you; nobody asks you for a value.
       </p>
       {loadError && <Notice tone="danger" compact role="alert" title="Couldn't Load Decision Model Checks">{loadError}</Notice>}
@@ -194,7 +204,7 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
           const awaiting = decision.kind === "credential_screen" && (decision.state === "uncertain" || decision.state === "failed") &&
             !subject?.classification;
           // An epic seed the model could not settle waits for the owner, who may continue without one.
-          const seedAwaiting = decision.kind === "scope_grant" && subject?.seed === "owner" && !subject.classification;
+          const seedAwaiting = isEpicSeed(decision) && subject?.seed === "owner" && !subject.classification;
           // An owner decision stays the owner's: classifying it only lets them choose an option.
           const ownerDecision = subject?.surface === "owner_decision";
           const proposal = decision.selectionProposal;
@@ -202,8 +212,8 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
           // only that exact request, never another one pending on the session.
           const requestKey = proposal?.outcome === "waiting_for_owner" && proposal.requestOccurrenceId && findRequest
             ? findRequest({ occurrenceId: proposal.requestOccurrenceId, sessionId: null }) : null;
-          const label = decision.kind === "scope_review" ? "Selection Proposal" : decision.kind === "scope_check" ? "Scope Proposal"
-            : subject ? SURFACE_LABELS[subject.surface] : "Request";
+          const label = decision.kind === "scope_review" ? "Selection Proposal" : isEpicSeed(decision) ? SURFACE_LABELS.issue_scope_seed
+            : decision.kind === "scope_check" ? "Scope Proposal" : subject ? SURFACE_LABELS[subject.surface] : "Request";
           const verdictLabels = decision.kind === "scope_check" ? SCOPE_CHECK_VERDICT_LABELS : VERDICT_LABELS;
           return (
             <li key={decision.occurrenceId} className="campaign-screen-item">
