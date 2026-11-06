@@ -358,8 +358,14 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 303", () => {
-  assert.ok(PROTOCOL_VERSION >= 303);
+test("PROTOCOL_VERSION is 308", () => {
+  assert.equal(PROTOCOL_VERSION, 308);
+  // Only a v308 runner sends a structured scope proposal, and only to a v308 control plane (#4282).
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.campaignScopeProposals, 308);
+  // Only a v307 runner is sent a typed-question Decision call's larger schema and output (#4283).
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.typedDecisionQuestions, 307);
+  assert.equal(runnerSupportsProtocol(306, "typedDecisionQuestions"), false);
+  assert.equal(runnerSupportsProtocol(307, "typedDecisionQuestions"), true);
   // Owner Questions need a v303 control plane and root runner (#4270).
   assert.equal(runnerSupportsProtocol(302, "ownerQuestions"), false);
   assert.equal(runnerSupportsProtocol(303, "ownerQuestions"), true);

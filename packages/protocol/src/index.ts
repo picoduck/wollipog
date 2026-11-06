@@ -940,6 +940,15 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      policy changes leave it pending. A v303 runner sends the field only to a v303 control plane;
 //      a v303 control plane accepts it only from a v303 root runner. (299-301 are claimed by open
 //      pull requests.)
+// 307: typed Decision questions (#4283). A Decision kind may ask a list of typed questions
+//      (boolean, choice or score, optionally one answer per item) in one `run_decision` call whose
+//      output schema requires one answer per question and item, each with a value, a confidence and
+//      a short evidence string. The control plane derives the verdict from the answers with the
+//      kind's fixed rule and confidence threshold, records them on the occurrence, and projects
+//      `DecisionOccurrenceView.typedAnswers`. A v307 runner accepts the larger schema and output
+//      (DECISION_SCHEMA_MAX_CHARS, DECISION_OUTPUT_MAX_BYTES); a typed call is never sent to an older
+//      runner, which records a non-transient `runner_incapable` failure and takes the person route.
+//      Older dashboards ignore the field. (304 to 306 are claimed by open pull requests.)
 // 308: the Orchestrator proposes a Full Control campaign's scope (#4282). The owner's first message
 //      is no longer read into a scope grant: the campaign starts with an empty scope (grant status
 //      `proposal`) and dispatches nothing until the Orchestrator's initial proposal is admitted.
@@ -948,11 +957,12 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      nothing checkable beyond owner-named issues is admitted with no model call, and anything else
 //      is the owner's one approval, presented as an Owner Question. A v308 runner sends `proposal`
 //      only to a v308 control plane; a v308 control plane reads it only from a v308 root runner, and
-//      an older runner's proposal takes the owner route. (304 to 307 are claimed by open pull
-//      requests.)
+//      an older runner's proposal takes the owner route, and one that can't report issue facts is
+//      refused. (304 to 306 are claimed by open pull requests.)
 export const PROTOCOL_VERSION = 308;
 
 export * from "./campaign-authority.js";
+export * from "./decision-questions.js";
 export * from "./workflow-decision-owner-rule.js";
 export * from "./owner-question.js";
 export * from "./scope-proposal.js";
@@ -1473,6 +1483,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionNamingDriftCodes: 97,
   /** v285 runners host tool-less, schema-constrained Decision calls (`run_decision`, #4101). */
   decisionModel: 285,
+  /** v307 runners accept a typed-question Decision call's larger schema and output (#4283). */
+  typedDecisionQuestions: 307,
   sessionAgentControl: 100,
   sessionAgentControlReasoningEffort: 138,
   sessionOrchestration: 109,
@@ -7629,8 +7641,12 @@ export const DECISION_PREPARATION_BUDGET_MS = 4_000;
 export const DECISION_CLEANUP_BUDGET_MS = 1_000;
 /** Extra time the control plane waits on the runner round trip beyond the attempt budget. */
 export const DECISION_TRANSPORT_MARGIN_MS = DECISION_CLEANUP_BUDGET_MS + 1_000;
-/** Largest structured output, in UTF-8 bytes, a runner returns. */
-export const DECISION_OUTPUT_MAX_BYTES = 8 * 1024;
+/** Largest structured output, in UTF-8 bytes, a runner returns. A v307 runner allows 32 KiB so one
+ * call can carry every typed answer (#4283); older runners stop at 8 KiB and never receive a typed
+ * call. */
+export const DECISION_OUTPUT_MAX_BYTES = 32 * 1024;
+/** Largest output schema, in JSON characters, a v307 runner accepts (older runners: 8,000). */
+export const DECISION_SCHEMA_MAX_CHARS = 32_000;
 /** Largest rendered input, in characters, the control plane sends for one call. */
 export const DECISION_INPUT_MAX_CHARS = 48_000;
 
@@ -7713,6 +7729,9 @@ export interface DecisionOccurrenceView {
   usage: DecisionUsageView;
   createdAt: number;
   decidedAt?: number;
+  /** v307 (#4283): a typed occurrence's questions and answers; the verdict above is the server's
+   * derivation from them. Absent on single-verdict occurrences. */
+  typedAnswers?: import("./decision-questions.js").DecisionTypedAnswersView;
 }
 
 export interface DecisionModelTestResult {

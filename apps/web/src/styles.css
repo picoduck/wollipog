@@ -5671,6 +5671,39 @@ body.shell-dock-dragging * {
   border-top: 1px solid var(--border);
 }
 .campaign-screen-item:last-child { border-bottom: 1px solid var(--border); }
+/* A typed Decision's answers (#4283): a short checklist, one line per question and item, its icon
+   in the line's first column so the claims align and the answer's details sit under the claim. */
+.decision-answers {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.decision-answer-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+/* The icon sits beside the claim's line; the answer's details sit under the claim. */
+.decision-answer {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: var(--space-2);
+  overflow-wrap: anywhere;
+}
+.decision-answer > .campaign-status-meta { grid-column: 2; }
+.decision-answer[data-standing="satisfies"] .decision-answer-icon { color: var(--positive-text); }
+.decision-answer[data-standing="violates"] .decision-answer-icon { color: var(--danger-text); }
+.decision-answer[data-standing="unsure"] .decision-answer-icon { color: var(--warning-on-tint); }
+/* The claim's words carry the standing; in forced colors each icon follows them. */
+@media (forced-colors: active) {
+  .decision-answer[data-standing="satisfies"] .decision-answer-icon,
+  .decision-answer[data-standing="violates"] .decision-answer-icon,
+  .decision-answer[data-standing="unsure"] .decision-answer-icon { color: inherit; }
+}
+.decision-answer-claim { color: var(--text); }
 .campaign-screen-actions {
   display: flex;
   flex-wrap: wrap;
