@@ -144,9 +144,10 @@ export function scopeView(db: ControlPlaneDb, root: SessionView, repository: str
  * known yet (a legacy campaign learns it from its runner, and the snapshot then checks again). */
 export function scopeRequestOutsideBoundary(root: SessionView, request: CampaignIssueScopeRequest): string | null {
   const allowed = new Set(campaignScopeRepositories(root).map((entry) => entry.repository));
-  if (!allowed.size || !request || !Array.isArray(request.additions) || !Array.isArray(request.removals)) return null;
+  if (!allowed.size || !request) return null;
+  const refs = (list: unknown) => Array.isArray(list) ? list as CampaignIssueRef[] : [];
   const epic = request.lineage?.kind === "epic" && request.lineage.repository !== undefined ? [{ repository: request.lineage.repository }] : [];
-  for (const ref of [...request.additions, ...request.removals, ...epic]) {
+  for (const ref of [...refs(request.additions), ...refs(request.removals), ...epic]) {
     if (ref && typeof ref.repository === "string" && campaignRepositoryLocation(ref.repository) && !allowed.has(ref.repository.toLowerCase())) {
       return ref.repository.toLowerCase();
     }
