@@ -1,18 +1,12 @@
 import { useEffect, useId, useState } from "react";
-import type { CampaignDecisionsResponse, DecisionErrorClass, DecisionKind } from "@wollipog/protocol";
+import type { CampaignDecisionsResponse, DecisionErrorClass } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
+import { isDecisionModelCheck } from "./decision-model.js";
 import type { CampaignRequestTarget } from "./CampaignStatusPanel.js";
 
 type CampaignDecision = CampaignDecisionsResponse["decisions"][number];
-
-/** The checks shown here (#4104): the question screen, follow-up relatedness, closure-reason choice,
- * a Custom campaign's epic seed, and the review of each selection proposal (#4103). Other kinds, such
- * as Full Control's scope grant, have their own place in Campaign Status. */
-const SHOWN_KINDS: ReadonlySet<DecisionKind> = new Set<DecisionKind>(["credential_screen", "follow_up_relatedness", "closure_reason", "scope_review"]);
-const shown = (decision: CampaignDecision) => SHOWN_KINDS.has(decision.kind) ||
-  decision.kind === "scope_grant" && decision.subject?.surface === "issue_scope_seed";
 
 const SURFACE_LABELS: Record<NonNullable<CampaignDecision["subject"]>["surface"], string> = {
   implementation_question: "Implementation Question",
@@ -138,7 +132,7 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
   useEffect(() => {
     const controller = new AbortController();
     api.campaignDecisions(sessionId, controller.signal).then((response) => {
-      setDecisions(response.decisions.filter(shown));
+      setDecisions(response.decisions.filter(isDecisionModelCheck));
       setCampaignSessionId(response.campaignSessionId);
       setLoadError(null);
     }).catch((cause: unknown) => {

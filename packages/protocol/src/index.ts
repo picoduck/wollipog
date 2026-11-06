@@ -911,6 +911,14 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      under any mode, grant or category; later requests for the same resource stay the person's,
 //      and Campaign Status lists it under Waiting for You with the rule. A runner refuses the field
 //      against an older control plane, which would drop it.
+// 297: campaign activity status (#4146). Campaign Active means work is actually running: a turn, a
+//      child, a background job, a pending continuation, a parked pull request with a wake
+//      registered, or the server's own repair. Idle campaigns read `complete_needs_cleanup`
+//      (terminal, with a `cleanup` list naming each item's action), `verified_complete`, or `stuck`
+//      (with the undelivered `stuck` items); the projection's `activity` lists what is live and the
+//      server's one automatic repair of idle leftovers. Dashboards below 297 receive
+//      `complete_needs_cleanup` as `complete_with_handoffs` (below 275 as `waiting_human`) and
+//      `stuck` as `blocked`. (292-294 are claimed by open pull requests.)
 // 302: granted issue numbers reach a live Custom Orchestrator (#4269). When a Custom campaign's
 //      first-message reading grants issue numbers, the control plane sends its v302 runner a
 //      `campaign_issue_scope` `grant_issue_numbers` operation naming the campaign session and those
@@ -918,7 +926,7 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      it on each ask) and on the stored launch metadata (the issue-closure checks read it), only for
 //      that live root Orchestrator and only while it holds no issue numbers and no issue scope; the
 //      same numbers again are a no-op. An older runner is never sent it and keeps the next-launch
-//      path. (297 to 301 are claimed by pull requests still open.)
+//      path. (298 to 301 are claimed by pull requests still open.)
 export const PROTOCOL_VERSION = 302;
 
 export * from "./campaign-authority.js";
@@ -939,6 +947,7 @@ export * from "./review-session.js";
 export * from "./pull-request-watch.js";
 export * from "./workspace-removal.js";
 export * from "./forge-decision-action.js";
+export * from "./campaign-activity.js";
 export * from "./review-retirement.js";
 export * from "./video-review-settings.js";
 export * from "./review-contract.js";
@@ -1151,6 +1160,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v275 campaign handoffs and recorded delivery (#4070). Gates the `complete_with_handoffs`
    * status for dashboards and the delivery and handoff ledger writes for runner tools. */
   campaignHandoffs: 275,
+  /** v297 campaign activity status (#4146). Gates `complete_needs_cleanup` and `stuck` for
+   * dashboards; older ones receive `complete_with_handoffs` (or `waiting_human`) and `blocked`. */
+  campaignActivityStatus: 297,
   /** v272 runner watches a parked session's merge-queue entry and the control plane wakes it (#4071).
    * Checked against the runner by the control plane and against the control plane by the runner. */
   pullRequestWatch: 272,
@@ -3158,25 +3170,27 @@ export interface FullControlScopeGrant {
   };
 }
 
-/** `blocked` means nothing is progressing without intervention: every unverified child failed,
- * stopped, or is held, or the campaign's own continuation is stalled (see
- * `OrchestratorCampaignProjection.stalled`). `waiting_human` and `verified_complete` take
- * precedence over a stalled continuation.
+/** A campaign's status (#4146; see campaign-activity.ts for the precedence): `waiting_human`
+ * (Waiting for You), `active` (Campaign Active: work is actually running), `complete_needs_cleanup`
+ * (Complete, Needs Cleanup: delivered, idle, housekeeping owed), `verified_complete` (Campaign
+ * Complete) and `stuck` (Campaign Stuck: idle, undelivered, nothing scheduled).
  *
- * v275 `complete_with_handoffs` (#4070) is terminal like `verified_complete`: every child is
- * verified and cleaned up, nothing is pending, and every unfinished committed work item is handed to
- * `human` or `external` (`OrchestratorCampaignProjection.handoffs`). Dashboards older than
- * `campaignHandoffs` receive it as `waiting_human`, never as active work. */
+ * `blocked` and `complete_with_handoffs` are what control planes older than v297 report: `blocked`
+ * meant nothing progressed without intervention, and v275 `complete_with_handoffs` (#4070) was
+ * terminal with every unfinished item handed to a person. A v297 control plane sends them only to
+ * dashboards older than `campaignActivityStatus`, in place of `stuck` and `complete_needs_cleanup`. */
 export type OrchestratorCampaignStatus =
   | "waiting_human"
   | "active"
-  | "blocked"
+  | "complete_needs_cleanup"
   | "verified_complete"
+  | "stuck"
+  | "blocked"
   | "complete_with_handoffs";
 
 /** Statuses after which the campaign takes no more automatic turns and Campaign Elapsed ends. */
 export function campaignStatusTerminal(status: OrchestratorCampaignStatus | null | undefined): boolean {
-  return status === "verified_complete" || status === "complete_with_handoffs";
+  return status === "verified_complete" || status === "complete_needs_cleanup" || status === "complete_with_handoffs";
 }
 
 /** One unfinished work item the campaign handed to a person or an outside party (#4070). */
@@ -3339,6 +3353,16 @@ export interface OrchestratorCampaignProjection {
     retained: number;
     items: import("./forge-decision-action.js").CampaignMergedBranch[];
   };
+  /** v297 (#4146): what is live (what keeps the campaign Active) and the server's automatic repair
+   * of idle leftovers. Omitted by older control planes. */
+  activity?: import("./campaign-activity.js").CampaignActivityView;
+  /** v297 (#4146): the housekeeping a delivered campaign still owes, each item with its reason and
+   * the exact action that settles it. Present whenever such items exist; the status is
+   * `complete_needs_cleanup` once nothing is live. Bounded by CAMPAIGN_CLEANUP_ITEMS_LIMIT. */
+  cleanup?: { total: number; items: import("./campaign-activity.js").CampaignCleanupItem[] };
+  /** v297 (#4146): the undelivered work behind `stuck`, each with why nothing is moving where that
+   * is known. Present only while the status is `stuck`. Bounded by CAMPAIGN_STUCK_ITEMS_LIMIT. */
+  stuck?: { total: number; items: import("./campaign-activity.js").CampaignStuckItem[] };
   /** Unverified children held from starting their next turn, with how to clear each (#1650).
    * Bounded; `children.blocked` stays the full count. Omitted when there are none. */
   heldChildren?: Array<{ sessionId: string; holds: SessionHoldView[] }>;
@@ -3358,8 +3382,9 @@ export interface OrchestratorCampaignProjection {
   followUps: { unique: number; duplicates: number };
   /** Present while the latest continuation is `failed` or `missing_result`, so a consumer sees the
    * stall without reading `continuation` (#1352). A failed turn may still have an automatic retry
-   * scheduled; a missing result needs acknowledgement. Where `status` would otherwise be `active`
-   * it reports `blocked`. Projected, like `continuation`, only on the root campaign's own view. */
+   * scheduled; a missing result needs acknowledgement. A stalled continuation is not live work, so
+   * with nothing else live an unfinished campaign reads `stuck` (v297; older control planes report
+   * `blocked`). Projected, like `continuation`, only on the root campaign's own view. */
   stalled?: "continuation_failed" | "continuation_missing_result";
   /** Durable synthetic-turn state. Omitted only when the campaign has never needed a wake-up. */
   continuation?: {
