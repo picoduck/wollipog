@@ -118,6 +118,7 @@ export function MachineSettingsDialog({
 
   const canManageRunner = runner?.canManage === true;
   const capacitySupported = !!runner && runnerSupportsProtocol(runner.protocolVersion, "machineRunnerCapacity");
+  const reviewerSecuritySupported = !!runner && runnerSupportsProtocol(runner.protocolVersion, "reviewerSecurityPolicy");
   const switchSupported = !!runner && runnerSupportsProtocol(runner.protocolVersion, "automaticProviderAccountSwitch");
   const installationSupported = !!runner && runnerSupportsProtocol(runner.protocolVersion, "harnessInstallations");
   const targetInstallationSupported = !!runner && runnerSupportsProtocol(runner.protocolVersion, "targetHarnessInstallations");
@@ -129,6 +130,7 @@ export function MachineSettingsDialog({
     name: canManageMachines,
     capacity: !!runner,
     switching: !!runner,
+    reviewerSecurity: reviewerSecuritySupported,
     defaultAccounts: providers,
     installations: groups.map((group) => group.key),
   });
@@ -199,6 +201,15 @@ export function MachineSettingsDialog({
         return {
           values: { ...from.values, switching: automaticAccountSwitching.enabled },
           revisions: { ...from.revisions, switching: automaticAccountSwitching.revision },
+        };
+      }
+      case "reviewerSecurity": {
+        const { reviewerSecurity } = await api.updateMachineReviewerSecurity(runnerId, {
+          policy: form.reviewerSecurity, expectedRevision: from.revisions.reviewerSecurity,
+        });
+        return {
+          values: { ...from.values, reviewerSecurity: reviewerSecurity.policy },
+          revisions: { ...from.revisions, reviewerSecurity: reviewerSecurity.revision },
         };
       }
       case "defaultAccount": {
@@ -435,6 +446,26 @@ export function MachineSettingsDialog({
               } : {})}
               onClick={() => update({ switching: !form.switching })}
             />
+          </div>
+        )}
+
+        {runner && (
+          <div className="field">
+            <div className="field-head"><span>Reviewer Executable Policy</span></div>
+            <Select<import("@wollipog/protocol").ReviewerSecurityPolicy>
+              label="Reviewer Executable Policy"
+              describedBy={`${ids}-reviewer-security-help`}
+              value={form.reviewerSecurity}
+              disabled={saving || !canManageRunner || !reviewerSecuritySupported}
+              options={[
+                { value: "strict", label: "Strict", description: "Verify ownership, write permissions, and private group membership." },
+                { value: "personal_machine", label: "Personal Machine", description: "Trust group-writable paths owned by your account without checking group membership. Use when you trust other local accounts." },
+              ]}
+              onChange={(reviewerSecurity) => update({ reviewerSecurity })}
+            />
+            <p className="field-helper" id={`${ids}-reviewer-security-help`}>{reviewerSecuritySupported
+              ? "Applies to reviewers and their Git, forge, and interpreter tools. Both policies reject world-writable paths and locations agents can write. Changes apply to the next review; running reviews continue."
+              : runnerCapabilityRequirement(runner.protocolVersion, "reviewerSecurityPolicy", "reviewer executable policy changes")}</p>
           </div>
         )}
 

@@ -6,6 +6,7 @@ import { configuredCodexHomes } from "./review-trust.js";
 import { reviewerInstallations } from "./reviewer-installations.js";
 import { ReviewWriterRegistry } from "./review-writers.js";
 import { ReviewSnapshotter } from "./review-snapshot.js";
+import { ReviewerSecurity } from "./reviewer-security.js";
 import { defaultReviewSessionDependencies, reviewLaunchArgs, reviewSessionDiscoveryReason, ReviewSessionLauncher } from "./review-sessions.js";
 import { PullRequestWatcher } from "./pull-request-watches.js";
 import { removeConfiguredWorkspace, WorkspaceRemovals } from "./workspace-removals.js";
@@ -1719,9 +1720,10 @@ sessions.setCodexHomes(() => configuredCodexHomes(homedir(), {
 const codexProtection = () => sessions.codexReviewerProtection();
 sessions.setReviewerInstallations(() => reviewerInstallations(agentsForControlPlane(),
   (agentId, driver) => runnerLocalAgentEnv(agentId, driver ?? "acp", { kind: "native" }).PATH ?? process.env.PATH));
+const reviewerSecurity = new ReviewerSecurity();
 const reviewDependencies = defaultReviewSessionDependencies(config.dataDir, log, sessionWritableGrants, agentsForControlPlane,
   (agentId, driver) => runnerLocalAgentEnv(agentId, driver ?? "acp", { kind: "native" }).PATH ?? process.env.PATH,
-  codexProtection);
+  codexProtection, () => reviewerSecurity.policy);
 const reviewSnapshots = new ReviewSnapshotter(resolve(config.dataDir, "review-snapshots"), reviewDependencies.exec, log);
 const reviewSessionLauncher = new ReviewSessionLauncher(resolve(config.dataDir, "review-snapshots"), reviewSnapshots, store, reviewDependencies);
 // Startup reconciliation has already settled every review session: no checkout is in use.
@@ -2453,6 +2455,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         if (sessions.configureCapacity(msg.runnerCapacity)) {
           metadata.runtime!.maxConcurrentSessions = msg.runnerCapacity.configuredUnits;
         }
+      }
+      if (msg.reviewerSecurity && runnerSupportsProtocol(controlPlaneProtocolVersion, "reviewerSecurityPolicy")) {
+        if (reviewerSecurity.apply(msg.reviewerSecurity)) void runDiscovery(true);
       }
       if (msg.automaticAccountSwitching &&
           runnerSupportsProtocol(controlPlaneProtocolVersion, "automaticProviderAccountSwitch")) {
@@ -3221,6 +3226,13 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       if (sessions.configureCapacity(msg)) {
         metadata.runtime!.maxConcurrentSessions = msg.configuredUnits;
         log(`Runner Capacity updated to ${msg.configuredUnits} units (revision ${msg.revision})`);
+      }
+      break;
+    case "configure_reviewer_security":
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "reviewerSecurityPolicy")) break;
+      if (reviewerSecurity.apply(msg)) {
+        log(`Reviewer Executable Policy updated to ${msg.policy} (revision ${msg.revision})`);
+        void runDiscovery(true);
       }
       break;
     case "configure_automatic_account_switch":

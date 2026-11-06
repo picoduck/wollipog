@@ -1554,3 +1554,28 @@ test("a Reconnect that fails from All Machines reads as it does from the machine
   await page.locator("article.machine-detail .notice").getByRole("button", { name: "Reconnect" }).click();
   await expect(toast.locator(".toast-detail")).toHaveText("Wollipog couldn't be reached. Check the connection, then try again.");
 });
+
+for (const width of [1280, 390]) {
+  test(`reviewer executable policy persists from Machine Settings at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`/machine-management-e2e.html?${DESIGN_WORKSTATION}`);
+    await openSettings(page);
+    const dialog = settingsDialog(page);
+    const choice = dialog.getByRole("button", { name: "Reviewer Executable Policy: Strict", exact: true });
+    await choice.click();
+    await page.getByRole("option", { name: "Personal Machine", exact: true }).click();
+    await dialog.getByRole("button", { name: "Save Changes", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await openSettings(page);
+    const selected = dialog.getByRole("button", { name: "Reviewer Executable Policy: Personal Machine", exact: true });
+    await expect(selected).toBeVisible();
+    await selected.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("reviewer-policy.png") });
+    await selected.click();
+    await page.getByRole("option", { name: "Strict", exact: true }).click();
+    await dialog.getByRole("button", { name: "Save Changes", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await openSettings(page);
+    await expect(dialog.getByRole("button", { name: "Reviewer Executable Policy: Strict", exact: true })).toBeVisible();
+  });
+}
