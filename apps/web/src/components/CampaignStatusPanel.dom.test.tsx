@@ -1709,3 +1709,35 @@ test("a genuine recovery blocker keeps its warning on an unfinished campaign (#3
     }
   }
 });
+
+test("an Orchestrator's scope proposal without lineage waits for you as a Scope Approval that opens its request (#4267)", async () => {
+  harnessRequests.descendants = [pendingRequest("s_root", "occ_scope")];
+  const { client } = fakeClient(() => ({ revision: 1, items: [], nextCursor: null }), {});
+  const summary = "Add picoduck/wollipog#41, picoduck/wollipog#42, raising Maximum Issues from 5 to 6";
+  const root = session({
+    orchestratorCampaign: campaignProjection(workSummary(), {
+      status: "waiting_human",
+      ownerDecisions: { total: 1, items: [
+        { occurrenceId: "occ_scope", sessionId: "s_root", category: "campaign_issue_scope", summary, handedOff: false, createdAt: NOW },
+      ] },
+    }),
+  });
+  const panel = await mount({ initial: root, client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    const section = [...panel.container.querySelectorAll("section")]
+      .find((candidate) => candidate.querySelector("h3")?.textContent === "Waiting for You")!;
+    assert.ok(section, "Waiting for You is shown");
+    assert.match(section.textContent ?? "", /Only you can make this decision\. The Orchestrator keeps working/u);
+    assert.doesNotMatch(section.textContent ?? "", /You kept/u, "the owner did not keep it");
+    const facts = [...section.querySelectorAll("dt")].map((term) => [term.textContent, term.nextElementSibling?.textContent]);
+    assert.deepEqual(facts.map(([term]) => term), ["Scope Approval"]);
+    assert.ok(facts[0]![1]!.startsWith(`${summary}Proposed by the Orchestrator`), facts[0]![1]!);
+    await click([...section.querySelectorAll("button")].find((button) => button.getAttribute("aria-label") === `Open Request: ${summary}`)!);
+    assert.equal(harnessRequests.selected.at(-1), JSON.stringify(["s_root", "occ_scope"]));
+    assert.equal(panel.state.mode, "requests");
+  } finally {
+    await panel.dispose();
+  }
+});

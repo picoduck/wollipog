@@ -398,6 +398,20 @@ test("decisions the owner kept wait for them in Campaign Status, and each opens 
 });
 
 for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "phone", width: 390, height: 844 }]) {
+  test(`an Orchestrator's scope proposal without lineage waits for the owner with its Maximum Issues increase, ${viewport.name} (#4267)`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&ownerScope=1");
+    const waiting = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Waiting for You" }) });
+    const summary = "Add team/repo#141, team/repo#142, raising Maximum Issues from 6 to 7";
+    await expect(waiting).toContainText("Scope Approval");
+    await expect(waiting).toContainText(summary);
+    await expect(waiting).toContainText("Proposed by the Orchestrator");
+    await expect(waiting).toContainText("Only you can make this decision.");
+    // The root's own request opens as its dock card above the composer, which this harness does not
+    // render; campaign-issue-scope.spec.ts reads that card.
+    await expect(waiting.getByRole("button", { name: `Open Request: ${summary}` })).toBeVisible();
+  });
+
   test(`a merge an installed rule keeps for the owner waits for them with the rule's source and quote, ${viewport.name} (#4137)`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.goto("/campaign-status-e2e.html?scenario=campaign&owners=rule");

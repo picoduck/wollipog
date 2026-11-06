@@ -97,3 +97,22 @@ test("selection lineage, its review evidence and its owner causes keep their exa
   }
   assert.equal(normalizeCampaignIssueScopeSnapshot({ ...base, grantReview: { ...grantReview, cause: "selection_admitted" } }), null);
 });
+
+test("an owner review keeps its exact shape and never rides with an admission, a grant review or lineage (#4267)", () => {
+  const base = { category: "campaign_issue_scope", repository: "team/repo", expectedRevision: 1, before: [1], additions: [3, 4],
+    removals: [], explanation: "The owner asked for these", affectedAssignments: [], affectedDecisions: [] };
+  const plain = { cause: "lineage_missing" };
+  const raised = { cause: "lineage_missing", maxIssuesIncrease: { from: 2, increase: 1 } };
+  assert.deepEqual(normalizeCampaignIssueScopeSnapshot({ ...base, ownerReview: plain })?.ownerReview, plain);
+  assert.deepEqual(normalizeCampaignIssueScopeSnapshot({ ...base, ownerReview: raised })?.ownerReview, raised);
+  for (const bad of [{ cause: "selection" }, { ...plain, extra: 1 }, { ...plain, maxIssuesIncrease: { from: 2, increase: 0 } },
+    { ...plain, maxIssuesIncrease: { from: 0, increase: 1 } }, { ...plain, maxIssuesIncrease: { from: 99, increase: 2 } },
+    { ...plain, maxIssuesIncrease: { from: 2, increase: 1, to: 3 } }, { ...plain, maxIssuesIncrease: { from: 2.5, increase: 1 } }, [], "lineage_missing"]) {
+    assert.equal(normalizeCampaignIssueScopeSnapshot({ ...base, ownerReview: bad }), null, JSON.stringify(bad));
+  }
+  for (const companion of [{ issueAdmission: { boundaryRevision: 1, evidenceDigest: "a".repeat(64) } }, { lineage: { kind: "epic", epic: 1 } },
+    { grantReview: { cause: "grant_failed", ownerMessage: "Fix it", messageDigest: "b".repeat(64) } },
+    { selectionReview: { occurrenceId: "dec_1", grantDigest: "a".repeat(64), verdict: "admit", reason: "Fits." } }]) {
+    assert.equal(normalizeCampaignIssueScopeSnapshot({ ...base, ownerReview: plain, ...companion }), null, JSON.stringify(companion));
+  }
+});
