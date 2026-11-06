@@ -172,6 +172,9 @@ export interface CampaignLaunchSummary {
   /** Enabling on a campaign whose first message limited it: Project Locations of other repositories,
    * which stay available and don't join (#4117). */
   availableLocations?: import("./project-location-inspection.js").CampaignAvailableLocation[];
+  /** Enabling on an existing campaign: Project Locations its owner didn't add, which keep waiting for
+   * Include in Campaign (#4117). */
+  pendingLocations?: import("./project-location-inspection.js").CampaignPendingLocation[];
   issueNumbers: number[];
   objective: string;
   root: { agentId: string; driver: string; model: string | null; effort: string | null;

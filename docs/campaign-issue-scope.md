@@ -183,12 +183,16 @@ approval is invalidated. A legacy campaign with no saved repository stays unveri
 - **Narrowing the boundary (#4117).** Admitting a limited initial scope, by the check or by the owner,
   re-mints the boundary without the other repositories at a new revision, and revokes what was bound to
   the old one. It happens before anything is dispatched. The admitted scope records `repositoryLimits`, and
-  a later addition outside them is refused, whether it names a repository or not. The launch entry always
-  stays first, because the root runs there and the boundary requires it, so a limit to other repositories
-  keeps that entry beside them while its issues stay refused.
+  a later addition outside them is refused, whether it names a repository or not.
+- **A limit naming only other repositories.** The launch entry stays first, because the root runs there
+  and the boundary requires it, so the boundary lists it beside them. It grants no work: no child is placed
+  in it, none of its gates (a merge, a branch deletion, an issue closure, a follow-up publication) is the
+  Orchestrator's to decide, no campaign review runs on it, and no agent adds its issues. What remains is
+  the root's own process, which keeps running in that checkout under its provider's permissions, and the
+  owner's own decisions, which stay the owner's.
 - **Repositories the limit left out.** Their Locations show in Campaign Status as Available but Not in
   This Campaign. A Location of a repository with no entry never joins while a limit stands, whether the
-  owner added it, its runner reconnected, the owner used Include in Campaign, or a reviewed enable found it.
+  owner added it, its runner reconnected, the owner used Include in Campaign, or an enable found it.
   A re-authorization and an enable keep the limit. Only `campaign_repository_addition`, which the owner
   approves, gives that repository an entry, and its issues then pass the limit. Its other available
   Locations then wait for Include in Campaign, because the approval named one Location.
