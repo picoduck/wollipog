@@ -4536,6 +4536,31 @@ test("provider-mode Claude Orchestrator auto-allows the observed issue-claiming 
   assert.equal(JSON.parse(writes[0]!).response.response.behavior, "allow");
 });
 
+test("a running Claude Orchestrator classifies issue writes against issue numbers granted after launch (#4269)", () => {
+  // The runner hands the driver its live launch policy and fills an empty grant in place once a
+  // Custom campaign's first-message reading settles; the classifier must read it on each ask.
+  const orchestrator: NonNullable<DriverOptions["orchestrator"]> = { strictProjectIsolation: false };
+  const h = makeHarness({ config: { permissionMode: "orchestrator" }, orchestrator });
+  const writes: string[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+  const ask = (requestId: string) => h.feed({
+    type: "control_request",
+    request_id: requestId,
+    request: { subtype: "can_use_tool", tool_name: "Bash", description: "Claim the issue", input: { command: "gh issue edit 1209 --add-assignee @me" } },
+  });
+
+  ask("before-grant");
+  assert.equal(writes.length, 0, "before the grant, the write is not routine");
+  assert.equal(h.events.length, 1, "it takes the person's approval path");
+  orchestrator.issueNumbers = [1209];
+  ask("after-grant");
+  assert.equal(h.events.length, 1, "no second approval card");
+  assert.deepEqual(JSON.parse(writes[0]!).response, {
+    subtype: "success", request_id: "after-grant", response: { behavior: "allow", updatedInput: { command: "gh issue edit 1209 --add-assignee @me" } },
+  });
+});
+
 test("provider-mode Claude Orchestrator returns non-canonical routine attempts to Claude", () => {
   const h = makeHarness({
     config: { permissionMode: "orchestrator" },

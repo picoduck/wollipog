@@ -40,7 +40,7 @@ export function campaignControlForRunner(control: CampaignControl, protocolVersi
 
 /** The authoritative order of the runner's copy of a campaign's control (#3363): the campaign
  * root's policy revision, which every control change advances, so a runner can refuse a delayed
- * update within one issue-scope revision. A pre-v299 runner is never sent it and keeps replacing
+ * update within one issue-scope revision. A pre-v304 runner is never sent it and keeps replacing
  * control with each synchronization, as before. */
 export function campaignControlRevisionForRunner(revision: number | undefined, protocolVersion: number | null | undefined): { controlRevision?: number } {
   return revision !== undefined && Number.isSafeInteger(revision) && revision >= 0 &&

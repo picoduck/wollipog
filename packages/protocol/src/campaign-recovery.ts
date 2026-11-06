@@ -65,6 +65,14 @@ export interface CampaignRecoveryProjection {
   records: CampaignRecoveryRecord[];
   truncated: boolean;
 }
+/** The fixed reasons the control plane gives with a `lifecycle_held` automation. `complete` is an
+ * intentional stop, not a blocker: every original scoped obligation is done, so there is nothing to
+ * recover. Campaign Status shows it as neutral (#3361); the other two still explain a real hold. */
+export const CAMPAIGN_AUTOMATION_HOLD_REASONS = {
+  lifecycle: "Automatic continuation is held by the campaign's current lifecycle or pending recovery.",
+  complete: "The campaign has no unfinished original scoped recovery obligation.",
+  recoveryHeld: "Original scoped work remains unfinished, but no current known recovery is eligible. Reconcile its original obligation before continuing.",
+} as const;
 export const CAMPAIGN_RECOVERY_LIMITS = { maxAttempts: 4, baseBackoffMs: 1_000,
   maxBackoffMs: 30_000, visibleRecords: 64, dispatchPerPass: 16 } as const;
 

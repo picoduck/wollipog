@@ -206,6 +206,7 @@ import {
   type OrchestratorCampaignPolicy,
   type OrchestratorCampaignProjection,
   type OrchestratorCampaignStatus,
+  CAMPAIGN_AUTOMATION_HOLD_REASONS,
   CAMPAIGN_HANDOFFS_LIMIT,
   CAMPAIGN_MERGED_BRANCHES_LIMIT,
   FORGE_DECISION_ACTION_MAX_ATTEMPTS,
@@ -6237,7 +6238,7 @@ export class ControlPlaneDb {
     if (!row || !policy || row.archived === 1 || this.sessionStopIntent(campaignId) ||
         isTerminal(row.status as SessionStatus) || row.status === "input_required" || row.history_quarantine ||
         row.worktree_recovery || row.queue_hold || pendingRequests(parseJson<PendingApproval>(row.pending_approval)).some(r => !r.async)) {
-      return { state: "lifecycle_held", reason: "Automatic continuation is held by the campaign's current lifecycle or pending recovery." };
+      return { state: "lifecycle_held", reason: CAMPAIGN_AUTOMATION_HOLD_REASONS.lifecycle };
     }
     const full = policy.control?.mode === "full_control";
     if (full && !campaignBoundaryCurrent({ orchestratorPolicy: policy, parentControlPolicy: this.parentControlPolicy(campaignId) ?? undefined })) {
@@ -6249,8 +6250,7 @@ export class ControlPlaneDb {
     // stays held: its original obligation is reconciled first, so the repair records no wake for it.
     if ((completion.state === "complete" && !this.campaignCleanupWakePending(campaignId)) || completion.state === "recovery_held") {
       return { state: "lifecycle_held", reason: completion.state === "complete"
-        ? "The campaign has no unfinished original scoped recovery obligation."
-        : "Original scoped work remains unfinished, but no current known recovery is eligible. Reconcile its original obligation before continuing." };
+        ? CAMPAIGN_AUTOMATION_HOLD_REASONS.complete : CAMPAIGN_AUTOMATION_HOLD_REASONS.recoveryHeld };
     }
     const active = this.activeCampaignContinuation(campaignId);
     if (active) {

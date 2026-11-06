@@ -256,7 +256,7 @@ export interface SessionMeta {
   /** Effective Orchestrator restriction. Missing legacy metadata remains strict at launch, and a
    * missing `integrationIsolation` matches that: a strict launch never carried user integrations. */
   orchestrator?: { strictProjectIsolation: boolean; integrationIsolation?: boolean; issueNumbers?: number[]; issueScope?: import("@wollipog/protocol").CampaignIssueScope; control?: import("@wollipog/protocol").CampaignControl;
-    /** v299 (#3363): the authoritative control revision `control` was read at; orders control updates. */
+    /** v304 (#3363): the authoritative control revision `control` was read at; orders control updates. */
     controlRevision?: number };
   /** v276 (#4074): a delegated image evidence reviewer. Every launch of it restricts the harness to
    * the two review tools, and it is never relaunched without this marker. */

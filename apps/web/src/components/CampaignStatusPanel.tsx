@@ -30,6 +30,7 @@ import {
   RESPONSIBLE_ACTOR_LABELS,
   UNAVAILABLE,
   campaignCostView,
+  campaignRecoveryAutomationNotice,
   campaignSummaryView,
   costWithProvenance,
   causeNeedsRequests,
@@ -295,11 +296,7 @@ function AvailableCampaignStatus({
                     scrollTop: scrollRef.current?.scrollTop ?? memory.scrollTop })}
                 />
               )}
-              {data.summary.campaign?.recovery?.automation?.reason && (
-                <Notice tone="warning" title="Authorized Recovery Unavailable">
-                  {data.summary.campaign.recovery.automation.reason}
-                </Notice>
-              )}
+              <CampaignRecoveryAutomation campaign={data.summary.campaign} />
               {data.summary.campaign?.recovery?.records.map(record => (
                 <CampaignRecoveryNotice key={record.id} record={record} />
               ))}
@@ -340,6 +337,18 @@ function AvailableCampaignStatus({
         </>
       )}
     </div>
+  );
+}
+
+/** The recovery automation's hold (#3361): nothing for a finished campaign, neutral when nothing is
+ * left to recover, and a warning only for a hold that keeps work from continuing. */
+function CampaignRecoveryAutomation({ campaign }: { campaign: CampaignStatusData["summary"]["campaign"] }) {
+  const notice = campaignRecoveryAutomationNotice(campaign?.status, campaign?.recovery?.automation);
+  if (!notice) return null;
+  return (
+    <Notice tone={notice.tone} title={notice.title} role={notice.tone === "neutral" ? "status" : undefined}>
+      {notice.body}
+    </Notice>
   );
 }
 
