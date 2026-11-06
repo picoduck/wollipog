@@ -219,7 +219,8 @@ test("#4118 a participant in another campaign repository's Location leaves the s
     const stored = h.db.sessionOrchestratorPolicy("root")!;
     const control = stored.control as Extract<CampaignControl, { mode: "full_control" }>;
     control.boundary.repositories = [{ repository: "team/repo", locationIds: [] }, { repository: "team/api", locationIds: [location.id] }];
-    h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(stored));
+    // A boundary's Locations come from the root's own Project (#4119).
+    h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=?, project_id=? WHERE id='root'").run(JSON.stringify(stored), project.id);
     const result = await h.close(PROPOSAL);
     assert.equal(result.errorDetails?.code, "campaign_issue_outside_scope");
     assert.equal(result.errorDetails?.recovery, "owner_scope_review_or_lineage", "a proposal can change the scope with this participant in place");

@@ -19966,7 +19966,8 @@ export class SessionManager {
     try {
       const result = await githubMergePreflight(message,
         options.gh ?? contextGhRunner(meta.context, cwd, options.agentEnv?.(meta) ?? {}));
-      return result.ok ? { ...base, ok: true, check: result.check } : { ...base, ok: false, refusal: result.refusal, reason: result.reason };
+      return result.ok ? { ...base, ok: true, check: result.check, ...(result.checks ? { checks: result.checks } : {}) }
+        : { ...base, ok: false, refusal: result.refusal, reason: result.reason };
     } catch {
       return { ...base, ok: false, refusal: "unavailable", reason: "GitHub could not be checked." };
     }

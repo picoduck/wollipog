@@ -5680,6 +5680,101 @@ test("a GitHub merge is requested and armed only while GitHub would close exactl
   }
 });
 
+test("a repository without required checks merges on every reported check, verified by the runner; no checks stays a person's (#4119)", async () => {
+  const { db, hub } = makeHarness();
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  try {
+    const meta = runnerMeta();
+    meta.agents.find((agent) => agent.id === "test-orchestrator")!.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "off" });
+    assert.ok(parent.ok && parent.data, parent.error);
+    db.updateSessionStatus(parent.data.id, "running", Date.now());
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title: "GitHub Child" };
+    let created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    if (created.status === 428) {
+      assert.ok(svc.approve(parent.data.id, db.getSession(parent.data.id)!.pendingApproval!.requestId, "allow").ok);
+      created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    }
+    assert.ok(created.ok && created.data, created.error);
+    const child = created.data;
+    db.updateSessionStatus(child.id, "running", Date.now());
+    // The Orchestrator owns merges here, so only the basis decides who owns this one.
+    assert.ok(svc.setParentControlPolicy(parent.data.id, {
+      implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "human",
+      follow_up_issue_publication: "human", ui_evidence_approval: "human", review_round_extension: "human",
+    }, 0).ok);
+
+    const preflights: Array<Extract<ControlPlaneToRunner, { type: "github_merge_preflight" }>> = [];
+    let checks: Record<string, unknown> | undefined;
+    hub.githubMergePreflight = async (msg) => {
+      preflights.push(msg);
+      return { type: "github_merge_preflight_result", requestId: msg.requestId, sessionId: msg.sessionId, ok: true,
+        check: { checkedAt: 5, closures: [] }, ...(checks ? { checks } : {}) } as RunnerRequestResult;
+    };
+    const cite = (...names: string[]) => ({ ...GITHUB_MERGE, checksBasis: "all_reported",
+      requiredChecks: { ...GITHUB_MERGE.requiredChecks, checks: names.map((name) => ({ name, state: "passed" })) } });
+    const ask = (key: string, snapshot: Record<string, unknown>) => svc.createWorkflowDecisionWithVideo(child.id,
+      { requestId: key, resourceKey: key, resourceSnapshot: snapshot as unknown as WorkflowDecisionResourceSnapshot });
+    const passed = (name: string) => ({ name, state: "passed" });
+
+    // Every reported check passing under a clean merge state admits it, recording the basis.
+    checks = { required: 0, clean: true, reported: [passed("build"), passed("lint")] };
+    const admitted = await ask("all-reported", cite("lint", "build"));
+    assert.ok(admitted.ok && admitted.data, admitted.error);
+    assert.equal(admitted.data.authority, "orchestrator");
+    assert.equal((admitted.data.resourceSnapshot as { checksBasis?: string }).checksBasis, "all_reported");
+    assert.equal(preflights.at(-1)!.checks, true, "the runner is asked for the head's checks");
+
+    // Pending, failing, unclean, required, or differently named checks refuse it; nothing is created.
+    for (const [label, read, pattern] of [
+      ["pending", { required: 0, clean: true, reported: [passed("build"), { name: "lint", state: "pending" }] }, /has not finished/u],
+      ["failing", { required: 0, clean: true, reported: [passed("build"), { name: "lint", state: "failing" }] }, /is failing/u],
+      ["unclean", { required: 0, clean: false, reported: [passed("build"), passed("lint")] }, /merge state as clean/u],
+      ["required", { required: 1, clean: true, reported: [passed("build"), passed("lint")] }, /must cite its required checks/u],
+      ["other names", { required: 0, clean: true, reported: [passed("build"), passed("test")] }, /exactly the checks GitHub reports/u],
+      ["malformed", { required: -1, clean: true, reported: [] }, /the runner's answer was incomplete/u],
+    ] as const) {
+      checks = read as unknown as Record<string, unknown>;
+      const refused = await ask(`refused-${label}`, cite("build", "lint"));
+      assert.equal(refused.status, 409, label);
+      assert.match(refused.error ?? "", pattern, label);
+    }
+
+    // A head with no checks at all is never green: the merge is the person's, even here.
+    checks = { required: 0, clean: false, reported: [] };
+    const none = await ask("no-checks", cite());
+    assert.ok(none.ok && none.data, none.error);
+    assert.equal(none.data.authority, "human");
+    assert.equal(none.data.authorityEvaluation?.reason, "no_checks");
+    // Only the all-reported basis may cite no checks, and only for GitHub.
+    assert.equal((await ask("empty-required", { ...GITHUB_MERGE, requiredChecks: { ...GITHUB_MERGE.requiredChecks, checks: [] } })).status, 400);
+    assert.equal(normalizeWorkflowDecisionSnapshot({ ...GITHUB_MERGE, checksBasis: "required" }).status, 400);
+    assert.equal(normalizeWorkflowDecisionSnapshot({ ...GITLAB_MERGE, checksBasis: "all_reported" }).status, 400);
+
+    // A required-checks merge keeps its snapshot, digest and preflight unchanged.
+    checks = undefined;
+    const plain = await ask("required-basis", GITHUB_MERGE);
+    assert.ok(plain.ok && plain.data, plain.error);
+    assert.deepEqual(plain.data.resourceSnapshot, GITHUB_MERGE);
+    assert.equal("checks" in preflights.at(-1)!, false);
+
+    // A runner that cannot read checks cannot support the basis.
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.githubMergeChecksBasis - 1);
+    const asked = preflights.length;
+    const older = await ask("older-runner", cite("build", "lint"));
+    assert.equal(older.status, 409);
+    assert.match(older.error ?? "", /newer runner/u);
+    assert.equal(preflights.length, asked);
+  } finally {
+    db.close();
+  }
+});
+
 test("a nested Orchestrator's verification counts toward the root campaign (#1462)", () => {
   const { db, svc, hub } = makeHarness();
   try {

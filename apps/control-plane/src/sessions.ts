@@ -37,6 +37,7 @@ import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignControlForRunner, campaignControlRevisionForRunner, campaignLaunchRepository, campaignScopeRepositories } from "./campaign-authority.js";
+import { campaignBoundaryRepositoryAt } from "./campaign-repository-boundary.js";
 import { genericRequestScreenData, implementationQuestionScreenData, ownerDecisionScreenData, screenCredentialRequest, type CredentialScreenSurface } from "./credential-screen.js";
 import { DECISION_TOTAL_BOUND_MS, DecisionRuntime, hubDecisionTransport, type DecisionOutcome } from "./decision-runtime.js";
 import { DecisionModelSettings } from "./decision-model-settings.js";
@@ -76,6 +77,7 @@ import { normalizeIssueClosureSnapshot, issueClosureActiveChildren, issueClosure
 import { normalizeAutomationCreationSnapshot } from "./automation-creation-snapshot.js";
 import { normalizeLocationSwitchSnapshot } from "./location-switch-snapshot.js";
 import { INTENDED_CLOSURES_LIMIT, normalizeIntendedClosures, prMergeClosureMismatch, unscopedClosureRefusal, validClosingReferenceCheck } from "./pr-merge-closures.js";
+import { allReportedChecksRefusal, validPullRequestChecksRead } from "./merge-checks-basis.js";
 import { observeReconciliationSnapshot, reconciliationSnapshotAvailable, correctionFrame, latestReconciliationRepair, normalizeReconciledSnapshot, reconciliationRevision } from "./claude-cost-reconciliation.js";
 import type { GithubIssueClosureRequest, GithubIssueClosureResult, GithubIssueClosureSnapshot, IssueClosureProofGapNotice } from "@wollipog/protocol";
 import { issueClosureDeliveryFailure, issueClosureDeliveryGap, issueClosureProofGapNotice } from "@wollipog/protocol";
@@ -1369,10 +1371,16 @@ export function normalizeWorkflowDecisionSnapshot(
       return [{ name: check.name, state: "passed" as const,
         ...(typeof check.url === "string" ? { url: check.url } : {}) }];
     }) : [];
+    // #4119: a GitHub repository without required checks cites every reported check instead; with
+    // none at all the merge is the person's, so an empty list is accepted only on that basis.
+    if (value.checksBasis !== undefined && (gitlab || value.checksBasis !== "all_reported")) {
+      return fail("checksBasis must be all_reported, and applies only to a GitHub merge decision");
+    }
+    const allReported = value.checksBasis === "all_reported";
     if (!repo || !pullRequest || !headSha ||
         (value.reviewResult !== "merge" && value.reviewResult !== "merge_with_acknowledged_risk") ||
         !checks || checks.status !== "passed" || checks.headSha !== headSha || !checked ||
-        !Array.isArray(checks.checks) || checkRows.length !== checks.checks.length || checkRows.length < 1) {
+        !Array.isArray(checks.checks) || checkRows.length !== checks.checks.length || (checkRows.length < 1 && !allReported)) {
       return fail("merge decisions require an exact repository, PR, reviewed head, and passing required checks for that head");
     }
     // #3713: the issues a merge is meant to close; the runner's check compares them with what the
@@ -1390,6 +1398,7 @@ export function normalizeWorkflowDecisionSnapshot(
         headSha, status: "passed", checkedAt: checked, checks: checkRows,
       },
       ...(intendedClosures ? { intendedClosures } : {}),
+      ...(allReported ? { checksBasis: "all_reported" as const } : {}),
       ...(gitlab ? {
         mergeMethod: value.mergeMethod as "merge_train" | "merge",
         squash: value.squash as boolean,
@@ -4351,6 +4360,8 @@ export class SessionsService {
     configs: SessionConfig[],
     request: { title?: string; agentId: string },
     members: Array<{ agentId: string; launch: AgentLaunch }> = [],
+    /** Where every member runs; a Full Control campaign checks it as it checks one child (#4119). */
+    place?: { runnerId: string; workspaceId: string },
   ): ServiceResult<SessionConfig[]> {
     if (!parentSessionId || configs.length === 0) return ok(configs);
     const parent = this.db.getSession(parentSessionId);
@@ -4359,6 +4370,11 @@ export class SessionsService {
     }
     const campaignAuthority = this.orchestratorCampaignController(parent);
     if (campaignAuthority === "refused") return fail(MALFORMED_ANCESTRY_AUTHORITY_REFUSAL, 409);
+    if (campaignAuthority?.orchestratorPolicy?.control?.mode === "full_control") {
+      const misplaced = place ? this.campaignPlacementRefusal(campaignAuthority, parent, place)
+        : "Full Control children must use a Location of a repository in the campaign's boundary";
+      if (misplaced) return fail(misplaced, 409);
+    }
     const campaignPolicy = campaignAuthority?.orchestratorPolicy;
     const campaignBehavior = campaignPolicy?.behavior;
     const reserved = { ...this.db.childSessionAllocations(parentSessionId) };
@@ -4452,8 +4468,10 @@ export class SessionsService {
       JSON.stringify(context.evidenceAuthority) !== JSON.stringify(control.boundary.evidenceAuthority) ||
       !scope || !scope.issueNumbers.includes(context.issue) || scope.revision !== context.issueScopeRevision ||
       !rootAudience || !childAudience || !this.db.scopeAudienceContainedWithMembership(rootAudience, childAudience) ||
-      request.runnerId !== root.runnerId || request.workspaceId !== root.workspaceId || request.workspacePath ||
-      request.agentId !== target.agentId || target.runnerId !== root.runnerId ||
+      // The peer runs in a Location of the child's own boundary repository (#4119).
+      request.workspacePath || !campaignBoundaryRepositoryAt(this.db, root, request) ||
+      campaignBoundaryRepositoryAt(this.db, root, request) !== campaignBoundaryRepositoryAt(this.db, root, child) ||
+      request.agentId !== target.agentId || target.runnerId !== request.runnerId ||
       this.db.getRunner(root.runnerId)?.protocolVersion !== context.controllerProtocolVersion ||
       this.db.getRunner(child.runnerId)?.protocolVersion !== context.childProtocolVersion ||
       this.db.getRunner(target.runnerId)?.protocolVersion !== target.runnerProtocolVersion ||
@@ -4502,7 +4520,7 @@ export class SessionsService {
       this.workflowDecisionRelationship(root.id, child.id) &&
       (decision.status !== "pending" || !this.workflowDecisionChildEnded(child)) &&
       (owner === "human" ? Boolean(root.parentControlPolicy) && this.workflowDecisionAuthorityCurrent(root, root.parentControlPolicy!, decision) :
-        evaluateCampaignAuthority(root, child, this.db.getRunner(child.runnerId)?.protocolVersion,
+        evaluateCampaignAuthority(root, this.campaignPlaced(root, child), this.db.getRunner(child.runnerId)?.protocolVersion,
           decision.resourceSnapshot, root.parentControlPolicy, this.db.getRunner(root.runnerId)?.protocolVersion,
           this.campaignPeerContracts(root, child.id)).owner === owner);
   }
@@ -4778,9 +4796,8 @@ export class SessionsService {
       if (!preflight.supported || !campaignBoundaryCurrent(campaignController)) {
         return campaignRefusalFail(preflight.requirement ?? preflight.reason ?? "campaign authority boundary is stale");
       }
-      if (req.runnerId !== campaignController.runnerId || req.workspaceId !== campaignController.workspaceId || req.workspacePath) {
-        return fail("Full Control children must use the campaign's repository workspace and runner", 409);
-      }
+      const misplaced = this.campaignPlacementRefusal(campaignController, parentSession, req);
+      if (misplaced) return fail(misplaced, 409);
     }
     if (launch.driver === "pi") {
       const unsupported = this.capabilityFailure(req.runnerId, "piHarness", "Pi RPC sessions");
@@ -10363,9 +10380,39 @@ export class SessionsService {
     const repositoryRoot = controller.orchestratorPolicy?.control?.mode === "full_control" && request.context?.operation
       ? this.db.sessionRepositoryRoot(requester.id) : undefined;
     const workspaceId = requester.workspaceId ?? (controller.orchestratorPolicy?.control?.mode === "full_control" ? this.db.getSession(requester.id)?.workspaceId : undefined);
-    return evaluateCampaignAuthority(controller, { ...requester, workspaceId, repositoryRoot: repositoryRoot ?? undefined }, this.db.getRunner(requester.runnerId)?.protocolVersion, this.db.campaignPolicyRequest(requester.id, controller.orchestratorPolicy?.control, request), controller.parentControlPolicy,
+    return evaluateCampaignAuthority(controller, this.campaignPlaced(controller, { ...requester, workspaceId, repositoryRoot: repositoryRoot ?? undefined }), this.db.getRunner(requester.runnerId)?.protocolVersion, this.db.campaignPolicyRequest(requester.id, controller.orchestratorPolicy?.control, request), controller.parentControlPolicy,
       controller.orchestratorPolicy?.control?.mode === "full_control" ? this.db.getRunner(controller.runnerId)?.protocolVersion : undefined,
       this.campaignPeerContracts(controller, requester.id));
+  }
+
+  /** Why a Full Control campaign refuses a new child at this place (#4119), or null. It must use a
+   * Location of a boundary repository, and a child of a child stays in its parent's repository, so
+   * each session works in exactly one. An ad-hoc path is never a Location. Sessions, runs and
+   * workflows all apply it. */
+  private campaignPlacementRefusal(root: SessionView, parent: SessionView | null,
+    place: { runnerId: string; workspaceId?: string | null; workspacePath?: string }): string | null {
+    if (root.orchestratorPolicy?.control?.mode !== "full_control") return null;
+    const repository = place.workspacePath ? null : campaignBoundaryRepositoryAt(this.db, root, place);
+    const parentRepository = parent && parent.id !== root.id ? campaignBoundaryRepositoryAt(this.db, root, parent) : repository;
+    return repository && parentRepository === repository ? null
+      : "Full Control children must use a Location of a repository in the campaign's boundary";
+  }
+
+  /** A campaign participant runs in a Location of a boundary repository, and in the same one as the
+   * campaign session it serves (#4119): its parent, unless that parent is the root, which serves
+   * every repository. */
+  private campaignServesOwnRepository(root: SessionView, session: SessionView): boolean {
+    const repository = campaignBoundaryRepositoryAt(this.db, root, session);
+    if (!repository) return false;
+    const parent = session.parentSessionId && session.parentSessionId !== root.id ? this.db.getSession(session.parentSessionId) : null;
+    return !parent || campaignBoundaryRepositoryAt(this.db, root, parent) === repository;
+  }
+
+  /** The requester with the boundary repository whose Location it runs in (#4119), for campaign
+   * authority. Resolved from its own runner and workspace, never from anything it sent. */
+  private campaignPlaced<T extends { runnerId?: string; workspaceId?: string | null }>(controller: SessionView, requester: T):
+    T & { boundaryRepository: string | null } {
+    return { ...requester, boundaryRepository: campaignBoundaryRepositoryAt(this.db, controller, requester) };
   }
 
   /** Synchronous provider requests park the root model. Settle only eligible exact occurrences
@@ -10756,7 +10803,7 @@ export class SessionsService {
     const control = root?.orchestratorPolicy?.control;
     if (!root || !member || control?.mode !== "full_control" || !control.boundary.budgetAuthority || !campaignBoundaryCurrent(root) ||
         !this.db.campaignBudgets.active(member.id) || isTerminal(member.status) || hasBlockingPendingRequest(member.pendingApproval) ||
-        member.runnerId !== root.runnerId || member.workspaceId !== root.workspaceId) return fail("review worker is not an active admitted participant in the current campaign boundary", 409);
+        !this.campaignServesOwnRepository(root, member)) return fail("review worker is not an active admitted participant in the current campaign boundary", 409);
     const accountingError = this.campaignBudgetConfigError(member);
     if (accountingError) return campaignRefusalFail(accountingError);
     const error = this.db.campaignBudgets.admissionError(worker.sessionId);
@@ -11554,7 +11601,7 @@ export class SessionsService {
     const preflight = campaignAuthorityPreflight(control, driver, this.db.getRunner(session.runnerId)?.protocolVersion,
       this.pacedVideoInstallationContract(session.runnerId, session.agentId));
     if (!preflight.supported) return preflight.requirement ?? preflight.reason ?? "campaign allowance requires supported accounting peers";
-    if (session.runnerId !== controller.runnerId || session.workspaceId !== controller.workspaceId) return "campaign allowance requires the original runner and workspace";
+    if (!this.campaignServesOwnRepository(controller, session)) return "campaign allowance requires a Location of the same boundary repository as the session it serves";
     if (view.state !== "active") return view.reason ?? "campaign allowance unavailable";
     if(view.authority.controlledReview) {
       const capability=this.db.getRunner(controller.runnerId)?.runtime?.campaignReview;
@@ -13286,6 +13333,12 @@ export class SessionsService {
     const gitlab = snapshot.mergeMethod !== undefined;
     const forge = gitlab ? "GitLab" : "GitHub";
     const runner = this.db.getRunner(child.runnerId);
+    // #4119: only a runner that reads the head's checks can support the all-reported basis.
+    const allReported = snapshot.checksBasis === "all_reported";
+    if (allReported && !runnerSupportsProtocol(runner?.protocolVersion, "githubMergeChecksBasis")) {
+      return { ok: false, revoke: false, message: runnerCapabilityRequirementError(runner?.protocolVersion, "githubMergeChecksBasis",
+        "merges in repositories without required checks").error };
+    }
     if (!runner || !runnerSupportsProtocol(runner.protocolVersion,
       gitlab ? "gitlabMergeClosingReferences" : "githubMergeClosingReferences")) return { ok: true };
     const unreadable = (reason: string) => ({ ok: false as const, revoke: false,
@@ -13296,7 +13349,7 @@ export class SessionsService {
     try {
       answer = await this.hub.requestFromRunner(child.runnerId, requestId, {
         type, requestId, sessionId: child.id, repository: snapshot.repository,
-        pullRequest: snapshot.pullRequest, headSha: snapshot.headSha,
+        pullRequest: snapshot.pullRequest, headSha: snapshot.headSha, ...(allReported ? { checks: true as const } : {}),
       }, gitlab ? GITLAB_MERGE_CLOSURES_TIMEOUT_MS : GITHUB_MERGE_PREFLIGHT_TIMEOUT_MS);
     } catch {
       return unreadable("the runner did not answer.");
@@ -13312,7 +13365,14 @@ export class SessionsService {
     const check = validClosingReferenceCheck(result.check, gitlab ? snapshot.repository : undefined);
     if (!check) return unreadable("the runner's answer was incomplete.");
     const mismatch = prMergeClosureMismatch(snapshot.intendedClosures ?? [], check.closures, gitlab ? "gitlab" : "github");
-    return mismatch ? { ok: false, revoke: true, message: mismatch } : { ok: true, check };
+    if (mismatch) return { ok: false, revoke: true, message: mismatch };
+    if (allReported) {
+      const checks = validPullRequestChecksRead((result as Partial<GithubMergePreflightResultMessage>).checks);
+      if (!checks) return unreadable("the runner's answer was incomplete.");
+      const refused = allReportedChecksRefusal(snapshot, checks);
+      if (refused) return { ok: false, ...refused };
+    }
+    return { ok: true, check };
   }
 
   createWorkflowDecision(
@@ -13418,7 +13478,7 @@ export class SessionsService {
     let authority = evaluated.effectiveOwner;
     const screenedQuestion = category === "implementation_question" &&
       controller.session.orchestratorPolicy?.control?.mode === "full_control";
-    const authorityEvaluation = evaluateCampaignAuthority(controller.session, child,
+    const authorityEvaluation = evaluateCampaignAuthority(controller.session, this.campaignPlaced(controller.session, child),
       this.db.getRunner(child.runnerId)?.protocolVersion, normalized.data, controller.policy,
       this.db.getRunner(controller.session.runnerId)?.protocolVersion, this.campaignPeerContracts(controller.session, child.id),
       this.reviewExtensionCap(child.id, normalized.data),
@@ -14170,7 +14230,7 @@ export class SessionsService {
       return fail("Only the campaign's owner can decide a decision the owner kept", 403);
     }
     if (authority === "orchestrator" && parentSessionId === childSessionId &&
-        evaluateCampaignAuthority(currentParent, currentChild, this.db.getRunner(currentChild.runnerId)?.protocolVersion,
+        evaluateCampaignAuthority(currentParent, this.campaignPlaced(currentParent, currentChild), this.db.getRunner(currentChild.runnerId)?.protocolVersion,
           decision.resourceSnapshot, currentPolicy, this.db.getRunner(currentParent.runnerId)?.protocolVersion,
           this.campaignPeerContracts(currentParent, currentChild.id)).basis !== "standing_authorization") {
       return fail("a root request requires standing human campaign authorization", 403);
@@ -15462,7 +15522,7 @@ export class SessionsService {
     // Full Control never routes evidence to the Human (#2940). The Orchestrator keeps a decision it
     // cannot fully inspect only while the current boundary gives it UI Evidence Approval.
     const requester = this.db.getSession(childSessionId);
-    const owner = requester ? evaluateCampaignAuthority(controller, requester,
+    const owner = requester ? evaluateCampaignAuthority(controller, this.campaignPlaced(controller, requester),
       this.db.getRunner(requester.runnerId)?.protocolVersion, snapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
       this.campaignPeerContracts(controller, requester.id)).owner : "human";
     return owner === "orchestrator" ? { effectiveOwner: "orchestrator", limitation: direct.fallback } : direct;
@@ -15477,7 +15537,7 @@ export class SessionsService {
     snapshot: WorkflowDecisionResourceSnapshot,
   ): WorkflowDecisionAuthority {
     const requester = this.db.getSession(childSessionId);
-    return requester ? evaluateCampaignAuthority(controller, requester,
+    return requester ? evaluateCampaignAuthority(controller, this.campaignPlaced(controller, requester),
       this.db.getRunner(requester.runnerId)?.protocolVersion, snapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
       this.campaignPeerContracts(controller, requester.id), this.reviewExtensionCap(requester.id, snapshot)).owner : "human";
   }
@@ -15640,7 +15700,7 @@ export class SessionsService {
     if (!options.recordingCompletedMerge && decision.status === "approved" && requester && decision.resourceSnapshot.category === "pr_merge" &&
         this.mergeReviewEvidenceRefusal(requester, decision.resourceSnapshot)) return false;
     if (decision.authorityEvaluation?.boundaryRevision !== undefined && (!requester ||
-        evaluateCampaignAuthority(controller, requester, this.db.getRunner(requester.runnerId)?.protocolVersion,
+        evaluateCampaignAuthority(controller, this.campaignPlaced(controller, requester), this.db.getRunner(requester.runnerId)?.protocolVersion,
           decision.resourceSnapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
           this.campaignPeerContracts(controller, requester.id)).boundaryRevision !== decision.authorityEvaluation.boundaryRevision ||
         !campaignBoundaryCurrent(controller))) return false;
@@ -18993,6 +19053,7 @@ export class SessionsService {
       members.map(() => ({ ...memberConfig })),
       spawnRequest,
       members,
+      { runnerId: req.runnerId, workspaceId: req.workspaceId },
     );
     if (!admitted.ok || !admitted.data) return failAs(admitted);
 
@@ -20056,6 +20117,7 @@ export class SessionsService {
       resolved.map(() => ({ ...memberConfig })),
       spawnRequest,
       resolved,
+      { runnerId: req.runnerId, workspaceId: req.workspaceId },
     );
     if (!admitted.ok || !admitted.data) return failAs(admitted);
 

@@ -112,3 +112,79 @@ test("closures merge one entry per issue in issue order", () => {
     { issue: "a/b#12", sources: ["description"], excerpt: "Closes #12 and fixes #3; resolves #12 again." },
   ]);
 });
+
+/** The checks read (#4119): the pull request's head commit, its rollup and its merge state. */
+function headChecks(nodes: unknown[] | null, overrides: Record<string, unknown> = {}, commit: Record<string, unknown> = {}, hasNextPage = false) {
+  return { data: { repository: { nameWithOwner: "picoduck/wollipog", pullRequest: {
+    number: 3729, headRefOid: HEAD, mergeStateStatus: "CLEAN",
+    commits: { nodes: [{ commit: { oid: HEAD,
+      statusCheckRollup: nodes === null ? null : { contexts: { pageInfo: { hasNextPage }, nodes } }, ...commit } }] },
+    ...overrides,
+  } } } };
+}
+const run = (name: string, status: string, conclusion: string | null, isRequired = false) =>
+  ({ __typename: "CheckRun", name, status, conclusion, isRequired });
+const status = (context: string, state: string, isRequired = false) => ({ __typename: "StatusContext", context, state, isRequired });
+
+/** Answers the closure query and the checks query each with their own fixture. */
+function both(checks: unknown, calls: string[][] = []): GhRunner {
+  return async (args) => {
+    calls.push(args);
+    const query = args.find((arg) => arg.startsWith("query="))!;
+    return { stdout: JSON.stringify(query.includes("mergeStateStatus") ? checks : pullRequest()), stderr: "", code: null, timedOut: false };
+  };
+}
+
+test("the merge preflight reads the head's checks only when asked, and reports each with how many are required (#4119)", async () => {
+  const calls: string[][] = [];
+  const unasked = await githubMergePreflight(REQUEST, both(headChecks([]), calls), () => 1);
+  assert.deepEqual(unasked, { ok: true, check: { checkedAt: 1, closures: [] } });
+  assert.equal(calls.length, 1, "a required-checks merge reads exactly what it did before");
+
+  const result = await githubMergePreflight({ ...REQUEST, checks: true }, both(headChecks([
+    run("build", "COMPLETED", "SUCCESS"), run("lint", "COMPLETED", "SKIPPED"), run("e2e", "IN_PROGRESS", null),
+    run("flaky", "COMPLETED", "TIMED_OUT"), status("ci/legacy", "SUCCESS", true), status("ci/deploy", "PENDING"), status("ci/x", "ERROR"),
+  ]), calls), () => 1);
+  assert.ok(result.ok);
+  assert.deepEqual(result.checks, { required: 1, clean: true, reported: [
+    { name: "build", state: "passed" }, { name: "lint", state: "passed" }, { name: "e2e", state: "pending" },
+    { name: "flaky", state: "failing" }, { name: "ci/legacy", state: "passed" }, { name: "ci/deploy", state: "pending" },
+    { name: "ci/x", state: "failing" },
+  ] });
+  assert.equal(calls.length, 3);
+  assert.match(calls[2]!.find((arg) => arg.startsWith("query="))!, /isRequired\(pullRequestNumber:\$number\)/u);
+});
+
+test("a head with no checks reads as none, and any merge state but CLEAN reads as not clean (#4119)", async () => {
+  const none = await githubMergePreflight({ ...REQUEST, checks: true }, both(headChecks(null)), () => 1);
+  assert.ok(none.ok);
+  assert.deepEqual(none.checks, { required: 0, reported: [], clean: true });
+  for (const state of ["BLOCKED", "BEHIND", "UNSTABLE", "UNKNOWN", "HAS_HOOKS", "DIRTY"]) {
+    const read = await githubMergePreflight({ ...REQUEST, checks: true }, both(headChecks([run("build", "COMPLETED", "SUCCESS")], { mergeStateStatus: state })));
+    assert.ok(read.ok);
+    assert.equal(read.checks!.clean, false, state);
+  }
+});
+
+test("a checks read that cannot prove the head fails closed and proves nothing (#4119)", async () => {
+  const cases: Array<[string, unknown]> = [
+    ["another head", headChecks([], { headRefOid: "f".repeat(40) })],
+    ["another commit", headChecks([], {}, { oid: "e".repeat(40) })],
+    ["another repository", { data: { repository: { ...headChecks([]).data.repository, nameWithOwner: "other/repo" } } }],
+    ["more than one page", headChecks([run("build", "COMPLETED", "SUCCESS")], {}, {}, true)],
+    ["an unnamed check", headChecks([run("", "COMPLETED", "SUCCESS")])],
+    ["an unknown node", headChecks([{ __typename: "Mystery", name: "x", isRequired: false }])],
+    ["no required flag", headChecks([{ __typename: "CheckRun", name: "x", status: "COMPLETED", conclusion: "SUCCESS" }])],
+    ["no merge state", headChecks([], { mergeStateStatus: null })],
+    ["GraphQL errors", { errors: [{ message: "boom" }], data: headChecks([]).data }],
+  ];
+  for (const [label, answer] of cases) {
+    const result = await githubMergePreflight({ ...REQUEST, checks: true }, both(answer));
+    assert.equal(result.ok, false, label);
+    if (!result.ok) assert.equal(result.refusal, "unavailable", label);
+  }
+  const failed = await githubMergePreflight({ ...REQUEST, checks: true }, async (args) => args.find((arg) => arg.startsWith("query="))!.includes("mergeStateStatus")
+    ? { stdout: "", stderr: "gh auth login", code: 4, timedOut: false }
+    : { stdout: JSON.stringify(pullRequest()), stderr: "", code: null, timedOut: false });
+  assert.deepEqual(failed, { ok: false, refusal: "unavailable", reason: "GitHub could not be read for the pull request's checks." });
+});
