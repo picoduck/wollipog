@@ -214,6 +214,51 @@ test("a Custom campaign's epic seed shows its reading beside the scope it affect
   }
 });
 
+test("a Custom campaign's epic seed on the proposal check reads as the Epic Seed, and the owner may still continue without an epic (#4282)", async () => {
+  const read = api.campaignDecisions;
+  const classify = api.classifyCampaignDecision;
+  const classified: string[] = [];
+  const seed = { sessionId: "root-1", surface: "issue_scope_seed" as const, requestId: "issue_scope_seed:abc" };
+  const check = (occurrenceId: string, extra: Partial<CampaignDecisionsResponse["decisions"][number]>) =>
+    decision(occurrenceId, { kind: "scope_check", promptVersion: "scope_check.v1", ...extra });
+  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions: [
+    check("check_seeded", { verdict: "admit", typedAnswers: TYPED_ADMITTED, subject: { ...seed, seed: "seeded" } }),
+    check("check_refused", { verdict: "refuse", reason: "The message only mentions #12 as background.", typedAnswers: TYPED_REFUSED, subject: { ...seed } }),
+    check("check_pending", { state: "pending", subject: { ...seed } }),
+    check("check_uncertain", { state: "uncertain", verdict: "uncertain", typedAnswers: TYPED_UNCERTAIN, subject: { ...seed, seed: "owner" } }),
+    check("check_old_runner", { state: "failed", failureClass: "runner_incapable", subject: { ...seed, seed: "owner" } }),
+    check("check_granted", { verdict: "admit", typedAnswers: TYPED_ADMITTED, subject: { ...seed, seed: "none" } }),
+  ], usage: { ...usage, calls: 6, unpricedCalls: 0 } });
+  api.classifyCampaignDecision = async (_id, occurrenceId, classification) => {
+    classified.push(occurrenceId);
+    return { ...seed, classification };
+  };
+  const view = await render(<CampaignDecisionModelChecks sessionId="root-1" canClassify refreshKey={1} onOpenSession={() => {}} />);
+  try {
+    const items = [...view.container.querySelectorAll("li.campaign-screen-item")];
+    assert.deepEqual(items.map((item) => [Object.keys(facts(item))[0], facts(item)["Epic Seed"], facts(item).Verdict]), [
+      ["Epic Seed", "It seeded the epic's issues; approve the issue scope before work is delegated.", "Within Your Message"],
+      ["Epic Seed", "Refused back to the Orchestrator, which revises it.", "Outside Your Message"],
+      ["Epic Seed", "Work waits to be delegated until the check finishes.", "Checking"],
+      ["Epic Seed", "Waiting for you: approve the campaign's issue scope, or continue without an epic.", "Uncertain"],
+      ["Epic Seed", "Waiting for you: approve the campaign's issue scope, or continue without an epic.", "None"],
+      ["Epic Seed", "It named no epic, so nothing waits.", "Within Your Message"],
+    ]);
+    assert.equal(facts(items[4]!).Failure, "Runner Can't Run It");
+    assert.ok(facts(items[1]!).Answers, "the typed answers show beside the seed");
+    assert.deepEqual(items.map((item) => [...item.querySelectorAll("button")].map((node) => node.textContent)), [
+      ["Open Session"], ["Open Session"], ["Open Session"], ["Continue Without an Epic", "Open Session"], ["Continue Without an Epic", "Open Session"],
+      ["Open Session"],
+    ], "a seed check left to the owner still offers to continue without an epic");
+    await act(async () => { [...items[3]!.querySelectorAll("button")].find((node) => node.textContent === "Continue Without an Epic")!.click(); });
+    assert.deepEqual(classified, ["check_uncertain"]);
+  } finally {
+    view.unmount();
+    api.campaignDecisions = read;
+    api.classifyCampaignDecision = classify;
+  }
+});
+
 test("Campaign Status lists each Decision Model call in exactly one section: checks beside their request, every other call in Decision Model (#4265)", async () => {
   const read = api.campaignDecisions;
   type Section = "Decision Model Checks" | "Decision Model";
