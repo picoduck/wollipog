@@ -6294,6 +6294,10 @@ export class SessionsService {
         return refused("not_an_issue", "The runner couldn't read every proposed number as an issue of the campaign repository.",
           { issue: numbers.find((n) => !verified.includes(n))! });
       }
+      // An issue whose members couldn't be read (the sub-issue read failed, a member was
+      // inaccessible, or the epic exceeds the bounded inspection) may still be an epic: never grant
+      // it as an issue number. As with the reading, its scope is the person's (review round 1).
+      if (single !== null && !epicRead) return owner("configuration", ownerMessage);
     }
     // The constraint check always runs, as the server reading always did: the message writes a
     // number, so whether it asks for that issue, only mentions it, or names an epic the proposal

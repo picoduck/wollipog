@@ -57,7 +57,9 @@ function harness(prompt: string, members: Record<number, CampaignIssueScopeCandi
       ...(message.facts ? { issueFacts: message.issues.map((number) => ({ number, kind: "issue" as const, state: "open" as const, labels: ["bug"], assignees: [],
         title: `Issue ${number}`, bodyExcerpt: `The body of ${number}.` })) } : {}) };
     const epic = message.epic;
-    if (epic === 13) return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: false };
+    // #13 is no issue at all; #77 is an issue whose member read fails (a failed sub-issue read, an
+    // inaccessible member, or more members than the bounded inspection allows).
+    if (epic === 13 || epic === 77) return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: false };
     const candidates: CampaignIssueScopeCandidate[] = epic === undefined ? [] : [{ issue: { repository: "team/repo", number: epic }, title: "Epic", source: "umbrella" },
       ...(members[epic] ?? []).map((source, index) => ({ issue: { repository: "team/repo", number: epic + 1 + index }, title: "Member", source }))];
     return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: true, repository: "team/repo", candidates };
@@ -216,6 +218,25 @@ test("a seed never comes from text: a failed or uncertain check is the person's,
       assert.equal(h.fake.checkCalls.length, 0, name);
     } finally { h.db.close(); }
   }
+});
+
+test("an issue whose members can't be read is never granted as an issue number: its scope is the person's (review round 1)", async () => {
+  const h = harness("Orchestrate epic #77 and its child issues.");
+  try {
+    h.fake.state.check = (message) => scopeCheckAnswer(message);
+    const result = await h.propose([77]);
+    assert.equal(result?.data?.seedProposal.outcome, "owner", result?.error ?? "proposed");
+    assert.equal(h.policy().issueNumbers, undefined, "a failed member read never becomes an issue-number grant");
+    assert.equal(h.policy().issueScopeProposalEpic, undefined);
+    assert.equal(h.policy().issueScopeSeed!.state, "owner");
+    assert.equal(h.fake.checkCalls.length, 0, "no check can admit it");
+    assert.equal(h.grants.length, 0);
+    const held = h.delegate();
+    assert.equal(held.ok, false, "delegation stays held for the person");
+    assert.match(held.error!, /Confirm the epic's authorized issue scope/u);
+    assert.equal(h.db.campaignDecisionSubject(h.policy().issueScopeSeed!.occurrenceId!)?.surface, "issue_scope_seed",
+      "Campaign Status offers the person Continue Without an Epic");
+  } finally { h.db.close(); }
 });
 
 test("the owner may continue without an epic when the seed is theirs; nobody else can, and a seeded epic is never released", async () => {
@@ -496,13 +517,13 @@ test("the check runs even when the Orchestrator states nothing to check: it refu
 });
 
 test("a seed gets three distinct checks whatever each proposes, and one proposal is checked at a time (security review)", async () => {
-  const h = harness("Orchestrate issues #12, #13 and #14.");
+  const h = harness("Orchestrate issues #12, #14 and #15.");
   try {
     h.fake.state.check = (message) => scopeCheckAnswer(message, (id) => id === "nothing_omitted" ? { value: "omits_requested", evidence: "Leaves one out." } : undefined);
-    for (const numbers of [[12], [13], [14]]) assert.equal((await h.propose(numbers))?.errorDetails?.code, "constraint_check_refused", `${numbers}`);
+    for (const numbers of [[12], [14], [15]]) assert.equal((await h.propose(numbers))?.errorDetails?.code, "constraint_check_refused", `${numbers}`);
     assert.equal((await h.propose([12]))?.errorDetails?.code, "constraint_check_refused", "a repeat joins its recorded check");
     assert.equal(h.fake.checkCalls.length, 3);
-    const fourth = await h.propose([12, 13]);
+    const fourth = await h.propose([12, 14]);
     assert.equal(fourth!.data!.seedProposal.outcome, "owner", "other issues buy no fourth check");
     assert.equal(h.fake.checkCalls.length, 3);
     assert.equal(h.policy().issueScopeSeed!.state, "owner");
