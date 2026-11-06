@@ -140,7 +140,13 @@ parent total is not billed twice; independently reported managed sessions count 
 
 Campaign members use `request_review_session` (`wollipog review session run`) for their own
 pushed PR. Admission reserves campaign allowance and actual managed Session usage settles against
-it, including unsuccessful attempts. The reviewer's exact harness/model/effort, read-only snapshot
+it, including unsuccessful attempts. A review takes no worker slot, so its default reservation
+counts it as one more claimant beside the free slots, and never fewer than two (#3618): with no free
+slot, the first review reserves half of the unreserved allowance and the next concurrent review
+half of what remains. Each free slot keeps a share at least as large as the review's. The
+requester's own human cost ceiling only lowers that share. Admission still checks every reservation
+against the unreserved allowance in the insertion transaction, and a review that reaches its
+reservation stops like any member. The reviewer's exact harness/model/effort, read-only snapshot
 and round/attempt limits remain enforced. Review approval grants no human approval, merge authority
 or passing checks. Optional review-session citations at merge gates are verified by the server.
 

@@ -1457,8 +1457,9 @@ test("a campaign member's review reserves allowance and settles actual usage wit
       assert.deepEqual(start.spec.campaignBudgetDispatch, h.db.campaignBudgets.dispatch(id));
       assert.equal(start.spec.config?.costBudgetUsd, allocation.costUsd);
       assert.equal(start.spec.config?.maxToolCalls, allocation.toolCalls);
-      assert.equal(allocation.costUsd, 40, "uses free campaign capacity, not the requester's reserved allocation");
-      assert.equal(h.db.campaignBudgets.view("root")!.outstanding.costUsd, before.outstanding.costUsd + 40);
+      // Two of four slots are free, so the review is a third claimant on the free capacity (#3618).
+      assert.equal(allocation.costUsd, before.remaining.costUsd! / 3, "uses free campaign capacity, not the requester's reserved allocation");
+      assert.equal(h.db.campaignBudgets.view("root")!.outstanding.costUsd, before.outstanding.costUsd + allocation.costUsd!);
       assert.equal(h.db.campaignBudgets.view("root")!.occupied, before.occupied);
       assert.equal(h.db.getSession(id)!.parentSessionId, "s1", "display parentage grants no descendant authority");
       assert.equal(h.db.getSession("s1")!.liveChildCapacity?.occupied, 0);
@@ -1576,6 +1577,126 @@ test("review admission and spending remain available with every campaign worker 
     assert.equal(h.db.campaignBudgets.view("root")!.occupied, 2);
     assert.equal(h.db.getSession(second.reviewSessionId)!.campaignMembership, undefined);
   } finally { h.db.close(); }
+});
+
+/** Spend plus every outstanding reservation stays within the authorized allowance. */
+function assertConserved(h: ReturnType<typeof harness>) {
+  const view = h.db.campaignBudgets.view("root")!;
+  assert.ok(view.actual.costUsd + view.outstanding.costUsd <= view.authority.costUsd! + 1e-9, "cost reservations exceed the allowance");
+  assert.ok(view.actual.toolCalls + view.outstanding.toolCalls <= view.authority.toolCalls!, "tool reservations exceed the allowance");
+  return view;
+}
+
+test("concurrent reviews share the remaining allowance at full worker concurrency (#3618)", () => {
+  const h = harness({ campaign: true });
+  try {
+    h.enableCampaign({ concurrency: 2 });
+    const before = h.db.campaignBudgets.view("root")!;
+    assert.equal(before.occupied, 2, "both worker slots are taken");
+    assert.ok(before.remaining.costUsd! > 0);
+    const first = requested(h, "s1").reviewSessionId;
+    const firstAllocation = h.db.campaignBudgets.allocation(first)!;
+    assert.equal(firstAllocation.costUsd, before.remaining.costUsd! / 2, "the first review leaves half the remainder");
+    assert.equal(firstAllocation.toolCalls, Math.floor(before.remaining.toolCalls! / 2));
+    const between = assertConserved(h);
+    const second = requested(h, "s2").reviewSessionId;
+    const secondAllocation = h.db.campaignBudgets.allocation(second)!;
+    assert.equal(secondAllocation.costUsd, between.remaining.costUsd! / 2);
+    assert.ok(secondAllocation.costUsd! > 0 && secondAllocation.toolCalls! > 0);
+    assert.equal(h.starts().length, 2, "both reviews launch while the first still runs");
+    assert.equal(h.db.reviewSessions.view(first)!.terminal, false);
+    const after = assertConserved(h);
+    assert.equal(after.occupied, 2, "reviews take no worker slot");
+    assert.equal(after.outstanding.costUsd, before.outstanding.costUsd + firstAllocation.costUsd! + secondAllocation.costUsd!);
+    assert.equal(h.starts()[0]!.spec.config?.costBudgetUsd, firstAllocation.costUsd);
+    assert.equal(h.starts()[1]!.spec.config?.costBudgetUsd, secondAllocation.costUsd);
+  } finally { h.db.close(); }
+});
+
+test("at partial worker concurrency a review leaves each free slot at least its own share (#3618)", () => {
+  for (const concurrency of [3, 4]) {
+    const h = harness({ campaign: true });
+    try {
+      h.enableCampaign({ concurrency });
+      const before = h.db.campaignBudgets.view("root")!;
+      const free = concurrency - before.occupied;
+      assert.ok(free >= 1, `${concurrency}: a worker slot is free`);
+      const first = h.db.campaignBudgets.allocation(requested(h, "s1").reviewSessionId)!;
+      assert.equal(first.costUsd, before.remaining.costUsd! / Math.max(2, free + 1), `${concurrency}`);
+      const between = assertConserved(h);
+      assert.ok(between.remaining.costUsd! / free >= first.costUsd! - 1e-9, `${concurrency}: each free slot keeps a share as large as the review's`);
+      const second = h.db.campaignBudgets.allocation(requested(h, "s2").reviewSessionId)!;
+      assert.equal(second.costUsd, between.remaining.costUsd! / Math.max(2, free + 1), `${concurrency}`);
+      // A worker admitted next still divides what is left among the free slots, as before.
+      const worker = h.db.campaignBudgets.prepare("root", "next-worker", {});
+      assert.equal(worker.costUsd, assertConserved(h).remaining.costUsd! / free, `${concurrency}`);
+    } finally { h.db.close(); }
+  }
+});
+
+test("interleaved review admissions never reserve more than the remaining allowance (#3618)", () => {
+  const h = harness({ campaign: true });
+  try {
+    h.enableCampaign({ concurrency: 2 });
+    const before = h.db.campaignBudgets.view("root")!;
+    // Three reviews each prepared from the same view before any of them is admitted.
+    const ids = ["review-a", "review-b", "review-c"];
+    const prepared = ids.map((id) => h.db.campaignBudgets.prepare("root", id, {}, true));
+    for (const allocation of prepared) assert.equal(allocation.costUsd, before.remaining.costUsd! / 2);
+    const admitted: string[] = [];
+    for (const allocation of prepared) {
+      h.db.reviewSessions.record({ reviewSessionId: allocation.sessionId, requesterSessionId: `requester-${allocation.sessionId}`, runnerId: "r",
+        pullRequest: request().pullRequest, headSha: HEAD, reviewer: "codex" }, 10);
+      try {
+        h.db.campaignBudgets.admit("root", allocation, {});
+        admitted.push(allocation.sessionId);
+      } catch (error) { assert.match((error as Error).message, /unreserved campaign allowance/u); }
+      assertConserved(h);
+    }
+    assert.deepEqual(admitted, ["review-a", "review-b"], "the third would overdraw the allowance and is refused");
+    assert.equal(h.db.campaignBudgets.allocation("review-c"), null, "a refused admission reserves nothing");
+    assert.ok(h.db.campaignBudgets.view("root")!.remaining.costUsd! < 1e-9);
+  } finally { h.db.close(); }
+});
+
+test("a concurrent review settles its actual usage and returns only the unused reservation (#3618)", () => {
+  const h = harness({ campaign: true });
+  try {
+    h.enableCampaign({ concurrency: 2 });
+    const before = h.db.campaignBudgets.view("root")!;
+    const first = requested(h, "s1").reviewSessionId;
+    const second = requested(h, "s2").reviewSessionId;
+    const reserved = h.db.campaignBudgets.allocation(second)!.costUsd!;
+    h.db.addSessionUsage(first, { costUsd: 3 }, 7);
+    h.db.appendEvent(first, { kind: "tool_call", toolCallId: "read", title: "Read", status: "completed" }, 8);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: first, state: "failed", reason: "invalid report" });
+    h.svc.onSessionStatus(first, "stopped");
+    const generation = h.starts()[0]!.spec.campaignBudgetDispatch!.generation;
+    h.db.campaignBudgets.recordCheckpoint(first, { generation, historyEpoch: 0, throughSeq: 1, costUsd: 3 });
+    assert.ok(h.db.campaignBudgets.settleCheckpoint(first, { historyEpoch: 0, hydratedSeq: 1 }));
+    const settled = assertConserved(h);
+    assert.equal(settled.actual.costUsd, before.actual.costUsd + 3, "settlement records actual usage");
+    assert.equal(settled.actual.toolCalls, before.actual.toolCalls + 1);
+    assert.equal(settled.outstanding.costUsd, before.outstanding.costUsd + reserved, "only the running review stays reserved");
+    // A review that reaches its reservation is stopped as before; the share does not relax that.
+    h.db.addSessionUsage(second, { costUsd: reserved }, 9);
+    assert.match(h.db.campaignBudgets.admissionError(second) ?? "", /allocation reached/u);
+  } finally { h.db.close(); }
+});
+
+test("a requester's own ceiling lowers a campaign review's share but never raises it (#3618)", () => {
+  for (const ceiling of [500, 4]) {
+    const h = harness({ campaign: true });
+    try {
+      h.db.updateSessionCostBudget("s1", ceiling, 4);
+      h.enableCampaign({ concurrency: 2, costUsd: 1000, toolCalls: 1000 });
+      const share = h.db.campaignBudgets.view("root")!.remaining.costUsd! / 2;
+      assert.ok(share > 4 && share < 500, "the fixture's share lies between the two ceilings");
+      const allocation = h.db.campaignBudgets.allocation(requested(h, "s1").reviewSessionId)!;
+      assert.equal(allocation.costUsd, Math.min(ceiling, share), `ceiling ${ceiling}`);
+      assertConserved(h);
+    } finally { h.db.close(); }
+  }
 });
 
 test("a refused requester archive leaves its reviewer active", () => {
