@@ -12,11 +12,11 @@ import { reliabilityReport } from "./ci-reliability-report.mjs";
 // before it keep their original single Node job; a run is read in the layout it executed.
 const LEGACY_NODE_JOB = "Typecheck, Unit Tests & Bundles", CHECKS_JOB = "Typecheck & Bundles";
 const UNIT_WORK = [1, 2, 3].map((n) => `Unit Tests (${n})`);
-const OTHER_WORK = [...[1, 2, 3, 4, 5].map((n) => `Browser End-to-End Tests (${n})`),
+const otherWork = (shards) => [...Array.from({ length: shards }, (_, i) => `Browser End-to-End Tests (${i + 1})`),
   "Settings-Rows win32 Baselines / Detect Settings-Rows Changes",
   "Settings-Rows win32 Baselines / Compare win32 Settings-Rows Baselines", "WebKit End-to-End Tests"];
-const requiredWork = (jobs) => jobs.some((job) => job.name === LEGACY_NODE_JOB) ? [LEGACY_NODE_JOB, ...OTHER_WORK]
-  : [CHECKS_JOB, ...UNIT_WORK, ...OTHER_WORK];
+const requiredWork = (jobs, shards = 5) => jobs.some((job) => job.name === LEGACY_NODE_JOB) ? [LEGACY_NODE_JOB, ...otherWork(shards)]
+  : [CHECKS_JOB, ...UNIT_WORK, ...otherWork(shards)];
 const nodeJob = (name) => name === LEGACY_NODE_JOB || UNIT_WORK.includes(name);
 const mandatorySteps = ["Typecheck", "Validate Web Production Build", "Validate Runner Bundle", "Validate Control-Plane Bundle", "Rendered Production Browser Smoke"];
 const utcWorkingDate = (time) => {
@@ -105,7 +105,8 @@ export function shadowReport(input) {
     }
     source.testedSha = plan.context.testedSha;
     if (record.attempt !== 1) { exclusions.push({ ...source, reason: "rerun-not-an-independent-change", cause: "unresolved" }); continue; }
-    const jobs = requiredWork(record.jobs).map((name) => record.jobs.filter((job) => job.name === name));
+    const jobs = requiredWork(record.jobs, record.metrics?.browserShardImbalance?.expected ?? 5)
+      .map((name) => record.jobs.filter((job) => job.name === name));
     if (jobs.some((matches) => matches.length !== 1)) { gaps.push({ ...source, reason: "missing-or-duplicate-full-job" }); continue; }
     const work = jobs.flat(), summaries = [];
     let incomplete = false, retryOnly = false, interruption = false, selectedFailed = false, fastFailed = false, outsideFailed = false;

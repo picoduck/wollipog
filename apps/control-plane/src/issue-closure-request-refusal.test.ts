@@ -239,7 +239,7 @@ test("#3382 under a selection scope grant the refusal names the grant's own rout
     const result = await h.close(PROPOSAL);
     assert.equal(result.status, 403);
     assert.equal(result.errorDetails?.recovery, "owner_scope_review_or_selection");
-    assert.match(result.error!, /one of the issues the owner's first message asked this campaign to choose, subject to that scope grant's count, checks and approval/);
+    assert.match(result.error!, /one of the issues the owner's first message asked this campaign to choose; that scope grant's count and checks and the Decision Model's scope review then admit it, refuse it or leave it to the owner/);
     assert.match(result.error!, /otherwise only a campaign owner can add the issue/);
     h.assertNothingRan();
   } finally { h.db.close(); }

@@ -179,7 +179,7 @@ record_campaign_work_item_delivery, adjudicate_campaign_recommendation, get_camp
 export function decisionHelp(): string {
   return [
     "Usage: wollipog decision <command> [options]",
-    "  decision request --request-id <id> --resource-key <key> --snapshot <json> [--json]",
+    "  decision request --request-id <id> --resource-key <key> --snapshot <json> [--owner-rule-source <path> --owner-rule-quote <text>] [--json]",
     "  decision get <occurrence-id> [--session <id>] [--json]",
     "  decision list [--session <id>] [--limit <1-100>] [--cursor <occurrence-id>] [--json]",
     "  decision consume <occurrence-id> --snapshot <json> [--action <json>] [--json]",
@@ -195,6 +195,7 @@ export function decisionHelp(): string {
     "Pass the exact typed resourceSnapshot as a JSON object in --snapshot. For a pr_merge consume, pass the exact WorkflowDecisionAction JSON object in --action; other categories omit it.",
     "Reconcile only an already-successful, exactly armed pr_merge action after the approved head has merged. Use its original snapshot; reconciliation never runs the merge command and requires control plane protocol v153.",
     "Withdraw a pending or approved decision that was never consumed or armed when it is no longer needed. It approves and consumes nothing, records you and the reason, and the decision then reads revoked with withdrawal provenance. Withdrawal requires control plane protocol v269.",
+    "When an installed skill or user-authored instruction keeps the gate for a person (a per-PR merge approval, say), request the exact typed decision anyway and name the rule with --owner-rule-source (the file) and --owner-rule-quote (the requirement, on one line). The decision is then the owner's under any mode or grant, and so is every later request for the same resource; it reaches their Inbox and Campaign Status. It can never give the Orchestrator a decision. Requires control plane protocol v296. Never end a turn with such a gate only in prose.",
     "ask-owner and hand-to-owner are for a Full Control campaign's root Orchestrator (tools request_owner_decision and hand_workflow_decision_to_owner; control plane protocol v281). ask-owner gives the campaign's owner a decision the owner kept, with the options as a JSON array of {optionId, label, description?}; it waits in the owner's Inbox without stopping your turn, only the owner can answer it, and their choice comes back to you. hand-to-owner gives the owner one of your pending Orchestrator-owned decisions (pass --session for a child's); that is one way, and you can never resolve it afterwards.",
     "The control plane remains authoritative: it validates the category, policy owner, current resource snapshot, and one-shot consumption. This command cannot resolve its own decision.",
   ].join("\n");
@@ -226,8 +227,8 @@ export function pullRequestHelp(): string {
   return [
     "Usage: wollipog pr wait <number|owner/name#number|url> [--repo <owner/name>] [--head <sha>]",
     "                        [--timeout <ms>] [--interval <ms>] [--any-failure] [--json]",
-    "       wollipog pr closures <number|owner/name#number|url> [--repo <owner/name>] [--intended <issue>]... [--json]",
-    "       wollipog pr closures --file <description.md> [--repo <owner/name>] [--intended <issue>]... [--json]",
+    "       wollipog pr closures <number|owner/name#number|url> [--repo <owner/name|gitlab-project>] [--intended <issue>]... [--json]",
+    "       wollipog pr closures --file <description.md> [--repo <owner/name|gitlab-project>] [--intended <issue>]... [--json]",
     "Block until the pull request's required checks pass or fail, GitHub marks its merge-queue entry",
     "UNMERGEABLE or it leaves the queue, it merges or closes, its head moves, or the timeout expires.",
     "A failed merge-group check alone does not end the wait: GitHub may rebuild the group and merge it.",
@@ -260,8 +261,14 @@ export function pullRequestHelp(): string {
     "(#N, owner/name#N, or an issue URL), and write \"Refs #N\" for one that must stay open. It reads locally",
     "with this machine's `gh` login, like pr wait. A GitHub pr_merge decision makes the same read and is",
     "refused unless its intendedClosures match.",
+    "For a GitLab merge request (as for pr wait, or --file with --repo <gitlab-host>/group/project), it reads",
+    "with `glab` and reports GitLab's default closing pattern on the description: close, fix, resolve or",
+    "implement in any form, including \"closing\" and \"implements\", even negated, closes every reference in a",
+    "list such as \"Closes #1, #2 and #3\", in code too. GitLab's own list of issues the merge request closes",
+    "(which covers the title, commits and an instance's own closing pattern) is reported as well and decides",
+    "where the two differ. --intended takes #N, group/project#N, <host>/group/project#N, or an issue URL.",
     "Exit status: 0 the closures are exactly the intended ones; 3 they differ (see undeclared and unmade);",
-    "1 GitHub or the file could not be read; 2 usage.",
+    "1 the forge or the file could not be read; 2 usage.",
   ].join("\n");
 }
 

@@ -1607,6 +1607,7 @@ app.register(async (instance) => {
       case "campaign_launch_inspection_result":
       case "gitlab_merge_preflight_result":
       case "github_merge_preflight_result":
+      case "gitlab_merge_closures_result":
       case "forge_decision_action_result":
         if (runnerId) hub.resolveRunnerRequest(msg, runnerId);
         break;
@@ -3813,14 +3814,17 @@ app.get("/api/sessions/:id/file", async (req, reply) => {
 
 app.get("/api/sessions/:id/workspace-references/search", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const q = req.query as { q?: unknown; match?: unknown };
+  const q = req.query as { q?: unknown; match?: unknown; fuzzyWithDirectories?: unknown };
   if (typeof q.q !== "string" || !q.q.trim() || q.q.length > 256) {
     return reply.code(400).send({ error: "q must contain 1-256 characters" });
   }
   if (q.match !== undefined && q.match !== "fuzzy") {
     return reply.code(400).send({ error: "match must be fuzzy when given" });
   }
-  const r = await svc.searchWorkspaceReferences(id, q.q, q.match);
+  if (q.fuzzyWithDirectories !== undefined && q.fuzzyWithDirectories !== "true") {
+    return reply.code(400).send({ error: "fuzzyWithDirectories must be true when given" });
+  }
+  const r = await svc.searchWorkspaceReferences(id, q.q, q.match, q.fuzzyWithDirectories === "true");
   if (!r.ok) return reply.code(r.status).send(failureBody(r));
   return r.data;
 });

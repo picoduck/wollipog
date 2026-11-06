@@ -159,7 +159,7 @@ function groupRun(id, createdMinutes, { reduced = false, status = "completed" } 
   const jobs = [job("PR Suite Routing", [], "skipped"),
     reduced ? job("Merge Group Gate", ["Compute Trusted Merge Group Gate", "Record Reduced Merge Group Coverage"])
       : job("Merge Group Gate", [], "skipped"),
-    ...FULL_JOBS.filter((name) => !reduced || !/^Browser End-to-End Tests \([2-5]\)$/.test(name))
+    ...FULL_JOBS.filter((name) => !reduced || !/^Browser End-to-End Tests \(\d+\)$/.test(name) || name === "Browser End-to-End Tests (1)")
       .map((name) => name.endsWith("Compare win32 Settings-Rows Baselines") ? job(name, [], "skipped") : job(name, STEP_NAMES(name)))];
   return { run, jobs: { total_count: jobs.length, jobs } };
 }

@@ -10,12 +10,13 @@ import { CampaignIssueScopeRefusal, inspectCampaignIssueScope, inspectCampaignPu
 import { boundedIssueNumbers, campaignRepositoryLocation, parseFullControlAutomaticResponse, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
 import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
-import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage, ForgeDecisionActionMessage, ForgeDecisionActionResultMessage } from "@wollipog/protocol";
+import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage, GitLabMergeClosuresMessage, GitLabMergeClosuresResultMessage, ForgeDecisionActionMessage, ForgeDecisionActionResultMessage } from "@wollipog/protocol";
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
 import { executeBranchDeletion, executePullRequestEnqueue, observePullRequestMerge } from "./forge-decision-action.js";
 import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
 import { gitlabMergePreflight } from "./gitlab-merge-preflight.js";
 import { githubMergePreflight } from "./github-merge-preflight.js";
+import { gitlabMergeClosures } from "./gitlab-merge-closures.js";
 /**
  * Runner-side session orchestration. For each control-plane `start_session`:
  *  - optionally create an isolated git worktree,
@@ -910,6 +911,8 @@ interface ProviderRetirement {
   unconfirmed: boolean;
   /** Temporary launch generation that accepts prompts while a pressure park is retiring. */
   parkingGeneration?: number;
+  /** The campaign generation whose final checkpoint this retirement fences until it is proven (#3788). */
+  campaignGeneration?: string;
 }
 
 type ProviderAuthenticationInspectionResult =
@@ -1160,6 +1163,41 @@ const ORPHAN_RECOVERY_PROMPT =
 const BACKGROUND_CONTINUATION_PROMPT =
   "Managed background jobs reached their terminal barrier. Consume every queued task notification and deliver the parent workflow's final user-visible result without waiting for another user message.";
 const MAX_RETAINED_DELIVERED_BACKGROUND_JOBS = 128;
+/** Attempts a background continuation gets when each fails before the provider accepts it (#3542),
+ * such as a provider process that cannot start. Then its automatic retries stop and the session
+ * says so; the result stays owed. */
+const MAX_CONTINUATION_LAUNCH_ATTEMPTS = 3;
+
+/** A finished job whose result its continuation still owes this conversation. */
+function owesBackgroundContinuation(job: DurableBackgroundJob): boolean {
+  return Boolean(job.continuationRequired && job.terminalStatus && !job.assistantResultPersistedAt &&
+    !job.continuationMissingResultAt && !job.continuationRetryExhaustedAt);
+}
+
+/** The owed continuations whose automatic attempts stopped after bounded launch failures (#3542). */
+function launchHeldBackgroundJobs(meta: Pick<SessionMeta, "backgroundJobs">): DurableBackgroundJob[] {
+  return (meta.backgroundJobs ?? []).filter((job) =>
+    job.continuationLaunchHeldAt !== undefined && owesBackgroundContinuation(job));
+}
+
+/** Every owed continuation is held (#3542): nothing runs or retries until a person acts, so the
+ * session holds no active-work permit for it. */
+function backgroundContinuationsAllLaunchHeld(meta: Pick<SessionMeta, "backgroundJobs">): boolean {
+  const owed = (meta.backgroundJobs ?? []).filter(owesBackgroundContinuation);
+  return owed.length > 0 && owed.every((job) => job.continuationLaunchHeldAt !== undefined);
+}
+
+/** Why a held continuation waits and how a person recovers it (#3542). */
+function backgroundContinuationHoldBlocker(jobCount: number, attempts: number, providerError?: string): string {
+  const results = jobCount === 1 ? "the result of 1 finished background job" : `the results of ${jobCount} finished background jobs`;
+  const error = providerError?.trim().replace(/[.\s]+$/u, "");
+  const quoted = error && error.length > PROVIDER_REJECTION_QUOTE_CHARS
+    ? `${error.slice(0, PROVIDER_REJECTION_QUOTE_CHARS)}…` : error;
+  return `The automatic turn that returns ${results} failed to start ${attempts} times in a row, ` +
+    `before the provider accepted it${quoted ? `: ${quoted}` : ""}. Wollipog stopped retrying it and kept ` +
+    `${jobCount === 1 ? "the result" : "the results"}. Restart the session to deliver ${jobCount === 1 ? "it" : "them"}` +
+    " in a fresh provider process; a message the provider accepts also retries it.";
+}
 
 /** Recompute the live aggregate after a delivery receipt changes only part of the inventory. */
 function managedBackgroundWorkState(
@@ -1229,8 +1267,10 @@ function carryBackgroundWorkAcrossRestart(
         job.continuationRetryExhaustedAt !== undefined) return job;
     if (job.continuationSubmittedAt !== undefined) return { ...job, continuationMissingResultAt: now };
     if (!deliver) return { ...markRestart(job), continuationMissingResultAt: now };
+    // A fresh process is the recovery a held continuation named (#3542): it gets a fresh bound.
+    const { continuationLaunchFailures: _failures, continuationLaunchHeldAt: _held, ...carried } = markRestart(job);
     return {
-      ...markRestart(job),
+      ...carried,
       continuationId: job.continuationId ?? continuationId,
       continuationQueuedAt: job.continuationQueuedAt ?? now,
     };
@@ -1563,6 +1603,15 @@ export class SessionManager {
   private readonly loggingOut = new Set<string>();
   /** Explicit stop waits for ACP session/close before this session may launch again. */
   private readonly closing = new Map<string, ProviderRetirement>();
+  /** Campaign generations of this process's providers that runner shutdown disposed mid-retirement
+   * or that exited unproven, awaiting the process-tree reaping that proves them gone (#3788). */
+  private readonly shutdownRetirements = new Map<string, Set<string>>();
+  /** Each provider instance that exited by itself, with its campaign generation, awaiting proof that
+   * its whole process tree is gone (#3788). A resumed provider of the same generation adds its own. */
+  private readonly exitRetirements = new Map<string, Map<Driver, string>>();
+  /** Fences an earlier runner process left for a generation this process has providers of again
+   * (#3788). Nothing this process proves covers that earlier provider, so they are never lifted. */
+  private readonly inheritedFences = new Map<string, string>();
   /** A turn-boundary worktree move owns a retiring provider even after it leaves `active`.
    * Unlike an ordinary close, prompts may join its pre-launch FIFO while the conversation reopens. */
   private readonly worktreeRebindings = new Map<string, {
@@ -5968,9 +6017,12 @@ export class SessionManager {
   /** Project execution evidence, never infer it from the session lifecycle alone. */
   private backgroundFollowUp(meta: SessionMeta): BackgroundFollowUpView | null {
     if (meta.backgroundWorkState !== "continuation_pending") return null;
+    // A continuation held after bounded launch failures (#3542) is neither queued nor retrying; the
+    // session's own status names that hold and its recovery.
     const jobs = (meta.backgroundJobs ?? []).filter((job) => job.continuationQueuedAt != null &&
       job.continuationRequired && !job.assistantResultPersistedAt &&
-      !job.continuationMissingResultAt && !job.continuationRetryExhaustedAt);
+      !job.continuationMissingResultAt && !job.continuationRetryExhaustedAt &&
+      job.continuationLaunchHeldAt === undefined);
     if (!jobs.length) return null;
     const queuedAt = Math.min(...jobs.map((job) => job.continuationQueuedAt!));
     const entry = this.active.get(meta.sessionId);
@@ -7287,6 +7339,10 @@ export class SessionManager {
       config: spec.config ?? {},
       campaignBudgetDispatch: spec.campaignBudgetDispatch,
       campaignBudgetCheckpoint: undefined,
+      // A relaunch under the same generation does not prove an earlier provider of it gone (#3788).
+      ...(prior?.retiringProviderGeneration !== undefined &&
+          prior.retiringProviderGeneration === spec.campaignBudgetDispatch?.generation
+        ? { retiringProviderGeneration: prior.retiringProviderGeneration } : {}),
       projectMemory: spec.projectMemory ?? prior?.projectMemory,
       artifactUploads: spec.artifactUploads ?? prior?.artifactUploads ?? "manual",
       orchestrator: (prior?.orchestrator?.issueScope?.revision ?? 0) > (spec.orchestrator?.issueScope?.revision ?? 0) ? prior?.orchestrator : spec.orchestrator ?? prior?.orchestrator,
@@ -7380,6 +7436,10 @@ export class SessionManager {
         }
         meta.seq = latest.seq;
         meta.logEpoch = latest.logEpoch;
+        // An exit proof can lift the fence while this write waits its turn (#3788).
+        meta.retiringProviderGeneration = latest.retiringProviderGeneration !== undefined &&
+          latest.retiringProviderGeneration === meta.campaignBudgetDispatch?.generation
+          ? latest.retiringProviderGeneration : undefined;
         const latestMatchesWorkspace = latest.repoPath === repoPath &&
           agentContextKey(latest.context) === agentContextKey(context);
         shouldUseWorktree = spec.useWorktree || latestMatchesWorkspace && !!latest.worktreePath &&
@@ -8570,7 +8630,16 @@ export class SessionManager {
     const continuationPending = meta.backgroundWorkState === "continuation_pending" ||
       !!meta.backgroundJobs?.some((job) => job.continuationRequired &&
         !job.assistantResultPersistedAt && !job.continuationMissingResultAt && !job.continuationRetryExhaustedAt);
-    return continuationPending && automaticClaudeRecoveryAllowed(meta) && !this.backgroundRecoveryHeld(meta);
+    // A continuation held after bounded launch failures (#3542) waits for a person and keeps no
+    // permit, unless detached work is running beside it: an owed result keeps the aggregate state at
+    // continuation_pending, so a live job's pending id is what still holds the permit then. An
+    // orphaned job's id is a diagnostic, not execution, until its recovery observes it live again.
+    const orphan = meta.orphanedWork;
+    const livePendingTaskIds = (meta.pendingBackgroundTaskIds ?? []).filter((id) => !orphan ||
+      !orphan.pendingTaskIds.includes(id) || !!orphan.recoveryObservedTaskIds?.includes(id));
+    const onlyHeldResults = backgroundContinuationsAllLaunchHeld(meta) && livePendingTaskIds.length === 0;
+    return continuationPending && !onlyHeldResults &&
+      automaticClaudeRecoveryAllowed(meta) && !this.backgroundRecoveryHeld(meta);
   }
 
   private settleActiveWorkPermit(sessionId: string, entry: ActiveSession): void {
@@ -13028,6 +13097,37 @@ export class SessionManager {
     return !!entry.retiredWorktreeRebind && entry.retiredWorktreeRebind === entry.pendingWorktreeRebind;
   }
 
+  /**
+   * Whether a retirement rebind may run ahead of the background continuation that holds it (#3542).
+   * The rebind waits on background work so that retiring the provider never ends work it still
+   * owns. Once every job has finished and only a continuation that was never submitted remains,
+   * the provider owns nothing the rebind could end, provided no provider process is running: then
+   * the continuation would launch a new process from this generation's stored isolation, whose bind
+   * list still names the retired worktree, and that launch fails. The rebind launches the same
+   * conversation with the current bind list, and the continuation runs there first, ahead of the
+   * prompts that waited behind it. A running process, or a driver that cannot tell, keeps the
+   * established order: the continuation reaches the live process without a launch.
+   */
+  private backgroundContinuationCanCrossRetirementRebind(meta: SessionMeta, entry: ActiveSession): boolean {
+    if (entry.currentBackgroundJobIds?.length || !this.onlyUnsubmittedContinuationOwed(meta, entry)) return false;
+    // A continuation not yet queued would run after the prompts the rebind carries; wait for it.
+    // One whose attempts are held has no queued turn to wait for (a person's turn retries it).
+    return entry.queue.some((prompt) => prompt.syntheticRecovery && !!prompt.backgroundJobIds?.length) ||
+      backgroundContinuationsAllLaunchHeld(meta);
+  }
+
+  /** No provider process runs, every job has finished, and the only background debt is a
+   * continuation that never reached the provider (#3542). */
+  private onlyUnsubmittedContinuationOwed(meta: SessionMeta, entry: ActiveSession): boolean {
+    if (meta.backgroundWorkState !== "continuation_pending" || meta.pendingBackgroundTaskIds?.length ||
+        meta.orphanedWork || entry.client.providerProcessLive?.() !== false) return false;
+    const jobs = meta.backgroundJobs ?? [];
+    if (jobs.some((job) => !job.terminalStatus)) return false;
+    const owed = jobs.filter(owesBackgroundContinuation);
+    return owed.length > 0 && owed.every((job) => job.continuationSubmittedAt === undefined &&
+      job.continuationAcceptedAt === undefined);
+  }
+
   /** A retirement rebind that cannot run stops here, so later drains do not request it again. */
   private failRetirementRebind(entry: ActiveSession): void {
     if (!this.retirementRebindPending(entry)) return;
@@ -13305,7 +13405,9 @@ export class SessionManager {
     // diagnostic metadata visible, but do not turn it into a permanent worktree/queue barrier.
     const backgroundWorkBlocksRebind =
       (!!meta?.backgroundWorkState || !!meta?.pendingBackgroundTaskIds?.length) &&
-      !meta?.orphanedWork?.recoveryAttemptedAt;
+      !meta?.orphanedWork?.recoveryAttemptedAt &&
+      !(meta && !entry.pendingLocationSwitch && this.retirementRebindPending(entry) &&
+        this.backgroundContinuationCanCrossRetirementRebind(meta, entry));
     return !entry.running &&
       !entry.providerInitiatedTurnActive &&
       this.active.get(sessionId) === entry &&
@@ -14703,6 +14805,19 @@ export class SessionManager {
 
     const launchGeneration = this.beginLaunchGeneration(sessionId);
     this.preLaunchAdmissionGenerations.set(sessionId, launchGeneration);
+    // A background continuation crossing a retirement rebind (#3542) still runs before the prompts
+    // that waited behind the rebind, as it would have had it gone first. The replacement queue is
+    // ordered by ordinal (ordinals are positive; at 1 an equal ordinal keeps this insertion order).
+    if (this.retirementRebindPending(entry)) {
+      const index = entry.queue.findIndex((prompt) => prompt.syntheticRecovery && !!prompt.backgroundJobIds?.length);
+      if (index >= 0 && entry.queue.length > 1) {
+        const [continuation] = entry.queue.splice(index, 1);
+        const own = this.ensureQueueOrdinal(sessionId, continuation!);
+        const first = Math.min(...entry.queue.map((prompt) => this.ensureQueueOrdinal(sessionId, prompt)));
+        if (own >= first) continuation!.ordinal = Math.max(1, first - 1);
+        entry.queue.unshift(continuation!);
+      }
+    }
     const queued = entry.queue.splice(0);
     if (queued.length) this.preLaunchQueues.set(sessionId, queued);
     // The session's own switch into exactly this worktree continues once the relaunch has run
@@ -15545,14 +15660,19 @@ export class SessionManager {
       if (entry.historyIntegrityFailure) return;
       const rejectionHoldBlocker = this.trackProviderRejection(sessionId, entry, queued, stop, inputMayHaveBeenDelivered);
       this.captureAgentSessionId(sessionId, entry.client); // codex threadId becomes known after turn 1
+      let continuationHoldBlocker: string | undefined;
       if (backgroundJobIds?.length && stop === "refusal" && !entry.backgroundPromptAccepted) {
         if (capacityRetriesExhausted) {
           // Keep the terminal result for inspection with separate pre-acceptance exhaustion evidence.
           // Exhaustion must not strand a pending submission or create another automatic retry burst.
           this.markBackgroundContinuationRetryExhausted(sessionId, backgroundJobIds);
-        } else {
+        } else if (entry.providerCapacityFailure || entry.authenticationBlocked) {
+          // Capacity and authentication keep their own bounds and recovery.
           this.resetBackgroundContinuationSubmission(sessionId, backgroundJobIds);
           this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+        } else {
+          continuationHoldBlocker = this.retryUnacceptedBackgroundContinuation(
+            sessionId, entry, queued, backgroundJobIds, entry.client.lastTurnError?.() ?? undefined);
         }
       }
       if (syntheticRecovery) {
@@ -15621,6 +15741,7 @@ export class SessionManager {
         const scopeId = this.store.readMeta(sessionId)?.providerCredentialScopeId;
         if (scopeId) this.providerAuthAutomaticAttempted.delete(scopeId);
         if (!entry.governanceTripped) this.clearProviderAccountSwitchFailureAfterTurn(sessionId);
+        if (!automaticTurn(queued) && this.active.get(sessionId) === entry) this.rearmLaunchHeldBackgroundContinuation(sessionId);
       }
       if (stop === "refusal" && !interrupted && !entry.governanceTripped) {
         this.scheduleAutomaticProviderAccountSwitch(sessionId, entry);
@@ -15639,6 +15760,8 @@ export class SessionManager {
         this.emitStatus(sessionId, "input_required", rejectedAnswerBlocker);
       } else if (rejectionHoldBlocker && this.providerRejectionHolds.has(sessionId)) {
         this.emitStatus(sessionId, "input_required", rejectionHoldBlocker);
+      } else if (continuationHoldBlocker) {
+        this.emitStatus(sessionId, "input_required", continuationHoldBlocker);
       } else {
         // The provider completed before the interrupt took effect. Do not fabricate Interrupted
         // or strand the existing FIFO: this was a normal completed turn, not a cancelled one.
@@ -15656,9 +15779,10 @@ export class SessionManager {
       // retired generation's late settle must not touch the replacement's streak.
       if (this.active.get(sessionId) === entry) this.lastProviderRejections.delete(sessionId);
       this.settleModelStoppedJobs(sessionId, queued.id, false);
+      let continuationHoldBlocker: string | undefined;
       if (backgroundJobIds?.length && !entry.backgroundPromptAccepted) {
-        this.resetBackgroundContinuationSubmission(sessionId, backgroundJobIds);
-        this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+        continuationHoldBlocker = this.retryUnacceptedBackgroundContinuation(
+          sessionId, entry, queued, backgroundJobIds, errText(err));
       } else if (backgroundJobIds?.length) {
         this.markBackgroundContinuationMissingResult(sessionId, backgroundJobIds);
       }
@@ -15692,7 +15816,8 @@ export class SessionManager {
       }
       this.emitEvent(sessionId, { kind: "error", message: `prompt failed: ${errText(err)}` }, durable);
       if (entry.historyIntegrityFailure) return;
-      this.emitStatus(sessionId, "failed", errText(err));
+      if (continuationHoldBlocker) this.emitStatus(sessionId, "input_required", continuationHoldBlocker);
+      else this.emitStatus(sessionId, "failed", errText(err));
       durable?.failed(`prompt failed: ${errText(err)}`);
     }
   }
@@ -17173,7 +17298,10 @@ export class SessionManager {
       }
       return existing;
     }
-    const retirement = {
+    // Until this exact provider is proven gone, no final checkpoint may name its generation, even
+    // from a restarted runner that no longer holds it (#3788).
+    const campaignGeneration = this.fenceRetiringProvider(sessionId);
+    const retirement: ProviderRetirement = {
       client: entry.client,
       entry,
       promise: Promise.resolve(),
@@ -17183,6 +17311,7 @@ export class SessionManager {
       parking: options.parking ?? false,
       unconfirmed: false,
       ...(options.parkingGeneration === undefined ? {} : { parkingGeneration: options.parkingGeneration }),
+      ...(campaignGeneration === undefined ? {} : { campaignGeneration }),
     };
     this.closing.set(sessionId, retirement);
     if (!entry.client.close) {
@@ -17229,7 +17358,13 @@ export class SessionManager {
       this.resumePromptsQueuedDuringParking(sessionId, retirement);
       this.reportCapacity();
     }
-    if (this.shuttingDown) return;
+    // Shutdown only begins disposing the provider here; recordShutdownRetirementCheckpoints proves
+    // it gone once the process trees are reaped.
+    if (this.shuttingDown) {
+      this.awaitShutdownProof(sessionId, retirement.campaignGeneration);
+      return;
+    }
+    this.clearRetiringProvider(sessionId, retirement.campaignGeneration);
     const settledMeta=this.store.readMeta(sessionId);
     // The exact provider has retired, even if Stop interrupted a running turn. Its last usage
     // callbacks have been persisted; stale in-memory turn flags cannot keep the reservation live.
@@ -18654,6 +18789,7 @@ export class SessionManager {
         }
       } else if (code && code !== 0) {
         this.rejectQueued(queued, "agent exited before queued command started");
+        this.fenceExitedProvider(sessionId, expectedClient);
         this.emitStatus(sessionId, "failed", `agent exited ${code}`);
       } else {
         this.rejectQueued(queued, "agent exited before queued command started");
@@ -18863,6 +18999,11 @@ export class SessionManager {
       }
     }
     this.active.clear();
+    // An exited provider still awaiting its tree proof is covered by shutdown's reaping too (#3788).
+    for (const [sessionId, providers] of this.exitRetirements) {
+      for (const generation of providers.values()) this.awaitShutdownProof(sessionId, generation);
+    }
+    this.exitRetirements.clear();
     const shutdownRetirementClients = new Set<Driver>();
     for (const retirement of [...this.closing.values()]) {
       shutdownRetirementClients.add(retirement.client);
@@ -18994,6 +19135,120 @@ export class SessionManager {
     return this.providerHomeLeases ? this.providerHomeLeases.close() : true;
   }
 
+  /** The final campaign budget checkpoint of a retired provider, in local history coordinates. */
+  private finalBudgetCheckpoint(
+    meta: SessionMeta,
+    dispatch: import("@wollipog/protocol").CampaignBudgetDispatch,
+  ): import("@wollipog/protocol").CampaignBudgetUsageCheckpoint {
+    return { generation: dispatch.generation, historyEpoch: this.snapshot(meta).historyEpoch ?? 0,
+      throughSeq: meta.seq, costUsd: meta.costUsd };
+  }
+
+  /**
+   * A provider that exits by itself has retired only once every process it started, descendants
+   * included, is proven gone (#3788): an ACP terminal or a detached helper can outlive the root.
+   * Fence its generation until the driver proves that, then attest the final checkpoint. A driver
+   * that cannot prove it, or a false proof, keeps the fence until a shutdown reaps every tree.
+   */
+  private fenceExitedProvider(sessionId: string, client: Driver): void {
+    const generation = this.fenceRetiringProvider(sessionId);
+    if (generation === undefined) return;
+    const providers = this.exitRetirements.get(sessionId) ?? new Map<Driver, string>();
+    providers.set(client, generation);
+    this.exitRetirements.set(sessionId, providers);
+    const proof = client.proveProcessTreeExit ? client.proveProcessTreeExit({ terminate: false }) : Promise.resolve(false);
+    void proof.catch(() => false).then((proven) => {
+      // Shutdown took this fence over; its reaping proof decides it.
+      if (this.shuttingDown || this.exitRetirements.get(sessionId)?.get(client) !== generation) return;
+      if (!proven) {
+        this.log(`session ${sessionId} keeps its campaign slot: its exited provider's process tree was not proven gone`);
+        return;
+      }
+      providers.delete(client);
+      if (providers.size === 0) this.exitRetirements.delete(sessionId);
+      try {
+        this.clearRetiringProvider(sessionId, generation);
+        const meta = this.store.readMeta(sessionId);
+        if (meta && !this.active.has(sessionId) && isTerminal(meta.status)) {
+          this.emitStatus(sessionId, meta.status, undefined, undefined, undefined, true);
+        }
+      } catch (error) {
+        this.log(`exited provider retirement proof failed for ${sessionId}: ${errText(error)}`);
+      }
+    });
+  }
+
+  /** Whether another of this process's providers of `generation` is still retiring or awaiting its
+   * exit proof (#3788). */
+  private retirementOutstanding(sessionId: string, generation: string): boolean {
+    return this.closing.get(sessionId)?.campaignGeneration === generation ||
+      [...this.exitRetirements.get(sessionId)?.values() ?? []].includes(generation);
+  }
+
+  /** Fence the current campaign generation's final checkpoint while one of its providers retires
+   * (#3788). A fence already present with nothing of this process outstanding was left by an earlier
+   * runner process, whose provider this process can never prove gone. */
+  private fenceRetiringProvider(sessionId: string): string | undefined {
+    const meta = this.store.readMeta(sessionId);
+    const generation = meta?.campaignBudgetDispatch?.generation;
+    if (generation === undefined) return undefined;
+    if (meta!.retiringProviderGeneration === generation) {
+      if (!this.retirementOutstanding(sessionId, generation)) this.inheritedFences.set(sessionId, generation);
+    } else {
+      this.store.patchMeta(sessionId, { retiringProviderGeneration: generation });
+    }
+    return generation;
+  }
+
+  /** Lift a proven retirement's fence on its generation's final checkpoint (#3788), unless another
+   * provider of that generation is still retiring or awaiting its exit proof, which lifts it later,
+   * or the fence came from an earlier runner process. */
+  private clearRetiringProvider(sessionId: string, generation: string | undefined): void {
+    if (generation === undefined || this.retirementOutstanding(sessionId, generation) ||
+        this.inheritedFences.get(sessionId) === generation) return;
+    if (this.store.readMeta(sessionId)?.retiringProviderGeneration === generation) {
+      this.store.patchMeta(sessionId, { retiringProviderGeneration: undefined });
+    }
+  }
+
+  private awaitShutdownProof(sessionId: string, generation: string | undefined): void {
+    if (generation === undefined) return;
+    const generations = this.shutdownRetirements.get(sessionId) ?? new Set<string>();
+    generations.add(generation);
+    this.shutdownRetirements.set(sessionId, generations);
+  }
+
+  /**
+   * Prove the retirements runner shutdown interrupted (#3788). Shutdown disposes each retiring
+   * provider without proof that it exited, and the runner can no longer report it. Once every spawned
+   * process tree is reaped, store each such session's final campaign checkpoint, so the restarted
+   * runner's negotiated session snapshots prove that no provider of the current generation remains.
+   * Without that proof the fence stays, and the session keeps its campaign slot.
+   */
+  recordShutdownRetirementCheckpoints(processTreesReaped: boolean): void {
+    if (!this.shuttingDown) throw new Error("shutdown retirement proof requires shutdown");
+    const retired = [...this.shutdownRetirements];
+    this.shutdownRetirements.clear();
+    if (!processTreesReaped) return;
+    for (const [sessionId, generations] of retired) {
+      try {
+        const meta = this.store.readMeta(sessionId);
+        const generation = meta?.retiringProviderGeneration;
+        // Reaping proves only the providers this process disposed or saw exit: never one whose
+        // disposal failed, nor an earlier runner process's.
+        if (!meta || generation === undefined || !generations.has(generation) ||
+            this.retirementOutstanding(sessionId, generation) || this.inheritedFences.get(sessionId) === generation) continue;
+        const dispatch = meta.campaignBudgetDispatch;
+        this.store.patchMeta(sessionId, { retiringProviderGeneration: undefined,
+          ...(dispatch?.generation === generation && isTerminal(meta.status)
+            ? { campaignBudgetCheckpoint: this.finalBudgetCheckpoint(meta, dispatch) } : {}) });
+        this.store.flush(sessionId);
+      } catch (error) {
+        this.log(`shutdown retirement proof failed for ${sessionId}: ${errText(error)}`);
+      }
+    }
+  }
+
   private emitStatus(
     sessionId: string,
     status: SessionStatus,
@@ -19021,6 +19276,14 @@ export class SessionManager {
     if (status === "idle" && rejectionHold !== undefined) {
       status = "input_required";
       detail = this.providerRejectionBlocker(sessionId, rejectionHold);
+    }
+    // So does a background continuation held after bounded launch failures (#3542), until Restart
+    // or a person's accepted turn retries it.
+    const launchHeld = status === "idle" && authMeta ? launchHeldBackgroundJobs(authMeta) : [];
+    if (launchHeld.length > 0) {
+      status = "input_required";
+      detail = backgroundContinuationHoldBlocker(launchHeld.length,
+        Math.max(...launchHeld.map((job) => job.continuationLaunchFailures ?? MAX_CONTINUATION_LAUNCH_ATTEMPTS)));
     }
     const entry = this.active.get(sessionId);
     const terminal = status === "completed" || status === "failed" || status === "stopped";
@@ -19052,10 +19315,10 @@ export class SessionManager {
     const finalMeta=this.store.readMeta(sessionId)!;
     const checkpoint=terminal && finalMeta.campaignBudgetDispatch && !this.closing.has(sessionId) &&
       !this.worktreeRebindings.has(sessionId) && !this.providerAccountSwitches.has(sessionId) &&
+      finalMeta.retiringProviderGeneration!==finalMeta.campaignBudgetDispatch.generation &&
       (finalProviderUsage || entry && !entry.running && !entry.providerInitiatedTurnActive) &&
       runnerSupportsProtocol(this.controlPlaneProtocolVersion(),"campaignBudgetAdmission")
-      ? {generation:finalMeta.campaignBudgetDispatch.generation,historyEpoch:this.snapshot(finalMeta).historyEpoch??0,
-        throughSeq:finalMeta.seq,costUsd:finalMeta.costUsd}:undefined;
+      ? this.finalBudgetCheckpoint(finalMeta, finalMeta.campaignBudgetDispatch):undefined;
     if(checkpoint) this.store.patchMeta(sessionId,{campaignBudgetCheckpoint:checkpoint});
     this.send({
       type: "session_status",
@@ -19470,6 +19733,30 @@ export class SessionManager {
       return result.ok ? { ...base, ok: true, check: result.check } : { ...base, ok: false, refusal: result.refusal, reason: result.reason };
     } catch {
       return { ...base, ok: false, refusal: "unavailable", reason: "GitHub could not be checked." };
+    }
+  }
+
+  /** v295 (#3762): read a GitLab `pr_merge` snapshot's merge request through the child session's own
+   * `glab` login and context, and report every issue merging it would close. Read-only; a refusal
+   * is a fixed sentence, never `glab` output. Every call names its host and project, so `glab` runs
+   * from the filesystem root, as forge actions do: no repository configuration the agent can write
+   * in its worktree is read on the way to a result that can lift a person's merge gate. */
+  async gitlabMergeClosures(
+    message: GitLabMergeClosuresMessage,
+    options: { glab?: GlabRunner; agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
+  ): Promise<GitLabMergeClosuresResultMessage> {
+    const base = { type: "gitlab_merge_closures_result" as const, requestId: message.requestId, sessionId: message.sessionId };
+    const meta = this.store.readMeta(message.sessionId);
+    if (!meta) {
+      return { ...base, ok: false, refusal: "unavailable", reason: "The session is not known to this runner." };
+    }
+    try {
+      const neutral = meta.context?.kind === "wsl" ? "/" : parsePath(tmpdir()).root;
+      const result = await gitlabMergeClosures(message,
+        options.glab ?? contextGlabRunner(meta.context, neutral, options.agentEnv?.(meta) ?? {}));
+      return result.ok ? { ...base, ok: true, check: result.check } : { ...base, ok: false, refusal: result.refusal, reason: result.reason };
+    } catch {
+      return { ...base, ok: false, refusal: "unavailable", reason: "GitLab could not be checked." };
     }
   }
 
@@ -20335,7 +20622,8 @@ export class SessionManager {
   private queuedBackgroundJobIds(meta: SessionMeta | null): string[] {
     const queued = (meta?.backgroundJobs ?? [])
       .filter((job) => job.continuationQueuedAt && !job.continuationSubmittedAt &&
-        !job.assistantResultPersistedAt && !job.continuationRetryExhaustedAt)
+        !job.assistantResultPersistedAt && !job.continuationRetryExhaustedAt &&
+        job.continuationLaunchHeldAt === undefined)
       .sort((left, right) => left.continuationQueuedAt! - right.continuationQueuedAt!);
     const continuationId = queued[0]?.continuationId;
     if (!continuationId) return [];
@@ -20503,6 +20791,90 @@ export class SessionManager {
       backgroundWorkState: "continuation_pending",
     });
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+  }
+
+  /**
+   * A runner-owned continuation ended before the provider accepted it (#3542). It never reached the
+   * conversation, so its result stays owed and another attempt is safe, but not an unbounded one:
+   * a provider process that cannot start fails the same way every time.
+   *
+   * | After this failure                                  | Next step                                   |
+   * | --------------------------------------------------- | ------------------------------------------- |
+   * | It holds a retirement rebind, and no process runs   | Back at the queue head; the rebind carries  |
+   * |                                                     | it into a launch with the current binds     |
+   * | Fewer than MAX_CONTINUATION_LAUNCH_ATTEMPTS failed  | Retried after ORPHAN_RECOVERY_RETRY_MS      |
+   * | The bound is reached                                | Held: no timer re-arms it, the session says |
+   * |                                                     | why, and Restart or a person's accepted turn|
+   * |                                                     | retries it                                  |
+   *
+   * Returns the session blocker once held.
+   */
+  private retryUnacceptedBackgroundContinuation(
+    sessionId: string,
+    entry: ActiveSession,
+    prompt: QueuedPrompt,
+    jobIds: string[],
+    providerError: string | undefined,
+  ): string | undefined {
+    this.resetBackgroundContinuationSubmission(sessionId, jobIds);
+    const current = this.store.readMeta(sessionId);
+    const selected = new Set(jobIds);
+    const failed = (current?.backgroundJobs ?? []).filter((job) => selected.has(job.id) &&
+      !job.continuationAcceptedAt && !job.assistantResultPersistedAt);
+    // A generation that Restart or Stop replaced settles late; the replacement owns the count.
+    if (!current || this.active.get(sessionId) !== entry || failed.length === 0) {
+      this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+      return undefined;
+    }
+    const attempts = Math.max(...failed.map((job) => (job.continuationLaunchFailures ?? 0) + 1));
+    const held = attempts >= MAX_CONTINUATION_LAUNCH_ATTEMPTS;
+    const heldAt = Date.now();
+    const failedIds = new Set(failed.map((job) => job.id));
+    const updated = this.store.patchMeta(sessionId, {
+      backgroundJobs: current.backgroundJobs!.map((job) => failedIds.has(job.id)
+        ? { ...job, continuationLaunchFailures: attempts, ...(held ? { continuationLaunchHeldAt: heldAt } : {}) }
+        : job),
+    });
+    if (!updated) return undefined;
+    this.store.flush(sessionId);
+    this.log(JSON.stringify({ event: held ? "background_continuation_launch_held" : "background_continuation_launch_failed",
+      sessionId, jobCount: failed.length, attempts }));
+    if (!held) {
+      if (!entry.pendingLocationSwitch && this.requestRetiredWorktreeRebind(sessionId, entry) &&
+          this.onlyUnsubmittedContinuationOwed(updated, entry)) {
+        // The failed launch rendered this generation's stored binds; the rebind renders current ones.
+        entry.queue.unshift(prompt);
+        this.emitQueue(sessionId);
+      } else {
+        this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+      }
+      return undefined;
+    }
+    this.cancelBackgroundContinuationTimer(sessionId);
+    this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    const blocker = backgroundContinuationHoldBlocker(failed.length, attempts, providerError);
+    // An error row stays visible in the transcript, where an Agent Log line would be hidden.
+    this.emitEvent(sessionId, { kind: "error", message: blocker });
+    return blocker;
+  }
+
+  /** A person's turn the provider accepted proves a provider process starts again (#3542): a held
+   * continuation gets a fresh bound and runs next. */
+  private rearmLaunchHeldBackgroundContinuation(sessionId: string): void {
+    const current = this.store.readMeta(sessionId);
+    if (!current || launchHeldBackgroundJobs(current).length === 0) return;
+    const updated = this.store.patchMeta(sessionId, {
+      backgroundJobs: current.backgroundJobs!.map((job) => {
+        if (job.continuationLaunchHeldAt === undefined && job.continuationLaunchFailures === undefined) return job;
+        const { continuationLaunchFailures: _failures, continuationLaunchHeldAt: _held, ...rearmed } = job;
+        return rearmed;
+      }),
+    });
+    if (!updated) return;
+    this.store.flush(sessionId);
+    this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    this.cancelBackgroundContinuationTimer(sessionId);
+    this.scheduleBackgroundContinuation(sessionId);
   }
 
   /** Provider acceptance is the at-most-once fence. Once that exact turn has ended without a

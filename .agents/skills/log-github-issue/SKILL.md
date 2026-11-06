@@ -47,23 +47,35 @@ Retain the shape of useful evidence with neutral placeholders such as `<user>`, 
 ## Require Publication Approval
 
 Before creating the issue, present the exact sanitized title, body, labels, and target repository.
-Custom retains user approval. Full Control permits delegated review only under the canonical policy:
-the server must confirm eligible human-established issue authority, authorized accepted follow-up
-lineage and the exact Orchestrator-owned typed publication occurrence. Include `recommendationId`
-in that request. A general request to create an issue establishes intent, but it does not replace
-review of the final public contents. Missing authority, unsupported hosts and mandatory external
-human rules retain human approval; report their source during preflight.
+A general request to create an issue establishes intent, not approval of unseen contents.
+Choose the approval path defined in `.github/ISSUE_REPORTING.md`:
 
-Read the exact occurrence and owner, have the authorized reviewer inspect the whole public payload,
-and consume an approved unchanged snapshot immediately before publication. Never approve a
-human-owned occurrence, substitute an ordinary prompt, or reinterpret installed skills as changed
-by this repository policy. See `docs/agent-workflow.md` for contributor preflight and delivery gates.
+- **Standalone session created by a human:** that human's explicit approval of the exact unchanged
+  draft authorizes publication, subject to applicable tool permissions. A subsequent "Publish the
+  issue" approves the draft already presented. No controlling Orchestrator or Orchestrator workflow
+  occurrence is required.
+- **Session governed by an Orchestrator workflow:** use the required typed publication
+  request/get/consume process. Read the exact occurrence's owner and authority; consume the approved
+  unchanged snapshot immediately before publication. Ordinary chat cannot replace a required typed
+  approval. Full Control delegation requires the canonical policy's server-confirmed authority and
+  accepted follow-up lineage; include `recommendationId` in that request. Never approve a human-owned
+  occurrence or reinterpret installed skills as changed by this repository policy.
+
+Determine the applicable path from session context and metadata, not merely the availability of
+workflow tools or a mode label. Do not create or require an Orchestrator for a standalone session,
+or use the standalone path to bypass a gate that applies to a child session. A "no controlling
+Orchestrator ancestor" response does not establish that a standalone session lacks human
+authorization. Missing delegation authority retains human review within the applicable workflow;
+it does not waive required typed gates. See `docs/agent-workflow.md` for campaign preflight and
+delivery gates, including unresolved external human requirements.
 
 Follow the Approval Preview Formatting rules in `.github/ISSUE_REPORTING.md`. In particular, never
 wrap an issue body that may contain code fences in a fixed three-backtick fence.
 
 Do not request approval again when the authorized reviewer has already approved the exact current
-payload under the current policy and occurrence. If the payload changes materially after approval, show the changed version and request approval again. When the user asks only for a draft, stop after providing the draft.
+payload under the applicable approval path (and occurrence, when required). If the payload changes
+materially after approval, show the changed version and request approval again. When the user asks
+only for a draft, stop after providing the draft.
 
 Publish only a draft that exists in your own conversation context. Files found on disk and issues already on the tracker are evidence of other work, not your drafts — a session that has lost its context must say so and stop rather than adopt what it finds. If asked to publish and no draft is present in the conversation, report that the drafting context appears to have been lost instead of reconstructing one silently or claiming the work is already done.
 

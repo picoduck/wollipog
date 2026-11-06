@@ -2992,12 +2992,24 @@ CREATE TABLE IF NOT EXISTS campaign_decision_subjects (
   campaign_session_id TEXT NOT NULL,
   session_id          TEXT NOT NULL,
   surface             TEXT NOT NULL CHECK (surface IN ('implementation_question','provider_question','tool_request','owner_decision',
-                        'follow_up_publication','issue_closure')),
+                        'follow_up_publication','issue_closure','issue_scope_seed')),
   request_id          TEXT NOT NULL,
   classification      TEXT CHECK (classification IN ('decline','orchestrator')),
   classified_by       TEXT,
   classified_at       INTEGER,
   created_at          INTEGER NOT NULL,
+  FOREIGN KEY (occurrence_id) REFERENCES decision_occurrences(occurrence_id) ON DELETE CASCADE
+);
+
+-- #4103: what each scope_review occurrence reviewed, for Campaign Status, and the one scope change
+-- an admit led to. The audit keeps only input digests; these are the proposal as the campaign shows it.
+CREATE TABLE IF NOT EXISTS campaign_selection_proposals (
+  occurrence_id          TEXT PRIMARY KEY,
+  campaign_session_id    TEXT NOT NULL,
+  issues                 TEXT NOT NULL,
+  explanation            TEXT NOT NULL,
+  workflow_occurrence_id TEXT,
+  created_at             INTEGER NOT NULL,
   FOREIGN KEY (occurrence_id) REFERENCES decision_occurrences(occurrence_id) ON DELETE CASCADE
 );
 
@@ -5809,15 +5821,16 @@ function preserveCampaignFollowUpOrigins(db: DatabaseSync): void {
 }
 
 /**
- * Admit the follow-up relatedness and closure-reason subjects (#4104 Slice B). A table written by
- * the question screen's release checked its surface against the four question surfaces; SQLite
- * cannot alter a CHECK, so that table is rebuilt with the wider check. Every row is preserved.
+ * Admit every current subject surface (#4104): the follow-up relatedness and closure-reason subjects
+ * (Slice B) and the Custom epic seed (Slice C). A table written by an earlier release checked its
+ * surface against fewer surfaces; SQLite cannot alter a CHECK, so that table is rebuilt with the
+ * wider check. Every row is preserved.
  */
 function widenCampaignDecisionSubjects(db: DatabaseSync): void {
   const schema = db.prepare(
     "SELECT sql FROM sqlite_master WHERE type='table' AND name='campaign_decision_subjects'",
   ).get() as { sql?: string } | undefined;
-  if (!schema?.sql || schema.sql.includes("'issue_closure'")) return;
+  if (!schema?.sql || schema.sql.includes("'issue_scope_seed'")) return;
   db.exec("PRAGMA foreign_keys = OFF;");
   try {
     db.exec("BEGIN;");
@@ -5827,7 +5840,7 @@ function widenCampaignDecisionSubjects(db: DatabaseSync): void {
         campaign_session_id TEXT NOT NULL,
         session_id          TEXT NOT NULL,
         surface             TEXT NOT NULL CHECK (surface IN ('implementation_question','provider_question','tool_request','owner_decision',
-                              'follow_up_publication','issue_closure')),
+                              'follow_up_publication','issue_closure','issue_scope_seed')),
         request_id          TEXT NOT NULL,
         classification      TEXT CHECK (classification IN ('decline','orchestrator')),
         classified_by       TEXT,
@@ -7425,6 +7438,8 @@ export class ControlPlaneDb {
       "superseded_by TEXT",
       // #4064: the root handed this Orchestrator-owned occurrence to the campaign's owner.
       "owner_handoff TEXT",
+      // #4137: the installed or user-authored rule that kept this occurrence for a person.
+      "owner_rule TEXT",
       // #4067: what Wollipog did when it performed this approved forge action itself.
       "forge_action TEXT",
       // #4138: the session owner who approved a Location switch, and its claim, then its receipt.
@@ -12508,6 +12523,33 @@ export class ControlPlaneDb {
     ).run(input.occurrenceId, input.campaignSessionId, input.sessionId, input.surface, input.requestId, now);
   }
 
+  /** Record what a `scope_review` occurrence reviewed (#4103). The first record wins: a duplicate
+   * proposal joining the same occurrence never rewrites it. */
+  recordSelectionProposal(input: { occurrenceId: string; campaignSessionId: string;
+    issues: Array<{ repository: string; number: number; title: string }>; explanation: string }, now: number): void {
+    this.stmt(`INSERT OR IGNORE INTO campaign_selection_proposals (occurrence_id, campaign_session_id, issues, explanation, created_at)
+      VALUES (?, ?, ?, ?, ?)`).run(input.occurrenceId, input.campaignSessionId, JSON.stringify(input.issues), input.explanation, now);
+  }
+
+  /** Link an admitted review to the one live scope change it created, by compare-and-set on the
+   * link it replaces (`previous`, null for the first): an occurrence holds one scope change at a
+   * time, and only one retired before it was applied is ever replaced. */
+  linkSelectionProposalDecision(occurrenceId: string, workflowOccurrenceId: string, previous: string | null = null): boolean {
+    return Number((previous === null
+      ? this.stmt(`UPDATE campaign_selection_proposals SET workflow_occurrence_id=?
+        WHERE occurrence_id=? AND workflow_occurrence_id IS NULL`).run(workflowOccurrenceId, occurrenceId)
+      : this.stmt(`UPDATE campaign_selection_proposals SET workflow_occurrence_id=?
+        WHERE occurrence_id=? AND workflow_occurrence_id=?`).run(workflowOccurrenceId, occurrenceId, previous)).changes) > 0;
+  }
+
+  selectionProposal(occurrenceId: string): { campaignSessionId: string; issues: Array<{ repository: string; number: number; title: string }>;
+    explanation: string; workflowOccurrenceId: string | null } | null {
+    const row = this.stmt("SELECT * FROM campaign_selection_proposals WHERE occurrence_id=?").get(occurrenceId) as
+      { campaign_session_id: string; issues: string; explanation: string; workflow_occurrence_id: string | null } | undefined;
+    return row ? { campaignSessionId: row.campaign_session_id, issues: JSON.parse(row.issues) as Array<{ repository: string; number: number; title: string }>,
+      explanation: row.explanation, workflowOccurrenceId: row.workflow_occurrence_id } : null;
+  }
+
   campaignDecisionSubject(occurrenceId: string): (CampaignDecisionSubject & { campaignSessionId: string }) | null {
     const row = this.stmt("SELECT * FROM campaign_decision_subjects WHERE occurrence_id=?").get(occurrenceId) as
       { campaign_session_id: string; session_id: string; surface: CampaignDecisionSubject["surface"]; request_id: string;
@@ -12532,6 +12574,15 @@ export class ControlPlaneDb {
 
   /** The owner's one classification of an uncertain or failed screen, by compare-and-set: only an
    * occurrence that routed to a person and has no classification yet accepts one. */
+  /** Record the owner's Continue Without an Epic on an epic seed's reading (#4104), once. The seed's
+   * own `owner` state, not the occurrence's, is what lets the owner release it. */
+  releaseCampaignIssueScopeSeedSubject(occurrenceId: string, userId: string, now: number): boolean {
+    return Number(this.stmt(
+      `UPDATE campaign_decision_subjects SET classification='orchestrator', classified_by=?, classified_at=?
+       WHERE occurrence_id=? AND surface='issue_scope_seed' AND classification IS NULL`,
+    ).run(userId, now, occurrenceId).changes) > 0;
+  }
+
   classifyCampaignDecision(occurrenceId: string, classification: "decline" | "orchestrator", userId: string, now: number): boolean {
     return Number(this.stmt(
       `UPDATE campaign_decision_subjects SET classification=?, classified_by=?, classified_at=?
@@ -17281,23 +17332,49 @@ export class ControlPlaneDb {
       .run(sessionId, randomUUID(), payloadSha256, now);
   }
 
-  /** One-time upgrade path for human-created root campaigns that predate protocol v158. A stored
-   * non-empty scope is immutable, and ambiguous provenance or prompts remain unscoped. */
-  backfillSessionOrchestratorIssueNumbers(id: string, issueNumbers: readonly number[], now: number): number[] | null {
-    const unique = [...new Set(issueNumbers)].filter((number) => Number.isSafeInteger(number) && number > 0);
-    if (unique.length === 0 || unique.length > 100 || !this.sessionWasHumanCreatedOrchestrator(id)) return null;
+  /** Record what a Custom campaign's first message, sent after an empty launch, asks of its epic seed
+   * (#4104): `pending` for a reading, or `none`. Compare-and-set: only a campaign with no seed, no
+   * scope and no seeded epic gets one, so only its first message ever does. */
+  beginCampaignIssueScopeSeed(id: string, seed: { state: "pending" | "none"; messageDigest: string }, now: number): boolean {
     const policy = this.sessionOrchestratorPolicy(id);
-    if (!policy) return null;
-    if (policy.issueScope || policy.issueNumbers?.length) return [...(policy.issueNumbers ?? [])];
+    if (!policy || policy.issueScopeSeed || policy.issueScope || policy.issueScopeProposalEpic !== undefined) return false;
     const previous = JSON.stringify(policy);
-    policy.issueNumbers = unique;
-    // Transcript-derived: never the Human launch request provenance Full Control enable trusts (#2940).
-    delete policy.issueNumbersSource;
-    const result = this.stmt(
-      "UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=? AND orchestrator_policy=?",
-    ).run(JSON.stringify(policy), now, id, previous);
-    if (Number(result.changes) === 1) return unique;
-    return this.sessionOrchestratorPolicy(id)?.issueNumbers ?? null;
+    policy.issueScopeSeed = { state: seed.state, messageDigest: seed.messageDigest };
+    return Number(this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=? AND orchestrator_policy=?")
+      .run(JSON.stringify(policy), now, id, previous).changes) === 1;
+  }
+
+  /** Settle a Custom campaign's epic seed (#4104), compare-and-set on the policy: only a seed still in
+   * `from` (pending, unless the owner releases an `owner` seed) for this exact message changes, and
+   * only `seeded` names the epic. A scope a person approved meanwhile leaves the seed as it was; it
+   * holds nothing once a scope exists.
+   *
+   * A `none` settlement may carry the issues a healthy reading of the first message named and the
+   * runner verified (#4259): they become the campaign's `issueNumbers` in the same write, only from a
+   * pending seed of a Custom campaign that holds no issue numbers yet. `launchRequest` marks them as
+   * the person's own launch request, the provenance Full Control enable trusts (#2940); a reading of
+   * a recorded transcript message is never marked. */
+  settleCampaignIssueScopeSeed(id: string, messageDigest: string,
+    next: { state: "seeded"; epic: number; occurrenceId: string }
+      | { state: "none"; occurrenceId?: string; grant?: { issueNumbers: readonly number[]; launchRequest: boolean } }
+      | { state: "owner"; occurrenceId?: string }, now: number,
+    from: "pending" | "owner" = "pending"): boolean {
+    const policy = this.sessionOrchestratorPolicy(id);
+    if (!policy || policy.issueScope || policy.issueScopeSeed?.state !== from || policy.issueScopeSeed.messageDigest !== messageDigest) return false;
+    const grant = next.state === "none" ? next.grant : undefined;
+    if (grant && (from !== "pending" || policy.control?.mode === "full_control" || policy.issueNumbers?.length ||
+        grant.issueNumbers.length < 1 || grant.issueNumbers.length > 100 || new Set(grant.issueNumbers).size !== grant.issueNumbers.length ||
+        grant.issueNumbers.some((n) => !Number.isSafeInteger(n) || n < 1))) return false;
+    const previous = JSON.stringify(policy);
+    policy.issueScopeSeed = { state: next.state, messageDigest, ...(next.occurrenceId ? { occurrenceId: next.occurrenceId } : {}) };
+    if (next.state === "seeded") policy.issueScopeProposalEpic = next.epic;
+    if (grant) {
+      policy.issueNumbers = [...grant.issueNumbers];
+      if (grant.launchRequest) policy.issueNumbersSource = "human_launch_request";
+      else delete policy.issueNumbersSource;
+    }
+    return Number(this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=? AND orchestrator_policy=?")
+      .run(JSON.stringify(policy), now, id, previous).changes) === 1;
   }
 
   campaignIssueScopeRootsForRunner(runnerId: string): SessionView[] {
@@ -22729,15 +22806,17 @@ export class ControlPlaneDb {
         `INSERT INTO workflow_decisions
          (request_id, occurrence_id, session_id, controlling_session_id, category, resource_key,
           resource_snapshot, resource_digest, policy_revision, authority, status, human_fallback, authority_evaluation,
-          closing_reference_check, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+          closing_reference_check, owner_rule, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
       ).run(
         input.requestId, input.occurrenceId, input.sessionId, input.controllingSessionId,
         input.category, input.resourceKey, JSON.stringify(input.resourceSnapshot), input.resourceDigest,
-        input.policyRevision, input.authority,
+        // A rule keeps the occurrence for a person whatever the caller computed (#4137).
+        input.policyRevision, input.ownerRule ? "human" : input.authority,
         input.humanFallback ? JSON.stringify(input.humanFallback) : null,
         input.authorityEvaluation ? JSON.stringify(input.authorityEvaluation) : null,
-        input.closingReferenceCheck ? JSON.stringify(input.closingReferenceCheck) : null, input.createdAt,
+        input.closingReferenceCheck ? JSON.stringify(input.closingReferenceCheck) : null,
+        input.ownerRule ? JSON.stringify(input.ownerRule) : null, input.createdAt,
       );
       this.db.exec("COMMIT");
     } catch (error) {
@@ -22974,7 +23053,7 @@ export class ControlPlaneDb {
       const changed = Number(this.stmt(
         `UPDATE workflow_decisions SET authority='human', owner_handoff=?, authority_evaluation=?
          WHERE occurrence_id=? AND status='pending' AND authority='orchestrator' AND owner_handoff IS NULL
-           AND consumed_at IS NULL AND action_kind IS NULL AND action_armed_at IS NULL`,
+           AND owner_rule IS NULL AND consumed_at IS NULL AND action_kind IS NULL AND action_armed_at IS NULL`,
       ).run(JSON.stringify(handoff), JSON.stringify(authorityEvaluation), occurrenceId).changes) === 1;
       if (!changed) return null;
       // Receipts back only an Orchestrator's approval, which this occurrence can no longer have.
@@ -22986,26 +23065,29 @@ export class ControlPlaneDb {
   /** The owner's classification releasing a question held for it (#4104): an implementation
    * question moves to the Orchestrator, and an owner decision stays the owner's but may now be
    * answered. Only a pending, unconsumed occurrence held for that reason changes; nothing else can
-   * be released this way, and an owner decision can never move to an agent. */
+   * be released this way, and an owner decision can never move to an agent. Nor can a question an
+   * owner rule kept (#4137): it stays the person's, who may now answer it. */
   releaseCredentialScreenReview(
     occurrenceId: string,
     authority: "human" | "orchestrator",
     authorityEvaluation: NonNullable<WorkflowDecisionView["authorityEvaluation"]>,
   ): WorkflowDecisionView | null {
-    const category = authority === "orchestrator" ? "implementation_question" : "owner_decision";
     const changed = Number(this.stmt(
       `UPDATE workflow_decisions SET authority=?, authority_evaluation=?
-       WHERE occurrence_id=? AND status='pending' AND authority='human' AND category=?
+       WHERE occurrence_id=? AND status='pending' AND authority='human'
+         AND (?='human' AND (category='owner_decision' OR (category='implementation_question' AND owner_rule IS NOT NULL))
+           OR ?='orchestrator' AND category='implementation_question' AND owner_rule IS NULL)
          AND owner_handoff IS NULL AND consumed_at IS NULL
          AND json_extract(authority_evaluation, '$.reason')='credential_screen_review'`,
-    ).run(authority, JSON.stringify(authorityEvaluation), occurrenceId, category).changes) === 1;
+    ).run(authority, JSON.stringify(authorityEvaluation), occurrenceId, authority, authority).changes) === 1;
     return changed ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
 
-  /** The pending decisions a campaign's owner kept (#4064), oldest first, for Campaign Status. */
+  /** The pending decisions a campaign's owner kept (#4064), oldest first, for Campaign Status: the
+   * root's owner decisions, the occurrences it handed over, and those an owner rule kept (#4137). */
   campaignOwnerDecisions(controllingSessionId: string): NonNullable<OrchestratorCampaignProjection["ownerDecisions"]> | null {
     const where = `controlling_session_id=? AND status='pending' AND authority='human'
-      AND (category='owner_decision' OR owner_handoff IS NOT NULL)`;
+      AND (category='owner_decision' OR owner_handoff IS NOT NULL OR owner_rule IS NOT NULL)`;
     const total = Number((this.stmt(`SELECT COUNT(*) AS count FROM workflow_decisions WHERE ${where}`)
       .get(controllingSessionId) as { count: number }).count);
     if (!total) return null;
@@ -23013,14 +23095,17 @@ export class ControlPlaneDb {
       ORDER BY created_at ASC, occurrence_id ASC LIMIT ${CAMPAIGN_OWNER_DECISIONS_LIMIT}`).all(controllingSessionId) as unknown[])
       .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null)
       .map((decision) => ({ occurrenceId: decision.occurrenceId, sessionId: decision.sessionId, category: decision.category,
-        summary: ownerDecisionSummary(decision.resourceSnapshot), handedOff: decision.ownerHandoff !== undefined, createdAt: decision.createdAt }));
+        summary: ownerDecisionSummary(decision.resourceSnapshot), handedOff: decision.ownerHandoff !== undefined,
+        ...(decision.ownerRule ? { ownerRule: decision.ownerRule } : {}), createdAt: decision.createdAt }));
     return { total, items };
   }
 
-  /** Every occurrence a campaign's root handed to its owner, in any state (#4064). */
-  ownerHandedWorkflowDecisions(controllingSessionId: string): WorkflowDecisionView[] {
+  /** Every occurrence a campaign's root handed to its owner (#4064) or an owner rule kept for a
+   * person (#4137), in any state. */
+  ownerKeptWorkflowDecisions(controllingSessionId: string): WorkflowDecisionView[] {
     return (this.stmt(
-      `SELECT * FROM workflow_decisions WHERE controlling_session_id=? AND owner_handoff IS NOT NULL
+      `SELECT * FROM workflow_decisions WHERE controlling_session_id=?
+         AND (owner_handoff IS NOT NULL OR owner_rule IS NOT NULL)
        ORDER BY created_at ASC, occurrence_id ASC`,
     ).all(controllingSessionId) as unknown[]).map(workflowDecisionFromRow).filter(
       (decision): decision is WorkflowDecisionView => decision !== null,
@@ -34300,6 +34385,11 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
   value.delegation.decisions = decisions;
   behavior.childHarness = childHarness;
   if (value.issueScopeProposalEpic !== undefined && (!Number.isSafeInteger(value.issueScopeProposalEpic) || value.issueScopeProposalEpic < 1)) return null;
+  const seed = value.issueScopeSeed as unknown as Record<string, unknown> | undefined;
+  if (seed !== undefined && !(seed && ["pending", "seeded", "none", "owner"].includes(seed.state as string) &&
+      typeof seed.messageDigest === "string" && /^[a-f0-9]{64}$/.test(seed.messageDigest) &&
+      (seed.occurrenceId === undefined || typeof seed.occurrenceId === "string") &&
+      (seed.state === "seeded") === (value.issueScopeProposalEpic !== undefined))) return null;
   if (value.issueScope && (typeof value.issueScope.repository !== "string" || !campaignRepositoryLocation(value.issueScope.repository) ||
       !Array.isArray(value.issueScope.issueNumbers) || value.issueScope.issueNumbers.length > 100 ||
       value.issueScope.issueNumbers.some((n) => !Number.isSafeInteger(n) || n < 1) ||
@@ -34381,6 +34471,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     withdrawal?: string | null;
     superseded_by?: string | null;
     owner_handoff?: string | null;
+    owner_rule?: string | null;
     issue_closure_result?: string | null;
     automation_creation_result?: string | null;
     location_switch_result?: string | null;
@@ -34449,6 +34540,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     ...(row.withdrawal ? { withdrawal: parseJson<NonNullable<WorkflowDecisionView["withdrawal"]>>(row.withdrawal) ?? undefined } : {}),
     ...(row.status === "superseded" && row.superseded_by ? { supersededBy: row.superseded_by } : {}),
     ...(row.owner_handoff ? { ownerHandoff: parseJson<NonNullable<WorkflowDecisionView["ownerHandoff"]>>(row.owner_handoff) ?? undefined } : {}),
+    ...(row.owner_rule ? { ownerRule: parseJson<NonNullable<WorkflowDecisionView["ownerRule"]>>(row.owner_rule) ?? undefined } : {}),
   };
 }
 

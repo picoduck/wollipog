@@ -129,6 +129,10 @@ export interface SessionMeta {
   controlPlaneLaunchId?: string;
   campaignBudgetDispatch?: import("@wollipog/protocol").CampaignBudgetDispatch;
   campaignBudgetCheckpoint?: import("@wollipog/protocol").CampaignBudgetUsageCheckpoint;
+  /** The campaign generation of a provider whose retirement began but is not yet proven (#3788).
+   * It outlives a runner restart, so a restarted runner, which holds no provider of the session,
+   * still attests no final checkpoint for a provider an interrupted shutdown may have left running. */
+  retiringProviderGeneration?: string;
   /** Human-correlated two-phase role change. Retiring/prepared fence every provider submission. */
   roleConversion?: {
     command: import("@wollipog/protocol").PrepareSessionRoleMessage;
@@ -534,6 +538,12 @@ export interface DurableBackgroundJob {
   continuationMissingResultAt?: number;
   /** Capacity retries ended before provider acceptance; results remain available for inspection. */
   continuationRetryExhaustedAt?: number;
+  /** Runner-private (#3542): consecutive attempts of this job's continuation that failed before the
+   * provider accepted it, such as a provider process that could not start. Never projected. */
+  continuationLaunchFailures?: number;
+  /** Runner-private (#3542): automatic attempts stopped after the bounded launch failures. The result
+   * stays owed: Restart, or a person's turn the provider accepts, retries it. Never projected. */
+  continuationLaunchHeldAt?: number;
   assistantResultPersistedAt?: number;
   /** Runner-private proof that v82 structured delivery evidence was durably published. */
   structuredDeliveryPublishedAt?: number;
@@ -4466,7 +4476,8 @@ export function metaToSnapshot(
     seq: m.seq,
     historyEpoch: m.logEpoch ?? 0,
     ...(runnerSupportsProtocol(controlPlaneProtocolVersion,"campaignBudgetAdmission") &&
-        ["completed","failed","stopped"].includes(m.status) && m.campaignBudgetCheckpoint?.generation===m.campaignBudgetDispatch?.generation
+        ["completed","failed","stopped"].includes(m.status) && m.campaignBudgetCheckpoint?.generation===m.campaignBudgetDispatch?.generation &&
+        (m.retiringProviderGeneration===undefined || m.retiringProviderGeneration!==m.campaignBudgetDispatch?.generation)
       ? {campaignBudgetCheckpoint:m.campaignBudgetCheckpoint}:{}),
     createdAt: m.createdAt,
     updatedAt: m.updatedAt,

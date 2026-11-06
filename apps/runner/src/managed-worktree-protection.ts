@@ -15,6 +15,10 @@ const MAX_EMPTY_COMMAND_EXPANSIONS = 16;
 export const MANAGED_WORKTREE_REFUSAL =
   "Wollipog protects this runner-owned worktree. Use discard_worktree so retirement can wait for the provider to exit and then apply the managed safety checks.";
 
+/** The command could not be inspected; no protected target has been established. */
+export const MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL =
+  "Wollipog could not tell where this command acts while a runner-owned worktree is protected (it could not inspect the command or follow its directory changes), so it was not run. Name the target by absolute path without cd, or write with apply_patch (Codex) or the Edit/Write tools (Claude Code).";
+
 /**
  * Refusal for a destructive command whose target the classifier cannot place (#1324): an unknown
  * variable, a command substitution, a backtick, or a relative path after a `cd` it cannot follow.
@@ -65,13 +69,14 @@ type ShellToken = ParseEntry | ExpandedField;
 /**
  * What one command, segment, or operand amounts to: it reaches a protected root (`protected`), it
  * changes directory out of one (`escape`), it moves a pinned worktree off its branch (`branch`), it
- * is destructive but its target cannot be placed (`unresolved`), or neither (`null`). `protected`,
- * `escape`, and `branch` all refuse outright; they differ only in the message.
+ * cannot be inspected (`uninspectable`), is destructive but its target cannot be placed
+ * (`unresolved`), or neither (`null`). All non-null verdicts refuse; `unresolved` yields to
+ * the first outright refusal, whose kind determines the message.
  */
-type Verdict = "protected" | "escape" | "branch" | "unresolved" | null;
+type Verdict = "protected" | "escape" | "branch" | "uninspectable" | "unresolved" | null;
 
-function refuses(verdict: Verdict): verdict is "protected" | "escape" | "branch" {
-  return verdict === "protected" || verdict === "escape" || verdict === "branch";
+function refuses(verdict: Verdict): verdict is "protected" | "escape" | "branch" | "uninspectable" {
+  return verdict === "protected" || verdict === "escape" || verdict === "branch" || verdict === "uninspectable";
 }
 
 /**
@@ -1968,8 +1973,10 @@ function classify(
     tokens = parse(command, reference);
   } catch {
     // A failed parse cannot safely tell whether a directory-changing segment was skipped.
-    return /(?:^|[\s;&|()])(?:builtin\s+|command\s+)?(?:cd|pushd)(?:\s|$)/u.test(command)
-      ? "protected" : null;
+    if (/(?:^|[\s;&|()])(?:builtin\s+|command\s+)?(?:cd|pushd)(?:\s|$)/u.test(command)) {
+      return "uninspectable";
+    }
+    return null;
   }
   let segment: ShellToken[] = [];
   type CwdReading = { cwd: string; environment: Map<string, string> };
@@ -2113,7 +2120,9 @@ function classify(
   const verdict = strongest([evaluate(null), unresolved ? "unresolved" : null]);
   if (!ambiguousDirectoryControl || refuses(verdict)) return verdict;
   // shell-quote discards newlines, so it cannot recover command boundaries from those inputs.
-  if (/[\r\n]/u.test(command)) return "protected";
+  if (/[\r\n]/u.test(command)) {
+    return "uninspectable";
+  }
   // Pipes, redirections and subshells make a preceding cd's effect uncertain. Recheck each
   // segment from an unknown directory: path-sensitive destructive operands then fail closed,
   // while ordinary commands such as `cd sub && make > build.log` remain usable.
@@ -2173,11 +2182,12 @@ export function commandTargetsManagedWorktree(
     if (verdict === "protected") return MANAGED_WORKTREE_REFUSAL;
     if (verdict === "escape") return MANAGED_WORKTREE_ESCAPE_REFUSAL;
     if (verdict === "branch") return MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL;
+    if (verdict === "uninspectable") return MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL;
     return verdict === "unresolved" ? MANAGED_WORKTREE_UNRESOLVED_REFUSAL : null;
   } catch {
     // Provider-controlled syntax must never escape the guard or crash the runner. If a bounded
     // destructive target cannot be classified safely, retain the managed worktree.
-    return MANAGED_WORKTREE_REFUSAL;
+    return MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL;
   }
 }
 

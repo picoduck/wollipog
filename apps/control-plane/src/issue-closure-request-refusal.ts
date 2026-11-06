@@ -102,12 +102,13 @@ export function issueClosureScopeRefusal(db: ControlPlaneDb, root: SessionView, 
     recovery = "unavailable";
     next = `Its issue scope cannot change right now: ${unavailable} Until it can, leave issue #${issue} open and report it for the campaign's owner.`;
   } else if (boundaryAdmits && grantReview === "selection") {
-    // Selection proposals take their own route (#4103): the grant's count and checks, never the agent's say.
+    // Selection proposals take their own route (#4103): the grant's count and floors, then the Decision
+    // Model's scope review, which admits, refuses or leaves it to the owner; never the agent's say.
     recovery = "owner_scope_review_or_selection";
     next = `A campaign owner can add issue #${issue} in Campaign Status under Issue Scope. request_campaign_issue_scope_change can ` +
-      "propose it as one of the issues the owner's first message asked this campaign to choose, subject to that scope grant's count, " +
-      "checks and approval, or with the lineage this campaign's Full Control issue authority accepts; otherwise only a campaign " +
-      "owner can add the issue. Once the issue is in scope, request the closure again; it still needs its own closure decision.";
+      "propose it as one of the issues the owner's first message asked this campaign to choose; that scope grant's count and checks " +
+      "and the Decision Model's scope review then admit it, refuse it or leave it to the owner. It can also propose it with the " +
+      "lineage this campaign's Full Control issue authority accepts; otherwise only a campaign owner can add the issue. Once the issue is in scope, request the closure again; it still needs its own closure decision.";
   } else if (boundaryAdmits && grantReview === undefined) {
     recovery = "owner_scope_review_or_lineage";
     next = `A campaign owner can add issue #${issue} in Campaign Status under Issue Scope. request_campaign_issue_scope_change admits ` +

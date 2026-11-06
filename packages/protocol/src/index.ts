@@ -896,10 +896,27 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      A pull request is reported there instead of failing the read. The control plane's
 //      selection floors read these facts; an older runner reports none, so its selection
 //      proposals take the owner's route. (290 is claimed by an open pull request.)
-export const PROTOCOL_VERSION = 291;
+// 295: closing patterns in GitLab merges (#3762). A GitLab `pr_merge` snapshot may declare
+//      `intendedClosures`, and requesting or arming it first asks the child's runner for
+//      `gitlab_merge_closures`, which reports every issue the merge would close: GitLab's default
+//      closing pattern on the description, and GitLab's own `closes_issues` list. The control plane
+//      refuses a closure that differs from the declaration and records the check on the decision.
+//      Under Full Control a checked GitLab merge whose closures are all in scope is then owned like a
+//      GitHub one. A pre-v295 child runner is not asked; its decisions carry no check and stay
+//      human-owned under Full Control. (292 to 294 are claimed by pull requests still open.)
+// 296: an owner rule on a typed workflow decision (#4137). request_workflow_decision
+//      (`wollipog decision request --owner-rule-source/--owner-rule-quote`) accepts an optional,
+//      bounded `ownerRule` naming the installed or user-authored file, and the quoted requirement,
+//      that keeps the gate for a person. The occurrence is created human-owned (`owner_kept`)
+//      under any mode, grant or category; later requests for the same resource stay the person's,
+//      and Campaign Status lists it under Waiting for You with the rule. A runner refuses the field
+//      against an older control plane, which would drop it.
+export const PROTOCOL_VERSION = 296;
 
 export * from "./campaign-authority.js";
+export * from "./workflow-decision-owner-rule.js";
 export * from "./closing-references.js";
+export * from "./gitlab-closing-references.js";
 export * from "./issue-closure-refusal.js";
 import type { GithubIssueClosureRefusal, GithubIssueClosureRefusalReason } from "./issue-closure-refusal.js";
 export * from "./issue-closure-delivery-gap.js";
@@ -1285,6 +1302,10 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * and a one-way handoff of an Orchestrator-owned occurrence to that owner. Checked against the
    * root's runner by the control plane and against the control plane by the runner. */
   ownerDecisions: 281,
+  /** v296 (#4137): `ownerRule` on request_workflow_decision. Checked against the control plane by
+   * the runner, because an older control plane ignores the field and would let the Orchestrator
+   * decide a gate its owner kept. */
+  workflowDecisionOwnerRule: 296,
   /** (#4138) A regular session's request_location_switch, checked against the requester's runner by
    * the control plane and against the control plane by the runner. */
   sessionLocationSwitch: 287,
@@ -1295,6 +1316,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   gitlabMergeDecisions: 239,
   /** v242 runner answers `github_merge_preflight`, the closing-reference check of a GitHub merge (#3713). */
   githubMergeClosingReferences: 242,
+  /** v295 runner answers `gitlab_merge_closures`, the closing-pattern check of a GitLab merge (#3762). */
+  gitlabMergeClosingReferences: 295,
   /** v244 runner binds a review session to a GitLab merge request, read with a trusted glab (#3539). */
   gitlabReviewSessions: 244,
   /** v249 runner inspects, closes and scopes GitLab issues with `glab` (#3539). */
@@ -3024,8 +3047,11 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   pendingLocations?: import("./project-location-inspection.js").CampaignPendingLocation[];
   /** The Locations that joined the boundary after launch, newest last, bounded (#4117). */
   locationJoins?: import("./project-location-inspection.js").CampaignLocationJoin[];
-  /** Human initial epic request, persisted before runner echo; this is a proposal seed, never authority. */
+  /** The epic a Custom campaign's first message names, once its seed (below) found one; a proposal
+   * seed, never authority. */
   issueScopeProposalEpic?: number;
+  /** A Custom campaign's epic seed, read from its first message by the Decision Model (#4104). */
+  issueScopeSeed?: CampaignIssueScopeSeed;
   /** Finite GitHub issue-write scope admitted from the initial request or an exact human-approved scope change. */
   issueNumbers?: number[];
   issueScope?: CampaignIssueScope;
@@ -3164,6 +3190,9 @@ export interface CampaignOwnerDecision {
   summary: string;
   /** The root handed an Orchestrator-owned occurrence to the owner, rather than asking anew. */
   handedOff: boolean;
+  /** v296 (#4137): the installed or user-authored rule that keeps it for the owner, when the
+   * requester named one. */
+  ownerRule?: import("./workflow-decision-owner-rule.js").WorkflowDecisionOwnerRule;
   createdAt: number;
 }
 
@@ -5259,6 +5288,22 @@ export interface WorkflowDecisionOption {
 }
 
 /** Authority is independent of ledger membership. Revision zero denotes a legacy initial scope. */
+/**
+ * A Custom campaign's epic seed (#4104). A first message that writes a digit string but names no
+ * explicit issue list is read by the Decision Model's `scope_grant` kind after the session starts.
+ * `pending` holds delegation until that reading settles. `seeded`: the reading named exactly one
+ * issue that the runner verified has members, now `issueScopeProposalEpic`, and the person approves
+ * the scope as before. `none`: it named no epic, so nothing is held. `owner`: the reading failed or
+ * was uncertain, so the person approves the scope with no seed. Nothing is ever parsed from the
+ * text instead, and no state grants anything.
+ */
+export interface CampaignIssueScopeSeed {
+  state: "pending" | "seeded" | "none" | "owner";
+  /** SHA-256 of the exact first message the seed reads. */
+  messageDigest: string;
+  occurrenceId?: string;
+}
+
 export interface CampaignIssueScope {
   repository: string;
   issueNumbers: number[];
@@ -5306,6 +5351,18 @@ export interface CampaignIssueScopeSnapshot {
   /** Present when the Orchestrator's own proposal is the owner's to approve because of the first
    * message's scope grant (#4102). Server-derived; it changes who decides, never what is granted. */
   grantReview?: CampaignScopeGrantReview;
+  /** The Decision Model's `admit` of a selection proposal (#4103), which the server's
+   * `issueAdmission` evidence binds: the review occurrence, the grant it read and its reason. */
+  selectionReview?: CampaignSelectionReview;
+}
+
+export interface CampaignSelectionReview {
+  /** The `scope_review` Decision occurrence. One occurrence admits at most one scope change. */
+  occurrenceId: string;
+  /** SHA-256 of the stored scope grant the review read. */
+  grantDigest: string;
+  verdict: "admit";
+  reason: string;
 }
 
 /** Why an Orchestrator's scope proposal is the owner's one typed approval (#4102), with what the
@@ -5314,18 +5371,38 @@ export interface CampaignIssueScopeSnapshot {
  *
  * - `grant_failed` / `grant_uncertain`: the Decision Model failed or was uncertain on the first
  *   message, so there is no grant to review the proposal against.
- * - `selection`: the proposal fills the grant's selection. Until the Decision Model reviews
- *   selection proposals (#4103), the owner approves them. */
+ * - `selection_uncertain` / `selection_failed` (#4103): the proposal passed every deterministic
+ *   floor of the grant's selection, but the Decision Model's review of it was uncertain or failed.
+ * - `selection_unverified` (#4103): the runner could not report the issues' state and labels, so
+ *   the open and Human Required floors are unverified and nothing reviewed it.
+ * - `selection`: the interim before #4103, when the owner approved every selection proposal. Kept
+ *   so requests created then still read; nothing creates it now. */
 export interface CampaignScopeGrantReview {
-  cause: "grant_failed" | "grant_uncertain" | "selection";
+  cause: "grant_failed" | "grant_uncertain" | "selection" | "selection_uncertain" | "selection_failed" | "selection_unverified";
   /** The owner's first message as the boundary records it: one line, at most 4000 characters. */
   ownerMessage: string;
   messageDigest: string;
   grantOccurrenceId?: string;
+  /** The `scope_review` Decision occurrence that was uncertain or failed (#4103). */
+  reviewOccurrenceId?: string;
   failureClass?: DecisionErrorClass;
-  /** The model's uncertain reason, or for `selection` its reason for the grant. */
+  /** The model's uncertain reason, or for a selection its reason for the grant. */
   reason?: string;
   selection?: Pick<ScopeGrantSelection, "count" | "defaulted" | "criteria" | "constraints">;
+}
+
+/** One selection proposal the Decision Model reviewed (#4103), for Campaign Status. */
+export interface CampaignSelectionProposal {
+  issues: Array<{ repository: string; number: number; title: string }>;
+  /** The Orchestrator's rationale, as it proposed it. */
+  explanation: string;
+  /** `reviewing` until the review settles; `admitted` once an Orchestrator-owned scope change
+   * exists, `applied` once it is in scope; `refused` by the review; `waiting_for_owner` while the
+   * owner's one request is pending, then `owner_approved` or `owner_declined`; `replaced` when a
+   * later proposal superseded its scope change before it was applied. */
+  outcome: "reviewing" | "admitted" | "applied" | "refused" | "waiting_for_owner" | "owner_approved" | "owner_declined" | "replaced";
+  /** The scope change it led to, when there is one. */
+  requestOccurrenceId?: string;
 }
 
 /** The follow-up a `campaign_follow_up_admission` decision admits (#2940): a recommendation the
@@ -5622,9 +5699,10 @@ export type WorkflowDecisionResourceSnapshot =
       squash?: boolean;
       /** GitLab only: delete the source branch on merge; for a train, the merge request's own setting. */
       removeSourceBranch?: boolean;
-      /** GitHub only (v242, #3713): every issue this merge is meant to close, as sorted unique
-       * `owner/repo#N`. The control plane admits the merge only when these are exactly the issues
-       * GitHub would close. Absent when it closes none, so earlier digests are unchanged. */
+      /** Every issue this merge is meant to close (GitHub v242, #3713; GitLab v295, #3762), as sorted
+       * unique `owner/repo#N`, or `host/group/project#N` for GitLab. The control plane admits the
+       * merge only when these are exactly the issues the forge would close. Absent when it closes
+       * none, so earlier digests are unchanged. */
       intendedClosures?: string[];
     }
   | {
@@ -5798,6 +5876,10 @@ export interface WorkflowDecisionView {
    * owner. One way: it stays the person's, and so does every later request for the same resource
    * in the campaign. Only a person resolves it. */
   ownerHandoff?: { bySessionId: string; at: number; reason: string };
+  /** v296 (#4137): the installed or user-authored rule that keeps this occurrence for a person,
+   * named by its requester or carried over from an earlier occurrence for the same resource. The
+   * occurrence was created human-owned (`owner_kept`); only a person resolves it. */
+  ownerRule?: import("./workflow-decision-owner-rule.js").WorkflowDecisionOwnerRule;
 }
 
 /** v281 (#4064): a Full Control root's question for its campaign's owner. */
@@ -5827,6 +5909,10 @@ export interface CreateWorkflowDecisionRequest {
    * that would supersede a person-owned follow-up publication is refused instead (#4066). */
   resourceKey: string;
   resourceSnapshot: WorkflowDecisionResourceSnapshot;
+  /** v296 (#4137): an installed or user-authored rule keeps this gate for a person. The occurrence
+   * is created human-owned under any mode or grant; it can only narrow authority. Bounded and
+   * refused, never truncated, when oversize. Reusing a requestId with a different rule fails. */
+  ownerRule?: import("./workflow-decision-owner-rule.js").WorkflowDecisionOwnerRule;
 }
 
 export interface ResolveWorkflowDecisionRequest {
@@ -7334,7 +7420,7 @@ export interface SessionNamingConnectionTestResult {
  * `scope_grant` reads a Full Control owner's first message into a typed scope grant (#4102), and
  * `credential_screen` screens Full Control questions (#4104); the other Full Control callers add
  * their kinds here with their prompts. */
-export type DecisionKind = "probe" | "scope_grant" | "credential_screen" | "follow_up_relatedness" | "closure_reason";
+export type DecisionKind = "probe" | "scope_grant" | "credential_screen" | "follow_up_relatedness" | "closure_reason" | "scope_review";
 
 /** Why one Decision attempt failed. The control plane, not the runner, decides what is transient:
  * see DECISION_TRANSIENT_ERROR_CLASSES. */
@@ -7480,11 +7566,17 @@ export interface DecisionModelTestResult {
 export interface CampaignDecisionSubject {
   /** The session whose request was screened. */
   sessionId: string;
-  surface: "implementation_question" | "provider_question" | "tool_request" | "owner_decision" | "follow_up_publication" | "issue_closure";
+  surface: "implementation_question" | "provider_question" | "tool_request" | "owner_decision" | "follow_up_publication" | "issue_closure" |
+    "issue_scope_seed";
   /** The affected request: a workflow decision request id, or a provider request occurrence id. */
   requestId: string;
-  /** The owner's classification of an uncertain or failed screen. */
+  /** The owner's classification of an uncertain or failed screen. For an epic seed, `orchestrator`
+   * is the owner's Continue Without an Epic. */
   classification?: "decline" | "orchestrator";
+  /** An `issue_scope_seed` subject's seed state, when this occurrence is the campaign's current
+   * reading, or `scoped` once the person approved a scope, which ends any hold the seed placed.
+   * Server-derived for Campaign Status; never stored on the subject. */
+  seed?: CampaignIssueScopeSeed["state"] | "scoped";
 }
 
 /** Owner classification of a question the Decision Model could not screen (#4104). It never
@@ -7495,7 +7587,7 @@ export interface ClassifyCampaignDecisionRequest {
 
 export interface CampaignDecisionsResponse {
   campaignSessionId: string;
-  decisions: Array<DecisionOccurrenceView & { subject?: CampaignDecisionSubject }>;
+  decisions: Array<DecisionOccurrenceView & { subject?: CampaignDecisionSubject; selectionProposal?: CampaignSelectionProposal }>;
   usage: DecisionUsageView & { calls: number; unpricedCalls: number };
 }
 
@@ -10227,9 +10319,11 @@ export interface GitLabMergePreflightResultMessage {
   reason?: string;
 }
 
-/** One issue a GitHub merge would close (#3713). `description` is the description's text, with
- * its line in `excerpt`; `linked` is GitHub's own `closingIssuesReferences`, which also covers an
- * issue linked by hand. Either alone closes the issue. */
+/** One issue a merge would close (#3713). `description` is the description's text, with its line in
+ * `excerpt`; `linked` is the forge's own list: GitHub's `closingIssuesReferences`, which also covers
+ * an issue linked by hand, or GitLab's `closes_issues` (#3762), which also covers the title, the
+ * commits and an instance's own closing pattern. Either alone closes the issue. A GitHub issue is
+ * `owner/repo#N`; a GitLab issue is `host/group/project#N`, lowercased. */
 export interface PullRequestClosure {
   issue: string;
   sources: Array<"description" | "linked">;
@@ -10258,6 +10352,32 @@ export interface GithubMergePreflightMessage {
  * proven). `reason` is a fixed sentence, never `gh` output. */
 export interface GithubMergePreflightResultMessage {
   type: "github_merge_preflight_result";
+  requestId: string;
+  sessionId: string;
+  ok: boolean;
+  refusal?: "stale_head" | "unavailable";
+  reason?: string;
+  check?: PullRequestClosingReferenceCheck;
+}
+
+/** v295 (#3762): before a GitLab `pr_merge` is requested or armed, the child's runner reads the open
+ * merge request through the session's own `glab` login: its head, its description and GitLab's own
+ * `closes_issues` list. Read-only; the control plane compares the closures with the snapshot's
+ * `intendedClosures`. */
+export interface GitLabMergeClosuresMessage {
+  type: "gitlab_merge_closures";
+  requestId: string;
+  sessionId: string;
+  repository: string;
+  pullRequest: number;
+  headSha: string;
+}
+
+/** As `GithubMergePreflightResultMessage`: `stale_head` (the merge request is not open at the
+ * snapshot's head) or `unavailable` (GitLab could not be read, so nothing was proven). `reason` is a
+ * fixed sentence, never `glab` output. */
+export interface GitLabMergeClosuresResultMessage {
+  type: "gitlab_merge_closures_result";
   requestId: string;
   sessionId: string;
   ok: boolean;
@@ -10912,6 +11032,7 @@ export type RunnerToControlPlane =
   | WorkflowActionAdmissionRecordedMessage
   | GitLabMergePreflightResultMessage
   | GithubMergePreflightResultMessage
+  | GitLabMergeClosuresResultMessage
   | import("./forge-decision-action.js").ForgeDecisionActionResultMessage
   | WorkflowActionReconciliationResultMessage
   | GithubIssueClosureResultMessage
@@ -12466,6 +12587,11 @@ export interface SearchWorkspaceReferencesRequestMessage {
    * contain the query, files and folders, in traversal order. A runner that predates the field
    * ignores it and answers without echoing it. */
   match?: WorkspaceReferenceSearchMatch;
+  /** The composer's picker (#4129): matched like `match: "fuzzy"`, folders as well as files, ranked
+   * by the same scorer within the same caps. Sent instead of `match`, so a runner or control plane
+   * that predates it answers with substring results, which still include folders, rather than with
+   * fuzzy files only. Takes precedence over `match`. */
+  fuzzyWithDirectories?: boolean;
 }
 
 export type WorkspaceReferenceSearchMatch = "fuzzy";
@@ -12480,8 +12606,11 @@ export interface SearchWorkspaceReferencesResultMessage {
   error?: string;
   results?: WorkspaceReferenceCandidate[];
   truncated?: boolean;
-  /** Echoes the request's `match` when the runner applied it. */
+  /** Echoes the request's `match` when the runner applied it; `"fuzzy"` too for an applied
+   * `fuzzyWithDirectories`. */
   match?: WorkspaceReferenceSearchMatch;
+  /** Echoes the request's `fuzzyWithDirectories` when the runner applied it (#4129). */
+  fuzzyWithDirectories?: boolean;
   /** Set on a truncated fuzzy search. */
   limit?: WorkspaceReferenceSearchLimit;
 }
@@ -13017,6 +13146,7 @@ export type ControlPlaneToRunner =
   | RecordWorkflowActionAdmissionMessage
   | GitLabMergePreflightMessage
   | GithubMergePreflightMessage
+  | GitLabMergeClosuresMessage
   | import("./forge-decision-action.js").ForgeDecisionActionMessage
   | ReconcileWorkflowActionMessage
   | GithubIssueClosureMessage

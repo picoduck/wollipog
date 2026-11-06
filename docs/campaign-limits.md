@@ -44,6 +44,16 @@ closing the provider. The runner sends its final checkpoint only after retiremen
 checkpoint, or a reconnect inventory without the session, releases the slot after a Stop,
 verification with Stop and Archive, archival or provider exit, without reloading history and even
 when its final usage has not settled yet. A pending, provisional or unretired stop keeps the slot.
+A provider that exits by itself with a non-zero code is reported `failed` at once, but it has retired
+only when its driver proves that every process it started, descendants included, is gone; the runner
+then reports the checkpoint (#3788). A driver that cannot prove that keeps the slot until a shutdown
+proves it. The runner records each retirement in progress durably: until it is proven,
+no runner process, a restarted one included, attests a final checkpoint for that generation. A
+runner shutdown that interrupts a retirement proves it only once every provider process tree is
+reaped; it then stores the checkpoint, and the restarted runner's negotiated session snapshots deliver
+it. A shutdown without that proof, or a runner that crashes, leaves the slot held. Each provider
+of a generation needs its own proof, a relaunch under the same generation keeps the fence, and
+nothing a later runner process proves lifts a fence an earlier process left.
 Its unspent reservation stays outstanding until its usage settles. Every campaign read settles ended workers whose hydrated history covers
 their checkpoint, so a campaign that held slots or reservations for already-ended workers is
 repaired on its next read or startup without changing its allowance.
@@ -130,7 +140,13 @@ parent total is not billed twice; independently reported managed sessions count 
 
 Campaign members use `request_review_session` (`wollipog review session run`) for their own
 pushed PR. Admission reserves campaign allowance and actual managed Session usage settles against
-it, including unsuccessful attempts. The reviewer's exact harness/model/effort, read-only snapshot
+it, including unsuccessful attempts. A review takes no worker slot, so its default reservation
+counts it as one more claimant beside the free slots, and never fewer than two (#3618): with no free
+slot, the first review reserves half of the unreserved allowance and the next concurrent review
+half of what remains. Each free slot keeps a share at least as large as the review's. The
+requester's own human cost ceiling only lowers that share. Admission still checks every reservation
+against the unreserved allowance in the insertion transaction, and a review that reaches its
+reservation stops like any member. The reviewer's exact harness/model/effort, read-only snapshot
 and round/attempt limits remain enforced. Review approval grants no human approval, merge authority
 or passing checks. Optional review-session citations at merge gates are verified by the server.
 

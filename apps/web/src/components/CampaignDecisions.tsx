@@ -2,19 +2,17 @@ import React, { useEffect, useId, useState } from "react";
 import type { CampaignDecisionsResponse } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { effortLabel } from "../format.js";
-import { decisionCostText, decisionModelName, decisionOutcomeText, verdictLabel } from "./decision-model.js";
+import { decisionCostText, decisionModelName, decisionOutcomeText, isDecisionModelCheck, verdictLabel } from "./decision-model.js";
 
 const SHOWN = 10;
 const REFRESH_MS = 60_000;
-/** Kinds Campaign Status shows in their own section, beside the request they affected: the
- * Question Screen's credential checks (#4104). They are not listed here a second time. */
-const OWN_SECTION_KINDS: ReadonlySet<string> = new Set(["credential_screen"]);
 
 /**
  * Campaign Status › Decision Model (#4101): the campaign's Decision calls, each as its own group
  * with its outcome and reason, the model it ran on and its usage, which is kept apart from the
- * campaign's worker cost. Hidden until the campaign has a decision; a read that fails leaves the
- * rest of Campaign Status as it is.
+ * campaign's worker cost. Decisions Decision Model Checks lists beside their request
+ * (`isDecisionModelCheck`) are not listed here a second time (#4265). Hidden until the campaign has
+ * another decision; a read that fails leaves the rest of Campaign Status as it is.
  */
 export function CampaignDecisions({ campaignId }: { campaignId: string }) {
   const api = useApi();
@@ -37,7 +35,7 @@ export function CampaignDecisions({ campaignId }: { campaignId: string }) {
     };
   }, [api, campaignId]);
 
-  const decisions = data?.decisions.filter((decision) => !OWN_SECTION_KINDS.has(decision.kind)) ?? [];
+  const decisions = data?.decisions.filter((decision) => !isDecisionModelCheck(decision)) ?? [];
   if (!data || !decisions.length) return null;
   const hidden = decisions.length - SHOWN;
   return (

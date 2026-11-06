@@ -96,6 +96,49 @@ import {
   type PreStagedDeliveryPlan,
 } from "./sessions.js";
 import { RunnerFrameQueue } from "./runner-frame-queue.js";
+import { fakeDecisionKind, fakeDecisionRuntime, HEALTHY_VERDICTS } from "./credential-screen-test-fixture.js";
+import { EMPTY_GRANT } from "./scope-grant-test-fixture.js";
+import type { DecisionRuntime } from "./decision-runtime.js";
+
+/** A Decision Model that reads a Custom campaign's first message as naming epic #123 (#4104). */
+function epicSeedReading(db: ControlPlaneDb) {
+  return fakeDecisionRuntime(db, (message) => fakeDecisionKind(message) === "scope_grant"
+    ? { verdict: "grant", fields: { ...EMPTY_GRANT, explicit: [{ repository: "", number: 123 }] } }
+    : { verdict: HEALTHY_VERDICTS[fakeDecisionKind(message)]! }).runtime;
+}
+
+/**
+ * Creates a person-created Custom campaign whose first message names `numbers`, and grants them the
+ * only way a first message can (#4259): the Decision Model's scripted `scope_grant` reading names
+ * exactly those issues, and the runner reads each as an issue of team/repo. Resolves once the reading
+ * settled, with the harness's own Decision runtime and runner handler restored.
+ */
+async function createWithIssueListReading<T extends { ok: boolean; data?: { id: string } }>(
+  svc: SessionsService, db: ControlPlaneDb, hub: { requestHandler?: (message: ControlPlaneToRunner) => RunnerRequestResult | Promise<RunnerRequestResult> },
+  numbers: number[], create: () => T): Promise<T> {
+  const internals = svc as unknown as { decisionRuntime: DecisionRuntime };
+  const previousRuntime = internals.decisionRuntime;
+  const previousHandler = hub.requestHandler;
+  svc.setDecisionRuntime(fakeDecisionRuntime(db, (message) => fakeDecisionKind(message) === "scope_grant"
+    ? { verdict: "grant", fields: { ...EMPTY_GRANT, explicit: numbers.map((number) => ({ repository: "", number })) } }
+    : { verdict: HEALTHY_VERDICTS[fakeDecisionKind(message)]! }).runtime);
+  hub.requestHandler = (message) => {
+    if (message.type === "campaign_issue_scope" && message.operation === "inspect") {
+      return { type: "campaign_issue_scope_result", requestId: message.requestId, sessionId: message.sessionId, ok: true, repository: "team/repo",
+        candidates: (message.issues ?? []).map((number) => ({ issue: { repository: "team/repo", number }, title: `Issue ${number}`, source: "member_checklist" as const })) };
+    }
+    if (previousHandler) return previousHandler(message);
+    throw new Error("runner did not respond in time");
+  };
+  try {
+    const created = create();
+    if (created.ok && created.data) await svc.campaignIssueScopeSeedSettled(created.data.id);
+    return created;
+  } finally {
+    svc.setDecisionRuntime(previousRuntime);
+    hub.requestHandler = previousHandler;
+  }
+}
 
 /** A runner capability refusal: the exact sentence, with the versions beside it and never in it. */
 function assertRunnerRefusal(
@@ -368,6 +411,7 @@ class FakeHub {
   deliveryHandler?: (runnerId: string, msg: ControlPlaneToRunner) => boolean;
   requestHandler?: (msg: ControlPlaneToRunner) => RunnerRequestResult | Promise<RunnerRequestResult>;
   githubMergePreflight?: (msg: Extract<ControlPlaneToRunner, { type: "github_merge_preflight" }>) => RunnerRequestResult | Promise<RunnerRequestResult>;
+  gitlabMergeClosures?: (msg: Extract<ControlPlaneToRunner, { type: "gitlab_merge_closures" }>) => RunnerRequestResult | Promise<RunnerRequestResult>;
   activeTurnIds = new Map<string, string>();
   queuedPrompts = new Map<string, QueuedPromptView[]>();
 
@@ -421,6 +465,13 @@ class FakeHub {
       return this.githubMergePreflight
         ? await this.githubMergePreflight(msg)
         : { type: "github_merge_preflight_result", requestId: msg.requestId, sessionId: msg.sessionId,
+            ok: true, check: { checkedAt: 1, closures: [] } };
+    }
+    if (msg.type === "gitlab_merge_closures") {
+      // A merge request that closes no issue, unless a test answers otherwise (#3762).
+      return this.gitlabMergeClosures
+        ? await this.gitlabMergeClosures(msg)
+        : { type: "gitlab_merge_closures_result", requestId: msg.requestId, sessionId: msg.sessionId,
             ok: true, check: { checkedAt: 1, closures: [] } };
     }
     if (!this.requestHandler) throw new Error("runner did not respond in time");
@@ -818,16 +869,14 @@ test("orchestrator separates default provider execution from the negotiated stri
     "strict Native TUI still needs its static fixed-rule mode");
     agent.capabilities.permissionModes = ["default", "dontAsk", "orchestrator"];
     db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1);
+    // A launch prompt grants no issue scope at creation (#4259): the Decision Model's reading decides
+    // later, and on a runner that can't hold an issue scope it takes the person-owned route.
     const outdatedScope = svc.createSession({ ...request, prompt: "Claim and orchestrate issue 1245.",
       config: { permissionMode: "orchestrator" } },
     undefined, undefined, false, false, false, { defaultOwnerUserId: "human" });
-    assertRunnerRefusal(
-      outdatedScope,
-      "This machine needs a newer runner for campaign issue coordination. Update and restart the runner.",
-      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope,
-      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1,
-      "an older runner fails actionably instead of silently losing the issue scope",
-    );
+    assert.equal(outdatedScope.ok, true, outdatedScope.error);
+    assert.equal(outdatedScope.data!.orchestratorPolicy!.issueNumbers, undefined, "an older runner is never silently granted an issue scope");
+    assert.equal(outdatedScope.data!.orchestratorPolicy!.issueScopeSeed?.state, "pending");
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     assert.equal(svc.createSession({ ...request, launchSurface: "native_tui",
       config: { permissionMode: "orchestrator" } }).ok, true);
@@ -1047,7 +1096,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
         effortLevels: ["high"], installations: 1, compatibleInstallations: 1, status: "available",
       },
     };
-    const created = svc.createSession({
+    const created = await createWithIssueListReading(svc, db, hub, [1209, 1210, 1211], () => svc.createSession({
       runnerId: RUNNER_ID,
       workspaceId: WORKSPACE_ID,
       agentId: "test-orchestrator",
@@ -1061,7 +1110,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       defaultOwnerUserId: "owner",
       orchestratorDefaults: settings,
       validateOrchestratorDefaults: () => null,
-    });
+    }));
     assert.ok(created.ok && created.data, created.error);
     const parent = created.data;
     assert.equal(parent.maxChildSessions, 3);
@@ -1072,37 +1121,52 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.equal(parent.orchestratorPolicy?.sources.behavior.maximumConcurrentChildren, "session_override");
     assert.equal(parent.orchestratorPolicy?.sources.delegation.decisions.pr_merge, "session_override");
     assert.equal(parent.parentControlPolicy?.revision, 1);
+    // The launch goes out before the reading settles (#4259): the first launch carries no issues, the
+    // reading grants them, and the next launch delivers them to the runner.
     const parentStart = hub.sentOfType("start_session").find((message) => message.spec.sessionId === parent.id)!;
-    assert.deepEqual(parentStart.spec.orchestrator?.issueNumbers, [1209, 1210, 1211]);
+    assert.deepEqual(parentStart.spec.orchestrator?.issueNumbers ?? [], [], "nothing granted at creation");
     assert.deepEqual(db.getSession(parent.id)?.orchestratorPolicy?.issueNumbers, [1209, 1210, 1211]);
     const restartedParent = svc.restart(parent.id);
     assert.ok(restartedParent.ok, restartedParent.error);
     assert.deepEqual(hub.sentOfType("start_session").at(-1)?.spec.orchestrator?.issueNumbers,
-      [1209, 1210, 1211], "restart preserves the immutable campaign issue scope");
-    const legacyPolicy = db.sessionOrchestratorPolicy(parent.id)!;
-    delete legacyPolicy.issueNumbers;
-    db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?")
-      .run(JSON.stringify(legacyPolicy), parent.id);
+      [1209, 1210, 1211], "restart delivers and preserves the immutable campaign issue scope");
+    // A pre-v158 campaign: no issue numbers and no reading of its recorded first message.
+    const unseed = () => {
+      const legacyPolicy = db.sessionOrchestratorPolicy(parent.id)!;
+      delete legacyPolicy.issueNumbers; delete legacyPolicy.issueNumbersSource; delete legacyPolicy.issueScopeSeed;
+      db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(legacyPolicy), parent.id);
+    };
+    unseed();
     db.appendEvent(parent.id, {
       kind: "user_message",
-      text: "Claim and delegate issue 1209 through 1211.",
+      text: "Claim and delegate issues 1209, 1210 and 1211.",
     }, Date.now());
     db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1);
-    const legacyRunnerRestart = svc.restart(parent.id);
-    assertRunnerRefusal(
-      legacyRunnerRestart,
-      "This machine needs a newer runner for campaign issue coordination. Update and restart the runner.",
-      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope,
-      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1,
-    );
+    const legacyRunnerRestart = await createWithIssueListReading(svc, db, hub, [1209, 1210, 1211], () => svc.restart(parent.id));
+    assert.ok(legacyRunnerRestart.ok, legacyRunnerRestart.error);
     assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.issueNumbers, undefined,
-      "an old runner cannot make recovered scope durable before it can enforce that scope");
+      "an old runner never holds a recovered scope it can't enforce: the reading is the owner's");
+    assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.issueScopeSeed?.state, "owner");
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
-    const upgradedParent = svc.restart(parent.id);
+    unseed();
+    const upgradedParent = await createWithIssueListReading(svc, db, hub, [1209, 1210, 1211], () => svc.restart(parent.id));
     assert.ok(upgradedParent.ok, upgradedParent.error);
-    assert.deepEqual(hub.sentOfType("start_session").at(-1)?.spec.orchestrator?.issueNumbers,
-      [1209, 1210, 1211], "restart safely backfills pre-v158 human campaign scope from its first prompt");
-    assert.deepEqual(db.getSession(parent.id)?.orchestratorPolicy?.issueNumbers, [1209, 1210, 1211]);
+    // The recorded first prompt has no stored author, so no grammar and no reading grants its issues:
+    // they are the owner's to approve through the one person-owned request.
+    assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.issueNumbers, undefined,
+      "restart's reading of an unattributed transcript message grants no pre-v158 campaign scope");
+    const ownerSeed = db.getSession(parent.id)!.orchestratorPolicy!.issueScopeSeed!;
+    assert.equal(ownerSeed.state, "owner");
+    // The owner settles the one request: Continue Without an Epic, which grants nothing.
+    const released = svc.classifyCampaignDecision(parent.id, ownerSeed.occurrenceId!, { classification: "orchestrator" }, { kind: "human", id: db.localIdentityContext().userId });
+    assert.ok(released.ok, released.error);
+    assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.issueNumbers, undefined);
+    // A persisted scope (here the one the launch's reading granted) is what the next check protects.
+    const persisted = db.sessionOrchestratorPolicy(parent.id)!;
+    persisted.issueNumbers = [1209, 1210, 1211];
+    db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(persisted), parent.id);
+    assert.ok(svc.restart(parent.id).ok);
+    assert.deepEqual(hub.sentOfType("start_session").at(-1)?.spec.orchestrator?.issueNumbers, [1209, 1210, 1211]);
     db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1);
     const outdatedRestart = svc.restart(parent.id);
     assertRunnerRefusal(
@@ -1503,7 +1567,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
 });
 
 test("approved UI evidence and implementation-question decisions do not block campaign child verification, and a blocking 409 names each decision", async () => {
-  const { db, svc } = makeHarness();
+  const { db, svc, hub } = makeHarness();
   try {
     const meta = runnerMeta();
     const planner = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
@@ -1520,7 +1584,7 @@ test("approved UI evidence and implementation-question decisions do not block ca
       ui_evidence_approval: "human",
       review_round_extension: "human",
     } as const;
-    const created = svc.createSession({
+    const created = await createWithIssueListReading(svc, db, hub, [1404], () => svc.createSession({
       runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
       config: { permissionMode: "orchestrator" }, prompt: "Orchestrate issue 1404.",
       orchestrator: { behavior: { completion: "retain" } },
@@ -1541,7 +1605,7 @@ test("approved UI evidence and implementation-question decisions do not block ca
         },
       },
       validateOrchestratorDefaults: () => null,
-    });
+    }));
     assert.ok(created.ok && created.data, created.error);
     const parent = created.data;
     db.updateSessionStatus(parent.id, "running", Date.now());
@@ -1689,8 +1753,9 @@ test("approved UI evidence and implementation-question decisions do not block ca
   }
 });
 
-/** A Stop and Archive campaign whose children the tests stop, report from, and verify. */
-function stopAndArchiveCampaignFixture(completion: "retain" | "stop_and_archive" = "stop_and_archive") {
+/** A Stop and Archive campaign whose children the tests stop, report from, and verify. Its first
+ * message's issue, #1440, is granted through the scripted scope grant reading (#4259). */
+async function stopAndArchiveCampaignFixture(completion: "retain" | "stop_and_archive" = "stop_and_archive") {
   const { db, svc, hub } = makeHarness();
   const meta = runnerMeta();
   const planner = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
@@ -1707,7 +1772,7 @@ function stopAndArchiveCampaignFixture(completion: "retain" | "stop_and_archive"
     ui_evidence_approval: "human",
     review_round_extension: "human",
   } as const;
-  const created = svc.createSession({
+  const created = await createWithIssueListReading(svc, db, hub, [1440], () => svc.createSession({
     runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
     config: { permissionMode: "orchestrator" }, prompt: "Orchestrate issue 1440.",
     orchestrator: { behavior: { completion } },
@@ -1728,9 +1793,10 @@ function stopAndArchiveCampaignFixture(completion: "retain" | "stop_and_archive"
       },
     },
     validateOrchestratorDefaults: () => null,
-  });
+  }));
   assert.ok(created.ok && created.data, created.error);
-  const parent = created.data;
+  assert.deepEqual(db.getSession(created.data.id)!.orchestratorPolicy!.issueNumbers, [1440], "the reading granted the named issue");
+  const parent = db.getSession(created.data.id)!;
   db.updateSessionStatus(parent.id, "running", Date.now());
   const spawn = (parentSessionId: string, prompt: string) => {
     const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, prompt };
@@ -1753,7 +1819,7 @@ function stopAndArchiveCampaignFixture(completion: "retain" | "stop_and_archive"
 }
 
 test("Stop and Archive retires the original worktree but retains provider-owned and unsafe worktrees as cleanup-pending", async (context) => {
-  const { db, svc, hub, parent, spawn, report, verify } = stopAndArchiveCampaignFixture();
+  const { db, svc, hub, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
   // A temporary forge failure schedules a five-minute retry. Keep that timer owned by this test
   // so it cannot wake after the fixture's database has closed.
   context.mock.timers.enable({ apis: ["setTimeout"] });
@@ -1826,7 +1892,7 @@ test("Stop and Archive retires the original worktree but retains provider-owned 
 });
 
 test("Stop and Archive leaves old runners pending and retries an undelivered archive on reconnect", async () => {
-  const { db, svc, hub, parent, spawn, report, verify } = stopAndArchiveCampaignFixture();
+  const { db, svc, hub, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
   try {
     const child = spawn(parent.id, "Deliver another issue");
     const path = `/worktrees/${child}/original`;
@@ -1859,8 +1925,8 @@ test("Stop and Archive leaves old runners pending and retries an undelivered arc
   }
 });
 
-test("a stopped campaign child with a final report can still be verified, and archived by that verification", () => {
-  const { db, svc, hub, parent, spawn, report, verify } = stopAndArchiveCampaignFixture();
+test("a stopped campaign child with a final report can still be verified, and archived by that verification", async () => {
+  const { db, svc, hub, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
   try {
     const child = spawn(parent.id, "Implement the assigned issue");
     assert.match(hub.sentOfType("start_session").find((message) => message.spec.sessionId === child)?.initialPrompt ?? "",
@@ -1955,8 +2021,8 @@ test("a stopped campaign child with a final report can still be verified, and ar
   }
 });
 
-test("a guardrail-stopped campaign child waits for its runner to confirm the stop (#1466)", () => {
-  const { db, svc, hub, parent, spawn, report, verify } = stopAndArchiveCampaignFixture();
+test("a guardrail-stopped campaign child waits for its runner to confirm the stop (#1466)", async () => {
+  const { db, svc, hub, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
   try {
     const child = spawn(parent.id, "Implement the assigned issue");
     svc.setConfig(child, { costBudgetUsd: 1 });
@@ -1993,8 +2059,8 @@ test("a guardrail-stopped campaign child waits for its runner to confirm the sto
   }
 });
 
-test("a disconnect-stopped campaign child is verifiable only once its runner confirms the stop (#1466)", () => {
-  const { db, svc, parent, spawn, report, verify } = stopAndArchiveCampaignFixture();
+test("a disconnect-stopped campaign child is verifiable only once its runner confirms the stop (#1466)", async () => {
+  const { db, svc, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
   try {
     const restored = spawn(parent.id, "Child the runner still holds");
     const ended = spawn(parent.id, "Child the runner no longer holds");
@@ -5279,8 +5345,150 @@ test("a GitHub merge snapshot's intendedClosures normalize to sorted unique issu
   for (const intendedClosures of [["3713"], ["closes #1"], "#1", [1], Array.from({ length: 101 }, (_, i) => `#${i + 1}`)]) {
     assert.equal(normalizeWorkflowDecisionSnapshot({ ...GITHUB_MERGE, intendedClosures }).status, 400, JSON.stringify(intendedClosures).slice(0, 60));
   }
-  assert.equal(normalizeWorkflowDecisionSnapshot({ ...GITLAB_MERGE, intendedClosures: ["#1"] }).status, 400,
-    "GitLab closes issues by its own rules, which this check does not read");
+  // A GitLab merge declares issues on its own instance (#3762).
+  const gitlab = normalizeWorkflowDecisionSnapshot({ ...GITLAB_MERGE, intendedClosures: [
+    "#9", "sibling#2", "Platform/Other#3", "gitlab.example.com/platform/agents/wollipog#9",
+    "https://gitlab.example.com/platform/agents/wollipog/-/issues/1"] });
+  assert.deepEqual(gitlab.data && "intendedClosures" in gitlab.data && gitlab.data.intendedClosures, [
+    "gitlab.example.com/platform/agents/sibling#2", "gitlab.example.com/platform/agents/wollipog#1",
+    "gitlab.example.com/platform/agents/wollipog#9", "gitlab.example.com/platform/other#3"]);
+  assert.deepEqual(normalizeWorkflowDecisionSnapshot({ ...GITLAB_MERGE, intendedClosures: [] }).data, GITLAB_MERGE);
+  for (const intendedClosures of [["https://github.com/picoduck/wollipog/issues/1"], ["https://other.example.com/a/b/-/issues/1"], ["3"]]) {
+    assert.equal(normalizeWorkflowDecisionSnapshot({ ...GITLAB_MERGE, intendedClosures }).status, 400, JSON.stringify(intendedClosures));
+  }
+});
+
+test("a GitLab merge is requested and armed only while GitLab would close exactly its intendedClosures (#3762)", async () => {
+  const { db, hub } = makeHarness();
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  try {
+    const meta = runnerMeta();
+    const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    orchestrator.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const parent = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "off",
+    });
+    assert.ok(parent.ok && parent.data, parent.error);
+    db.updateSessionStatus(parent.data.id, "running", Date.now());
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title: "GitLab Child" };
+    let created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    if (created.status === 428) {
+      assert.ok(svc.approve(parent.data.id, db.getSession(parent.data.id)!.pendingApproval!.requestId, "allow").ok);
+      created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    }
+    assert.ok(created.ok && created.data, created.error);
+    const child = created.data;
+    db.updateSessionStatus(child.id, "running", Date.now());
+    assert.ok(svc.setParentControlPolicy(parent.data.id, {
+      implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "human",
+      follow_up_issue_publication: "human", ui_evidence_approval: "human", review_round_extension: "human",
+    }, 0).ok);
+
+    const reads: Array<Extract<ControlPlaneToRunner, { type: "gitlab_merge_closures" }>> = [];
+    let answer: Record<string, unknown> | Error = { ok: true, check: { checkedAt: 5, closures: [] } };
+    hub.gitlabMergeClosures = async (msg) => {
+      reads.push(msg);
+      if (answer instanceof Error) throw answer;
+      return { type: "gitlab_merge_closures_result", requestId: msg.requestId, sessionId: msg.sessionId, ...answer } as RunnerRequestResult;
+    };
+    const preflights: ControlPlaneToRunner[] = [];
+    hub.requestHandler = async (msg) => {
+      if (msg.type !== "gitlab_merge_preflight") throw new Error(`unexpected ${msg.type}`);
+      preflights.push(msg);
+      return { type: "gitlab_merge_preflight_result", requestId: msg.requestId, sessionId: msg.sessionId, ok: true } as RunnerRequestResult;
+    };
+    const issue = (n: number) => `gitlab.example.com/platform/agents/wollipog#${n}`;
+    const negated = { issue: issue(12), sources: ["description"], excerpt: "This MR is not closing #12 yet." };
+    const delivered = { issue: issue(3762), sources: ["description", "linked"], excerpt: "Implements #3762." };
+    const ask = (key: string, snapshot: Record<string, unknown> = GITLAB_MERGE) =>
+      svc.createWorkflowDecisionWithVideo(child.id, { requestId: key, resourceKey: key,
+        resourceSnapshot: snapshot as unknown as WorkflowDecisionResourceSnapshot });
+
+    // An undeclared closure, here an "-ing" form, never reaches review, and is named with its line.
+    answer = { ok: true, check: { checkedAt: 5, closures: [negated] } };
+    const refused = await ask("negated");
+    assert.equal(refused.status, 409);
+    assert.match(refused.error ?? "", new RegExp(`merge request would close an issue that intendedClosures does not list: ${issue(12)}, ` +
+      "from the description: “This MR is not closing #12 yet\\.”", "u"));
+    assert.match(refused.error ?? "", /GitLab closes an issue when close, fix, resolve or implement/u);
+    assert.deepEqual(reads[0], { type: "gitlab_merge_closures", requestId: reads[0]!.requestId, sessionId: child.id,
+      repository: GITLAB_MERGE.repository, pullRequest: 7, headSha: GITLAB_MERGE.headSha });
+    assert.deepEqual(svc.workflowDecisions(child.id, undefined, 10).data?.decisions, [], "no decision was created");
+
+    // GitLab's own list (from the title, commits or an instance's own pattern) is a closure too.
+    answer = { ok: true, check: { checkedAt: 5, closures: [{ issue: issue(9), sources: ["linked"] }] } };
+    assert.match((await ask("linked")).error ?? "", /wollipog#9, which GitLab reports the merge request closes/u);
+    // A declared closure GitLab would not make.
+    answer = { ok: true, check: { checkedAt: 5, closures: [] } };
+    assert.match((await ask("unmade", { ...GITLAB_MERGE, intendedClosures: ["#3762"] })).error ?? "",
+      /intendedClosures lists gitlab\.example\.com\/platform\/agents\/wollipog#3762, but merging this merge request would not close it/u);
+    for (const [refusal, pattern] of [["stale_head", /no longer matches the merge request: GitLab said stale_head/u],
+      ["unavailable", /GitLab could not be read .*GitLab said unavailable Try again/u]] as const) {
+      answer = { ok: false, refusal, reason: `GitLab said ${refusal}` };
+      assert.match((await ask(`refused-${refusal}`)).error ?? "", pattern);
+    }
+    answer = new Error("runner did not respond in time");
+    assert.match((await ask("silent")).error ?? "", /the runner did not answer/u);
+    // A GitHub-shaped issue is not a GitLab merge's closure.
+    answer = { ok: true, check: { checkedAt: 5, closures: [{ issue: "picoduck/wollipog#9", sources: ["linked"] }] } };
+    assert.match((await ask("malformed")).error ?? "", /the runner's answer was incomplete/u);
+    assert.deepEqual(svc.workflowDecisions(child.id, undefined, 10).data?.decisions, [], "nothing unread or mismatched was created");
+
+    // A merge that closes exactly what it declares is created, and records what was read.
+    answer = { ok: true, check: { checkedAt: 5, closures: [delivered] } };
+    const intended = await ask("intended", { ...GITLAB_MERGE, intendedClosures: ["#3762"] });
+    assert.ok(intended.ok && intended.data, intended.error);
+    assert.deepEqual(intended.data.resourceSnapshot, { ...GITLAB_MERGE, intendedClosures: [issue(3762)] });
+    assert.deepEqual(intended.data.closingReferenceCheck, { checkedAt: 5, closures: [delivered] });
+
+    // Arming reads GitLab again, alongside the merge preflight.
+    const snapshot = intended.data.resourceSnapshot as Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>;
+    const command = canonicalPrMergeEnqueueCommand(snapshot);
+    const approve = async (key: string) => {
+      const decision = await ask(key, snapshot);
+      assert.ok(decision.ok && decision.data, decision.error);
+      assert.ok(svc.resolveDescendantRequest(parent.data!.id, child.id, decision.data.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+      return decision.data.occurrenceId;
+    };
+    const consume = (occurrenceId: string) => svc.consumeWorkflowDecision(child.id, occurrenceId,
+      { resourceSnapshot: snapshot, action: { kind: "pr_merge_enqueue", command } });
+    const edited = await approve("edited-after-approval");
+    answer = { ok: true, check: { checkedAt: 6, closures: [negated, delivered] } };
+    const revoked = await consume(edited);
+    assert.equal(revoked.status, 409);
+    assert.match(revoked.error ?? "", /wollipog#12.*This approval was revoked, so nothing was armed/u);
+    assert.equal(db.workflowDecisionByOccurrence(edited)?.status, "revoked");
+    assert.equal(db.workflowDecisionByOccurrence(edited)?.actionAdmission, undefined);
+    assert.equal(preflights.length, 1, "the merge preflight ran alongside the read");
+
+    answer = { ok: true, check: { checkedAt: 6, closures: [delivered] } };
+    const retried = await approve("unreadable-then-armed");
+    answer = { ok: false, refusal: "unavailable", reason: "gitlab.example.com could not be reached." };
+    const unreadable = await consume(retried);
+    assert.match(unreadable.error ?? "", /gitlab\.example\.com could not be reached\. Try again\./u);
+    assert.equal(db.workflowDecisionByOccurrence(retried)?.status, "approved", "an unreadable GitLab proves nothing; retry is allowed");
+    answer = { ok: true, check: { checkedAt: 7, closures: [delivered] } };
+    const armed = await consume(retried);
+    assert.ok(armed.ok, armed.error);
+    assert.equal(db.workflowDecisionByOccurrence(retried)?.actionAdmission?.command, command);
+
+    // A runner that predates the check is not asked; its decision says nothing was read.
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.gitlabMergeClosingReferences - 1);
+    const asked = reads.length;
+    answer = { ok: true, check: { checkedAt: 8, closures: [negated] } };
+    const legacy = await ask("legacy-runner");
+    assert.ok(legacy.ok && legacy.data, legacy.error);
+    assert.equal(legacy.data.closingReferenceCheck, undefined);
+    assert.equal(reads.length, asked, "a pre-v295 runner receives no gitlab_merge_closures");
+  } finally {
+    db.close();
+  }
 });
 
 test("a GitHub merge is requested and armed only while GitHub would close exactly its intendedClosures (#3713)", async () => {
@@ -21871,6 +22079,154 @@ test("capability gates reject old/unknown runners before requests or cache mutat
   assert.equal(files.capabilityRequirement?.requiredRunnerProtocolVersion, 16);
 });
 
+/* Workspace search options (#1263 match, #4129 fuzzyWithDirectories; pinned by #4254). */
+
+type WorkspaceSearchReply = Omit<Extract<RunnerRequestResult, { type: "search_workspace_references_result" }>, "type" | "requestId">;
+
+/** A seeded session whose runner answers every workspace search with `reply`; returns what it sent. */
+function workspaceSearchHarness(reply: WorkspaceSearchReply = { ok: true, results: [] }) {
+  const harness = makeHarness();
+  const sessionId = seedSession(harness.svc, harness.hub);
+  harness.hub.requestHandler = (message) => {
+    if (message.type !== "search_workspace_references") throw new Error(`unexpected request ${message.type}`);
+    return { type: "search_workspace_references_result", requestId: message.requestId, ...reply };
+  };
+  const sent = () => harness.hub.sentOfType("search_workspace_references")
+    .map(({ requestId, ...rest }) => {
+      assert.match(requestId, /^wsr_search_/u);
+      return rest;
+    });
+  return { ...harness, sessionId, sent };
+}
+
+test("workspace search forwards match and fuzzyWithDirectories only when given, so an older runner sees a substring request", async () => {
+  const { svc, sessionId, sent } = workspaceSearchHarness();
+  assert.equal((await svc.searchWorkspaceReferences(sessionId, "src/app")).ok, true);
+  assert.equal((await svc.searchWorkspaceReferences(sessionId, "sapp", "fuzzy")).ok, true);
+  assert.equal((await svc.searchWorkspaceReferences(sessionId, "sapp", undefined, true)).ok, true);
+  assert.equal((await svc.searchWorkspaceReferences(sessionId, "sapp", "fuzzy", true)).ok, true);
+  assert.deepEqual(sent(), [
+    { type: "search_workspace_references", sessionId, query: "src/app" },
+    { type: "search_workspace_references", sessionId, query: "sapp", match: "fuzzy" },
+    { type: "search_workspace_references", sessionId, query: "sapp", fuzzyWithDirectories: true },
+    { type: "search_workspace_references", sessionId, query: "sapp", match: "fuzzy", fuzzyWithDirectories: true },
+  ]);
+  for (const message of sent().slice(0, 2)) {
+    assert.equal("fuzzyWithDirectories" in message, false, "an unrequested folder option is omitted, not false");
+  }
+  assert.equal("match" in sent()[0]!, false, "a substring search carries no match key");
+});
+
+test("workspace search echoes match only when the runner applied it", async () => {
+  const results = [{ path: "src/app.ts", isDirectory: false }];
+  const applied = workspaceSearchHarness({ ok: true, results, match: "fuzzy" });
+  assert.deepEqual(await applied.svc.searchWorkspaceReferences(applied.sessionId, "sapp", "fuzzy"),
+    { ok: true, status: 200, data: { results, truncated: false, match: "fuzzy" } });
+
+  // A runner that predates `match` answers with substring results and no echo.
+  const older = workspaceSearchHarness({ ok: true, results });
+  assert.deepEqual(await older.svc.searchWorkspaceReferences(older.sessionId, "sapp", "fuzzy"),
+    { ok: true, status: 200, data: { results, truncated: false } });
+
+  // An echo nobody asked for is not reported either: the request was a substring search.
+  const unrequested = workspaceSearchHarness({ ok: true, results, match: "fuzzy", fuzzyWithDirectories: true });
+  assert.deepEqual(await unrequested.svc.searchWorkspaceReferences(unrequested.sessionId, "app"),
+    { ok: true, status: 200, data: { results, truncated: false } });
+});
+
+test("workspace search echoes fuzzyWithDirectories only when the runner applied both it and fuzzy matching", async () => {
+  const results = [{ path: "src", isDirectory: true }, { path: "src/app.ts", isDirectory: false }];
+  const applied = workspaceSearchHarness({ ok: true, results, match: "fuzzy", fuzzyWithDirectories: true });
+  assert.deepEqual(await applied.svc.searchWorkspaceReferences(applied.sessionId, "sapp", undefined, true),
+    { ok: true, status: 200, data: { results, truncated: false, match: "fuzzy", fuzzyWithDirectories: true } });
+  const appliedWithMatch = workspaceSearchHarness({ ok: true, results, match: "fuzzy", fuzzyWithDirectories: true });
+  assert.deepEqual(await appliedWithMatch.svc.searchWorkspaceReferences(appliedWithMatch.sessionId, "sapp", "fuzzy", true),
+    { ok: true, status: 200, data: { results, truncated: false, match: "fuzzy", fuzzyWithDirectories: true } });
+
+  const partialReplies: WorkspaceSearchReply[] = [
+    // A runner that predates both options: a plain substring answer.
+    { ok: true, results },
+    // A runner that knows `match` but predates `fuzzyWithDirectories` echoes neither for this request.
+    { ok: true, results, match: "fuzzy" },
+    // A folder echo without the fuzzy echo is not an applied fuzzy search.
+    { ok: true, results, fuzzyWithDirectories: true },
+  ];
+  for (const reply of partialReplies) {
+    const { svc, sessionId } = workspaceSearchHarness(reply);
+    assert.deepEqual(await svc.searchWorkspaceReferences(sessionId, "sapp", undefined, true),
+      { ok: true, status: 200, data: { results, truncated: false } }, JSON.stringify(reply));
+    // Asking for match as well does not let a partial echo through as a plain fuzzy answer.
+    const withMatch = workspaceSearchHarness(reply);
+    assert.deepEqual(await withMatch.svc.searchWorkspaceReferences(withMatch.sessionId, "sapp", "fuzzy", true),
+      { ok: true, status: 200, data: { results, truncated: false } }, `match + ${JSON.stringify(reply)}`);
+  }
+});
+
+test("workspace search passes limit through only for entries or results, and truncated only when the runner says so", async () => {
+  const cases: Array<[reply: WorkspaceSearchReply, expected: Record<string, unknown>]> = [
+    [{ ok: true, results: [], truncated: true, match: "fuzzy", limit: "entries" }, { truncated: true, limit: "entries" }],
+    [{ ok: true, results: [], truncated: true, match: "fuzzy", limit: "results" }, { truncated: true, limit: "results" }],
+    [{ ok: true, results: [], truncated: true, match: "fuzzy" }, { truncated: true }],
+    [{ ok: true, results: [], truncated: true, match: "fuzzy", limit: "bytes" as never }, { truncated: true }],
+    [{ ok: true, results: [], truncated: "true" as never, match: "fuzzy", limit: "entries" }, { truncated: false, limit: "entries" }],
+    [{ ok: true, results: [], truncated: false, match: "fuzzy" }, { truncated: false }],
+    [{ ok: true, match: "fuzzy" }, { truncated: false }],
+  ];
+  for (const [reply, expected] of cases) {
+    const { svc, sessionId } = workspaceSearchHarness(reply);
+    assert.deepEqual(await svc.searchWorkspaceReferences(sessionId, "sapp", "fuzzy"),
+      { ok: true, status: 200, data: { results: [], match: "fuzzy", ...expected } }, JSON.stringify(reply));
+  }
+  // A substring search keeps a runner-reported limit as well; only the echo depends on the option.
+  const substring = workspaceSearchHarness({ ok: true, results: [], truncated: true, limit: "results" });
+  assert.deepEqual(await substring.svc.searchWorkspaceReferences(substring.sessionId, "app"),
+    { ok: true, status: 200, data: { results: [], truncated: true, limit: "results" } });
+});
+
+test("workspace search keeps its 404, 409, capability, 502 and 504 failure statuses", async () => {
+  const missing = workspaceSearchHarness();
+  assert.deepEqual(await missing.svc.searchWorkspaceReferences("no-such-session", "app", "fuzzy"),
+    { ok: false, status: 404, error: "session not found" });
+  assert.deepEqual(missing.sent(), []);
+
+  const offline = workspaceSearchHarness();
+  offline.hub.online = false;
+  assert.deepEqual(await offline.svc.searchWorkspaceReferences(offline.sessionId, "app", "fuzzy"),
+    { ok: false, status: 409, error: "runner is offline" });
+  assert.deepEqual(offline.sent(), []);
+
+  const old = workspaceSearchHarness();
+  old.db.registerRunner(runnerMeta(), Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.workspaceReferences - 1);
+  const unsupported = await old.svc.searchWorkspaceReferences(old.sessionId, "app", undefined, true);
+  assert.equal(unsupported.ok, false);
+  assert.equal(unsupported.status, 409);
+  assert.match(unsupported.error ?? "", /workspace references/u);
+  assert.equal(unsupported.capabilityRequirement?.requiredRunnerProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.workspaceReferences);
+  assert.deepEqual(old.sent(), [], "an unsupported runner is never asked");
+
+  const refused = workspaceSearchHarness({ ok: false, error: "workspace root is unavailable" });
+  assert.deepEqual(await refused.svc.searchWorkspaceReferences(refused.sessionId, "app", "fuzzy"),
+    { ok: false, status: 502, error: "workspace root is unavailable" });
+  const refusedSilently = workspaceSearchHarness({ ok: false });
+  assert.deepEqual(await refusedSilently.svc.searchWorkspaceReferences(refusedSilently.sessionId, "app"),
+    { ok: false, status: 502, error: "could not search workspace paths" });
+
+  const mismatched = workspaceSearchHarness();
+  mismatched.hub.requestHandler = (message) => ({
+    type: "list_session_files_result", requestId: message.type === "search_workspace_references" ? message.requestId : "x", ok: true,
+  }) as RunnerRequestResult;
+  assert.deepEqual(await mismatched.svc.searchWorkspaceReferences(mismatched.sessionId, "app"),
+    { ok: false, status: 502, error: "unexpected runner reply" });
+
+  const timedOut = workspaceSearchHarness();
+  timedOut.hub.requestHandler = () => { throw new RunnerRequestTimeoutError(); };
+  const timeout = await timedOut.svc.searchWorkspaceReferences(timedOut.sessionId, "app", "fuzzy");
+  assert.equal(timeout.ok, false);
+  assert.equal(timeout.status, 504);
+  assert.equal(timeout.error, new RunnerRequestTimeoutError().message);
+  assert.equal(timedOut.sent().length, 1);
+});
+
 test("Pi discovery and adoption fail closed until the runner supports managed transcript copies", async () => {
   const { db, hub, svc } = makeHarness();
   const metadata = runnerMeta();
@@ -25122,6 +25478,36 @@ test("operator video validation is confined to one controller and revokes review
     assert.equal(h.db.workflowDecisionByOccurrence(delegated.data.occurrenceId)?.status, "revoked");
     assert.equal(h.db.validUiEvidenceReviewReceipts(
       delegated.data.occurrenceId, h.parent.id, Date.now()).length, 0);
+  } finally { h.db.close(); }
+});
+
+test("a video an owner rule kept is never derived into Orchestrator-owned frames under a new key (#4137 review)", async (t) => {
+  if (!await shortVideoDecoderAvailable()) {
+    assert.notEqual(process.env.CI, "true", "CI must provision an executable isolated FFmpeg decoder");
+    return t.skip("no isolated video decoder on this host");
+  }
+  const h = uiEvidenceReviewHarness(PROTOCOL_VERSION, true, undefined, true);
+  const inside = new SessionsService(h.db, h.hub as unknown as Hub, NOOP_LOG,
+    undefined, undefined, undefined, undefined, undefined, undefined, true, h.parent.id);
+  try {
+    const child = h.createChild("Ruled Video Child");
+    const attached = h.svc.attachSessionVideo(child.id, {
+      name: "kept.webm", mimeType: "video/webm", data: transientVideoBytes().toString("base64"),
+    }, { kind: "agent", id: child.id });
+    assert.ok(attached.ok && attached.data, attached.error);
+    const item = { evidenceId: "kept", artifactId: attached.data.artifactId, sha256: attached.data.sha256, mediaType: "video/webm" };
+    const ownerRule = { source: "AGENTS.md", quote: "A person reviews every video before merge." };
+    const ruled = await inside.createWorkflowDecisionWithVideo(child.id, { requestId: "ruled-video", resourceKey: "ruled-video",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [item] }, ownerRule });
+    assert.ok(ruled.ok && ruled.data, ruled.error);
+    assert.deepEqual([ruled.data.authority, ruled.data.ownerRule], ["human", ownerRule]);
+    // The same video under a new requestId and key, without the rule, still goes to the owner.
+    const again = await inside.createWorkflowDecisionWithVideo(child.id, { requestId: "same-video", resourceKey: "another-key",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [item] } });
+    assert.ok(again.ok && again.data, again.error);
+    assert.deepEqual([again.data.authority, again.data.ownerRule], ["human", ownerRule]);
+    assert.equal(again.data.resourceSnapshot.category === "ui_evidence_approval" && again.data.resourceSnapshot.videoReview, undefined,
+      "no frames are derived for the Orchestrator");
   } finally { h.db.close(); }
 });
 
@@ -28892,10 +29278,10 @@ test("issue closure requires an exact human decision and executes one durable ac
         permissionModes: ["default", "orchestrator"],
       };
       db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
-      const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
+      const created = await createWithIssueListReading(svc, db, hub, mode === "multi_pending" ? [123, 124] : [123], () => svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
         agentId: "test-orchestrator", config: { permissionMode: "orchestrator" },
         prompt: mode === "multi_pending" ? "Orchestrate issues 123 and 124." : "Orchestrate issues 123." },
-        undefined, undefined, false, false, false, { defaultOwnerUserId: "owner" });
+        undefined, undefined, false, false, false, { defaultOwnerUserId: "owner" }));
       assert.ok(created.ok && created.data, created.error);
       const id = created.data.id;
       db.updateSessionStatus(id, "running", Date.now());
@@ -29024,9 +29410,9 @@ test("a refused issue closure records why, keeps the runner's sanitized message,
       meta.agents.find((agent) => agent.id === "test-orchestrator")!.capabilities = { models: [], effortLevels: [], slashCommands: [],
         supportsImages: false, supportsApprovals: true, permissionModes: ["default", "orchestrator"] };
       db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
-      const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      const created = await createWithIssueListReading(svc, db, hub, [123], () => svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
         config: { permissionMode: "orchestrator" }, prompt: "Orchestrate issues 123." },
-      undefined, undefined, false, false, false, { defaultOwnerUserId: "owner" });
+      undefined, undefined, false, false, false, { defaultOwnerUserId: "owner" }));
       assert.ok(created.ok && created.data, created.error);
       const id = created.data.id;
       db.updateSessionStatus(id, "running", Date.now());
@@ -29086,7 +29472,7 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
     "follow_up_prompt", "follow_up_decision", "transitive_follow_up_prompt", "upstream_follow_up_prompt",
     "sibling_follow_up_prompt", "linked_unrelated_prompt", "other_issue_follow_up_decision", "reassigned_into_lineage",
     "issue_toggled", "readjudicated"]) {
-    const { db, svc, hub, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+    const { db, svc, hub, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
     try {
       const plan = svc.recordCampaignPlan(parent.id, { items: [
         { key: "issue", issue: { repository: "picoduck/wollipog", number: 1440 } },
@@ -29244,8 +29630,8 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
   }
 });
 
-test("child creation records the named campaign work item before the launch is sent (#3106)", () => {
-  const { db, svc, hub, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("child creation records the named campaign work item before the launch is sent (#3106)", async () => {
+  const { db, svc, hub, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "first" }, { key: "second" }, { key: "dropped" }],
       planComplete: true });
@@ -29359,7 +29745,7 @@ test("child creation records the named campaign work item before the launch is s
 });
 
 test("a child created with an unrelated work item never revokes an approved issue closure (#3106)", async () => {
-  const { db, svc, hub, parent } = stopAndArchiveCampaignFixture("retain");
+  const { db, svc, hub, parent } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, { items: [
       { key: "issue", issue: { repository: "picoduck/wollipog", number: 1440 } }, { key: "unrelated" },
@@ -29409,8 +29795,8 @@ test("a child created with an unrelated work item never revokes an approved issu
   } finally { db.close(); }
 });
 
-test("issue-closure attribution treats work recorded before its history as related (#3084)", () => {
-  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("issue-closure attribution treats work recorded before its history as related (#3084)", async () => {
+  const { db, svc, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     // Emulate a database from before attribution history: no triggers, marker, or history rows.
     db.db.exec(`DROP TRIGGER campaign_work_item_issue_recorded; DROP TRIGGER campaign_work_item_issue_changed;
@@ -29480,8 +29866,8 @@ function ledgerItem(svc: SessionsService, campaignId: string, key: string) {
   return detail.data.item;
 }
 
-test("campaign work ledger records plans, attempts, and delivery that survive reassignment and child deletion (#2417)", () => {
-  const { db, svc, hub, parent, spawn, report } = stopAndArchiveCampaignFixture("retain");
+test("campaign work ledger records plans, attempts, and delivery that survive reassignment and child deletion (#2417)", async () => {
+  const { db, svc, hub, parent, spawn, report } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, {
       items: [
@@ -29582,8 +29968,8 @@ test("campaign work ledger records plans, attempts, and delivery that survive re
   }
 });
 
-test("work-item delivery requires an open attempt and leaves session verification untouched when refused (#2417)", () => {
-  const { db, svc, parent, spawn, report } = stopAndArchiveCampaignFixture("retain");
+test("work-item delivery requires an open attempt and leaves session verification untouched when refused (#2417)", async () => {
+  const { db, svc, parent, spawn, report } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "a" }, { key: "b" }], planComplete: true });
     const [a, b] = plan.data!.items;
@@ -29625,8 +30011,8 @@ test("work-item delivery requires an open attempt and leaves session verificatio
   }
 });
 
-test("recommendations record origins and dispositions without inflating committed work (#2417)", () => {
-  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("recommendations record origins and dispositions without inflating committed work (#2417)", async () => {
+  const { db, svc, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "origin" }], planComplete: true });
     const originId = plan.data!.items[0]!.workItemId;
@@ -29690,8 +30076,8 @@ test("recommendations record origins and dispositions without inflating committe
   }
 });
 
-test("campaign work ledger writes grant no dispatch, publication, merge, or decision authority (#2417)", () => {
-  const { db, svc, hub, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("campaign work ledger writes grant no dispatch, publication, merge, or decision authority (#2417)", async () => {
+  const { db, svc, hub, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const child = spawn(parent.id, "Implement");
     const mergeSnapshot = {
@@ -29740,8 +30126,8 @@ test("campaign work ledger writes grant no dispatch, publication, merge, or deci
   }
 });
 
-test("campaign work ledger operations are Orchestrator-only, root-keyed, and bounded (#2417)", () => {
-  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("campaign work ledger operations are Orchestrator-only, root-keyed, and bounded (#2417)", async () => {
+  const { db, svc, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const child = spawn(parent.id, "Ordinary child");
     assert.equal(svc.recordCampaignPlan(child, { items: [{ key: "x" }], planComplete: true }).status, 404,
@@ -29787,8 +30173,8 @@ test("campaign work ledger operations are Orchestrator-only, root-keyed, and bou
   }
 });
 
-test("campaign work ledger accepts host-qualified GitLab issue and merge request refs in nested namespaces (#3539)", () => {
-  const { db, svc, parent } = stopAndArchiveCampaignFixture("retain");
+test("campaign work ledger accepts host-qualified GitLab issue and merge request refs in nested namespaces (#3539)", async () => {
+  const { db, svc, parent } = await stopAndArchiveCampaignFixture("retain");
   try {
     const project = "gitlab.example.com/group/subgroup/project";
     const plan = svc.recordCampaignPlan(parent.id, {
@@ -29824,8 +30210,8 @@ test("campaign work ledger accepts host-qualified GitLab issue and merge request
   }
 });
 
-test("campaign work ledger review regressions: no-op detection, linkage, dependency batches, cursors, and sorting (#2417)", () => {
-  const { db, svc, parent, spawn, report } = stopAndArchiveCampaignFixture("retain");
+test("campaign work ledger review regressions: no-op detection, linkage, dependency batches, cursors, and sorting (#2417)", async () => {
+  const { db, svc, parent, spawn, report } = await stopAndArchiveCampaignFixture("retain");
   try {
     // A dependency batch is validated against its final graph, whatever order it lists items in.
     const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "a" }, { key: "b", dependsOnKeys: ["a"] }], planComplete: false });
@@ -29908,8 +30294,8 @@ test("campaign work ledger review regressions: no-op detection, linkage, depende
   }
 });
 
-test("campaign work ledger retries match the exact report identity and normalized reasons (#2417)", () => {
-  const { db, svc, parent, spawn, report } = stopAndArchiveCampaignFixture("retain");
+test("campaign work ledger retries match the exact report identity and normalized reasons (#2417)", async () => {
+  const { db, svc, parent, spawn, report } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "a" }, { key: "b" }], planComplete: false });
     const [a, b] = plan.data!.items;
@@ -29949,8 +30335,8 @@ test("campaign work ledger retries match the exact report identity and normalize
   }
 });
 
-test("a nested Orchestrator's work-item verification lands in the root ledger and refreshes every campaign view (#2417, #1462)", () => {
-  const { db, svc, hub, parent, report } = stopAndArchiveCampaignFixture("retain");
+test("a nested Orchestrator's work-item verification lands in the root ledger and refreshes every campaign view (#2417, #1462)", async () => {
+  const { db, svc, hub, parent, report } = await stopAndArchiveCampaignFixture("retain");
   try {
     const nested = db.createSession({
       id: "nested-ledger-orchestrator", parentSessionId: parent.id, runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
@@ -30009,8 +30395,8 @@ function knownUsd(metric: { availability: string; value?: { usd: number } } | un
   return Math.round(metric.value!.usd * 1_000_000) / 1_000_000;
 }
 
-test("independent Codex child-thread usage is attributed to the attempt, while ordinary subagent usage stays out (#2417, #2455)", () => {
-  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("independent Codex child-thread usage is attributed to the attempt, while ordinary subagent usage stays out (#2417, #2455)", async () => {
+  const { db, svc, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "codex" }], planComplete: true });
     const child = spawn(parent.id, "Delegate to Codex threads");
@@ -30030,8 +30416,8 @@ test("independent Codex child-thread usage is attributed to the attempt, while o
   }
 });
 
-test("campaign usage reaches exactly one bucket per record and keeps its attempt through reassignment, replay, and deletion (#2417)", () => {
-  const { db, svc, parent, spawn, report } = stopAndArchiveCampaignFixture("retain");
+test("campaign usage reaches exactly one bucket per record and keeps its attempt through reassignment, replay, and deletion (#2417)", async () => {
+  const { db, svc, parent, spawn, report } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "a" }, { key: "b" }, { key: "nested" }], planComplete: true });
     const [a, b, nestedItem] = plan.data!.items;
@@ -30125,8 +30511,8 @@ test("campaign usage reaches exactly one bucket per record and keeps its attempt
   }
 });
 
-test("waiting before the first attempt counts toward Waiting Time but not Item Elapsed (#2417)", () => {
-  const { db, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("waiting before the first attempt counts toward Waiting Time but not Item Elapsed (#2417)", async () => {
+  const { db, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const ledger = db.campaignWorkLedger;
     const minute = 60_000;
@@ -30153,8 +30539,8 @@ test("waiting before the first attempt counts toward Waiting Time but not Item E
   }
 });
 
-test("campaign elapsed is wall-clock, not a sum of concurrent items, and item times replay durable intervals (#2417)", () => {
-  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("campaign elapsed is wall-clock, not a sum of concurrent items, and item times replay durable intervals (#2417)", async () => {
+  const { db, svc, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const ledger = db.campaignWorkLedger;
     const minute = 60_000;
@@ -30218,8 +30604,8 @@ test("campaign elapsed is wall-clock, not a sum of concurrent items, and item ti
   }
 });
 
-test("the campaign projection records completion when it first reaches verified_complete and clears it on reopening (#2417)", () => {
-  const { db, svc, parent, spawn, report, verify } = stopAndArchiveCampaignFixture("retain");
+test("the campaign projection records completion when it first reaches verified_complete and clears it on reopening (#2417)", async () => {
+  const { db, svc, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture("retain");
   try {
     const child = spawn(parent.id, "Only child");
     svc.onSessionStatus(child, "idle");
@@ -30237,8 +30623,8 @@ test("the campaign projection records completion when it first reaches verified_
   }
 });
 
-test("time and cost before recording began read as unavailable or partial, never zero, and unpriced usage is a lower bound (#2417)", () => {
-  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("time and cost before recording began read as unavailable or partial, never zero, and unpriced usage is a lower bound (#2417)", async () => {
+  const { db, svc, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "a", dispatchState: "queued" }, { key: "idle" }], planComplete: true });
     const child = spawn(parent.id, "Deliver a");
@@ -30283,8 +30669,8 @@ test("time and cost before recording began read as unavailable or partial, never
   }
 });
 
-test("starting recording seeds existing items and open attempts once, so later intervals are measured (#2417)", () => {
-  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("starting recording seeds existing items and open attempts once, so later intervals are measured (#2417)", async () => {
+  const { db, svc, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, {
       items: [{ key: "a", dispatchState: "queued" }, { key: "orphaned", dispatchState: "queued" }], planComplete: true,
@@ -30316,8 +30702,8 @@ test("starting recording seeds existing items and open attempts once, so later i
   }
 });
 
-test("the summary embedded in the root's view hides cost from contributors its whole audience cannot read (#2417)", () => {
-  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("the summary embedded in the root's view hides cost from contributors its whole audience cannot read (#2417)", async () => {
+  const { db, svc, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "a" }], planComplete: true });
     const child = spawn(parent.id, "Deliver a");
@@ -30337,8 +30723,8 @@ test("the summary embedded in the root's view hides cost from contributors its w
   }
 });
 
-test("campaign cost names Claude turns that billed a running total as uncertain (#4069)", () => {
-  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("campaign cost names Claude turns that billed a running total as uncertain (#4069)", async () => {
+  const { db, svc, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const itemId = svc.recordCampaignPlan(parent.id, { items: [{ key: "a" }], planComplete: true }).data!.items[0]!.workItemId;
     const child = spawn(parent.id, "Deliver a");
@@ -30363,8 +30749,8 @@ test("campaign cost names Claude turns that billed a running total as uncertain 
   }
 });
 
-test("campaign cost follows session access: a hidden contributor hides its bucket, attempt, and item (#2417)", () => {
-  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("campaign cost follows session access: a hidden contributor hides its bucket, attempt, and item (#2417)", async () => {
+  const { db, svc, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "a" }], planComplete: true });
     const itemId = plan.data!.items[0]!.workItemId;
@@ -30484,6 +30870,7 @@ test("human campaign scope recovery, additions, denial, removal and closure use 
       models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true, permissionModes: ["default", "orchestrator"],
     };
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    svc.setDecisionRuntime(epicSeedReading(db));
     const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
       config: { permissionMode: "orchestrator" }, prompt: "Orchestrate epic #123." }, undefined, undefined, false, false, false, { defaultOwnerUserId: "owner" });
     assert.ok(created.ok && created.data, created.error);
@@ -30502,7 +30889,10 @@ test("human campaign scope recovery, additions, denial, removal and closure use 
       }
       throw new Error("unexpected fixture command");
     };
-    assert.equal(db.getSession(id)!.orchestratorPolicy!.issueScopeProposalEpic,123,"the proposal seed is stored before any runner echo");
+    // The seed is pending from creation, before any runner echo; the Decision Model's reading then names the epic (#4104).
+    assert.equal(db.getSession(id)!.orchestratorPolicy!.issueScopeSeed!.state,"pending","the seed is held before any runner echo");
+    await svc.campaignIssueScopeSeedSettled(id);
+    assert.equal(db.getSession(id)!.orchestratorPolicy!.issueScopeProposalEpic,123);
     const beforeScopeChild = svc.createSession({runnerId:RUNNER_ID,workspaceId:WORKSPACE_ID,agentId:AGENT_ID,prompt:"Fix issue 124.",config:{}},undefined,undefined,false,false,false,{parentSessionId:id});
     assert.equal(beforeScopeChild.ok,false,"epic delegation requires confirmed issue scope");
     assert.match(beforeScopeChild.error!,/Confirm the epic/);
@@ -30650,7 +31040,7 @@ test("scope approval cannot authorize a stopped Orchestrator in another reposito
     meta.workspaces.push({id:"other-workspace",name:"Other",path:"/repos/other"});
     meta.agents.find((a)=>a.id==="test-orchestrator")!.capabilities={models:[],effortLevels:[],slashCommands:[],supportsImages:false,supportsApprovals:true,permissionModes:["default","orchestrator"]};
     db.registerRunner(meta,Date.now(),PROTOCOL_VERSION);
-    const created=svc.createSession({runnerId:RUNNER_ID,workspaceId:WORKSPACE_ID,agentId:"test-orchestrator",config:{permissionMode:"orchestrator"},prompt:"Orchestrate issues #12 and #13.",orchestrator:{execution:{strictProjectIsolation:false}}},undefined,undefined,false,false,false,{defaultOwnerUserId:"owner"});
+    const created=await createWithIssueListReading(svc,db,hub,[12,13],()=>svc.createSession({runnerId:RUNNER_ID,workspaceId:WORKSPACE_ID,agentId:"test-orchestrator",config:{permissionMode:"orchestrator"},prompt:"Orchestrate issues #12 and #13.",orchestrator:{execution:{strictProjectIsolation:false}}},undefined,undefined,false,false,false,{defaultOwnerUserId:"owner"}));
     assert.ok(created.ok && created.data,created.error);
     const id=created.data.id;
     db.updateSessionStatus(id,"running",Date.now());
@@ -30684,6 +31074,7 @@ test("human-only campaigns can confirm scope and separately approve closure with
     meta.agents.find((a)=>a.id==="test-orchestrator")!.capabilities={models:[],effortLevels:[],slashCommands:[],supportsImages:false,supportsApprovals:true,permissionModes:["default","orchestrator"]};
     db.registerRunner(meta,Date.now(),PROTOCOL_VERSION);
     const decisions={implementation_question:"human",pr_merge:"human",merged_branch_deletion:"human",follow_up_issue_publication:"human",ui_evidence_approval:"human"} as const;
+    svc.setDecisionRuntime(epicSeedReading(db));
     const created=svc.createSession({runnerId:RUNNER_ID,workspaceId:WORKSPACE_ID,agentId:"test-orchestrator",config:{permissionMode:"orchestrator"},prompt:"Orchestrate epic #123.",orchestrator:{delegation:{parentControl:"off",decisions}}},undefined,undefined,false,false,false,{defaultOwnerUserId:"owner"});
     assert.ok(created.ok && created.data,created.error);
     const id=created.data.id;
@@ -30691,10 +31082,11 @@ test("human-only campaigns can confirm scope and separately approve closure with
     assert.equal(created.data.parentControlPolicy!.revision,0,"human-only fallback is materialized by SessionView");
     db.updateSessionStatus(id,"running",Date.now());
     hub.requestHandler=(m)=> {
-      if(m.type==="campaign_issue_scope") return {type:"campaign_issue_scope_result",requestId:m.requestId,sessionId:m.sessionId,ok:true,repository:"team/repo",...(m.operation==="synchronize"?{revision:m.scope.revision}:{candidates:(m.issues??[123]).map((number)=>({issue:{repository:"team/repo",number},title:"Epic",source:"umbrella" as const}))})};
+      if(m.type==="campaign_issue_scope") return {type:"campaign_issue_scope_result",requestId:m.requestId,sessionId:m.sessionId,ok:true,repository:"team/repo",...(m.operation==="synchronize"?{revision:m.scope.revision}:{candidates:(m.issues??[123,124]).map((number)=>({issue:{repository:"team/repo",number},title:number===123?"Epic":"Member",source:number===123?"umbrella" as const:"sub_issue" as const}))})};
       if(m.type==="github_issue_closure") return {type:"github_issue_closure_result",requestId:m.requestId,sessionId:m.sessionId,ok:true,inspection:{repository:"team/repo",issue:123,title:"Epic",url:"https://github.com/team/repo/issues/123",state:"OPEN",forgeDigest:"a".repeat(64),openPullRequests:[]}};
       throw new Error("unexpected command");
     };
+    await svc.campaignIssueScopeSeedSettled(id);
     const proposed=await svc.proposeCampaignIssueScope(id,{requestId:"confirm",expectedRevision:0,additions:[{repository:"team/repo",number:123}],removals:[],explanation:"Include epic"});
     assert.ok(proposed.ok && proposed.data,proposed.error);
     assert.equal(proposed.data.authority,"human");
@@ -30777,6 +31169,7 @@ test("GitLab campaign scope and issue closure require a v249 runner and then rea
     const register = (version: number) => db.registerRunner(meta, Date.now(), version);
     const previous = RUNNER_CAPABILITY_MIN_PROTOCOL.gitlabCampaignIssues - 1;
     register(PROTOCOL_VERSION);
+    svc.setDecisionRuntime(epicSeedReading(db));
     const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
       config: { permissionMode: "orchestrator" }, prompt: "Orchestrate epic #123." }, undefined, undefined, false, false, false, { defaultOwnerUserId: "owner" });
     assert.ok(created.ok && created.data, created.error);
@@ -30789,7 +31182,7 @@ test("GitLab campaign scope and issue closure require a v249 runner and then rea
       requests.push(`${message.type}:${"operation" in message ? message.operation : ""}`);
       if (message.type === "campaign_issue_scope") return { type: "campaign_issue_scope_result", requestId: message.requestId, sessionId: message.sessionId,
         ok: true, repository, ...(message.operation === "synchronize" ? { revision: message.scope.revision } :
-          { candidates: (message.issues ?? [123]).map((number) => ({ issue: { repository, number }, title: `Issue ${number}`, source: "member_checklist" as const })) }) };
+          { candidates: (message.issues ?? [123, 124]).map((number) => ({ issue: { repository, number }, title: `Issue ${number}`, source: "member_checklist" as const })) }) };
       if (message.type === "github_issue_closure" && message.operation === "inspect") {
         return { type: "github_issue_closure_result", requestId: message.requestId, sessionId: id, ok: true,
           inspection: { repository: "gitlab.example.com/Platform/Backend/Service", issue: message.issue, title: "Member", url: `${web}/-/issues/${message.issue}`,
@@ -30797,6 +31190,7 @@ test("GitLab campaign scope and issue closure require a v249 runner and then rea
       }
       throw new Error("unexpected fixture command");
     };
+    await svc.campaignIssueScopeSeedSettled(id);
     const current = await svc.campaignIssueScope(id);
     assert.ok(current.ok && current.data, current.error);
     assert.equal(current.data.repository, repository);

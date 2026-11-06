@@ -5,12 +5,57 @@ import { GitDiffViewer } from "../components/GitDiffViewer.js";
 import { LineSelectionBar, useDiffLineSelection } from "../components/DiffLineSelection.js";
 import { WorkspaceReferencePicker } from "../components/WorkspaceReferencePicker.js";
 import { ComposerAttachments } from "../components/images.js";
+import { rankFuzzyWorkspacePaths } from "../files-panel.js";
 import "../styles.css";
 
 const query = new URLSearchParams(window.location.search);
 const after = query.get("state") !== "before";
 /** The @ picker's state for #2155: results (default), truncated, busy, error, offline, noquery, none. */
 const pickerState = query.get("picker") ?? "results";
+/**
+ * A search of WORKSPACE_PATHS for `q` (#4129), answered as a current runner does (fuzzy, folders
+ * included, best first) or, with `match=substring`, as one that predates it. `cap=results` or
+ * `cap=entries` marks the answer truncated by that cap.
+ */
+const searchQuery = query.get("q");
+const substringSearch = query.get("match") === "substring";
+const searchCap = query.get("cap");
+
+const WORKSPACE_PATHS = [
+  { path: "apps", isDirectory: true },
+  { path: "apps/web", isDirectory: true },
+  { path: "apps/web/src", isDirectory: true },
+  { path: "apps/web/src/components", isDirectory: true },
+  { path: "apps/web/src/components/settings", isDirectory: true },
+  { path: "apps/web/src/components/CheckBadge.tsx", isDirectory: false },
+  { path: "apps/web/src/components/ComposerListbox.tsx", isDirectory: false },
+  { path: "apps/web/src/components/SessionDetail.tsx", isDirectory: false },
+  { path: "apps/web/src/components/SessionDetail.composer-focus.dom.test.tsx", isDirectory: false },
+  { path: "apps/web/src/components/settings/SettingsDialog.tsx", isDirectory: false },
+  { path: "apps/web/src/composer-drafts.ts", isDirectory: false },
+  { path: "apps/runner/src/session-files.ts", isDirectory: false },
+  { path: "docs/design-system.md", isDirectory: false },
+  { path: "packages/protocol/src", isDirectory: true },
+  { path: "packages/protocol/src/fuzzy-path-match.ts", isDirectory: false },
+];
+
+function searchedPickerProps(q: string) {
+  const results = substringSearch
+    ? WORKSPACE_PATHS.filter((candidate) => candidate.path.toLowerCase().includes(q.toLowerCase()))
+    : rankFuzzyWorkspacePaths(WORKSPACE_PATHS, q);
+  const limit = searchCap === "entries" || searchCap === "results" ? searchCap : undefined;
+  return {
+    results,
+    busy: false,
+    error: null as string | null,
+    truncated: limit !== undefined,
+    ...(substringSearch ? {} : { fuzzy: true, limit }),
+    query: q,
+    workspaceName: "wollipog",
+    machineName: "Studio Mac",
+    machineOnline: true,
+  };
+}
 
 const PICKER_RESULTS = [
   { path: "src/session.ts", isDirectory: false },
@@ -39,6 +84,7 @@ function SelectableDiff({ diff, onAttach }: {
 }
 
 function pickerProps() {
+  if (searchQuery) return searchedPickerProps(searchQuery);
   const base = {
     results: PICKER_RESULTS,
     busy: false,
@@ -122,7 +168,7 @@ function Fixture() {
       <section className="card" style={{ padding: 16, display: "grid", gap: 12 }}>
         <strong>Prompt Composer</strong>
         <ComposerAttachments images={attachments} onRemove={(index) => setAttachments((current) => current.filter((_, i) => i !== index))} />
-        <div style={{ position: "relative", marginTop: after ? 240 : 0 }}>
+        <div style={{ position: "relative", marginTop: after ? (searchQuery ? 380 : 240) : 0 }}>
           {after && (
             <WorkspaceReferencePicker
               listboxId="workspace-evidence-picker"

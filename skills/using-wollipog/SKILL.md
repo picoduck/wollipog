@@ -29,8 +29,8 @@ wollipog session unarchive <session-id> --json
 wollipog session stop-job <session-id> <job-id> --json
 wollipog session release-hold <session-id> <hold-id> --json
 wollipog pr wait <number|owner/name#number|host/group/project!iid|url> [--head <sha>] [--timeout <ms>] --json
-wollipog pr closures <number|owner/name#number|url> [--intended <issue>]... --json
-wollipog pr closures --file <description.md> [--repo <owner/name>] [--intended <issue>]... --json
+wollipog pr closures <number|owner/name#number|host/group/project!iid|url> [--intended <issue>]... --json
+wollipog pr closures --file <description.md> [--repo <owner/name|gitlab-host/group/project>] [--intended <issue>]... --json
 wollipog review session run --repo <owner/name|gitlab-host/group/project> --pr <number> --head <sha> --brief-file <path> [--full-reason <text>] --json
 wollipog review session get <review-session-id> --json
 wollipog artifact attach --file <absolute-path> [--name <display-name>] --json
@@ -384,20 +384,29 @@ or resolve, in any tense or case) directly before the issue's reference, whateve
 "does not close #12", "must not auto-close #12" and "doesn't resolve #12's cause" all close #12. An
 issue linked in the pull request's Development section closes too.
 
+The same rule covers GitLab merge requests, with a wider pattern. GitLab closes an issue when a merge
+request reaches the default branch and its title, description or a commit message puts close, fix,
+resolve or implement, in any form ("closing", "fixing", "implements"), before the reference, even
+negated, and in code too. One keyword closes every reference in a list: "Closes #1, #2 and
+group/project#3" closes all three. An instance may configure its own pattern; GitLab's own list of
+the issues a merge request closes then decides.
+
 - Write "Refs #N" for every issue that must stay open, in the description, the title and commit
-  messages. Never put a closing verb directly before such a reference, not even in an example that
+  messages. Never put a closing verb before such a reference, not even in an example that
   describes this rule; paraphrase it instead.
 - Check a draft description before publishing it with `wollipog pr closures --file <draft> --json`,
-  and an open pull request with `wollipog pr closures <pr> --json`. Pass each issue the merge should
-  close with `--intended`. Exit status 3 lists `undeclared` closures and `unmade` declarations; 0
-  means the merge closes exactly the intended issues.
-- A GitHub `pr_merge` snapshot names the issues the merge should close in `intendedClosures` (`#N`,
-  `owner/repo#N`, or an issue URL); omit it when the merge must close none. A current runner reads
-  the pull request before the decision is created and again before it is armed. If GitHub would
-  close anything else, or not close a declared issue, the request is refused with each reference and
-  its line, and a changed description revokes an approval at consume. Fix the text or the
-  declaration and request again. The decision's `closingReferenceCheck` shows its reviewer what the
-  merge closes; it is absent when the child's runner predates the check.
+  and an open pull request with `wollipog pr closures <pr> --json`. A GitLab merge request works the
+  same way: name it by URL or `<host>/group/project!<iid>`, or pass `--repo <host>/group/project` with
+  `--file`. Pass each issue the merge should close with `--intended`. Exit status 3 lists
+  `undeclared` closures and `unmade` declarations; 0 means the merge closes exactly the intended issues.
+- A `pr_merge` snapshot names the issues the merge should close in `intendedClosures` (`#N`,
+  `owner/repo#N`, or an issue URL; for GitLab `#N`, `group/project#N`, `<host>/group/project#N`, or an
+  issue URL on that instance); omit it when the merge must close none. A current runner (GitLab from
+  v295) reads the pull or merge request before the decision is created and again before it is armed.
+  If the forge would close anything else, or not close a declared issue, the request is refused with
+  each reference and its line, and a changed description revokes an approval at consume. Fix the text
+  or the declaration and request again. The decision's `closingReferenceCheck` shows its reviewer what
+  the merge closes; it is absent ("Not checked") when the child's runner predates the check.
 
 ## Review Sessions
 
@@ -779,6 +788,16 @@ Neither tool exists for a child or under Custom, where a person already sees the
 requests, and an older runner or control plane refuses them by name. Never decide an owner-kept
 decision yourself, and never ask the owner to approve one in chat.
 
+When an installed skill or user-authored instruction keeps a typed gate for a person (a per-PR
+merge approval, say), any requester, child or root and in any mode, files the exact typed decision
+anyway and names the rule in `ownerRule` on `request_workflow_decision`: `source` is the file and
+`quote` the requirement, on one line (CLI `wollipog decision request ... --owner-rule-source <path>
+--owner-rule-quote <text>`; control plane v296). The occurrence is created owner-kept and reaches
+the owner's Inbox and Campaign Status with the rule; later requests for the same resource stay the
+owner's. It can never give the Orchestrator a decision. See
+[references/campaign-authority.md](references/campaign-authority.md). Never end a turn with such a
+gate only in prose.
+
 ## Inspecting and Changing Campaign Issue Scope
 
 Before delegating an epic, use `get_campaign_issue_scope` (CLI: `wollipog issue-scope get --epic <number>`).
@@ -802,7 +821,10 @@ only, with your ranking in `explanation`, including any you find mid-run. Determ
 an issue outside the campaign's repositories, a pull request, a closed issue, one already in scope,
 one another active campaign holds, one past the selection count or Maximum Issues, and one with a
 label a Human Required rule names; choose another issue rather than asking. A proposal that passes
-goes to the owner as one typed approval. The server
+is reviewed by the Decision Model against the owner's words: an admitted one returns an
+Orchestrator-owned scope change that you resolve and apply yourself; a refused one returns its
+`reason`, so propose a different issue; an uncertain or failed review becomes the owner's one typed
+approval, and proposing the same issues again returns that same request. The server
 refuses incidental references, foreign repositories and changes beyond human-set limits, naming the
 failed condition in a bounded `code`; a campaign owner can still propose the change from Campaign Status.
 Resolution applies and consumes scope atomically; do not separately consume it. A root can resolve
