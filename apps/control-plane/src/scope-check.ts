@@ -36,28 +36,34 @@ const oneLine = (value: string) => value.replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").tri
 function issueLabel(repository: string, number: number, title: string, room: number): string {
   const head = `${repository}#${number}`;
   const rest = oneLine(title);
-  if (!rest) return head.slice(0, room);
   const full = `${head} ${rest}`;
-  return full.length <= room ? full : `${full.slice(0, Math.max(head.length, room - 1))}…`;
+  if (!rest || room <= head.length + 2) return head;
+  return full.length <= room ? full : `${full.slice(0, room - 1)}…`;
 }
 
 /** The question parameters: one per owner-named issue, one per chosen issue and stated constraint.
- * Every parameter fits the framework's bound, the constraint never shortened, so the refusal names
- * both the issue and the constraint it breaks. */
-export function scopeCheckParameters(repository: string, proposal: Pick<CampaignScopeProposal, "issues" | "constraints">): Record<string, string[]> {
+ * Every parameter fits the framework's bound with the constraint whole: the issue's title shortens
+ * first, then goes, and when even the bare reference and the whole constraint can't fit, the result
+ * is null, so the proposal is never checked against part of a constraint and goes to the owner. */
+export function scopeCheckParameters(repository: string, proposal: Pick<CampaignScopeProposal, "issues" | "constraints">): Record<string, string[]> | null {
   const max = DECISION_QUESTION_PARAMETER_MAX_CHARS;
   const named = proposal.issues.filter((issue) => issue.origin === "owner_named")
     .map((issue) => issueLabel(repository, issue.number, issue.title, max));
   const chosen = proposal.issues.filter((issue) => issue.origin === "orchestrator_chosen");
-  const pairs = chosen.flatMap((issue) => proposal.constraints.map((constraint) => {
-    const suffix = ` — ${oneLine(constraint)}`;
-    return `${issueLabel(repository, issue.number, issue.title, Math.max(24, max - suffix.length))}${suffix}`.slice(0, max);
-  }));
+  const pairs: string[] = [];
+  for (const issue of chosen) {
+    for (const constraint of proposal.constraints) {
+      const suffix = ` — ${oneLine(constraint)}`;
+      const reference = `${repository}#${issue.number}`;
+      if (reference.length + suffix.length > max) return null;
+      pairs.push(`${issueLabel(repository, issue.number, issue.title, max - suffix.length)}${suffix}`);
+    }
+  }
   return { ...(named.length ? { named_asked_for: named } : {}), ...(pairs.length ? { constraint_met: pairs } : {}) };
 }
 
 function inputsWith(ownerMessage: string, proposal: CampaignScopeProposal, explanation: string, facts: readonly CampaignIssueFacts[],
-  campaign: ScopeCheckCampaign, excerpt: number): DecisionInputs {
+  campaign: ScopeCheckCampaign, excerpt: number, parameters: Record<string, string[]>): DecisionInputs {
   return {
     ownerMessage,
     data: {
@@ -74,7 +80,7 @@ function inputsWith(ownerMessage: string, proposal: CampaignScopeProposal, expla
           withheldOperations: campaign.admitted.withheldOperations } } : {}),
       }),
     },
-    questions: { parameters: scopeCheckParameters(campaign.repository, proposal) },
+    questions: { parameters },
   };
 }
 
@@ -82,10 +88,13 @@ function inputsWith(ownerMessage: string, proposal: CampaignScopeProposal, expla
  * fit one Decision call: such a proposal is never checked in part, so it is the owner's. */
 export function scopeCheckInputs(ownerMessage: string, proposal: CampaignScopeProposal, explanation: string,
   facts: readonly CampaignIssueFacts[], campaign: ScopeCheckCampaign): DecisionInputs | null {
+  // A constraint too long to ask whole beside the issue's reference is never asked in part.
+  const parameters = scopeCheckParameters(campaign.repository, proposal);
+  if (!parameters) return null;
   const start = Math.max(200, Math.min(CAMPAIGN_ISSUE_FACT_LIMITS.bodyExcerptChars,
     Math.floor(ISSUE_FACTS_BUDGET_CHARS / Math.max(1, facts.length)) - 400));
   for (const excerpt of [start, Math.floor(start / 2), Math.floor(start / 4), 200, 0]) {
-    const inputs = inputsWith(ownerMessage, proposal, explanation, facts, campaign, excerpt);
+    const inputs = inputsWith(ownerMessage, proposal, explanation, facts, campaign, excerpt, parameters);
     if (scopeCheckInputDigest(inputs) !== null) return inputs;
   }
   return null;

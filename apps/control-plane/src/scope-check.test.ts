@@ -53,11 +53,20 @@ test("the questions are parameterized per owner-named issue and per chosen issue
     named_asked_for: ["owner/repo#12 Crash"],
     constraint_met: ["owner/repo#93 Bug 93 — UI only", "owner/repo#93 Bug 93 — skip anything labeled security"],
   });
-  // A long title is shortened; the constraint never is.
+  // A long title is shortened, then dropped; the constraint never is.
   const long = scopeCheckParameters(REPO, proposal({ issues: [{ number: 5, origin: "orchestrator_chosen", rationale: "r", title: "x".repeat(400) }],
-    constraints: ["skip anything labeled security"] })).constraint_met![0]!;
+    constraints: ["skip anything labeled security"] }))!.constraint_met![0]!;
   assert.ok(long.length <= 200);
   assert.ok(long.endsWith(" — skip anything labeled security"));
+  const nearLimit = `skip anything labeled ${"y".repeat(150)} except docs`;
+  const tight = scopeCheckParameters(REPO, proposal({ issues: [{ number: 5, origin: "orchestrator_chosen", rationale: "r", title: "A title" }],
+    constraints: [nearLimit] }))!.constraint_met![0]!;
+  assert.equal(tight, `owner/repo#5 — ${nearLimit}`, "the title goes before any of the constraint does");
+  // A constraint that can't fit whole beside the issue's reference is never asked in part: the proposal is the owner's.
+  const whole = `${"z".repeat(196)} end`;
+  const tooLong = proposal({ issues: [{ number: 5, origin: "orchestrator_chosen", rationale: "r", title: "t" }], constraints: [whole] });
+  assert.equal(scopeCheckParameters(REPO, tooLong), null);
+  assert.equal(scopeCheckInputs(MESSAGE, tooLong, "Why.", [fact(5)], CAMPAIGN), null);
   // Nothing named and nothing chosen asks neither kind of question; the fixed four still go.
   const none = prepareDecision(DECISION_KINDS.scope_check, scopeCheckInputs(MESSAGE, proposal({ issues: [], constraints: [] }), "Why.", [], CAMPAIGN)!);
   assert.deepEqual(none.questions!.map((question) => question.questionId),

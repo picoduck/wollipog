@@ -1711,6 +1711,14 @@ test("an uncertain constraint check gets exactly one owner approval, as an Owner
     assert.equal(repeated.data!.occurrenceId, proposed.data!.occurrenceId);
     assert.equal(c.ownerRequests().length, 1);
     assert.equal(f.decision.checkCalls.length, 1, "uncertain is a real answer: never retried, never asked twice");
+    // A revised proposal of the same issues, even one a fresh check would admit or one that drops every
+    // checkable statement, returns the owner's pending approval: nothing replaces it behind their back.
+    f.decision.state.check = (message) => scopeCheckAnswer(message);
+    const revised = await c.propose(issues, { requestedCount: 5, constraints: ["open issues only"] }, "Reworded constraint.");
+    assert.equal(revised.data!.occurrenceId, proposed.data!.occurrenceId);
+    assert.equal(f.decision.checkCalls.length, 1, "no new check runs while the owner's approval is pending");
+    assert.equal(f.db.workflowDecisionByOccurrence(proposed.data!.occurrenceId)!.status, "pending");
+    f.decision.state.check = uncertainCheck;
     assert.deepEqual(f.db.getSession(c.id)!.orchestratorPolicy!.issueScope!.issueNumbers, []);
     assert.equal(c.delegate().errorDetails?.code, "initial_scope_not_admitted");
 
@@ -1857,6 +1865,31 @@ test("a check that fails after the runtime's retries sends exactly one owner req
   } finally { await server.close(); f.db.close(); }
 });
 
+test("removing a chosen issue never frees room under the count, and re-adding the same one takes no second slot (#4282)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const c = await proposalCampaign(f, server, "Fix the 3 most important open bugs.");
+    const admitted = await c.propose([chosen(41), chosen(42), chosen(43)], { requestedCount: 3, constraints: ["open"] });
+    assert.equal(admitted.data!.authority, "orchestrator", admitted.error ?? "");
+    assert.equal(c.apply(admitted.data!.occurrenceId).ok, true);
+    // The owner removes #43 from Campaign Status.
+    const removal = await f.sessions.proposeCampaignIssueScope(c.id, { requestId: randomUUID(), expectedRevision: c.revision(), additions: [],
+      removals: [{ repository: "owner/repo", number: 43 }], explanation: "Not now." }, () => true, f.human);
+    assert.equal(removal.ok, true, removal.error ?? "");
+    assert.equal(f.sessions.resolveWorkflowDecision(c.id, c.id, removal.data!.occurrenceId, { outcome: "approve" }, removal.data!.authority,
+      removal.data!.authority === "human" ? { kind: "human", id: f.human.userId } : { kind: "agent", id: c.id }, () => true).ok, true);
+    assert.deepEqual(f.db.getSession(c.id)!.orchestratorPolicy!.issueScope!.issueNumbers, [41, 42]);
+    // A different fourth issue is still past the count of 3: removing #43 freed nothing.
+    const fourth = await c.propose([chosen(44)], { requestedCount: 3, constraints: ["open"] });
+    assert.deepEqual(fourth.errorDetails, { code: "proposal_count_exceeded", limit: 3, requested: 4 });
+    // Re-adding #43 itself counts once.
+    const readded = await c.propose([chosen(43)], { requestedCount: 3, constraints: ["open"] });
+    assert.equal(readded.ok, true, readded.error ?? "");
+    assert.equal(readded.data!.authority, "orchestrator");
+  } finally { await server.close(); f.db.close(); }
+});
+
 test("rewording a refused proposal's constraints buys only a bounded number of checks; past it the proposal is the owner's (#4282)", async () => {
   const f = fixture();
   const { server } = await app(f);
@@ -1864,7 +1897,10 @@ test("rewording a refused proposal's constraints buys only a bounded number of c
     const c = await proposalCampaign(f, server, "Fix the 2 most important open bugs.");
     f.decision.state.check = checkAnswering((parameter) => parameter.startsWith("owner/repo#72 "), "violates", "It is closed upstream.");
     const results = [];
+    // Casing and spacing alone are the same proposal: "  OPEN " reads the recorded refusal of "open".
+    const normalizedRepeat = async () => (await c.propose([chosen(71), chosen(72)], { requestedCount: 2, constraints: ["  OPEN "] })).errorDetails?.code;
     for (const constraint of ["open", "open issues", "currently open", "open ones"]) {
+      if (constraint === "open issues") assert.equal(await normalizedRepeat(), "constraint_check_refused");
       results.push(await c.propose([chosen(71), chosen(72)], { requestedCount: 2, constraints: [constraint] }));
     }
     assert.deepEqual(results.map((result) => result.ok ? result.data!.authority : result.errorDetails?.code),
@@ -1872,9 +1908,10 @@ test("rewording a refused proposal's constraints buys only a bounded number of c
     assert.equal(f.decision.checkCalls.length, 3);
     const record = (results[3]!.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!;
     assert.equal(record.ownerCause, "constraint_check_unavailable");
-    // Casing and spacing alone are the same proposal: they read the recorded refusal.
+    // From now on any proposal of these issues returns the owner's pending approval, and asks nobody again.
     const same = await c.propose([chosen(71), chosen(72)], { requestedCount: 2, constraints: ["  OPEN "] });
-    assert.equal(same.errorDetails?.code, "constraint_check_refused");
+    assert.equal(same.data!.occurrenceId, results[3]!.data!.occurrenceId);
+    assert.equal(c.ownerRequests().length, 1);
     assert.equal(f.decision.checkCalls.length, 3);
   } finally { await server.close(); f.db.close(); }
 });

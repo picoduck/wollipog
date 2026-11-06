@@ -12233,9 +12233,10 @@ export class SessionsService {
     }
     // Floor 8: the issues the Orchestrator chose stay within the count the owner stated, the admitted
     // one for a later addition, or the default of 3 (as #4102). The check still confirms the count.
-    // A later addition counts every chosen issue earlier proposals admitted, even one since removed.
-    const chosenCount = base.issues.filter((issue) => issue.origin === "orchestrator_chosen").length +
-      (first.initialScope ? this.db.appliedProposalChosenIssues(sessionId).length : 0);
+    // A later addition counts every distinct chosen issue earlier proposals admitted, even one since
+    // removed (so removing never frees room), and re-adding one of them takes no second slot.
+    const chosenCount = new Set([...base.issues.filter((issue) => issue.origin === "orchestrator_chosen").map((issue) => issue.number),
+      ...(first.initialScope ? this.db.appliedProposalChosenIssues(sessionId) : [])]).size;
     const chosenLimit = scopeProposalChosenLimit(base, first.initialScope);
     if (structured && chosenCount > chosenLimit) return refuse("proposal_count_exceeded", { limit: chosenLimit, requested: chosenCount });
     const scopeRequest: CampaignIssueScopeRequest = { requestId: request.requestId, expectedRevision: request.expectedRevision,
@@ -12251,14 +12252,16 @@ export class SessionsService {
         ...(admitted.constraintCheck ? { checkOccurrenceId: admitted.constraintCheck.occurrenceId } : {}) });
       return created;
     };
+    /** The owner's pending approval of these same additions at this revision, if any. */
+    const pendingOwnerApproval = () => this.db.pendingWorkflowDecisionsForController(sessionId).find((d) => {
+      const s = d.resourceSnapshot;
+      return d.sessionId === sessionId && s.category === "campaign_issue_scope" && s.scopeProposal?.route === "owner" &&
+        s.expectedRevision === request.expectedRevision && JSON.stringify(s.additions) === JSON.stringify([...additions].sort((a, b) => a - b));
+    });
     /** The owner's one approval. Proposing the same issues again while it is pending returns it,
      * whatever the rationale now says: it is never decided again behind the owner's back. */
     const ownerApproval = (owned: CampaignScopeProposal): ServiceResult<WorkflowDecisionView> => {
-      const pending = this.db.pendingWorkflowDecisionsForController(sessionId).find((d) => {
-        const s = d.resourceSnapshot;
-        return d.sessionId === sessionId && s.category === "campaign_issue_scope" && s.scopeProposal?.route === "owner" &&
-          s.expectedRevision === request.expectedRevision && JSON.stringify(s.additions) === JSON.stringify([...additions].sort((a, b) => a - b));
-      });
+      const pending = pendingOwnerApproval();
       if (pending) return ok(pending);
       const snapshot = scopeSnapshot(this.db, latest, repository, scopeRequest, { scopeProposal: owned });
       if (!snapshot) return malformed();
@@ -12268,6 +12271,13 @@ export class SessionsService {
       return this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: `campaign_issue_scope:${sessionId}`,
         resourceSnapshot: snapshot }, canAccess, { trustedIssueScope: true });
     };
+    // While the owner's approval of these same issues is pending, any proposal of them returns it:
+    // neither the fast path nor a revised proposal's check can replace it behind the owner's back.
+    const awaitingOwner = pendingOwnerApproval();
+    if (awaitingOwner) {
+      log("owner_review", { checks, cause: "owner_pending", ownerRequest: awaitingOwner.occurrenceId });
+      return ok(awaitingOwner);
+    }
     // Nothing checkable: admitted by the floors alone, with no model call.
     if (!checks.length) return admit(record, { kind: "scope_proposal_floors" });
     // An older runner's unstructured proposal can't be checked: it is the owner's.
