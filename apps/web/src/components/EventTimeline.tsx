@@ -20,7 +20,10 @@ import { type TurnUsage,
 import { Markdown } from "./Markdown.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
-import { AUTOMATIC_TURNS_HELD_SENTENCE, describeTurnError, isAutomaticTurnsHeld } from "../turn-error.js";
+import {
+  AUTOMATIC_TURNS_HELD_SENTENCE, BACKGROUND_RESULTS_HELD_SENTENCE, describeTurnError, isAutomaticTurnsHeld,
+  isBackgroundResultsHeld,
+} from "../turn-error.js";
 import {
   MeasuredVirtualList,
   type VirtualRevealOutcome,
@@ -2565,6 +2568,8 @@ function TimelineRowContent({
       if (item.nonFatal) return <TurnProblemNotice message={item.message} />;
       return isAutomaticTurnsHeld(item.message)
         ? <AutomaticTurnsHeldNotice message={item.message} />
+        : isBackgroundResultsHeld(item.message)
+        ? <BackgroundResultsHeldNotice message={item.message} />
         : <TurnFailedNotice message={item.message} prompt={failedTurnPrompt} />;
     case "turn_interrupted":
       // The row shows only its turn's footer ("Stopped at …"); EventTimelineBody renders that.
@@ -3156,6 +3161,21 @@ function AutomaticTurnsHeldNotice({ message }: { message: string }) {
       details={<div className="code-well"><pre>{withoutPromptFailedPrefix(message)}</pre></div>}
     >
       <p>{AUTOMATIC_TURNS_HELD_SENTENCE}</p>
+    </Notice>
+  );
+}
+
+/** The runner stopped retrying the automatic turn that returns finished background results (#3542).
+ * No person's turn failed, so there is no Retry Turn; Restart or a person's accepted message delivers
+ * them. The runner's count of attempts and the provider's own words stay behind Show Details. */
+function BackgroundResultsHeldNotice({ message }: { message: string }) {
+  return (
+    <Notice
+      tone="warning"
+      title="Background Results Held"
+      details={<div className="code-well"><pre>{withoutPromptFailedPrefix(message)}</pre></div>}
+    >
+      <p>{BACKGROUND_RESULTS_HELD_SENTENCE}</p>
     </Notice>
   );
 }

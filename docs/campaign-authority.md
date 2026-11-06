@@ -135,6 +135,21 @@ handoff is revoked when anyone tries to use it. Both routes need a v281 root run
 plane, exist only for a Full Control root, and refuse a question that asks for a credential value.
 Custom campaigns are unchanged.
 
+An owner rule (#4137, v296) is the requester's route for the same thing. `request_workflow_decision`
+accepts an optional `ownerRule` (`source`: the installed or user-authored file, at most 256 ASCII
+path characters; `quote`: the requirement, one line of at most 1000 characters without control or
+invisible formatting characters). Oversize or malformed values are refused, never truncated. The
+occurrence is created human-owned with reason `owner_kept`, in any mode and under any grant or
+category; the database write forces `authority='human'` whenever a rule is stored. Only the
+controller's owner resolves it, it cannot be handed over again, the Orchestrator cannot withdraw it
+as a review round extension, and a credential-screen classification keeps it the person's. Its
+stored rule counts as an owner-kept occurrence for `ownerKeptTargets`, so every later request for
+the same resource under that controller is human-owned too and carries the matched rule forward;
+reusing a requestId with a different rule is refused. Campaign Status lists it under Waiting for
+You (`ownerDecisions[].ownerRule`) and the Request Card shows the source and quote as plain text. A
+runner refuses the field against an older control plane, which would silently drop it. A request
+without the field keeps its policy routing.
+
 The root's own pending typed workflow decisions never park its provider, so they never stop a
 standing response to another request. A real NDJSON fixture verifies that both callbacks settle and the provider
 continues. No stopped-provider recovery is introduced here; that remains #2938.

@@ -788,6 +788,16 @@ Neither tool exists for a child or under Custom, where a person already sees the
 requests, and an older runner or control plane refuses them by name. Never decide an owner-kept
 decision yourself, and never ask the owner to approve one in chat.
 
+When an installed skill or user-authored instruction keeps a typed gate for a person (a per-PR
+merge approval, say), any requester, child or root and in any mode, files the exact typed decision
+anyway and names the rule in `ownerRule` on `request_workflow_decision`: `source` is the file and
+`quote` the requirement, on one line (CLI `wollipog decision request ... --owner-rule-source <path>
+--owner-rule-quote <text>`; control plane v296). The occurrence is created owner-kept and reaches
+the owner's Inbox and Campaign Status with the rule; later requests for the same resource stay the
+owner's. It can never give the Orchestrator a decision. See
+[references/campaign-authority.md](references/campaign-authority.md). Never end a turn with such a
+gate only in prose.
+
 ## Inspecting and Changing Campaign Issue Scope
 
 Before delegating an epic, use `get_campaign_issue_scope` (CLI: `wollipog issue-scope get --epic <number>`).
@@ -811,7 +821,10 @@ only, with your ranking in `explanation`, including any you find mid-run. Determ
 an issue outside the campaign's repositories, a pull request, a closed issue, one already in scope,
 one another active campaign holds, one past the selection count or Maximum Issues, and one with a
 label a Human Required rule names; choose another issue rather than asking. A proposal that passes
-goes to the owner as one typed approval. The server
+is reviewed by the Decision Model against the owner's words: an admitted one returns an
+Orchestrator-owned scope change that you resolve and apply yourself; a refused one returns its
+`reason`, so propose a different issue; an uncertain or failed review becomes the owner's one typed
+approval, and proposing the same issues again returns that same request. The server
 refuses incidental references, foreign repositories and changes beyond human-set limits, naming the
 failed condition in a bounded `code`; a campaign owner can still propose the change from Campaign Status.
 Resolution applies and consumes scope atomically; do not separately consume it. A root can resolve

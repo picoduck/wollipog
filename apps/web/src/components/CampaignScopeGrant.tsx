@@ -150,14 +150,21 @@ function SelectionCountEditor({ grant, count, edit }: { grant: FullControlScopeG
 export function ScopeGrantReviewFacts({ review }: { review: CampaignScopeGrantReview }) {
   const why = review.cause === "selection"
     ? "Your first message asked the campaign to choose issues. You approve its choice until the Decision Model reviews selections."
-    : review.cause === "grant_uncertain"
-      ? "The Decision Model couldn't tell which issues your first message asks for, so there is no grant to check this proposal against."
-      : `${scopeGrantFailureSentence(review.failureClass)} There is no grant to check this proposal against.`;
+    : review.cause === "selection_uncertain"
+      ? "Your first message asked the campaign to choose issues. These passed every check, but the Decision Model couldn't tell whether they fit what you asked for."
+      : review.cause === "selection_failed"
+        ? `Your first message asked the campaign to choose issues. These passed every check, but the Decision Model's review of them didn't finish: ${scopeGrantFailureSentence(review.failureClass)}`
+        : review.cause === "selection_unverified"
+          ? "Your first message asked the campaign to choose issues. The campaign's machine can't report whether these issues are open or what labels they have, so nothing checked them."
+          : review.cause === "grant_uncertain"
+            ? "The Decision Model couldn't tell which issues your first message asks for, so there is no grant to check this proposal against."
+            : `${scopeGrantFailureSentence(review.failureClass)} There is no grant to check this proposal against.`;
+  const reasonLabel = review.cause === "selection" || review.cause === "selection_unverified" ? "Grant Reason" : "Uncertain Reason";
   return <>
     <p>{why}</p>
     <dl className="facts">
       <div><dt>Your First Message</dt><dd>{review.ownerMessage}</dd></div>
-      {review.reason && <div><dt>{review.cause === "selection" ? "Grant Reason" : "Uncertain Reason"}</dt><dd>{review.reason}</dd></div>}
+      {review.reason && <div><dt>{reasonLabel}</dt><dd>{review.reason}</dd></div>}
       {review.selection && <div><dt>Selection</dt><dd>
         {review.selection.count}{review.selection.defaulted ? " (defaulted)" : ""}
         {review.selection.criteria ? `, ${review.selection.criteria}` : ""}

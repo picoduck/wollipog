@@ -1,4 +1,5 @@
 import { RETIRED_REVIEW_TOOL_NAMES, REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
+import { normalizeWorkflowDecisionOwnerRule, WORKFLOW_DECISION_OWNER_RULE_QUOTE_MAX_CHARS, WORKFLOW_DECISION_OWNER_RULE_SOURCE_MAX_CHARS } from "@wollipog/protocol";
 import { sessionCredentialRefusal } from "./session-credential-error.js";
 /** Shared session-management tools for the session-scoped CLI and MCP server. */
 
@@ -773,6 +774,24 @@ async function ownerDecisionCompatibilityError(deps: McpDeps): Promise<ToolResul
     ? null
     : controlPlaneUpdateRequired(needsNewerWollipog("Owner decisions need",
       "Update Wollipog; nothing reached the owner."), required, actual);
+}
+
+/** A pre-v296 control plane ignores `ownerRule` (#4137), so the decision would keep the owner its
+ * policy names and the Orchestrator could decide a gate its owner kept. Refuse before sending. */
+async function ownerRuleCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule;
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const result = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!result.ok) {
+      return controlPlaneUpdateRequired(wollipogSupportUnverified("owner rules", result.message), required);
+    }
+    actual = result.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= required
+    ? null
+    : controlPlaneUpdateRequired(needsNewerWollipog("Owner rules (ownerRule) need",
+      "Nothing was requested. Tell your Orchestrator which gate the rule keeps for a person, so it can hand the decision to the owner, or update Wollipog."), required, actual);
 }
 
 /** Bounds the fence probe so it cannot push a create call toward the harness's tool timeout. */
@@ -2505,12 +2524,30 @@ export const TOOLS: McpTool[] = [
         requestId: { type: "string", description: "Caller-owned idempotency key" },
         resourceKey: { type: "string", description: "Stable action target; a new occurrence supersedes older unconsumed occurrences, except a person-owned follow-up publication, which is never replaced: wait for it, consume it, or withdraw it first" },
         resourceSnapshot: WORKFLOW_DECISION_RESOURCE_SCHEMA,
+        ownerRule: {
+          type: "object",
+          description: "When an installed skill or user-authored instruction keeps this gate for a person, name it here: the decision is created human-owned under any mode or grant, so only the owner decides it, and its card shows the rule. It can never give the Orchestrator a decision. Requires control plane v296.",
+          properties: {
+            source: { type: "string", minLength: 1, maxLength: WORKFLOW_DECISION_OWNER_RULE_SOURCE_MAX_CHARS,
+              description: "The file that keeps the gate, such as ~/.claude/skills/issue-workflow/SKILL.md; letters, digits and ._~/\\@+:- without spaces" },
+            quote: { type: "string", minLength: 1, maxLength: WORKFLOW_DECISION_OWNER_RULE_QUOTE_MAX_CHARS,
+              description: "The requirement quoted from that file, on one line" },
+          },
+          required: ["source", "quote"],
+          additionalProperties: false,
+        },
       },
       required: ["requestId", "resourceKey", "resourceSnapshot"],
       additionalProperties: false,
     },
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      if (args?.ownerRule !== undefined) {
+        const rule = normalizeWorkflowDecisionOwnerRule(args.ownerRule);
+        if (!rule.ok) return errorResult(rule.message);
+        const compatibilityError = await ownerRuleCompatibilityError(deps);
+        if (compatibilityError) return compatibilityError;
+      }
       if (args?.resourceSnapshot?.category === "pr_merge" && args.resourceSnapshot.intendedClosures !== undefined) {
         const compatibilityError = await intendedClosuresCompatibilityError(deps, args.resourceSnapshot.mergeMethod !== undefined);
         if (compatibilityError) return compatibilityError;
@@ -2521,7 +2558,8 @@ export const TOOLS: McpTool[] = [
         deps,
         "POST",
         `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/workflow-decisions`,
-        { requestId: args?.requestId, resourceKey: args?.resourceKey, resourceSnapshot: args?.resourceSnapshot },
+        { requestId: args?.requestId, resourceKey: args?.resourceKey, resourceSnapshot: args?.resourceSnapshot,
+          ...(args?.ownerRule !== undefined ? { ownerRule: args.ownerRule } : {}) },
         // A merge is created only after the control plane reads the pull request through this runner.
         args?.resourceSnapshot?.category === "pr_merge" ? Math.max(deps.requestTimeoutMs ?? CP_TIMEOUT_MS, MERGE_DECISION_TIMEOUT_MS) : undefined,
       );

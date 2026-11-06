@@ -11,6 +11,7 @@ import {
   GUARD_STATE_UNINSPECTABLE_PREFIX,
   MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL,
   MANAGED_WORKTREE_REFUSAL,
+  MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL,
   MANAGED_WORKTREE_UNRESOLVED_REFUSAL,
   commandTargetsGuardState,
   guardStateClassifierWork,
@@ -78,6 +79,23 @@ test("a destructive command against a protected worktree is denied with the mana
     hookEventName: "PreToolUse",
     permissionDecision: "deny",
     permissionDecisionReason: MANAGED_WORKTREE_REFUSAL,
+  });
+});
+
+test("an uninspectable command keeps the hook denial and exit code with accurate guidance", (t) => {
+  const f = fixture();
+  t.after(f.cleanup);
+  const target = mkdtempSync(join(tmpdir(), "wollipog-unmanaged-message-"));
+  t.after(() => rmSync(target, { recursive: true, force: true }));
+  const outcome = runManagedWorktreeGuardDecision(hookInput({
+    cwd: "/unmanaged/project",
+    tool_input: { command: `cd ${target} && cat > note.txt <<'EOF'\nplain\nEOF` },
+  }), f.protectionsFile);
+  assert.equal(outcome.exitCode, 0);
+  assert.equal(outcome.stderr, "");
+  assert.deepEqual(JSON.parse(outcome.stdout).hookSpecificOutput, {
+    hookEventName: "PreToolUse", permissionDecision: "deny",
+    permissionDecisionReason: MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL,
   });
 });
 

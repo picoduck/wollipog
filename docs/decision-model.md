@@ -146,6 +146,9 @@ and #4061 regression cases run through `scopeGrantCandidates` in `scope-grant.te
 A Custom campaign's epic seed uses the same `scope_grant` reading in place of the
 `initialCampaignEpic` regular expression. The reading starts once the session is created, or once the
 person's first prompt is admitted when the campaign was launched without one, so neither adds a wait.
+A campaign whose first message was recorded before the seed existed gets the same reading of that
+message the first time it tries to delegate, its issue scope is read (#4258), or it is restarted
+(#4259).
 
 Its outcome:
 
@@ -153,12 +156,49 @@ Its outcome:
 - The same floors apply (`scopeGrantCandidates`, against the repository the runner reports).
 - The runner must read members for that issue: sub-issues or checklist members.
 
+The same reading also grants the issues the first message names (#4259), in place of the
+`orchestratorIssueNumbersFromInitialPrompt` grammar, which is removed. When the reading names issues
+or ranges and no epic is seeded, every one must survive the floors and the runner must read each as an
+issue of the campaign repository; they then become the campaign's `issueNumbers`. A drop of any of
+them, or a runner older than the issue scope protocol, grants none and leaves the reading with the
+owner. So does a message the server can't show the campaign's owner wrote: only the owner's create
+request or first prompt grants issues. Nothing is granted at creation: the reading settles after
+`createSession` returns, and the campaign holds no issue numbers until then.
+
 A failed or uncertain reading, or one the floors or the runner cannot confirm, falls back to today's
 Custom human scope approval with no seed. It never falls back to parsing the text. That is the
 typed, person-owned request: the owner approves a scope, or chooses **Continue Without an Epic**.
 The occurrence is recorded with the `issue_scope_seed` subject, so Campaign Status shows the reading
 under Decision Model Checks as **Epic Seed**, with the seed's state. See
 `docs/campaign-issue-scope.md` for the states.
+
+## Scope Review (`scope_review`, #4103)
+
+When the owner's first message asked the campaign to choose issues, the Orchestrator proposes the
+issues it chose with selection lineage. Deterministic floors run first: a repository in the
+campaign's boundary, an open issue, not already in scope, held by no other active campaign, within
+the selection's count and Maximum Issues, and no Human Required label rule. Only a proposal that
+passes all of them is reviewed. `proposeSelectionScope` in `apps/control-plane/src/sessions.ts` calls
+the runtime; `apps/control-plane/src/scope-selection.ts` builds the inputs and the occurrence key.
+
+- **Inputs.** The owner's exact first message is the owner's words. The data fields are quoted and
+  untrusted: `grant` (the stored grant's repositories, named issues and selection), `issues` (each
+  issue's number, title, state, labels and a body excerpt that shrinks so any number of issues fits)
+  and `rationale` (the Orchestrator's `explanation`).
+- **Verdicts.** `admit`, `refuse` with a reason, or `uncertain`. Only `admit` can confirm, and only
+  the exact proposal the floors already admitted; fields outside the schema are ignored. No verdict
+  can raise the count, change a repository or grant an operation.
+- **Occurrence key.** The campaign, the boundary revision, the scope revision, the grant's digest and
+  the sorted additions. The rationale is left out on purpose: re-proposing the same issues returns the
+  recorded outcome, so a reworded rationale is never a second review, a second owner request or a
+  second admission. Any re-authorization, such as the owner changing the selection count, reviews
+  afresh, and a linked request retired without a decision is replaced rather than returned.
+- **Failure rule.** An uncertain or failed review creates the owner's one scope approval
+  (`grantReview.cause` `selection_uncertain` or `selection_failed`, with `reviewOccurrenceId`), and
+  the occurrence's `humanRequestId` names it.
+
+`campaign_selection_proposals` keeps each reviewed proposal's issues and rationale, and the scope
+change an admit created, for Campaign Status. The audit still keeps only input digests.
 
 ## Audit and Usage
 
