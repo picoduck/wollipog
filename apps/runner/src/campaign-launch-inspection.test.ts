@@ -151,6 +151,64 @@ test("a repository-only inspection verifies the origin without reading issues", 
   } finally { await rm(path, { recursive: true, force: true }); }
 });
 
+test("a publication inspection runs the root's duplicate search in the Location's own repository (#4119)", async () => {
+  const path = await mkdtemp(join(tmpdir(), "campaign-launch-publication-"));
+  const publication = { sanitizedTitle: "[Feature]: Api Repair", labels: ["enhancement"],
+    sanitizedBody: "## Problem\nBroken\n## Proposed Behavior\nRepair it\n## Acceptance Criteria\n- Repaired\n## Security and Compatibility\nNone" };
+  try {
+    const calls: string[][] = [];
+    const run = (existing: string[]) => async (cwd: string, command: string, args: string[]) => {
+      assert.equal(cwd, path, "every command runs in the Location's own path");
+      calls.push([command, ...args]);
+      if (command === "git") return args[0] === "remote" ? "https://github.com/owner/api.git" : args.includes("--is-inside-work-tree") ? "true" : "a".repeat(40);
+      const rows = existing.map((title, index) => ({ number: index + 1, title, html_url: `https://github.com/owner/api/issues/${index + 1}` }));
+      return JSON.stringify(args.includes("search/issues") ? { items: rows, incomplete_results: false, total_count: rows.length } : rows);
+    };
+    const message = { type: "campaign_launch_inspect" as const, requestId: "publish-1", workspaceId: "w", issueNumbers: [], publication };
+    const result = await inspectCampaignLaunch(message, [{ id: "w", path }], run(["Unrelated"]));
+    assert.equal(result.ok, true, result.error ?? "inspected");
+    assert.equal(result.repository, "owner/api");
+    assert.equal(result.duplicateSearch, "subject");
+    assert.match(result.publicationDigest!, /^[a-f0-9]{64}$/);
+    // The duplicate search reads the target repository, by the title's subject.
+    assert.ok(calls.some((call) => call.includes("repos/owner/api/issues?state=all&sort=created&direction=desc&per_page=100")));
+    assert.ok(calls.some((call) => call.includes("q=repo:owner/api is:issue in:title Api Repair")));
+    assert.doesNotMatch(JSON.stringify(result), /Broken|Repair it|\/tmp\//);
+
+    // An issue with the same subject or an unsafe payload refuses it.
+    const duplicate = await inspectCampaignLaunch(message, [{ id: "w", path }], run(["Api repair"]));
+    assert.deepEqual([duplicate.ok, duplicate.failure, duplicate.publicationDigest], [false, "publication_refused", undefined]);
+    const unsafe = await inspectCampaignLaunch({ ...message, publication: { ...publication, sanitizedBody: "No headings" } }, [{ id: "w", path }], run([]));
+    assert.deepEqual([unsafe.ok, unsafe.failure], [false, "publication_refused"]);
+
+    // With an issue number, that issue must be published with exactly this payload. No duplicate
+    // search runs: the published issue itself has this title.
+    const published = (changes: Record<string, unknown> = {}) => async (_cwd: string, command: string, args: string[]) => {
+      if (command === "git") return args[0] === "remote" ? "https://github.com/owner/api.git" : args.includes("--is-inside-work-tree") ? "true" : "a".repeat(40);
+      assert.equal(args.includes("search/issues"), false);
+      return JSON.stringify({ number: 77, title: publication.sanitizedTitle, body: publication.sanitizedBody, html_url: "https://github.com/owner/api/issues/77",
+        labels: publication.labels.map((name) => ({ name })), ...changes });
+    };
+    const verify = { ...message, requestId: "verify-1", issueNumbers: [77] };
+    const verified = await inspectCampaignLaunch(verify, [{ id: "w", path }], published());
+    assert.deepEqual([verified.ok, verified.issueNumbers, verified.publicationDigest, verified.duplicateSearch], [true, [77], undefined, undefined]);
+    for (const changes of [{ title: "Another title" }, { body: "Edited after approval" }, { labels: [] }]) {
+      const edited = await inspectCampaignLaunch(verify, [{ id: "w", path }], published(changes));
+      assert.deepEqual([edited.ok, edited.failure], [false, "publication_refused"], JSON.stringify(changes));
+      assert.doesNotMatch(JSON.stringify(edited), /Edited after approval|Another title/);
+    }
+    let executed = false;
+    const many = await inspectCampaignLaunch({ ...message, issueNumbers: [1, 2] }, [{ id: "w", path }], async () => { executed = true; return ""; });
+    assert.deepEqual([many.ok, many.failure, executed], [false, "invalid_request", false]);
+    const extra =await inspectCampaignLaunch({ ...message, publication: { ...publication, repository: "other/repo" } } as CampaignLaunchInspectionMessage,
+      [{ id: "w", path }], async () => { executed = true; return ""; });
+    assert.deepEqual([extra.ok, extra.failure, executed], [false, "invalid_request", false]);
+    // A facts read reports a pull request rather than refusing it, so it can never check a payload.
+    const both = await inspectCampaignLaunch({ ...message, issueNumbers: [77], facts: true }, [{ id: "w", path }], async () => { executed = true; return ""; });
+    assert.deepEqual([both.ok, both.failure, executed], [false, "invalid_request", false]);
+  } finally { await rm(path, { recursive: true, force: true }); }
+});
+
 test("SSH home workspace inspection uses the authorized project subfolder, including dynamic ids", async () => {
   const root = await mkdtemp(join(tmpdir(), "inspection-location-"));
   const { mkdir } = await import("node:fs/promises");
@@ -221,9 +279,11 @@ test("each inspection step has a fixed sanitized failure without command output 
   try {
     for (const failure of Object.keys(CAMPAIGN_LAUNCH_INSPECTION_ERRORS) as CampaignLaunchInspectionFailure[]) {
       const result = await inspectCampaignLaunch({ type: "campaign_launch_inspect", requestId: "failure",
-        workspaceId: failure === "unknown_location" ? "unknown" : "w", issueNumbers: [1],
+        workspaceId: failure === "unknown_location" ? "unknown" : "w", issueNumbers: failure === "publication_refused" ? [] : [1],
         ...(failure === "missing_path" ? { workspacePath: join(path, "absent") } : {}),
         ...(failure === "invalid_request" ? { workspacePath: "" } : {}),
+        // An unsafe payload: the publication inspection refuses it before any forge read.
+        ...(failure === "publication_refused" ? { publication: { sanitizedTitle: "Repair", sanitizedBody: "secret token", labels: [] } } : {}),
       }, [{ id: "w", path }], async (_cwd, command, args) => {
         if ((failure === "not_repository" && args.includes("--is-inside-work-tree")) ||
             (failure === "issue_read_failed" && command === "gh")) throw new Error("secret://token /private/path RAW_OUTPUT");

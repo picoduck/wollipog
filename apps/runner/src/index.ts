@@ -618,7 +618,7 @@ const metadata: RunnerMetadata = {
       : {}),
   })),
   runtime: {
-    campaignLaunchInspection: { version: 3 },
+    campaignLaunchInspection: { version: 4 },
     dataDir: config.dataDir,
     worktreeRoot: resolve(config.dataDir, "worktrees"),
     worktreePorts: {

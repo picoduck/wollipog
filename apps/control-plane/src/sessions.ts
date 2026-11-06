@@ -38,6 +38,8 @@ import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignRepositoryLimits, campaignControlForRunner, campaignControlRevisionForRunner, campaignLaunchRepository, campaignScopeRepositories, carriedCampaignRepositories } from "./campaign-authority.js";
 import { campaignBoundaryRepositoryAt } from "./campaign-repository-boundary.js";
+import { inspectBoundaryPublication, verifyBoundaryPublishedIssue } from "./project-location-inspection.js";
+import { campaignBoundaryRepository } from "@wollipog/protocol";
 import { genericRequestScreenData, implementationQuestionScreenData, ownerDecisionScreenData, screenCredentialRequest, type CredentialScreenSurface } from "./credential-screen.js";
 import { DECISION_TOTAL_BOUND_MS, DecisionRuntime, hubDecisionTransport, type DecisionOutcome } from "./decision-runtime.js";
 import { DecisionModelSettings } from "./decision-model-settings.js";
@@ -12039,6 +12041,31 @@ export class SessionsService {
     });
   }
 
+  /** The duplicate and content inspection of a follow-up publication, as the digest of its exact
+   * payload, or null when it did not complete. The root's own repository is inspected as the root,
+   * in its checkout; another boundary repository through one of its Locations (#4119), with that
+   * Location runner's own forge login, so its duplicate search runs in the target repository. */
+  private async inspectCampaignPublicationDigest(root: SessionView,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>): Promise<string | null> {
+    const control = root.orchestratorPolicy?.control;
+    if (control?.mode !== "full_control") return null;
+    const payload = { sanitizedTitle: snapshot.sanitizedTitle, sanitizedBody: snapshot.sanitizedBody, labels: snapshot.labels };
+    try {
+      if (snapshot.repository !== control.boundary.repository.toLowerCase()) {
+        const entry = campaignBoundaryRepository(control.boundary, snapshot.repository);
+        return entry ? await inspectBoundaryPublication({ db: this.db, hub: this.hub }, root, entry, payload) : null;
+      }
+      const requestId = `publication_inspect_${randomUUID()}`;
+      const result = await this.hub.requestFromRunner(root.runnerId, requestId, { type: "campaign_issue_scope", operation: "publication_inspect",
+        requestId, sessionId: root.id, ...payload }, 60_000);
+      // The tag-insensitive title proof needs a runner whose duplicate search and comparison are too;
+      // an older one misses an existing issue that differs from this title only by its tag.
+      return result.type === "campaign_issue_scope_result" && result.ok && result.sessionId === root.id &&
+        result.repository?.toLowerCase() === snapshot.repository && result.publicationDigest && result.duplicateSearch === "subject"
+        ? result.publicationDigest : null;
+    } catch { return null; }
+  }
+
   /** Admits a publication of an accepted related recommendation as Orchestrator-owned. The root or
    * any member whose gates the root controls may request it: the drafting child usually does. A
    * refusal names its condition, logged here and recorded on the human-owned fallback (#2940). */
@@ -12070,18 +12097,8 @@ export class SessionsService {
     const related = await this.followUpRelatedness(root, sessionId, snapshot, evidence);
     if (related.outcome === "refused") return refused("unrelated_follow_up", boundaryRevision, related.reason);
     if (related.outcome === "owner") return refused("relatedness_unconfirmed", boundaryRevision);
-    let publicationDigest: string;
-    try {
-      // Inspection and consumption both run as the root, whose runner and repository own the boundary.
-      const requestId = `publication_inspect_${randomUUID()}`;
-      const result = await this.hub.requestFromRunner(root.runnerId, requestId, { type: "campaign_issue_scope", operation: "publication_inspect",
-        requestId, sessionId: root.id, sanitizedTitle: snapshot.sanitizedTitle, sanitizedBody: snapshot.sanitizedBody, labels: snapshot.labels }, 60_000);
-      // The tag-insensitive title proof needs a runner whose duplicate search and comparison are too;
-      // an older one misses an existing issue that differs from this title only by its tag.
-      if (result.type !== "campaign_issue_scope_result" || !result.ok || result.sessionId !== root.id || result.repository?.toLowerCase() !== snapshot.repository || !result.publicationDigest ||
-          result.duplicateSearch !== "subject") return refused("inspection_failed", boundaryRevision);
-      publicationDigest = result.publicationDigest;
-    } catch { return refused("inspection_failed", boundaryRevision); }
+    const publicationDigest = await this.inspectCampaignPublicationDigest(root, snapshot);
+    if (!publicationDigest) return refused("inspection_failed", boundaryRevision);
     const current = this.db.getSession(root.id)!;
     const boundary = issueBoundary(current);
     if (!boundary || issueEvidenceDigest(publicationEvidence(this.db, current, snapshot)) !== issueEvidenceDigest(evidence)) return refused("evidence_changed", boundaryRevision);
@@ -12101,6 +12118,12 @@ export class SessionsService {
         !grant.resourceSnapshot.issueAdmission && !humanApproved || this.db.admittedCampaignPublicationIssue(sessionId, grant.occurrenceId) !== null) return false;
     const publication = grant.resourceSnapshot;
     const root = this.db.getSession(sessionId)!;
+    // An issue published in another boundary repository is read through one of its Locations (#4119).
+    if (publication.repository !== campaignLaunchRepository(root)) {
+      const entry = campaignScopeRepositories(root).find((candidate) => candidate.repository === publication.repository);
+      return entry ? verifyBoundaryPublishedIssue({ db: this.db, hub: this.hub }, root, entry,
+        { sanitizedTitle: publication.sanitizedTitle, sanitizedBody: publication.sanitizedBody, labels: publication.labels }, issue) : false;
+    }
     const requestId = `publication_verify_${randomUUID()}`;
     const inspected = await this.hub.requestFromRunner(root.runnerId, requestId, { type: "campaign_issue_scope", operation: "inspect", requestId,
       sessionId, issues: [issue], publication: { sanitizedTitle: publication.sanitizedTitle, sanitizedBody: publication.sanitizedBody, labels: publication.labels } }, 60_000);
@@ -12237,6 +12260,17 @@ export class SessionsService {
             d.resourceSnapshot.sanitizedTitle === candidate.title && this.db.admittedCampaignPublicationIssue(sessionId, d.occurrenceId) === null);
           if (grant && await this.inspectPublishedScopeIssue(sessionId, grant, candidate.issue.number)) settlements.push({ publicationOccurrenceId: grant.occurrenceId, issue: candidate.issue.number });
         }
+        // A publication in another repository settles the same way, named by its recorded issue (#4119).
+        for (const group of snapshot.otherRepositories ?? []) {
+          for (const grant of this.db.campaignPublicationReservations(sessionId)) {
+            const published = grant.resourceSnapshot;
+            if (grant.status !== "consumed" || published.category !== "follow_up_issue_publication" || published.repository !== group.repository ||
+                !published.recommendationId || this.db.admittedCampaignPublicationIssue(sessionId, grant.occurrenceId) !== null) continue;
+            const resulting = this.db.campaignWorkLedger.recommendation(sessionId, published.recommendationId)?.resultingIssue;
+            if (!resulting || resulting.repository.toLowerCase() !== group.repository || !group.additions.includes(resulting.number)) continue;
+            if (await this.inspectPublishedScopeIssue(sessionId, grant, resulting.number)) settlements.push({ publicationOccurrenceId: grant.occurrenceId, issue: resulting.number });
+          }
+        }
         if (settlements.length) snapshot.verifiedPublications = settlements;
       }
       const boundary = issueBoundary(latest);
@@ -12299,11 +12333,13 @@ export class SessionsService {
           } else {
             if (!boundary.issueAuthority!.relatedFollowUps) return refuse("follow_ups_not_authorized");
             if (additionCount !== 1) return refuse("follow_up_not_single");
-            // A publication names its own repository; one in another repository is #4119's route.
-            if (otherAdditions) return refuse("publication_not_found");
+            // The one addition is in the repository its publication names, any of the boundary's (#4119).
+            const otherGroup = otherAdditions ? snapshot.otherRepositories?.find((group) => group.additions.length) : undefined;
+            const targetRepository = otherGroup?.repository ?? snapshot.repository;
+            const addedIssue = otherGroup?.additions[0] ?? snapshot.additions[0]!;
             const grant = this.db.workflowDecisionByOccurrence(snapshot.lineage.publicationOccurrenceId);
             if (!grant || grant.controllingSessionId !== sessionId || grant.resourceSnapshot.category !== "follow_up_issue_publication" ||
-                grant.resourceSnapshot.repository !== snapshot.repository) return refuse("publication_not_found");
+                grant.resourceSnapshot.repository !== targetRepository) return refuse("publication_not_found");
             if (grant.status !== "consumed") return refuse("publication_not_consumed");
             if (this.db.admittedCampaignPublicationIssue(sessionId, grant.occurrenceId) !== null) return refuse("publication_already_admitted");
             const publication = grant.resourceSnapshot;
@@ -12331,16 +12367,19 @@ export class SessionsService {
               if (!basis) return refuse("publication_approver_not_owner");
               approval = { kind: "human", approvedByUserId: approver.userId, approvedAt: approver.approvedAt, basis, objective };
             }
-            const bound = scopePublicationRecommendation(this.db, sessionId, publication, snapshot.additions[0]!);
+            const bound = scopePublicationRecommendation(this.db, sessionId, publication, addedIssue);
             if ("failure" in bound) return refuse(bound.failure);
             const { recommendation } = bound;
+            // Its origins are in the scope this change starts from, in whichever repository (#4119).
+            const heldScope = latest.orchestratorPolicy?.issueScope;
             if (!recommendation.originWorkItemIds.length || recommendation.originWorkItemIds.some((id) => {
               const origin = this.db.campaignWorkLedger.detail(sessionId, id, Date.now())?.issue;
-              return !origin || origin.repository.toLowerCase() !== snapshot.repository || !snapshot.before.includes(origin.number);
+              return !origin || !heldScope || !campaignScopeHolds(heldScope, origin);
             })) return refuse("origin_outside_scope");
-            if (!await this.inspectPublishedScopeIssue(sessionId, grant, snapshot.additions[0]!, Boolean(approval))) return refuse("payload_mismatch");
-            snapshot.verifiedPublications = [{ publicationOccurrenceId: grant.occurrenceId, issue: snapshot.additions[0]! }];
-            evidence = { occurrenceId: grant.occurrenceId, payloadDigest: grant.resourceDigest, issue: snapshot.additions[0], ...(approval ? { approval } : {}) };
+            if (!await this.inspectPublishedScopeIssue(sessionId, grant, addedIssue, Boolean(approval))) return refuse("payload_mismatch");
+            snapshot.verifiedPublications = [{ publicationOccurrenceId: grant.occurrenceId, issue: addedIssue }];
+            evidence = { occurrenceId: grant.occurrenceId, payloadDigest: grant.resourceDigest, issue: addedIssue,
+              ...(otherGroup ? { repository: otherGroup.repository } : {}), ...(approval ? { approval } : {}) };
             this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "scope_proposal", sessionId, requestId: request.requestId,
               boundaryRevision: boundary.revision, scopeRevision: snapshot.expectedRevision, lineage: "follow_up", publicationOccurrenceId: grant.occurrenceId,
               publicationAuthority: approval ? "human_approval" : "bounded_admission", ...(approval ? { approvalBasis: approval.basis, approvalObjective: approval.objective } : {}), outcome: "admitted" }));
@@ -14713,16 +14752,12 @@ export class SessionsService {
       const snapshot = normalized.data;
       const evidence = publicationEvidence(this.db, parent, snapshot);
       if (!evidence) return fail("Publication lineage, capacity or disposition changed before consumption", 409);
-      try {
-        const requestId = `publication_consume_${randomUUID()}`;
-        const result = await this.hub.requestFromRunner(parent.runnerId, requestId, { type: "campaign_issue_scope", operation: "publication_inspect", requestId,
-          sessionId: parent.id, sanitizedTitle: snapshot.sanitizedTitle, sanitizedBody: snapshot.sanitizedBody, labels: snapshot.labels }, 60_000);
-        if (result.type !== "campaign_issue_scope_result" || !result.ok || result.sessionId !== parent.id || result.repository?.toLowerCase() !== snapshot.repository ||
-            result.duplicateSearch !== "subject" ||
-            issueEvidenceDigest({ evidence, publicationDigest: result.publicationDigest }) !== snapshot.issueAdmission!.evidenceDigest ||
-            issueEvidenceDigest(publicationEvidence(this.db, this.db.getSession(parent.id)!, snapshot)) !== issueEvidenceDigest(evidence) ||
-            !this.workflowDecisionAuthorityCurrent(this.db.getSession(parent.id)!, policy, decision)) return fail("Fresh publication evidence changed; request a new exact grant", 409);
-      } catch { return fail("Fresh duplicate inspection failed; no publication grant was consumed", 409); }
+      // The same inspection as admission, through the same repository's runner and Location (#4119).
+      const publicationDigest = await this.inspectCampaignPublicationDigest(parent, snapshot);
+      if (!publicationDigest) return fail("Fresh duplicate inspection failed; no publication grant was consumed", 409);
+      if (issueEvidenceDigest({ evidence, publicationDigest }) !== snapshot.issueAdmission!.evidenceDigest ||
+          issueEvidenceDigest(publicationEvidence(this.db, this.db.getSession(parent.id)!, snapshot)) !== issueEvidenceDigest(evidence) ||
+          !this.workflowDecisionAuthorityCurrent(this.db.getSession(parent.id)!, policy, decision)) return fail("Fresh publication evidence changed; request a new exact grant", 409);
     }
     if (action.data) {
       if (child.driver !== "claude-code" && child.driver !== "codex-app-server") {
