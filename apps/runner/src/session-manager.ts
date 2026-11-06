@@ -332,6 +332,7 @@ import {
   type RetainedWorktreeRefRecord,
   type SafeWorktreeDiscardResult,
 } from "./worktree.js";
+import { boundTurnDiff } from "./history-event-bound.js";
 import {
   loadWorktreeSetupConfig,
   resolvedWorktreeSetupEnvironment,
@@ -7714,7 +7715,7 @@ export class SessionManager {
           if (worktreeOwnedByLaunch && worktreeIdentity && !worktreeIdentity.baseCommit) {
             worktreeIdentity = {
               ...worktreeIdentity,
-              baseRef: "HEAD",
+              baseRef: worktree.baseRef ?? "HEAD",
               baseCommit: await worktreeHead(worktree.path, worktreeOptions),
             };
           }
@@ -11869,8 +11870,8 @@ export class SessionManager {
       // Acceptance is not observable until the source-of-truth event crosses its durability fence.
       this.store.flush(sessionId);
       try {
-        this.accrueMeta(sessionId, payload);
-        this.send({ type: "session_event", sessionId, payload, seq: stored.seq, ts: stored.ts });
+        this.accrueMeta(sessionId, stored.payload);
+        this.send({ type: "session_event", sessionId, payload: stored.payload, seq: stored.seq, ts: stored.ts });
       } catch (relayError) {
         this.log(`persisted steering event relay failed for ${sessionId}: ${errText(relayError)}`);
       }
@@ -18782,7 +18783,9 @@ export class SessionManager {
     const worktreeOptions = { context: entry.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash };
     const captured = base ? await captureTurnDiff(entry.worktree.path, base, worktreeOptions) : null;
     const diff = captured?.diff ?? (await worktreeDiff(entry.worktree.path, worktreeOptions));
-    if (diff.trim()) this.emitEvent(sessionId, { kind: "file_edit", path: "worktree", diff });
+    // A turn that pulls in a large upstream range can produce a diff bigger than one history
+    // record may be (#4288). Keep a bounded diff whose summary names the full size and file count.
+    if (diff.trim()) this.emitEvent(sessionId, { kind: "file_edit", path: "worktree", diff: boundTurnDiff(diff) });
     return captured?.tree ?? null;
   }
 
@@ -19691,8 +19694,9 @@ export class SessionManager {
       const stored = this.store.appendEvent(sessionId, identifiedPayload);
       if (!stored) throw new Error("session metadata disappeared before history append");
       try {
-        this.accrueMeta(sessionId, identifiedPayload);
-        this.send({ type: "session_event", sessionId, payload: identifiedPayload, seq: stored.seq, ts: stored.ts });
+        // Relay what was stored: the store may have shortened an oversized record (#4288).
+        this.accrueMeta(sessionId, stored.payload);
+        this.send({ type: "session_event", sessionId, payload: stored.payload, seq: stored.seq, ts: stored.ts });
       } catch (relayError) {
         // The authoritative append already committed. Do not misclassify a best-effort metadata or
         // transport failure as corrupt history, and never throw it through a driver callback; the

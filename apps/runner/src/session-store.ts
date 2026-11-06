@@ -88,6 +88,7 @@ import type {
   WorktreeRecoveryView,
 } from "@wollipog/protocol";
 import { RetentionResponse, scanRetentionSources } from "./history-retention.js";
+import { boundHistoryPayload } from "./history-event-bound.js";
 import type { WorktreeHookSnapshot } from "./worktree-setup.js";
 import type { LeaseProcessEvidence } from "./provider-home-lease-evidence.js";
 
@@ -2339,9 +2340,26 @@ export class SessionStore {
     }
     const layout = this.appendHistoryLayout(id, epoch);
     offset ??= layout.totalBytes;
-    const ev: StoredEvent = { seq, ts, payload };
+    let ev: StoredEvent = { seq, ts, payload };
     try {
-      appendFileSync(layout.active.path, `${JSON.stringify(ev)}\n`);
+      // The reader refuses any record above its page budget, and one refused record makes the
+      // whole session unreadable (#4288). Shorten an oversized record's bulky text before it is
+      // written, or refuse it outright: nothing is persisted, so the existing history stays
+      // readable. The record is serialized once; only an oversized one pays for bounding.
+      let line = JSON.stringify(ev);
+      if (line.length * 3 > HISTORY_PAGE_EVENT_BUDGET && Buffer.byteLength(line, "utf8") > HISTORY_PAGE_EVENT_BUDGET) {
+        const bounded = boundHistoryPayload(payload, HISTORY_PAGE_EVENT_BUDGET,
+          (candidate) => JSON.stringify({ seq, ts, payload: candidate }));
+        if (!bounded) {
+          throw new HistoryStoreError(
+            "history_event_too_large",
+            `refused to write a ${payload.kind} record larger than the ${HISTORY_PAGE_MAX_BYTES} byte page budget`,
+          );
+        }
+        ev = { seq, ts, payload: bounded };
+        line = JSON.stringify(ev);
+      }
+      appendFileSync(layout.active.path, `${line}\n`);
     } catch (error) {
       // A failed write can leave a torn suffix. Reconcile the tail and layout from disk next time
       // instead of appending after bytes no reader will accept.
