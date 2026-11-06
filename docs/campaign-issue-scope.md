@@ -140,7 +140,7 @@ incompatible participants first. A participant outside the launch repository nee
 ## Repository-Qualified Scope
 
 The scope holds `{ repository, number }` pairs (`issues`) across the campaign's repositories: a Full
-Control boundary's entries, or for Custom, which stores no repository list yet, its launch repository.
+Control boundary's entries, or for Custom its launch repository and any its owner approved adding.
 `owner/app#5` and `owner/api#5` are separate entries with separate authority. `repository` and
 `issueNumbers` stay as the launch repository's part for older clients and runners. A scope saved before
 #4118 reads as its numbers in its repository, at the same revision; nothing is rewritten and no

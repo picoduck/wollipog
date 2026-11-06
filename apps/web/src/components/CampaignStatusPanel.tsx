@@ -375,12 +375,14 @@ function CampaignOwnerDecisions({ ownerDecisions, now, findRequest, onOpenReques
   const hidden = ownerDecisions.total - ownerDecisions.items.length;
   // An Orchestrator's scope proposal without lineage waits for the owner without the owner keeping it (#4267).
   const scopeApproval = (item: (typeof ownerDecisions.items)[number]) => item.category === "campaign_issue_scope" && !item.ownerRule && !item.handedOff;
+  // So does its request to add a repository (#4117): the owner never kept it, it is always theirs.
+  const repositoryAddition = (item: (typeof ownerDecisions.items)[number]) => item.category === "campaign_repository_addition" && !item.ownerRule && !item.handedOff;
   const one = ownerDecisions.total === 1;
   return (
     <section className="campaign-status-handoffs" aria-labelledby={headingId}>
       <h3 id={headingId} className="section-title">Waiting for You</h3>
       <p className="section-note">
-        {ownerDecisions.items.some(scopeApproval)
+        {ownerDecisions.items.some((item) => scopeApproval(item) || repositoryAddition(item))
           ? `Only you can make ${one ? "this decision" : "these decisions"}.`
           : `You kept ${one ? "this decision" : "these decisions"}, so only you can make ${one ? "it" : "them"}.`}{" "}
         The Orchestrator keeps working on everything else meanwhile.
@@ -392,7 +394,8 @@ function CampaignOwnerDecisions({ ownerDecisions, now, findRequest, onOpenReques
             <li key={item.occurrenceId}>
               <dl className="facts">
                 <div>
-                  <dt>{item.ownerRule ? "Kept by Rule" : item.handedOff ? "Handed to You" : scopeApproval(item) ? "Scope Approval" : "Owner Decision"}</dt>
+                  <dt>{item.ownerRule ? "Kept by Rule" : item.handedOff ? "Handed to You" : scopeApproval(item) ? "Scope Approval"
+                    : repositoryAddition(item) ? "Add Repository" : "Owner Decision"}</dt>
                   <dd>
                     {item.summary}
                     <span className="campaign-status-meta">

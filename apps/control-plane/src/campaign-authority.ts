@@ -100,14 +100,17 @@ export function campaignLaunchRepository(root: Pick<SessionView, "orchestratorPo
 }
 
 /** The repositories the campaign's issue scope may hold, the launch repository first (#4118): a
- * Full Control boundary's entries, each with its verified Locations in order. A Custom campaign
- * stores no repository list yet, so its one entry is the launch repository its scope recorded. */
+ * Full Control boundary's entries, each with its verified Locations in order. A Custom campaign's
+ * entries are the launch repository its scope recorded and the list its owner's approved additions
+ * grew (#4117). */
 export function campaignScopeRepositories(root: Pick<SessionView, "orchestratorPolicy">): CampaignBoundaryRepository[] {
   const control = root.orchestratorPolicy?.control;
   if (control?.mode === "full_control") return campaignBoundaryRepositories(control.boundary)
     .map((entry) => ({ repository: entry.repository.toLowerCase(), locationIds: entry.locationIds }));
   const launch = campaignLaunchRepository(root);
-  return launch ? [{ repository: launch, locationIds: [] }] : [];
+  const listed = (root.orchestratorPolicy?.repositories ?? []).map((entry) => ({ repository: entry.repository.toLowerCase(), locationIds: entry.locationIds }));
+  const own = listed.find((entry) => entry.repository === launch);
+  return [...(launch ? [own ?? { repository: launch, locationIds: [] }] : []), ...listed.filter((entry) => entry.repository !== launch)];
 }
 
 /** Under Full Control the issue scope bounds what the Orchestrator may deliver (#4062): a child is

@@ -18,7 +18,7 @@ import {
 import type { GhOutcome, GhRunner } from "./campaign-forge-status.js";
 import type { GlabRunner } from "./campaign-gitlab-status.js";
 import { runPullRequestCli, runWollipogCli, runWollipogInit } from "./wollipog-cli.js";
-import { expandCommandAlias, resolveHelp } from "./wollipog-help.js";
+import { campaignHelp, expandCommandAlias, resolveHelp } from "./wollipog-help.js";
 
 test("MCP stays connected beyond the credential deadline and recovers typed decisions after acknowledgment", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-mcp-readiness-"));
@@ -1701,6 +1701,36 @@ test("CLI exact-result handoff forwards the descendant revision and refuses its 
   calls.length = 0;
   assert.equal(await invoke(["session", "handoff-result", "parent", "--revision", "result-7", "--json"]), 1);
   assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
+});
+
+test("CLI campaign repository additions map to their tools and expose no approval command (#4117)", async () => {
+  const calls: Array<{ url: string; method?: string; body?: string }> = [];
+  let version = PROTOCOL_VERSION;
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, method: init?.method, body: init?.body });
+    return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+      ? { protocolVersion: version } : { authority: "human", status: "pending" }) };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token",
+    WOLLIPOG_SESSION_ID: "root", WOLLIPOG_PERMISSION_PRESET: "orchestrator" };
+  const invoke = (args: string[]) => runWollipogCli(["node", "cli.js", "--wollipog-cli", ...args, "--json"], env,
+    { stdout: () => {}, stderr: () => {} }, fetch);
+  const last = () => calls.filter((call) => !call.url.endsWith("/api/compatibility")).at(-1)!;
+  const request = { requestId: "add-1", locationId: "loc_third", reason: "The follow-up lives in team/third.", work: { kind: "follow_up", id: "fu_1" } };
+  assert.equal(await invoke(["campaign", "repository-addition", "request", "--input", JSON.stringify(request)]), 0);
+  assert.equal(last().url, "http://cp/api/sessions/root/orchestrator-campaign/repository-additions");
+  assert.deepEqual(JSON.parse(last().body!), request);
+  assert.equal(await invoke(["campaign", "repository-addition", "get", "workflow_1"]), 0);
+  assert.equal(last().url, "http://cp/api/sessions/root/orchestrator-campaign/repository-additions/workflow_1");
+  assert.equal(await invoke(["campaign", "repository-addition", "execute", "workflow_1", "--digest", "a".repeat(64)]), 0);
+  assert.deepEqual(JSON.parse(last().body!), { resourceDigest: "a".repeat(64) });
+  const count = calls.length;
+  assert.equal(await invoke(["campaign", "repository-addition", "approve", "workflow_1"]), 2);
+  assert.equal(await invoke(["campaign", "repository-addition", "get", "workflow_1", "--session", "other"]), 2);
+  version = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryAddition - 1;
+  assert.equal(await invoke(["campaign", "repository-addition", "request", "--input", JSON.stringify(request)]), 1);
+  assert.ok(calls.slice(count).every((call) => call.url.endsWith("/api/compatibility")), "nothing else reaches the control plane");
+  assert.match(campaignHelp(), /repository-addition request/);
 });
 
 test("CLI campaign ledger commands map to their tools and refuse other sessions or old control planes (#2417)", async () => {

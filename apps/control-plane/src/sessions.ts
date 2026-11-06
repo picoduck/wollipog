@@ -76,6 +76,7 @@ import { normalizeCampaignIssueScopeSnapshot, titleFromPrompt, type CampaignIssu
 import { normalizeIssueClosureSnapshot, issueClosureActiveChildren, issueClosureBindingSnapshot, issueClosureChildren, issueClosureFailureRefusal, issueClosureResultRefusal } from "./github-issue-closure.js";
 import { normalizeAutomationCreationSnapshot } from "./automation-creation-snapshot.js";
 import { normalizeLocationSwitchSnapshot } from "./location-switch-snapshot.js";
+import { normalizeCampaignRepositoryAdditionSnapshot } from "./campaign-repository-addition-snapshot.js";
 import { INTENDED_CLOSURES_LIMIT, normalizeIntendedClosures, prMergeClosureMismatch, unscopedClosureRefusal, validClosingReferenceCheck } from "./pr-merge-closures.js";
 import { allReportedChecksRefusal, validPullRequestChecksRead } from "./merge-checks-basis.js";
 import { observeReconciliationSnapshot, reconciliationSnapshotAvailable, correctionFrame, latestReconciliationRepair, normalizeReconciledSnapshot, reconciliationRevision } from "./claude-cost-reconciliation.js";
@@ -642,6 +643,7 @@ const CAMPAIGN_REQUEST_WITHDRAWN_OUTCOME = "withdrawn";
  * that person, so neither the requester nor an Orchestrator can withdraw one. */
 const PERSON_SETTLED_WORKFLOW_DECISION_CATEGORIES: ReadonlySet<WorkflowDecisionCategory> = new Set([
   "issue_closure", "campaign_issue_scope", "campaign_follow_up_admission", "automation_creation", "location_switch",
+  "campaign_repository_addition",
 ]);
 
 /** A request resolution a person made, or a server revocation a person's action led to, asks the
@@ -931,7 +933,8 @@ function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): strin
   if (isOwnerQuestionSnapshot(decision.resourceSnapshot) && !decision.withdrawal) return ownerQuestionAnswerPrompt(decision, decision.resourceSnapshot);
   // A decision the owner kept (#4064), or an owner rule kept for them (#4137), is answered by that
   // owner, never by an agent or a reviewer.
-  const ownerKept = decision.category === "owner_decision" || decision.ownerHandoff !== undefined || decision.ownerRule !== undefined;
+  const ownerKept = decision.category === "owner_decision" || decision.category === "campaign_repository_addition" ||
+    decision.ownerHandoff !== undefined || decision.ownerRule !== undefined;
   const resolver = decision.withdrawal || decision.authority === "orchestrator" ? "Your Orchestrator"
     : ownerKept && decision.status !== "revoked" ? "Your campaign's owner" : "A human reviewer";
   // A withdrawal's own reason replaces the message an earlier approval left (#3917), and the option
@@ -959,6 +962,12 @@ function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): strin
       : decision.status === "denied" ? "Your owner chose Stay Here: keep working in this Location and repository, and do not ask again " +
         "unless they tell you to. Explain what can and cannot be done from here."
       : "The request ended unanswered: this session stays where it is."] : []),
+    ...(decision.category === "campaign_repository_addition" && !decision.withdrawal ? [decision.status === "approved"
+      ? "Call execute_campaign_repository_addition (or `wollipog campaign repository-addition execute`) with this occurrenceId " +
+        "and its resourceDigest now: it inspects that exact Location again and adds its repository to the campaign."
+      : decision.status === "denied" ? "Your owner declined adding this repository. Record the work that needs it as blocked on " +
+        "the owner, never as delivered, and do not ask again for the same work."
+      : "The request ended unanswered: the campaign's repositories are unchanged and the work that needs it stays blocked."] : []),
     "The decision record is authoritative: read it with get_workflow_decision before acting. " +
       "If you have already acted on this outcome, continue from where you are.",
     "[End Wollipog Workflow Decision]",
@@ -1248,6 +1257,10 @@ export function normalizeWorkflowDecisionSnapshot(
   if (category === "location_switch") {
     const snapshot = normalizeLocationSwitchSnapshot(value);
     return snapshot ? ok(snapshot) : fail("a Location switch requires a server-inspected set of Project Locations");
+  }
+  if (category === "campaign_repository_addition") {
+    const snapshot = normalizeCampaignRepositoryAdditionSnapshot(value);
+    return snapshot ? ok(snapshot) : fail("a repository addition requires a server-inspected Project Location");
   }
   if (category === "campaign_issue_scope") {
     const normalized = normalizeCampaignIssueScopeSnapshot(value);
@@ -13382,6 +13395,8 @@ export class SessionsService {
     internal?: { trustedDerivedVideo?: boolean; videoFallbackReason?: string; trustedIssueClosure?: boolean; trustedIssueScope?: boolean; trustedPublication?: boolean; trustedAutomationCreation?: boolean;
       /** A regular session's Location switch, inspected by LocationSwitchService (#4138). */
       trustedLocationSwitch?: boolean;
+      /** An Orchestrator's repository addition, inspected by CampaignLocations (#4117). */
+      trustedRepositoryAddition?: boolean;
       publicationAdmissionFailure?: CampaignPublicationAdmissionFailure;
       /** The resourceKey an admitted publication was requested under, before it was stored under its recommendation (#4066). */
       requestedResourceKey?: string;
@@ -13442,6 +13457,9 @@ export class SessionsService {
     }
     if (normalized.data.category === "location_switch" && !internal?.trustedLocationSwitch) {
       return fail("use request_location_switch: the control plane inspects the Project's Locations itself", 403);
+    }
+    if (normalized.data.category === "campaign_repository_addition" && !internal?.trustedRepositoryAddition) {
+      return fail("use request_campaign_repository_addition: the control plane inspects the Project Location itself, and only the campaign's owner decides", 403);
     }
     if (normalized.data.category === "pr_merge") {
       const snapshot = normalized.data;
@@ -14137,6 +14155,37 @@ export class SessionsService {
       this.hub.sessionChangedById(childSessionId);
       return ok(this.withMergeReviewEvidence(resolved));
     }
+    // A repository addition widens the campaign's authority (#4117): only the campaign's own owner
+    // decides it, in Full Control and Custom alike. No Orchestrator, child or delegation can.
+    if (decision?.category === "campaign_repository_addition") {
+      if (decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
+          parentSessionId !== childSessionId || !canAccess(childSessionId)) return fail("workflow decision not found", 404);
+      const root = this.db.getSession(childSessionId);
+      const scope = this.db.sessionScope(childSessionId);
+      const human = authority === "human" && actor.kind === "human" && actor.id && scope
+        ? this.db.operatingHumanPrincipal(actor.id, scope.organizationId) : null;
+      const control = root?.orchestratorPolicy?.control;
+      const owner = control?.mode === "full_control" ? control.boundary.authorizedByUserId
+        : scope?.owner.kind === "user" ? scope.owner.userId : null;
+      if (!human || human.userId !== owner || !this.db.isSessionOwner(human, childSessionId)) {
+        return fail("Only the campaign's owner can add a repository to it", 403);
+      }
+      if (!root || isTerminal(root.status) || root.archived || decision.status !== "pending" ||
+          decision.resourceSnapshot.category !== "campaign_repository_addition") {
+        return fail("This repository addition has ended or was already decided", 409);
+      }
+      const checked = this.validateWorkflowDecisionResolution(decision, resolution);
+      if (!checked.ok) return failAs(checked);
+      const now = Date.now();
+      const oweResume = this.workflowDecisionResumeOwed(root);
+      const resolved = this.db.resolveCampaignRepositoryAdditionDecision(occurrenceId,
+        resolution.outcome === "approve" ? "approved" : "denied", human.userId, now, oweResume);
+      if (!resolved) return fail("This repository addition was decided concurrently", 409);
+      this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
+      this.recordWorkflowDecisionAudit(resolved, resolution.outcome === "approve" ? "allowed" : "denied", actor, now);
+      this.hub.sessionChangedById(childSessionId);
+      return ok(this.withMergeReviewEvidence(resolved));
+    }
     // A Location switch widens what the session reaches (#4138): only its authenticated owner picks
     // the exact Location, and Stay Here leaves its repository and permissions unchanged.
     if (decision?.category === "location_switch") {
@@ -14475,6 +14524,7 @@ export class SessionsService {
     if (decision.category === "campaign_issue_scope") return fail("Scope resolution applies and consumes the exact authorized proposal atomically", 403);
     if (decision.category === "automation_creation") return fail("use execute_automation_creation to consume and create the approved automation atomically", 403);
     if (decision.category === "location_switch") return fail("use execute_location_switch to carry out the exact Location its owner chose", 403);
+    if (decision.category === "campaign_repository_addition") return fail("use execute_campaign_repository_addition to carry out the exact Location the campaign's owner approved", 403);
     if (decision.category === "issue_closure") return fail("use close_github_issue to consume and execute the exact approved closure", 403);
     if (decision.category === "campaign_follow_up_admission") {
       return fail("accept the follow-up again: the approval is consumed when the campaign admits exactly that follow-up", 403);
@@ -15422,7 +15472,7 @@ export class SessionsService {
   } | null {
     // A Location switch is the regular session's own gate, always its owner's (#4138). Its service
     // refuses Orchestrators and children before a request reaches here.
-    if (category === "automation_creation" || category === "location_switch") return {
+    if (category === "automation_creation" || category === "location_switch" || category === "campaign_repository_addition") return {
       session: child, policy: { revision: 0, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
     };
     if (child.orchestratorPolicy?.control?.mode === "full_control" && child.parentControlPolicy &&
@@ -15683,7 +15733,8 @@ export class SessionsService {
     decision: WorkflowDecisionView,
     options: { recordingCompletedMerge?: boolean } = {},
   ): boolean {
-    if (decision.category === "automation_creation" || decision.category === "location_switch") return decision.authority === "human" &&
+    if (decision.category === "automation_creation" || decision.category === "location_switch" ||
+        decision.category === "campaign_repository_addition") return decision.authority === "human" &&
       decision.controllingSessionId === decision.sessionId;
     // A decision the owner kept (#4064) stays the person's whatever the boundary would now delegate.
     // An Orchestrator-owned occurrence for a resource the owner kept (one requested before the
@@ -16237,6 +16288,7 @@ export class SessionsService {
       review_round_extension: "Review Round Extension Approval Required",
       owner_decision: "Owner Decision Required",
       location_switch: "Location Switch Approval Required",
+      campaign_repository_addition: "Add Repository to Campaign Approval Required",
     };
     const options = snapshot.category === "implementation_question" || snapshot.category === "owner_decision" ||
         snapshot.category === "location_switch"
