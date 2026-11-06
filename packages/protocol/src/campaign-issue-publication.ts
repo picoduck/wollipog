@@ -33,7 +33,9 @@ export type CampaignPublicationAdmissionFailure =
   | "recommendation_not_accepted" | "recommendation_spent" | "title_mismatch" | "origin_outside_scope"
   | "capacity_exhausted" | "inspection_failed" | "evidence_changed" | "recommendation_missing" | "authority_unavailable"
   // #4104: the Decision Model found the follow-up unrelated to what the owner asked for, or could not tell.
-  | "unrelated_follow_up" | "relatedness_unconfirmed";
+  | "unrelated_follow_up" | "relatedness_unconfirmed"
+  // #4119: the follow-up's repository is not in the campaign's boundary.
+  | "target_outside_boundary";
 
 /** Failures the requester can correct in one step (#4065). Under Full Control such a request is
  * refused with its fixed sentence: no decision is created, nobody is asked, and nothing is granted. */
@@ -68,4 +70,7 @@ export const CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES: Readonly<Record<CampaignPu
     "Do not publish it as a campaign follow-up; report it in your final report instead. Nothing was created.",
   relatedness_unconfirmed: "relatedness_unconfirmed: the Decision Model could not confirm that this follow-up is related to the work the " +
     "campaign's owner asked for, so a person reviews it.",
+  target_outside_boundary: "target_outside_boundary: the follow-up's repository is not one of this campaign's repositories, so a person " +
+    "reviews it. If it is a repository of the campaign's Project, the Orchestrator can ask the owner to add it with " +
+    "request_campaign_repository_addition, naming this follow-up's recommendation; once added, request the publication again.",
 };

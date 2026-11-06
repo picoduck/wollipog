@@ -339,3 +339,9 @@ and labels; include `recommendationId` in the workflow request. Review the exact
 resolving. Duplicate/sanitation and lineage checks repeat before one-shot consumption. Read the
 published issue back and record it on that recommendation before proposing its scope addition.
 Missing issue-boundary authority never turns ledger acceptance or ordinary prose into a grant.
+Record a follow-up with the repository it belongs to, which may differ from its origin's: in a
+boundary repository it is reviewed under the same floors, with its duplicate search in that
+repository and lineage naming both, and it joins the scope as one repository-qualified addition
+with its follow-up lineage. Outside the boundary it is a person's
+(`target_outside_boundary`): for a repository of the campaign's Project, request its addition with
+`request_campaign_repository_addition` naming the follow-up, and publish only after the addition.

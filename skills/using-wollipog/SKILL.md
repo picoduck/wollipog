@@ -957,3 +957,11 @@ and labels; include `recommendationId` in the workflow request. Review the exact
 resolving. Duplicate/sanitation and lineage checks repeat before one-shot consumption. Read the
 published issue back and record it on that recommendation before proposing its scope addition.
 Missing issue-boundary authority never turns ledger acceptance or ordinary prose into a grant.
+A follow-up may target any repository of the campaign's boundary, not only its origin's: under Full
+Control it is reviewed under the same floors, its duplicate search runs in the target repository
+through one of its Locations, and its lineage names both repositories. Once published and recorded,
+propose it as one repository-qualified addition with its follow-up lineage, as for any follow-up; its
+payload is read back through that repository's Location. A target outside the boundary
+is a person's (`target_outside_boundary`); if it is a repository of the campaign's Project, ask the
+owner to add it with `request_campaign_repository_addition` naming the follow-up, then request the
+publication again once the addition is carried out.

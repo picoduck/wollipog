@@ -10,7 +10,7 @@ import { Hub } from "./hub.js";
 import { SessionsService, canonicalPrMergeEnqueueCommand } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
-import { closureEvidence, closureDeliveryGaps, issueEvidenceDigest } from "./campaign-issue-authority.js";
+import { closureEvidence, closureDeliveryGaps, issueEvidenceDigest, publicationEvidence } from "./campaign-issue-authority.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { CampaignForgeObserver } from "./campaign-forge-observations.js";
 import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
@@ -3825,5 +3825,165 @@ test("#4066 supersession between Orchestrator-owned occurrences is unchanged, an
     const refused = h.svc.resolveWorkflowDecision("root", "child", first.data!.occurrenceId, { outcome: "approve" }, "orchestrator", { kind: "agent", id: "root" }, () => true);
     assert.equal(refused.status, 409);
     assert.match(refused.error!, new RegExp(`superseded by workflow decision ${second.data!.occurrenceId}`, "u"));
+  } finally { h.db.close(); }
+});
+
+test("a follow-up in another boundary repository is inspected through its Location, owned by the Orchestrator and recorded with both repositories; outside the boundary it waits for a repository addition (#4119)", async () => {
+  const h = harness();
+  try {
+    // team/api is a Location of the campaign's Project on a second runner that inspects publications.
+    const register = (version: 3 | 4) => h.db.registerRunner({ runnerId: "r2", hostname: "r2", os: "linux", version: "test",
+      workspaces: [{ id: "a", name: "Api", path: "/repos/api" }], agents: [],
+      runtime: { maxConcurrentSessions: 4, campaignLaunchInspection: { version } } as RunnerMetadata["runtime"] }, 1, PROTOCOL_VERSION);
+    register(4);
+    const project = h.db.createProject({ name: "Multi" });
+    const api = h.db.addProjectLocation(project.id, { runnerId: "r2", workspaceId: "a" });
+    h.db.raw().prepare("UPDATE sessions SET project_id=? WHERE id='root'").run(project.id);
+    const inspections: Array<{ runnerId: string; workspacePath?: string; publication?: unknown }> = [];
+    const verifications: Array<{ issueNumbers: number[]; title?: string }> = [];
+    let publishedPayloadMatches = true;
+    // Runs while the runner is answering, as a person changing the Location mid-request would.
+    let whileInspecting: (() => void) | null = null;
+    const runner = h.hub.requestFromRunner;
+    h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+      if (message.type !== "campaign_launch_inspect") return runner(runnerId, requestId, message, timeout);
+      whileInspecting?.();
+      const result = { type: "campaign_launch_inspection_result" as const, requestId, workspaceId: message.workspaceId, ok: true, repository: "team/api",
+        issueNumbers: message.issueNumbers, digest: "d".repeat(64) };
+      // Reading issues, with a payload to match or without one, is not a duplicate search.
+      if (message.issueNumbers.length) {
+        verifications.push({ issueNumbers: message.issueNumbers, ...(message.publication ? { title: message.publication.sanitizedTitle } : {}) });
+        return message.publication && !publishedPayloadMatches ? { ...result, ok: false, failure: "publication_refused" as const } : result;
+      }
+      inspections.push({ runnerId, workspacePath: message.workspacePath, publication: message.publication });
+      return { ...result, publicationDigest: issueEvidenceDigest(message.publication), duplicateSearch: "subject" as const };
+    };
+    const record = (title: string) => {
+      const recorded = h.svc.recordCampaignFollowUp("root", { originSessionId: "child", repository: "team/api", title, originWorkItemIds: [h.item.id] });
+      assert.ok(recorded.ok, recorded.error ?? "record");
+      assert.ok(h.svc.adjudicateCampaignRecommendation("root", { recommendationId: recorded.data!.id, disposition: "accepted",
+        reason: "Observed in the API while delivering #100", publicationRequired: true }).ok);
+      return recorded.data!.id;
+    };
+    const publication = (title: string, recommendationId: string) => ({ category: "follow_up_issue_publication" as const, repository: "team/api",
+      sanitizedTitle: title, sanitizedBody: body, labels: [], recommendationId });
+    const request = (key: string, snapshot: ReturnType<typeof publication>) =>
+      h.svc.createWorkflowDecisionWithVideo("child", { requestId: key, resourceKey: key, resourceSnapshot: snapshot });
+
+    // Outside the boundary the publication is the person's, naming the repository-addition route.
+    const outside = await request("outside", publication("Api outside repair", record("Api outside repair")));
+    assert.ok(outside.ok, outside.error ?? "request");
+    assert.equal(outside.data!.authority, "human");
+    assert.equal(outside.data!.authorityEvaluation?.admissionFailure, "target_outside_boundary");
+    assert.match(CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES.target_outside_boundary, /request_campaign_repository_addition/u);
+    assert.equal(inspections.length, 0, "nothing is inspected outside the boundary");
+
+    // Once the owner's addition put team/api in the boundary, the same kind of follow-up is the Orchestrator's.
+    const policy = h.db.getSession("root")!.orchestratorPolicy!;
+    if (policy.control?.mode !== "full_control") throw new Error("fixture control expected");
+    policy.control.boundary.repositories = [{ repository: "team/repo", locationIds: [] }, { repository: "team/api", locationIds: [api.id] }];
+    h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
+    assert.equal(campaignBoundaryCurrent(h.db.getSession("root")!), true);
+    const inside = publication("Api inside repair", record("Api inside repair"));
+    const admitted = await request("inside", inside);
+    assert.ok(admitted.ok, admitted.error ?? "request");
+    assert.equal(admitted.data!.authority, "orchestrator", JSON.stringify(admitted.data!.authorityEvaluation));
+    // Its duplicate search ran in team/api, through that Location's runner and path.
+    assert.deepEqual(inspections, [{ runnerId: "r2", workspacePath: "/repos/api",
+      publication: { sanitizedTitle: "Api inside repair", sanitizedBody: body, labels: [] } }]);
+    // Its lineage names the originating repository's issue and the target repository.
+    assert.deepEqual(publicationEvidence(h.db, h.db.getSession("root")!, inside)?.lineage, { target: "team/api", origins: ["team/repo#100"] });
+    // Consumption inspects again through the same Location.
+    assert.ok(h.svc.resolveWorkflowDecision("root", "child", admitted.data!.occurrenceId, { outcome: "approve" }, "orchestrator",
+      { kind: "agent", id: "root" }, () => true).ok);
+    const consumed = await h.svc.consumeWorkflowDecision("child", admitted.data!.occurrenceId, { resourceSnapshot: admitted.data!.resourceSnapshot });
+    assert.ok(consumed.ok, consumed.error ?? "consume");
+    assert.equal(inspections.length, 2);
+    assert.equal(inspections[1]!.runnerId, "r2");
+
+    // Once published and read back, it joins the scope through that lineage, as one addition of its
+    // own repository, with its payload verified through that repository's Location.
+    const insideRecommendation = inside.recommendationId;
+    assert.ok(h.svc.adjudicateCampaignRecommendation("root", { recommendationId: insideRecommendation, disposition: "accepted", reason: "Published payload read back",
+      resultingWorkItemKey: `followup:${insideRecommendation}`, resultingIssue: { repository: "team/api", number: 77 } }).ok);
+    const join = (requestId: string, number: number, publicationOccurrenceId: string) => h.svc.proposeCampaignIssueScope("root", { requestId,
+      expectedRevision: h.db.getSession("root")!.orchestratorPolicy!.issueScope!.revision, additions: [{ repository: "team/api", number }], removals: [],
+      explanation: "The published follow-up", lineage: { kind: "follow_up", publicationOccurrenceId } });
+    publishedPayloadMatches = false;
+    const altered = await join("join-altered", 77, admitted.data!.occurrenceId);
+    assert.equal(altered.errorDetails?.code, "payload_mismatch", "an edited issue never joins");
+    publishedPayloadMatches = true;
+    verifications.length = 0;
+    const joined = await join("join", 77, admitted.data!.occurrenceId);
+    assert.ok(joined.ok, joined.error ?? "join");
+    assert.equal(joined.data!.authority, "orchestrator", JSON.stringify(joined.data!.authorityEvaluation));
+    assert.deepEqual(verifications.at(-1), { issueNumbers: [77], title: "Api inside repair" });
+    assert.ok(h.approve(joined.data!).ok);
+    assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueScope!.issues,
+      [{ repository: "team/api", number: 77 }, { repository: "team/repo", number: 100 }]);
+    assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100], "the launch repository's numbers are unchanged");
+    assert.equal(h.db.admittedCampaignPublicationIssue("root", admitted.data!.occurrenceId), 77, "the publication's slot is settled");
+    assert.equal((await join("join-again", 77, admitted.data!.occurrenceId)).ok, false, "a publication admits one issue once");
+
+    // An issue's lineage must name its own repository's publication.
+    const wrong = await h.svc.proposeCampaignIssueScope("root", { requestId: "join-wrong-repository", expectedRevision: h.db.getSession("root")!.orchestratorPolicy!.issueScope!.revision,
+      additions: [{ repository: "team/repo", number: 101 }], removals: [], explanation: "Not this publication's repository", lineage: { kind: "follow_up", publicationOccurrenceId: admitted.data!.occurrenceId } });
+    assert.equal(wrong.errorDetails?.code, "publication_not_found");
+
+    // A person adding a published issue of that repository settles its publication the same way.
+    const humanJoin = publication("Api human repair", record("Api human repair"));
+    const humanGrant = await request("human-grant", humanJoin);
+    assert.ok(humanGrant.ok, humanGrant.error ?? "request");
+    assert.ok(h.svc.resolveWorkflowDecision("root", "child", humanGrant.data!.occurrenceId, { outcome: "approve" }, "orchestrator",
+      { kind: "agent", id: "root" }, () => true).ok);
+    assert.ok((await h.svc.consumeWorkflowDecision("child", humanGrant.data!.occurrenceId, { resourceSnapshot: humanGrant.data!.resourceSnapshot })).ok);
+    assert.ok(h.svc.adjudicateCampaignRecommendation("root", { recommendationId: humanJoin.recommendationId, disposition: "accepted", reason: "Published payload read back",
+      resultingWorkItemKey: `followup:${humanJoin.recommendationId}`, resultingIssue: { repository: "team/api", number: 78 } }).ok);
+    const humanChange = await h.svc.proposeCampaignIssueScope("root", { requestId: "human-join", expectedRevision: h.db.getSession("root")!.orchestratorPolicy!.issueScope!.revision,
+      additions: [{ repository: "team/api", number: 78 }], removals: [], explanation: "Add the published follow-up" }, () => true, h.principal);
+    assert.ok(humanChange.ok, humanChange.error ?? "human change");
+    assert.ok(humanChange.data!.resourceSnapshot.category === "campaign_issue_scope");
+    assert.deepEqual(humanChange.data!.resourceSnapshot.verifiedPublications, [{ publicationOccurrenceId: humanGrant.data!.occurrenceId, issue: 78 }]);
+
+    // A same-repository follow-up keeps its lineage unchanged and the root's own inspection.
+    const local = { ...publication("Related repair", acceptedRecommendation(h)), repository: "team/repo" };
+    const localEvidence = publicationEvidence(h.db, h.db.getSession("root")!, local);
+    assert.ok(localEvidence);
+    assert.equal(localEvidence.lineage, undefined);
+
+    // A Location that changes while its runner answers is not the one the boundary lists: its answer
+    // proves nothing, whether it was repointed, moved to another Project, or removed.
+    const changes: Array<[string, () => void, () => void]> = [
+      ["repointed", () => h.db.registerRunner({ runnerId: "r2", hostname: "r2", os: "linux", version: "test", workspaces: [{ id: "a", name: "Api", path: "/repos/elsewhere" }], agents: [],
+        runtime: { maxConcurrentSessions: 4, campaignLaunchInspection: { version: 4 } } as RunnerMetadata["runtime"] }, 1, PROTOCOL_VERSION), () => register(4)],
+      ["moved", () => { h.db.raw().prepare("UPDATE project_locations SET project_id=? WHERE id=?").run(h.db.createProject({ name: "Elsewhere" }).id, api.id); },
+        () => { h.db.raw().prepare("UPDATE project_locations SET project_id=? WHERE id=?").run(project.id, api.id); }],
+      ["removed", () => { h.db.removeProjectLocation(api.id); }, () => {}],
+    ];
+    for (const [label, change, restore] of changes) {
+      let changed = false;
+      whileInspecting = () => { if (!changed) { changed = true; change(); } };
+      const midway = await request(`midway-${label}`, publication(`Api ${label} repair`, record(`Api ${label} repair`)));
+      whileInspecting = null;
+      assert.ok(changed, `${label}: the runner was asked`);
+      assert.ok(midway.ok, midway.error ?? label);
+      assert.equal(midway.data!.authorityEvaluation?.admissionFailure, "inspection_failed", label);
+      assert.equal(midway.data!.authority, "human", label);
+      restore();
+    }
+
+    // A Location runner that cannot inspect publications proves nothing: the person decides.
+    const remaining = h.db.addProjectLocation(project.id, { runnerId: "r2", workspaceId: "a" });
+    const stored = h.db.getSession("root")!.orchestratorPolicy!;
+    if (stored.control?.mode !== "full_control") throw new Error("fixture control expected");
+    stored.control.boundary.repositories = [{ repository: "team/repo", locationIds: [] }, { repository: "team/api", locationIds: [remaining.id] }];
+    h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(stored));
+    register(3);
+    const askedBefore = inspections.length;
+    const older = await request("older", publication("Api older repair", record("Api older repair")));
+    assert.ok(older.ok, older.error ?? "request");
+    assert.equal(older.data!.authority, "human");
+    assert.equal(older.data!.authorityEvaluation?.admissionFailure, "inspection_failed");
+    assert.equal(inspections.length, askedBefore, "an older runner is never asked");
   } finally { h.db.close(); }
 });
