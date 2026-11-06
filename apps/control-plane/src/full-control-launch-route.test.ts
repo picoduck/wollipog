@@ -4129,6 +4129,22 @@ test("a message naming a repository with no limit proposed always reaches the ch
   } finally { await c.server.close(); c.f.db.close(); }
 });
 
+test("a Location's short name in the message reaches the check too, so a limit written that way is never dropped on the no-model path (#4117)", async () => {
+  const c = await threeRepositoryProposals("Fix #12 in api only.");
+  const { f } = c;
+  try {
+    f.db.renameProjectLocation(c.p.project.id, c.third.id, "The API Repository");
+    f.decision.state.check = (message) => scopeCheckAnswer(message, (question) => question === "repository_limits_complete" ? { value: "omits_limit" } : undefined);
+    const proposed = await c.propose([named(12)]);
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    const recorded = (proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!;
+    assert.ok(recorded.checks.includes("repository_mentioned"), "the name the resolver accepts forces the check");
+    assert.equal(f.decision.checkCalls.length, 1);
+    assert.equal(proposed.data!.authority, "human");
+    assert.equal(recorded.ownerCause, "constraint_check_uncertain");
+  } finally { await c.server.close(); c.f.db.close(); }
+});
+
 test("while a limit stands, another repository's Location stays available however it arrives; only an approved addition brings it in (#4117)", async () => {
   const c = await threeRepositoryProposals("Fix the top bug in r2 c, and nothing else.");
   const { f, id, locations, additions, orchestrator } = c;

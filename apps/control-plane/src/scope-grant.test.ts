@@ -59,6 +59,13 @@ test("a repository name means one boundary repository, or nothing (#4118)", () =
   assert.equal(messageNamesRepository("Fix https://github.com/owner/web/issues/3 rapidly.", named), false);
   assert.equal(messageNamesRepository("Fix owner/web#3, then the api.", named), true);
   assert.equal(messageNamesRepository("Fix everything.", named), false);
+  // Every Location name the resolver accepts counts, whichever way the message writes it.
+  const alias = [{ repository: "owner/backend", locationNames: ["The API Repository"] }, { repository: "owner/web" }];
+  assert.equal(resolveRepositoryName("api", alias), "owner/backend");
+  for (const message of ["Fix #12 in api only.", "Fix #12 in the api repo only.", "Fix #12 in The API Repository only."]) {
+    assert.equal(messageNamesRepository(message, alias), true, message);
+  }
+  assert.equal(messageNamesRepository("Fix #12 rapidly.", alias), false);
 });
 
 test("a number is written for a repository only where the message qualifies it so; a bare one is the launch repository's (#4118)", () => {
