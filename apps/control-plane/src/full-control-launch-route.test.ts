@@ -742,12 +742,12 @@ test("an empty launch scope delegates no issue writes: additions are refused and
     assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, []);
     assert.deepEqual(control.boundary.issueAuthority!.epics, []);
 
-    // The Orchestrator cannot widen an empty scope: an addition needs epic or in-scope lineage.
+    // The Orchestrator cannot widen an empty scope: an addition without lineage only asks the owner (#4267).
     const addition = await f.sessions.proposeCampaignIssueScope(root.id, { requestId: "add-5", expectedRevision: 1,
       additions: [{ repository: "owner/repo", number: 5 }], removals: [], explanation: "Fixture addition without lineage" });
-    assert.equal(addition.ok, false);
-    assert.equal(addition.status, 403);
-    assert.match(addition.error!, /authorized epic or exact related-publication lineage/);
+    assert.equal(addition.ok, true, addition.error ?? "");
+    assert.equal(addition.data!.authority, "human");
+    assert.equal(addition.data!.status, "pending");
     const epic = await f.sessions.proposeCampaignIssueScope(root.id, { requestId: "add-epic", expectedRevision: 1,
       additions: [{ repository: "owner/repo", number: 5 }], removals: [], explanation: "Fixture epic addition", lineage: { kind: "epic", epic: 5 } });
     assert.equal(epic.ok, false);
