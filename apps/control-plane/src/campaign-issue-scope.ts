@@ -13,7 +13,7 @@ export function scopeParticipants(db: ControlPlaneDb, root: SessionView): Sessio
 }
 
 /** Why an Orchestrator participant cannot hold the campaign's scope (#4118), or null. It must be in
- * a Location of a boundary repository; outside the launch repository its runner needs v304. */
+ * a Location of a boundary repository; outside the launch repository its runner needs v305. */
 export function participantScopeRefusal(db: ControlPlaneDb, root: SessionView, member: Pick<SessionView, "id" | "runnerId" | "workspaceId">):
   { error: string; status: number; capability?: RunnerCapabilityRequirementDetails } | null {
   // The root's own workspace always qualifies, even before the campaign records its repository.
@@ -185,7 +185,7 @@ export function scopeSnapshot(db: ControlPlaneDb, root: SessionView, repository:
   } while (cursor);
   // A decision or child is affected when any repository's part of the change affects it.
   const changes = groups.filter((g) => g.additions.length || g.removals.length);
-  const affectedDecisions = db.unconsumedWorkflowDecisionsForController(root.id).filter((d) => d.category !== "campaign_issue_scope" &&
+  const affectedDecisions = db.authorityBoundWorkflowDecisionsForController(root.id).filter((d) => d.category !== "campaign_issue_scope" &&
     changes.some((g) => scopeChangeAffectsDecision(db, root.id, g.repository, [...g.additions, ...g.removals], groups.some((x) => x.removals.length > 0),
       db.campaignWorkLedger.sessionsUnrelatedToIssues(root.id, g.repository, [...g.additions, ...g.removals]), d)))
     .map((d) => d.occurrenceId).sort();
@@ -206,7 +206,7 @@ export function scopeSnapshot(db: ControlPlaneDb, root: SessionView, repository:
  * Full Control scope change re-authorizes the boundary all of them were evaluated under, so that
  * request lists, and its approval revokes, every one (#3915). */
 export function everyOutstandingScopeDecision(db: ControlPlaneDb, rootId: string): string[] {
-  return db.unconsumedWorkflowDecisionsForController(rootId).filter((d) => d.category !== "campaign_issue_scope").map((d) => d.occurrenceId).sort();
+  return db.authorityBoundWorkflowDecisionsForController(rootId).filter((d) => d.category !== "campaign_issue_scope").map((d) => d.occurrenceId).sort();
 }
 
 /** Whether a scope change that adds or removes `changed` invalidates an outstanding decision (#3915).

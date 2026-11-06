@@ -19882,7 +19882,7 @@ export class SessionManager {
         return { ...base, ok: false, error: "Stale or conflicting campaign scope revision" };
       }
       let control = message.control;
-      // A participant in any boundary repository stores its own repository's part (#4118, v304).
+      // A participant in any boundary repository stores its own repository's part (#4118, v305).
       if (control && (!validCampaignControl(control) || control.mode === "full_control" && !campaignBoundaryRepository(control.boundary, repository))) return { ...base, ok: false, error: "Scope authority boundary is invalid or in another repository" };
       // A human scope revision intentionally invalidates older standing authorization, but
       // scope removal must still persist. Disable the stale runner diagnostic contract;

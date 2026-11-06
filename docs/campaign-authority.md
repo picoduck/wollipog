@@ -135,6 +135,22 @@ handoff is revoked when anyone tries to use it. Both routes need a v281 root run
 plane, exist only for a Full Control root, and refuse a question that asks for a credential value.
 Custom campaigns are unchanged.
 
+Owner Questions (#4270, v303) are the same route for a question that authorizes nothing: a design
+choice, clarification or preference. `request_owner_decision` with `kind: "question"` stores an
+`owner_decision` whose snapshot reads `kind: "question"`, with 0 to 12 suggested options. Clients
+present its card as an agent question (`presentOwnerQuestionRequest`): the question, its material as
+Markdown context, the suggested options with the recommended one marked, an Other choice and a
+free-text answer, then an optional note when there are options. The owner answers through the
+session's question route; the control plane resolves the decision itself (`answerOwnerQuestion`),
+stores the chosen option and the owner's own words, and delivers both to the root as a Wollipog Owner
+Answer prompt. Only the campaign's owner answers it; agents, children and other people are refused,
+and a refused attempt leaves it pending. Because it grants nothing, it is not bound to the policy
+revision it was asked under: scope, boundary and policy changes, and a runner reconnect, leave it
+pending and answerable, while an Owner Approval is revoked as before. It ends only when the owner
+answers or dismisses it, the root withdraws it, or a newer owner decision under the same key
+replaces it. A pre-v303 root runner keeps the approval form, and a v303 runner sends `kind` only to a
+v303 control plane.
+
 An owner rule (#4137, v296) is the requester's route for the same thing. `request_workflow_decision`
 accepts an optional `ownerRule` (`source`: the installed or user-authored file, at most 256 ASCII
 path characters; `quote`: the requirement, one line of at most 1000 characters without control or

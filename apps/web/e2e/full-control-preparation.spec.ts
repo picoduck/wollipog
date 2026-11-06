@@ -2,7 +2,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, CONTROLLED_REVIEW_PROFILE, DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION,
   type CampaignLaunchInspectionFailure, type FullControlLaunchRequest, type OrchestratorCampaignPolicy, type RunnerView } from "@wollipog/protocol";
 import { execFileSync } from "node:child_process";
-import { campaignLaunchPreflight } from "../../control-plane/src/campaign-launch-admission.js";
+import { campaignLaunchPreflight, fullControlRootPlacementRefusal } from "../../control-plane/src/campaign-launch-admission.js";
 
 const sourceHead = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 const captures = `test-results/full-control-source-fixture-${sourceHead}`;
@@ -178,6 +178,40 @@ for (const viewport of viewports) {
       expect(admissions).toHaveLength(1);
       expect(admissions[0]!.preflightDigest).toBe(serverPreflight(admissions[0] as unknown as FullControlLaunchRequest, true).digest);
       expect(admissions[0]!.requestId).toMatch(/^[a-f0-9]{32}$/);
+    });
+
+    test(`launch harness ${viewport.name} ${theme}: a Native TUI choice refuses Full Control in words and never starts Direct (#2940)`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await routeSettings(page, []);
+      const preflights: FullControlLaunchRequest[] = [];
+      const admissions: unknown[] = [];
+      // The route answers as the server does: its own refusal for this choice, else a ready launch.
+      await page.route("**/api/full-control-campaigns/preflight", async (route) => {
+        const launch = route.request().postDataJSON() as FullControlLaunchRequest;
+        preflights.push(launch);
+        const refusal = fullControlRootPlacementRefusal(launch, []);
+        await route.fulfill(refusal ? { status: 409, json: { error: `Full Control launch is blocked: ${refusal}` } }
+          : { json: { preflight: serverPreflight(launch, true) } });
+      });
+      await page.route("**/api/full-control-campaigns", async (route) => {
+        admissions.push(route.request().postDataJSON());
+        await route.fulfill({ status: 201, json: { id: "session-full-control" } });
+      });
+      await page.goto(`/new-session-choices-e2e.html?defaults=orchestrator&nativeTui=1&openedView=1&theme=${theme}`);
+      await openSessionOptions(page);
+      await editSessionPolicy(page, "Decisions", (policy) =>
+        policy.getByRole("radiogroup", { name: "Orchestrator Control" }).getByRole("radio", { name: "Full Control", exact: true }).click());
+      await page.getByRole("radiogroup", { name: "Harness" }).getByRole("radio", { name: /^Native TUI/ }).click();
+      await page.getByRole("button", { name: "Create Session", exact: true }).click();
+      const alert = page.getByRole("alert").filter({ hasText: "Couldn't Start the Session" });
+      await expect(alert).toHaveCount(1);
+      await expect(alert).toContainText("Full Control needs the Direct harness, because Native TUI doesn't track usage or show approval cards. Choose Direct under Harness.");
+      await expect(alert).not.toContainText("Full Control launch is blocked:");
+      await expectNoFullControlForm(page);
+      expect(preflights).toHaveLength(1);
+      expect(preflights[0]!.overrides!.session!.launchSurface).toBe("native_tui");
+      expect(admissions, "nothing is admitted, so no Direct session starts instead").toHaveLength(0);
+      await shoot(page, alert, `${captures}/launch-${viewport.name}-${theme}-native-tui-blocked.png`);
     });
 
     for (const failure of ["not_repository", "unsupported_origin"] as const) {

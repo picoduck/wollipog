@@ -6,6 +6,7 @@ import { AutomationCreationSummary } from "../AutomationCreationSummary.js";
 import { LocationSwitchSummary } from "./LocationSwitchSummary.js";
 import { followUpLimitText } from "../../follow-up-limit.js";
 import { issueRefLabel } from "../../campaign-status.js";
+import { StructuredQuestionText } from "../StructuredQuestionText.js";
 
 /** The issues a merge would close (#3713; GitLab since #3762). The control plane creates the
  * decision only when they are exactly the snapshot's declared ones, so with a check this is what the
@@ -58,14 +59,18 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck }: {
     case "owner_decision":
       // A decision the campaign's owner kept (#4064): the root's question, what it rests on, and
       // the options, of which only the owner chooses one.
+      // Its material is the root's Markdown, links included (#4270), never a monospace block. An
+      // Owner Question (#4270) is normally answered as a question; this summary is its read-only form.
       return <>
         <p>{snapshot.question}</p>
-        {snapshot.material && <div className="code-well"><pre>{snapshot.material}</pre></div>}
-        <ul>{snapshot.options.map((option) => <li key={option.optionId}>
+        {snapshot.material && <div><StructuredQuestionText>{snapshot.material}</StructuredQuestionText></div>}
+        {snapshot.options.length > 0 && <ul>{snapshot.options.map((option) => <li key={option.optionId}>
           {option.label}{option.optionId === snapshot.recommendedOptionId ? " (Recommended)" : ""}
           {option.description ? <>: {option.description}</> : null}
-        </li>)}</ul>
-        <p>You kept this decision, so only you can make it. The Orchestrator keeps working while it waits.</p>
+        </li>)}</ul>}
+        <p>{snapshot.kind === "question"
+          ? "The Orchestrator asked you this question. Only you can answer it, in your own words, and it keeps working while it waits."
+          : "You kept this decision, so only you can make it. The Orchestrator keeps working while it waits."}</p>
       </>;
     case "campaign_issue_scope":
       return <CampaignIssueScopeSummary snapshot={snapshot} />;

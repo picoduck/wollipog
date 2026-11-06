@@ -249,6 +249,7 @@ import { useRemovedFocus } from "./useRemovedFocus.js";
 import { useBodyWidth } from "./useBodyWidth.js";
 import { CampaignHeldChildren, type CampaignHeldChild } from "./CampaignHeldChildren.js";
 import { ComposerQuestionResponse } from "./ComposerQuestionResponse.js";
+import { withPresentedOwnerQuestions } from "../owner-question-presentation.js";
 import { useGovernanceAudit, useGovernanceTimeline } from "./useGovernanceAudit.js";
 import {
   indexTranscriptDecisionRows,
@@ -782,6 +783,8 @@ export function SessionDetail(props: SessionDetailProps) {
   // children four times a second while an agent streams (#2872). The parts that show one of those
   // fields read it through `useLiveSession`.
   const session = useStoreSelector((s) => s.sessions.get(sessionId), sessionEqualIgnoringStreaming);
+  // An Owner Question (#4270) is answered here as a question, in the composer.
+  const presentedSession = useMemo(() => session ? withPresentedOwnerQuestions(session) : undefined, [session]);
   const needsDetail = !session || session.projection === "summary" || Boolean(session.archived);
   const detailEpoch = session?.eventEpoch ?? 0;
   const conn = useStoreSelector((s) => s.conn);
@@ -854,7 +857,7 @@ export function SessionDetail(props: SessionDetailProps) {
     );
   }
 
-  return <SessionDetailLoaded {...props} session={session} />;
+  return <SessionDetailLoaded {...props} session={presentedSession ?? session} />;
 }
 
 const DESCENDANT_REQUEST_POLL_INTERVAL_MS = 2_000;
