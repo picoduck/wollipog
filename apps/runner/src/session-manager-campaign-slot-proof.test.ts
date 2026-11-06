@@ -9,8 +9,19 @@ import { ControlPlaneDb } from "../../control-plane/src/db.js";
 import { Hub } from "../../control-plane/src/hub.js";
 import { SessionsService } from "../../control-plane/src/sessions.js";
 import { publishNegotiatedSessionSnapshots } from "./control-plane-transport.js";
-import { SessionManager } from "./session-manager.js";
+import { SessionManager, type RetirementProcessProof } from "./session-manager.js";
 import { SessionStore } from "./session-store.js";
+
+/** Runner processes of the simulated host, by pid: each records its own evidence with the fences
+ * it sets, and a later one proves an earlier one gone only once the test marks it gone (#4256). */
+function host() {
+  const gone = new Set<number>();
+  const runner = (pid: number): RetirementProcessProof => ({
+    current: () => ({ pid, process: { bootId: "00000000-0000-4000-8000-000000000000", startTime: String(pid), marker: "a".repeat(32) } }),
+    abandoned: (earlier) => gone.has(earlier.pid),
+  });
+  return { gone, runner };
+}
 
 // A campaign child keeps its concurrency slot until the runner proves its provider retired (#3788).
 // A real SessionManager launches the child through a fake provider and feeds its messages to a real
@@ -77,8 +88,11 @@ function harness() {
       proveProcessTreeExit: ({ terminate }: { terminate: boolean }) => { driver.proofs.push(terminate); return tree; },
       setConfig() {}, resolvePermission: () => false, agentSessionId: () => "conversation" };
   };
-  const manager = (store = new SessionStore(dir)) =>
-    new SessionManager(send, () => {}, store, "r", undefined, factory as never, dir, 1);
+  const manager = (store = new SessionStore(dir), proof?: RetirementProcessProof) => {
+    const runner = new SessionManager(send, () => {}, store, "r", undefined, factory as never, dir, 1);
+    if (proof) runner.setRetirementProcessProof(proof);
+    return runner;
+  };
   const launch = async (runner: SessionManager) => {
     assert.equal(await runner.start({ sessionId: "worker", agentId: "claude", workspaceId: "w", workspacePath: dir,
       driver: "claude-code", command: "claude", args: [], env: {}, context: { kind: "native" }, useWorktree: false,
@@ -457,4 +471,162 @@ test("an exit proof that lands while a same-generation relaunch waits to write i
     assert.equal(new SessionStore(h.dir).readMeta("worker")!.retiringProviderGeneration, undefined);
     assert.equal(h.occupied(), 0);
   } finally { runner.shutdownAll(); h.cleanup(); }
+});
+
+test("a restarted runner that proves the earlier runner gone releases the slot it left held (#4256)", async () => {
+  // The earlier runner crashes while the Stop closes its provider, or shuts down without proving
+  // its process trees reaped. Either way it never reports the child's final checkpoint.
+  for (const ending of ["crash", "unproven shutdown"] as const) {
+    for (const provenAtStartup of [true, false]) {
+      const what = `${ending}, ${provenAtStartup ? "proven at startup" : "proven later"}`;
+      const h = harness();
+      const machine = host();
+      const first = h.manager(undefined, machine.runner(1001));
+      let restarted: SessionManager | undefined;
+      try {
+        const provider = await h.launch(first);
+        provider.callbacks.onEvent({ kind: "token_usage", model: "claude-opus-5-5", inputTokens: 1, costUsd: 0.6 });
+        assert.ok(h.svc.stop("worker").ok);
+        first.stop("worker");
+        assert.equal(new SessionStore(h.dir).readMeta("worker")!.retiringProviderRunner?.pid, 1001,
+          `${what}: the fence records the runner process that set it`);
+        if (ending === "unproven shutdown") {
+          assert.equal(first.shutdownAll(), true);
+          first.recordShutdownRetirementCheckpoints(false);
+        }
+        assert.equal(h.statuses.some((status) => status.campaignBudgetCheckpoint), false);
+
+        if (provenAtStartup) machine.gone.add(1001);
+        restarted = h.manager(undefined, machine.runner(1002));
+        restarted.reconcileStore();
+        await h.reconnect(restarted);
+        const dispatch = h.db.campaignBudgets.dispatch("worker")!;
+        restarted.rearmGovernance("worker", {}, undefined, dispatch);
+        if (!provenAtStartup) {
+          assert.equal(h.occupied(), 1, `${what}: without proof the slot stays held`);
+          h.refused(`${what}: and a replacement is refused, even after an allocation redelivery`);
+          assert.equal(h.statuses.some((status) => status.campaignBudgetCheckpoint), false);
+          assert.equal(h.db.campaignBudgets.active("worker"), true, `${what}: the reservation stays outstanding`);
+          // Retries repeat the same proof; time alone proves nothing.
+          assert.equal(restarted.proveEarlierRunnerRetirements(true), true, `${what}: still unproven`);
+          assert.equal(h.occupied(), 1);
+          machine.gone.add(1001);
+          assert.equal(restarted.proveEarlierRunnerRetirements(true), false, `${what}: the retry proves it`);
+          assert.ok(h.statuses.at(-1)!.campaignBudgetCheckpoint, `${what}: and reports the final checkpoint at once`);
+        }
+        const meta = new SessionStore(h.dir).readMeta("worker")!;
+        assert.equal(meta.retiringProviderGeneration, undefined, `${what}: the fence is lifted`);
+        assert.equal(meta.retiringProviderRunner, undefined);
+        const checkpoint = restarted.snapshotForControlPlane(meta).campaignBudgetCheckpoint!;
+        assert.ok(checkpoint, `${what}: the snapshot carries the final checkpoint`);
+        assert.equal(checkpoint.generation, dispatch.generation);
+        assert.equal(checkpoint.costUsd, 0.6);
+        assert.equal(h.occupied(), 0, `${what}: the proof frees the slot without a history reload`);
+        h.child("replacement");
+        assert.equal(h.occupied(), 1, `${what}: a replacement is admitted`);
+
+        const view = h.hydrate(checkpoint.historyEpoch, checkpoint.throughSeq);
+        assert.deepEqual(h.settlements(), [{ cost: 0.6 }], `${what}: the spend settles from the durable checkpoint`);
+        assert.equal(view.actual.costUsd, 0.6);
+        restarted.rearmGovernance("worker", {}, undefined, dispatch);
+        assert.equal(h.hydrate(checkpoint.historyEpoch, checkpoint.throughSeq).actual.costUsd, 0.6, `${what}: counted once`);
+        assert.deepEqual(h.settlements(), [{ cost: 0.6 }]);
+      } finally { first.shutdownAll(); restarted?.shutdownAll(); h.cleanup(); }
+    }
+  }
+});
+
+test("an earlier runner proven gone after a same-generation relaunch hands the fence to the relaunched provider (#4256)", async () => {
+  const h = harness();
+  const machine = host();
+  const first = h.manager(undefined, machine.runner(1001));
+  let restarted: SessionManager | undefined;
+  try {
+    await h.launch(first);
+    assert.ok(h.svc.stop("worker").ok);
+    first.stop("worker");
+    // Crash. The restarted runner cannot prove the earlier one gone and relaunches the session.
+    restarted = h.manager(undefined, machine.runner(1002));
+    restarted.reconcileStore();
+    await h.reconnect(restarted);
+    const resumed = await h.launch(restarted);
+    resumed.callbacks.onExit(3);
+    machine.gone.add(1001);
+    assert.equal(restarted.proveEarlierRunnerRetirements(true), false, "the earlier runner is proven gone");
+    assert.equal(new SessionStore(h.dir).readMeta("worker")!.retiringProviderRunner?.pid, 1002,
+      "the fence now belongs to the relaunched provider's own retirement");
+    assert.equal(h.statuses.some((status) => status.campaignBudgetCheckpoint), false, "whose tree may still run");
+    assert.equal(h.occupied(), 1);
+    h.refused("so a replacement is refused");
+    resumed.treeGone(true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(h.statuses.at(-1)!.campaignBudgetCheckpoint, "its own proof then releases the slot");
+    assert.equal(h.occupied(), 0);
+    h.child("replacement");
+  } finally { first.shutdownAll(); restarted?.shutdownAll(); h.cleanup(); }
+});
+
+test("a fence recorded without process evidence is never lifted by a later runner process (#4256)", async () => {
+  const h = harness();
+  const machine = host();
+  const first = h.manager(undefined, { current: () => undefined, abandoned: () => true });
+  let restarted: SessionManager | undefined;
+  try {
+    await h.launch(first);
+    assert.ok(h.svc.stop("worker").ok);
+    first.stop("worker");
+    restarted = h.manager(undefined, machine.runner(1002));
+    restarted.reconcileStore();
+    await h.reconnect(restarted);
+    assert.equal(restarted.proveEarlierRunnerRetirements(true), false, "there is nothing to prove it with");
+    assert.ok(new SessionStore(h.dir).readMeta("worker")!.retiringProviderGeneration, "so the fence stays");
+    assert.equal(h.occupied(), 1);
+    h.refused("and a replacement is refused");
+  } finally { first.shutdownAll(); restarted?.shutdownAll(); h.cleanup(); }
+});
+
+test("a provider that exits by itself with code 0 or by a signal gets an accurate status and frees its slot only on its tree proof (#4256)", async () => {
+  for (const code of [0, null]) {
+    for (const treeProven of [true, false]) {
+      const what = `code ${code}, tree ${treeProven ? "proven" : "not proven"}`;
+      const h = harness();
+      const runner = h.manager();
+      try {
+        const provider = await h.launch(runner);
+        provider.callbacks.onEvent({ kind: "token_usage", model: "claude-opus-5-5", inputTokens: 1, costUsd: 0.3 });
+        provider.callbacks.onExit(code);
+        const reported = h.statuses.at(-1)!;
+        assert.equal(reported.status, code === 0 ? "completed" : "failed", `${what}: the exit is reported`);
+        assert.equal(reported.detail, code === 0 ? "agent exited (code 0)" : "agent exited by a signal");
+        assert.equal(h.db.getSession("worker")!.status, reported.status);
+        assert.equal(reported.campaignBudgetCheckpoint, undefined, `${what}: a descendant may outlive the root`);
+        assert.ok(provider.proofs.length > 0 && provider.proofs.every((terminate) => !terminate),
+          `${what}: only the non-killing proof follows the provider's own exit`);
+        assert.equal(h.occupied(), 1);
+        h.refused(`${what}: so no replacement runs beside it`);
+        runner.rearmGovernance("worker", {}, undefined, h.db.campaignBudgets.dispatch("worker"));
+        assert.equal(h.occupied(), 1, `${what}: nor does an allocation redelivery release it`);
+
+        provider.treeGone(treeProven);
+        await new Promise((resolve) => setImmediate(resolve));
+        const checkpoint = h.statuses.at(-1)!.campaignBudgetCheckpoint;
+        if (!treeProven) {
+          assert.equal(checkpoint, undefined, `${what}: a tree not proven gone keeps the slot`);
+          assert.equal(h.occupied(), 1);
+          h.refused(`${what}: and a replacement is still refused`);
+          assert.equal(h.db.campaignBudgets.active("worker"), true, `${what}: the reservation stays outstanding`);
+          continue;
+        }
+        assert.ok(checkpoint, `${what}: the proof carries the final checkpoint`);
+        assert.equal(checkpoint.costUsd, 0.3);
+        assert.equal(h.occupied(), 0, `${what}: the proof frees the slot`);
+        h.child("replacement");
+        const view = h.hydrate(checkpoint.historyEpoch, checkpoint.throughSeq);
+        assert.deepEqual(h.settlements(), [{ cost: 0.3 }], `${what}: the spend settles once`);
+        assert.equal(view.actual.costUsd, 0.3);
+        assert.equal(h.hydrate(checkpoint.historyEpoch, checkpoint.throughSeq).actual.costUsd, 0.3);
+        assert.deepEqual(h.settlements(), [{ cost: 0.3 }]);
+      } finally { runner.shutdownAll(); h.cleanup(); }
+    }
+  }
 });

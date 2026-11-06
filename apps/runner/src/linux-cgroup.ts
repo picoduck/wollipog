@@ -285,6 +285,9 @@ let instance: { mount: CgroupLocation; bootId: string; identity: Readonly<LinuxC
  * provider parent. Its retirement can prove that systemd pruned an absent provider parent. */
 export function providerContainmentUnitIdentity(): Readonly<LinuxCgroupIdentity> | undefined { return instance?.unit; }
 
+/** The provider parent's identity if containment was already selected, without selecting it. */
+export function selectedProviderContainmentIdentity(): Readonly<LinuxCgroupIdentity> | undefined { return instance?.identity; }
+
 /** Detached provider controllers keep their lifetime contract, but their HOME
  * cannot be released at shutdown while any of them still occupies the provider parent. */
 export function providerContainmentEmpty(): boolean {
