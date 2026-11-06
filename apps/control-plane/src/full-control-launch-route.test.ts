@@ -1107,7 +1107,7 @@ test("a launch records its preflight's capabilities and evidence for Campaign St
 
     const revision = f.db.getSession(rootId)!.parentControlPolicy!.revision;
     const revoked = f.sessions.setCampaignControl(rootId, { mode: "custom" }, revision, f.human);
-    assert.ok(revoked.ok, revoked.error);
+    assert.ok(revoked.ok, revoked.error ?? "revocation succeeded");
     assert.equal(f.db.getSession(rootId)!.orchestratorPolicy!.launchDisclosure, undefined, "a revoke drops the record with its boundary");
     assert.equal(f.db.campaignProjection(rootId)!.launchDisclosure, undefined);
 
