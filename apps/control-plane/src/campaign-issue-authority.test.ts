@@ -51,7 +51,7 @@ function harness(full = true, maximum = 5, issues = [100]) {
     }
     if (message.type === "github_issue_closure") {
       state.closureMessages.push(message);
-      if (message.operation === "execute") { state.executes++; return { type: "github_issue_closure_result", requestId, sessionId: message.sessionId, ok: true,
+      if (message.operation !== "inspect") { state.executes++; return { type: "github_issue_closure_result", requestId, sessionId: message.sessionId, ok: true,
         result: { outcome: "uncertain", completedAt: Date.now() } }; }
       return { type: "github_issue_closure_result", requestId, sessionId: message.sessionId, ok: true, inspection: { repository: "team/repo", issue: message.issue,
         title: "Issue", url: `https://github.com/team/repo/issues/${message.issue}`, state: "OPEN", forgeDigest: "a".repeat(64),

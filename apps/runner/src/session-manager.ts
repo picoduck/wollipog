@@ -10,7 +10,7 @@ import { CampaignIssueScopeRefusal, inspectCampaignIssueScope, inspectCampaignPu
 import { launchOrchestratorMeta, nextCampaignControl, validControlRevision } from "./campaign-control-order.js";
 import { boundedIssueNumbers, campaignBoundaryRepository, campaignRepositoryLocation, parseFullControlAutomaticResponse, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
-import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
+import type { GithubIssueClosureLocation, GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
 import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage, GitLabMergeClosuresMessage, GitLabMergeClosuresResultMessage, ForgeDecisionActionMessage, ForgeDecisionActionResultMessage } from "@wollipog/protocol";
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
 import { executeBranchDeletion, executePullRequestEnqueue, observePullRequestMerge } from "./forge-decision-action.js";
@@ -129,7 +129,7 @@ import {
   type SessionWorktreeSwitchView,
 } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, realpathSync, writeSync } from "node:fs";
 import { mkdir, realpath, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { validLocationSwitchBranch, type SessionLocationSwitchMessage } from "@wollipog/protocol";
@@ -958,6 +958,19 @@ function canResumeSession(meta: SessionMeta): boolean {
 }
 
 /** Keep nonblocking questions while authentication owns the visible approval barrier. */
+/** A closure that threw. Execution throws only before its mutation fence: a mutation failure is an
+ * `uncertain` result. Provider output is never surfaced, only these fixed sentences. */
+function issueClosureFailure(
+  base: { type: "github_issue_closure_result"; requestId: string; sessionId: string },
+  error: unknown,
+): GithubIssueClosureResultMessage {
+  return error instanceof IssueClosureInspectionError
+    ? { ...base, ok: false, failure: error.failure, error: error.message,
+        ...(error.deliveryVerificationFailure ? { deliveryVerificationFailure: error.deliveryVerificationFailure } : {}) }
+    : { ...base, ok: false, failure: "evidence_unavailable",
+      error: "Issue inspection failed; verify gh or glab authentication and complete conflict evidence" };
+}
+
 function pendingAsyncQuestions(pending: PendingApproval | null | undefined): PendingApproval | null {
   return pendingRequests(pending)
     .filter((request) => request.kind === "question" && request.async)
@@ -1506,6 +1519,8 @@ function retainedSteeringPayloadBytes(text: string, images: PromptImageInput[]):
 }
 
 const STEERING_SUBMISSION_TIMEOUT_MS = 10_000;
+/** How long a prepared closure at a Location waits at its mutation fence for the commit (#4119). */
+const LOCATION_ISSUE_CLOSURE_COMMIT_WAIT_MS = 30_000;
 const MAX_STEERING_TERMINALS_PER_SESSION = 1_024;
 const MAX_UNRESOLVED_STEERING_ATTEMPTS_PER_SESSION = 50;
 const MAX_STEERING_RESULT_MESSAGE_CHARS = 4_096;
@@ -1828,6 +1843,8 @@ export class SessionManager {
   private readonly retainedResumableSessions = new Set<string>();
   private readonly parkedResumableSessions = new Set<string>();
   private readonly stateDir: string;
+  /** Closures at a Location waiting at their mutation fence for the control plane's commit (#4119). */
+  private readonly preparedLocationClosures = new Map<string, { commit: () => void; finished: Promise<GithubIssueClosureResultMessage> }>();
   /** Evidence for widening the provider-history classifier (#876). Nothing reads it to decide. */
   private readonly unclassifiedRejections: UnclassifiedRejectionJournal;
   private readonly providerStateReconcileTimer: ReturnType<typeof setInterval>;
@@ -20206,10 +20223,12 @@ export class SessionManager {
   /** Execute only trusted, human-approved closures, with a durable fence before mutation. */
   async githubIssueClosure(
     message: GithubIssueClosureMessage,
-    options: { agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
+    options: { agentEnv?: (meta: SessionMeta) => Record<string, string>; locationCommitWaitMs?: number } = {},
   ): Promise<GithubIssueClosureResultMessage> {
     const base = { type: "github_issue_closure_result" as const, requestId: message.requestId, sessionId: message.sessionId };
+    if (message.location) return this.githubIssueClosureAtLocation(message, message.location, base, options.locationCommitWaitMs);
     const meta = this.store.readMeta(message.sessionId);
+    if (message.operation === "commit") return { ...base, ok: false, failure: "runner_failed", error: "Only a closure at a Location is committed separately" };
     if (!meta?.orchestrator || !meta.repoPath) {
       return { ...base, ok: false, failure: "runner_failed", error: "Issue closure requires a runner-local Orchestrator repository" };
     }
@@ -20264,12 +20283,97 @@ export class SessionManager {
         occurrenceId: message.occurrenceId, outcome: result.outcome, ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
       return { ...base, ok: true, result };
     } catch (error) {
-      // Execution throws only before its mutation fence: a mutation failure is an `uncertain` result.
-      return error instanceof IssueClosureInspectionError
-        ? { ...base, ok: false, failure: error.failure, error: error.message,
-            ...(error.deliveryVerificationFailure ? { deliveryVerificationFailure: error.deliveryVerificationFailure } : {}) }
-        : { ...base, ok: false, failure: "evidence_unavailable",
-          error: "Issue inspection failed; verify gh or glab authentication and complete conflict evidence" };
+      return issueClosureFailure(base, error);
+    }
+  }
+
+  /** A closure in another campaign repository (#4119): in the Location the control plane resolved,
+   * with this runner's own forge login. The Orchestrator session lives on another runner, so this
+   * one holds no copy of its scope or boundary, and can't reread them at its mutation fence as the
+   * root's runner does. So `execute` runs every forge check, stops at the fence and answers
+   * `prepared`; the control plane rechecks the campaign's authority after those reads and sends
+   * `commit`. Without one in time, nothing is written. What this runner fences itself is what only
+   * it can see: the checkout's origin, the forge digest, and one durable attempt per occurrence. */
+  private async githubIssueClosureAtLocation(
+    message: GithubIssueClosureMessage,
+    location: GithubIssueClosureLocation,
+    base: { type: "github_issue_closure_result"; requestId: string; sessionId: string },
+    commitWaitMs = LOCATION_ISSUE_CLOSURE_COMMIT_WAIT_MS,
+  ): Promise<GithubIssueClosureResultMessage> {
+    if (message.operation === "commit") {
+      const prepared = this.preparedLocationClosures.get(message.occurrenceId);
+      if (!prepared) return { ...base, ok: false, failure: "runner_failed", error: "No closure is prepared for this approval; nothing was written" };
+      prepared.commit();
+      return { ...await prepared.finished, ...base };
+    }
+    // Frames are not validated on the wire.
+    if (typeof location.workspacePath !== "string" || !location.workspacePath.trim() || location.workspacePath.includes("\0") ||
+        typeof location.repository !== "string" || !location.repository) {
+      return { ...base, ok: false, failure: "runner_failed", error: "Issue closure requires the Location's path on this runner" };
+    }
+    const repository = location.repository.toLowerCase();
+    let cwd: string;
+    try {
+      cwd = await realpath(location.workspacePath);
+    } catch {
+      return { ...base, ok: false, failure: "runner_failed", error: "Issue closure requires the Location's path on this runner" };
+    }
+    const run = issueClosureRun({ kind: "native" }, cwd);
+    try {
+      if (message.operation === "inspect") {
+        const inspection = await inspectGithubIssueClosure(message.issue, run, message.deliveryPullRequests, message.epicMembers === true);
+        if (inspection.repository.toLowerCase() !== repository) return { ...base, ok: false, failure: "repository_changed", error: "The Location's repository differs from the one this closure names" };
+        return { ...base, ok: true, inspection };
+      }
+      if (message.snapshot.repository.toLowerCase() !== repository) return { ...base, ok: false, failure: "repository_changed", error: "Closure repository differs from the Location's" };
+      if (this.preparedLocationClosures.has(message.occurrenceId)) return { ...base, ok: false, failure: "runner_failed", error: "This approval's closure is already prepared; nothing more was written" };
+      const { occurrenceId, snapshot } = message;
+      const digest = createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
+      let commit = () => {};
+      let answerCommit = (_granted: boolean) => {};
+      const committed = new Promise<boolean>((resolve) => { answerCommit = resolve; });
+      let atFence = () => {};
+      const reachedFence = new Promise<"prepared">((resolve) => { atFence = () => resolve("prepared"); });
+      const finished = executeGithubIssueClosure(snapshot, run, async () => {
+        // The wait starts here: however long the forge checks took, the control plane gets all of it.
+        const timer = setTimeout(() => answerCommit(false), commitWaitMs);
+        timer.unref();
+        commit = () => { clearTimeout(timer); answerCommit(true); };
+        atFence();
+        // Nothing awaits between the commit and the durable record, and the mutation follows it.
+        return await committed && this.beginLocationIssueClosure(occurrenceId, digest);
+      }).then((result): GithubIssueClosureResultMessage => {
+        this.log(JSON.stringify({ event: "github_issue_closure_result", sessionId: message.sessionId, workspaceId: location.workspaceId,
+          occurrenceId, outcome: result.outcome, ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
+        return { ...base, ok: true, result };
+      }, (error) => issueClosureFailure(base, error)).finally(() => this.preparedLocationClosures.delete(occurrenceId));
+      // A commit before the fence is reached grants nothing: `prepared` hasn't been answered yet.
+      this.preparedLocationClosures.set(occurrenceId, { commit: () => commit(), finished });
+      const first = await Promise.race([reachedFence, finished]);
+      return first === "prepared" ? { ...base, ok: true, prepared: true } : first;
+    } catch (error) {
+      return issueClosureFailure(base, error);
+    }
+  }
+
+  /** The durable fence before a Location's closure mutates anything (#4119): one record per occurrence,
+   * created exclusively and flushed, so a replay or a restart can never close through it twice. */
+  private beginLocationIssueClosure(occurrenceId: string, digest: string): boolean {
+    const directory = join(this.stateDir, "location-issue-closures");
+    try {
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      const fd = openSync(join(directory, `${createHash("sha256").update(occurrenceId).digest("hex")}.attempt`), "wx", 0o600);
+      try {
+        writeSync(fd, `${digest}\n`);
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      const parent = openSync(directory, "r");
+      try { fsyncSync(parent); } finally { closeSync(parent); }
+      return true;
+    } catch {
+      return false;
     }
   }
 

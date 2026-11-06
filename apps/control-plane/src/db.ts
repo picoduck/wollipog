@@ -18204,8 +18204,12 @@ export class ControlPlaneDb {
           AND category='campaign_issue_scope' AND status='consumed' AND json_extract(resource_snapshot, '$.expectedRevision')=?`)
         .all(rootId, rootId, revision) as unknown[]).map(workflowDecisionFromRow);
       const snapshot = rows.length === 1 ? rows[0]?.resourceSnapshot : undefined;
-      if (snapshot?.category !== "campaign_issue_scope" || snapshot.repository.toLowerCase() !== repository.toLowerCase() ||
-          snapshot.additions.includes(issue) || snapshot.removals.includes(issue)) return false;
+      if (snapshot?.category !== "campaign_issue_scope") return false;
+      // #4119: a closure in another campaign repository reads that repository's part of the change.
+      // A change with no part for the repository has separate authority, and the answer is no.
+      const launch = snapshot.repository.toLowerCase() === repository.toLowerCase();
+      const part = launch ? snapshot : snapshot.otherRepositories?.find((group) => group.repository.toLowerCase() === repository.toLowerCase());
+      if (!part || part.additions.includes(issue) || part.removals.includes(issue)) return false;
     }
     return true;
   }
