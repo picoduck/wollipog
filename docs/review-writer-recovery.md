@@ -148,7 +148,9 @@ or root; group writes require proof that the group is private to the runner user
 **Personal Machine** accepts group-writable paths owned by the runner user without querying
 group membership. This suits a machine whose other local accounts you trust, including normal
 user-owned CLI installations with mode 775. It accepts the risk that another member of that
-group could replace a tool. Root-owned group-writable paths still require the Strict checks.
+group could replace a tool. When the runner uses a non-root account, root-owned group-writable
+paths still require the Strict checks. A runner running as root treats root-owned paths as its
+own under Personal Machine, including the group-write exception.
 
 Both policies reject world-writable paths, other owners, and session-writable locations, and
 check symlink containers, targets, and script interpreters. The policy covers reviewers and

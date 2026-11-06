@@ -2456,9 +2456,8 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           metadata.runtime!.maxConcurrentSessions = msg.runnerCapacity.configuredUnits;
         }
       }
-      if (msg.reviewerSecurity && runnerSupportsProtocol(controlPlaneProtocolVersion, "reviewerSecurityPolicy")) {
-        if (reviewerSecurity.apply(msg.reviewerSecurity)) void runDiscovery(true);
-      }
+      if (reviewerSecurity.register(runnerSupportsProtocol(controlPlaneProtocolVersion, "reviewerSecurityPolicy")
+        ? msg.reviewerSecurity : undefined)) void runDiscovery(true);
       if (msg.automaticAccountSwitching &&
           runnerSupportsProtocol(controlPlaneProtocolVersion, "automaticProviderAccountSwitch")) {
         automaticAccountSwitchConfigurationSynchronized =
