@@ -459,13 +459,15 @@ test("labels and accessible names are Title Case, the list is keyboard operable,
   }
 });
 
-test("a stalled campaign continuation reads Blocked at the root (#1352)", async ({ page }) => {
-  // Stages a failed continuation for the root, then refreshes the root with a stage report.
+test("a stalled campaign continuation beside a running child reads Campaign Active, never Blocked (#1352, #4146)", async ({ page }) => {
+  // Stages a failed continuation for the root, then refreshes the root with a stage report. The
+  // panel item's child is still running, which is live work, so the campaign stays Campaign Active
+  // (#4146); with nothing live it would read Campaign Stuck, which the control-plane tests cover.
   const { seeded, databasePath } = stack;
   await signIn(page);
   await openCampaignStatus(page, seeded.rootId);
   const state = summaryBox(page).locator("dt", { hasText: /^State$/u }).locator("xpath=following-sibling::dd[1]");
-  await expect(state).not.toHaveText("Blocked");
+  await expect(state).toHaveText("Campaign Active");
   await withLiveDb(databasePath, (db) => {
     const now = Date.now();
     db.recordCampaignContinuationEvent({ eventId: `child-ready:${seeded.rootId}:live`, campaignSessionId: seeded.rootId,
@@ -483,7 +485,8 @@ test("a stalled campaign continuation reads Blocked at the root (#1352)", async 
     db.updateCampaignContinuationForCommand("live-continuation-cmd", "failed", now, "provider refused the turn");
   });
   await stack.updateItem(seeded.panelItemId, { stage: { stage: "implementing", note: "Still binding the panel." } });
-  await expect(state).toHaveText("Blocked");
+  await expect(state).toHaveText("Campaign Active");
+  await expect(state).not.toHaveText("Blocked");
   await expect(workRows(page).filter({ hasText: "Campaign Status Panel" })).toHaveAttribute("data-state", "running",
     { timeout: 10_000 });
 });

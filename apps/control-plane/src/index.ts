@@ -1,5 +1,5 @@
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
-import { projectCampaignHandoffsForUi } from "./campaign-status-compatibility.js";
+import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
 import { mediaSessionMutationAllowed } from "./media-session-route-policy.js";
 import { MEDIA_SESSION_PURPOSE_ERROR } from "./prepared-media-session-runtime.js";
 import { DELEGATED_IMAGE_REVIEWER_ERROR, delegatedImageReviewerMutationAllowed } from "./delegated-image-reviews.js";
@@ -1261,7 +1261,7 @@ app.addHook("preSerialization", (req, _reply, payload, done) => {
   const protocol = parseUiProtocolVersion(req.query) ?? parseUiProtocolVersion({
     protocolVersion: req.headers["x-wollipog-ui-protocol"],
   });
-  done(null, projectCampaignHandoffsForUi(projectBackgroundRetryExhaustionForUi(payload, protocol), protocol));
+  done(null, projectCampaignStatusForUi(projectBackgroundRetryExhaustionForUi(payload, protocol), protocol));
 });
 // @fastify/websocket installs one `upgrade` listener on the underlying HTTP server. Register it
 // exactly once: sibling registrations make both listeners claim every socket and eventually turn
@@ -4344,9 +4344,10 @@ app.get("/api/sessions", async (req,reply) => {
     protocolVersion: req.headers["x-wollipog-ui-protocol"],
   });
   const supportsRetryExhaustion = principal?.kind === "agent" || runnerSupportsProtocol(uiProtocol, "backgroundRetryExhaustion");
-  const supportsHandoffs = principal?.kind === "agent" || runnerSupportsProtocol(uiProtocol, "campaignHandoffs");
+  // Agent principals read every campaign status (#4146); a dashboard reads the ones it knows.
+  const campaignStatusProtocol = principal?.kind === "agent" ? PROTOCOL_VERSION : uiProtocol;
   return reply.type("application/json").send(principal
-    ? db.sessionListJsonForPrincipal(principal,includeArchived,supportsRetryExhaustion,supportsHandoffs)
+    ? db.sessionListJsonForPrincipal(principal,includeArchived,supportsRetryExhaustion,campaignStatusProtocol)
     : '{"sessions":[]}');
 });
 
@@ -4444,6 +4445,18 @@ app.post("/api/sessions/:id/orchestrator-campaign/behavior", async (req, reply) 
   if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
   return respond(reply, svc.setCampaignBehavior(id, req.body, { kind: "human", id: humanActorId(req) },
     (behavior, exactRow) => orchestratorSettings.campaignBehaviorError(human, behavior, exactRow)));
+});
+
+// #4146: Campaign Status's **Delete Merged Branches**. Wollipog performs the campaign's approved
+// merged_branch_deletion decisions it still can, through the existing forge action and its checks;
+// a person who can read the root and each requester asks. It approves nothing, so a branch without
+// an approved deletion keeps its exact command. No agent allowlist entry exists for this endpoint.
+app.post("/api/sessions/:id/orchestrator-campaign/cleanup/delete-merged-branches", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const human = requestHuman(req);
+  if (!human) return reply.code(403).send({ error: "only an authenticated human may ask Wollipog to delete merged branches" });
+  if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
+  return respond(reply, await svc.deleteApprovedMergedBranches(id, (sessionId) => db.canAccessSession(human, sessionId)));
 });
 
 app.get("/api/sessions/:id/orchestrator-campaign", async (req, reply) => {
