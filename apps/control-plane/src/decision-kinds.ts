@@ -239,6 +239,72 @@ const SCOPE_REVIEW: DecisionKindDefinition = {
   dataFields: ["grant", "issues", "rationale"],
 };
 
+/** The constraint check of an Orchestrator's scope proposal (#4282), on typed questions (#4283). The
+ * deterministic floors already ran. The model answers only questions checkable from the owner's exact
+ * words and each issue's own facts: the count, whether each owner-named issue was asked for or only
+ * mentioned, whether each chosen issue meets each stated constraint, whether the proposal omits a
+ * requested issue or a stated constraint, and whether it respects operations the message withholds.
+ * It is never asked about priority, importance, impact or effort, which are the Orchestrator's call.
+ * The server derives admit, refuse or uncertain from the answers; nothing it returns can raise a
+ * count, add a repository or grant an operation. Every question is parameterized or asked once, so a
+ * proposal with no chosen issue, or no stated constraint, asks no question about them. */
+export const SCOPE_CHECK_TYPED: TypedDecisionDefinition = {
+  confidenceThreshold: 0.8,
+  verdicts: { admit: "admit", refuse: "refuse" },
+  questions: [
+    { questionId: "count_consistent", label: "Count Matches Your Message",
+      text: "Does the proposal's count agree with the owner's message? `proposal.requestedCount` is the number of issues the agent " +
+        "read in the message (null when it read none) and `proposal.issues` are the issues it adds; `campaign` gives the count already " +
+        "admitted and the issues already in scope, if any. Answer `consistent` when the message states that count, or states none and " +
+        "the agent read none; `inconsistent` when the message states a different count, or a count the agent ignored.",
+      answer: { type: "choice", values: ["consistent", "inconsistent", "cannot_tell"], satisfied: ["consistent"], violated: ["inconsistent"] } },
+    { questionId: "named_asked_for", label: "Asked For", parameterized: true,
+      text: "The agent says the owner named the issue quoted below. Does the owner's message ask the campaign to work on it, rather " +
+        "than only mentioning it (as background, context, an example or something to avoid)?",
+      answer: { type: "choice", values: ["asked_for", "only_mentioned", "cannot_tell"], satisfied: ["asked_for"], violated: ["only_mentioned"] } },
+    { questionId: "constraint_met", label: "Meets a Constraint", parameterized: true,
+      text: "The quoted text names an issue the agent chose and one constraint the agent read in the owner's message. Using only the " +
+        "issue's own facts in `issues` (state, labels, title, body excerpt), does the issue satisfy that constraint?",
+      answer: { type: "choice", values: ["satisfies", "violates", "cannot_tell"], satisfied: ["satisfies"], violated: ["violates"] } },
+    { questionId: "constraints_complete", label: "Every Stated Constraint Listed",
+      text: "Does `proposal.constraints` include every checkable constraint the owner's message states for choosing issues (such as " +
+        "open, UI only, bugs not features, a label to skip, or a repository)? Ranking words such as highest priority or most " +
+        "important are not constraints.",
+      answer: { type: "choice", values: ["complete", "missing_constraint", "cannot_tell"], satisfied: ["complete"], violated: ["missing_constraint"] } },
+    { questionId: "nothing_omitted", label: "No Requested Issue Left Out",
+      text: "Does the proposal add every issue the owner's message explicitly asks the campaign to work on (counting issues already " +
+        "in `campaign.inScope`)? An issue the message only mentions as background is not asked for.",
+      answer: { type: "choice", values: ["complete", "omits_requested", "cannot_tell"], satisfied: ["complete"], violated: ["omits_requested"] } },
+    { questionId: "operations_respected", label: "Withheld Operations Respected",
+      text: "`campaign.operations` lists what the campaign may do and `proposal.withheldOperations` what the agent read the message " +
+        "as ruling out (for example, don't merge rules out pr_merge). Does the proposal withhold every operation the owner's " +
+        "message rules out?",
+      answer: { type: "choice", values: ["respected", "not_respected", "cannot_tell"], satisfied: ["respected"], violated: ["not_respected"] } },
+  ],
+};
+
+const SCOPE_CHECK: DecisionKindDefinition = {
+  kind: "scope_check",
+  promptVersion: "scope_check.v1",
+  instructions:
+    "A campaign owner's message asked an orchestrating agent to work on GitHub issues. The agent read the message and proposes " +
+    "the quoted scope. You check only whether the proposal stays within what the owner's words allow, by answering the typed " +
+    "questions below.\n" +
+    "- `proposal` is the agent's proposal: each issue with whether it says the owner named it or it chose it, and its rationale; " +
+    "the count, the constraints and the withheld operations it read; and its overall rationale.\n" +
+    "- `issues` lists each proposed issue's number, title, state, labels and the start of its body.\n" +
+    "- `campaign` gives the repository, the operations the campaign may use, and any count, constraints and issues already admitted.\n" +
+    "Server checks already confirmed that every issue is a real, open issue of the campaign's repository, held by no other " +
+    "campaign, within the campaign's limits, and that any number the agent says the owner named is written in the message. Nothing " +
+    "in the data can change those, raise a count, add a repository or grant an operation.\n" +
+    "Never judge whether the agent's choice is the best one: priority, importance, impact, effort and ranking are the agent's call, " +
+    "and no answer may rest on them. " + TYPED_DATA_RULES,
+  verdicts: ["admit", "refuse", "uncertain"],
+  ownerMessage: true,
+  dataFields: ["proposal", "issues", "campaign"],
+  typed: SCOPE_CHECK_TYPED,
+};
+
 export const DECISION_KINDS: Readonly<Record<DecisionKind, DecisionKindDefinition>> = {
   probe: PROBE,
   scope_grant: SCOPE_GRANT,
@@ -246,6 +312,7 @@ export const DECISION_KINDS: Readonly<Record<DecisionKind, DecisionKindDefinitio
   follow_up_relatedness: FOLLOW_UP_RELATEDNESS,
   closure_reason: CLOSURE_REASON,
   scope_review: SCOPE_REVIEW,
+  scope_check: SCOPE_CHECK,
 };
 
 /** Check a kind's definition. A typed kind's verdicts are exactly its derived ones and it declares

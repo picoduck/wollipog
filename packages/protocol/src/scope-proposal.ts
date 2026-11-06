@@ -1,5 +1,5 @@
 import type { CampaignAuthorityOperation } from "./campaign-authority.js";
-import type { AgentQuestion, PendingApproval, WorkflowDecisionResourceSnapshot } from "./index.js";
+import type { AgentQuestion, DecisionErrorClass, DecisionTypedAnswersView, PendingApproval, WorkflowDecisionResourceSnapshot } from "./index.js";
 
 /**
  * The Orchestrator proposes a Full Control campaign's scope (#4282). The owner's first message
@@ -11,10 +11,29 @@ import type { AgentQuestion, PendingApproval, WorkflowDecisionResourceSnapshot }
  *
  * The server's deterministic floors run first and refuse naming the issue and condition. A proposal
  * that states nothing checkable beyond issues the owner named is admitted after the floors with no
- * model call. Anything else needs the constraint check; until the Decision Model's constraint check
- * ships, and whenever it later fails or is uncertain, the owner gets exactly one approval request
- * for the proposal, presented as an Owner Question. Nothing is ever parsed from the message text.
+ * model call. Anything else is the Decision Model's constraint check (`scope_check`, typed questions
+ * in one call): it admits, refuses naming the question and issue, or, when it is uncertain or fails,
+ * the owner gets exactly one approval request for the proposal, presented as an Owner Question.
+ * Nothing is ever parsed from the message text.
  */
+
+/** The operations a Full Control boundary can grant, in Title Case, for every surface that names one. */
+export const CAMPAIGN_OPERATION_LABELS: Readonly<Partial<Record<CampaignAuthorityOperation, string>>> = {
+  implementation_question: "Implementation Questions",
+  pr_merge: "PR Merge",
+  merged_branch_deletion: "Merged Branch Deletion",
+  follow_up_issue_publication: "Follow-Up Issue Publication",
+  ui_evidence_approval: "UI Evidence Approval",
+  issue_closure: "Issue Closure",
+  campaign_issue_scope: "Issue Scope Changes",
+  question: "Questions",
+  tool_approval: "Tool Approvals",
+  policy_ask: "Policy Asks",
+};
+
+export function campaignOperationLabel(operation: CampaignAuthorityOperation): string {
+  return CAMPAIGN_OPERATION_LABELS[operation] ?? operation;
+}
 
 export type ScopeProposalIssueOrigin = "owner_named" | "orchestrator_chosen";
 
@@ -53,15 +72,29 @@ export interface CampaignScopeProposalInput {
 /** What a proposal needs checked beyond the floors. Empty means the no-model fast path.
  * `unreferenced_named_issues`: an issue marked owner-named whose number the message writes only as
  * a bare number, never as an issue reference (`#12`, `owner/repo#12` or the issue's URL), so the
- * floor alone can't tell it from a count or a version. */
-export type ScopeProposalCheck = "requested_count" | "chosen_issues" | "unreferenced_named_issues" | "constraints" | "withheld_operations" |
-  "proposal_unstructured";
+ * floor alone can't tell it from a count or a version. `unproposed_references`: the owner's message
+ * references an issue of the campaign repository that the proposal doesn't add as owner-named, so
+ * whether the owner asked for it, or only mentioned it as background, needs the check. */
+export type ScopeProposalCheck = "requested_count" | "chosen_issues" | "unreferenced_named_issues" | "unproposed_references" | "constraints" |
+  "withheld_operations" | "proposal_unstructured";
 
-/** Why a proposal is the owner's one approval. `constraint_check_unavailable`: it states checkable
- * constraints and no constraint check is available yet (#4282, slice 1), or a later one failed;
+/** Why a proposal is the owner's one approval. `constraint_check_uncertain` and
+ * `constraint_check_failed`: the Decision Model's constraint check could not settle it, or failed
+ * after the runtime's retries; `constraint_check_unavailable`: no check could run at all (no
+ * organization, or inputs too large for one call), and every record before the check shipped;
  * `proposal_unstructured`: the Orchestrator's runner predates structured proposals, so nothing about
  * its proposal can be checked. */
-export type ScopeProposalOwnerCause = "constraint_check_unavailable" | "proposal_unstructured";
+export type ScopeProposalOwnerCause = "constraint_check_uncertain" | "constraint_check_failed" | "constraint_check_unavailable" |
+  "proposal_unstructured";
+
+/** The Decision Model's constraint check of a recorded proposal: its audited occurrence and what the
+ * server derived from the answers. A refused check records no proposal: the Orchestrator revises. */
+export interface CampaignScopeConstraintCheck {
+  occurrenceId: string;
+  verdict: "admit" | "uncertain" | "failed";
+  /** The server's bounded sentence naming the deciding answer, never the model's prose. */
+  reason?: string;
+}
 
 /** The proposal as the server recorded it on the scope request: the Orchestrator's own words beside
  * the floors' facts. Server-derived; it changes who decides, never what is granted. */
@@ -76,12 +109,14 @@ export interface CampaignScopeProposal {
   withheldOperations: CampaignAuthorityOperation[];
   /** What it needs checked beyond the floors; empty on the fast path. */
   checks: ScopeProposalCheck[];
-  /** `admitted`: the floors admitted it with no model call, as an Orchestrator-owned change.
-   * `owner`: the owner's one approval, presented as an Owner Question. */
+  /** `admitted`: an Orchestrator-owned change, admitted by the floors with no model call, or by the
+   * constraint check's admit. `owner`: the owner's one approval, presented as an Owner Question. */
   route: "admitted" | "owner";
   ownerCause?: ScopeProposalOwnerCause;
   /** With `route: "owner"`: the owner's message as the boundary records it, for the question. */
   ownerMessage?: string;
+  /** The constraint check that admitted it or sent it to the owner; absent when none ran. */
+  constraintCheck?: CampaignScopeConstraintCheck;
 }
 
 /** The initial scope the campaign admitted (#4282), recorded on the first message's scope. */
@@ -105,11 +140,26 @@ export interface CampaignScopeProposalView {
    * scope; `waiting_for_owner`, then `owner_approved` or `owner_declined`; `replaced` when a later
    * request superseded it, or it was revoked or withdrawn before it was applied. */
   outcome: "admitted" | "applied" | "waiting_for_owner" | "owner_approved" | "owner_declined" | "replaced";
+  /** The constraint check's audited answers, read from its occurrence, for the checklist. */
+  check?: CampaignScopeCheckView;
+}
+
+/** One constraint check as Campaign Status shows it: the occurrence's state, the server's verdict and
+ * reason, a failure's class, and each typed question with its answer and confidence. */
+export interface CampaignScopeCheckView {
+  occurrenceId: string;
+  state: "pending" | "decided" | "uncertain" | "failed";
+  verdict?: string;
+  reason?: string;
+  failureClass?: DecisionErrorClass;
+  typedAnswers?: DecisionTypedAnswersView;
 }
 
 const OPERATIONS: readonly CampaignAuthorityOperation[] = ["implementation_question", "pr_merge", "merged_branch_deletion",
   "follow_up_issue_publication", "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"];
-const CHECKS: readonly ScopeProposalCheck[] = ["requested_count", "chosen_issues", "unreferenced_named_issues", "constraints", "withheld_operations",
+const CHECKS: readonly ScopeProposalCheck[] = ["requested_count", "chosen_issues", "unreferenced_named_issues", "unproposed_references", "constraints",
+  "withheld_operations", "proposal_unstructured"];
+const OWNER_CAUSES: readonly ScopeProposalOwnerCause[] = ["constraint_check_uncertain", "constraint_check_failed", "constraint_check_unavailable",
   "proposal_unstructured"];
 
 const plainText = (value: unknown, max: number): value is string => typeof value === "string" && value.length <= max &&
@@ -158,15 +208,19 @@ export function normalizeScopeProposalInput(value: unknown, additions: ReadonlyA
  * check — holds only when every issue is one the owner named and the owner's exact message writes as
  * an issue reference (`referencedIssues`: the campaign repository's `#n`, `owner/repo#n` or issue
  * URL), no constraint is stated, no operation is withheld, and any stated count is exactly the named
- * issues. The reference list only narrows: a number it misses goes to the check, never past it.
- * Everything else is the constraint check's, which fails closed to the owner until it exists.
+ * issues. A reference the message writes but the proposal doesn't add as owner-named also needs the
+ * check: the owner may have asked for it, or only mentioned it as background. The reference list
+ * only narrows: a number it misses goes to the check, never past it. Everything else is the
+ * Decision Model's constraint check.
  */
 export function scopeProposalChecks(proposal: Pick<CampaignScopeProposalInput, "issues" | "requestedCount" | "constraints" | "withheldOperations">,
     referencedIssues: readonly number[]): ScopeProposalCheck[] {
   const checks: ScopeProposalCheck[] = [];
   const chosen = proposal.issues.some((issue) => issue.origin === "orchestrator_chosen");
+  const named = (number: number) => proposal.issues.some((issue) => issue.origin === "owner_named" && issue.number === number);
   if (chosen) checks.push("chosen_issues");
   if (proposal.issues.some((issue) => issue.origin === "owner_named" && !referencedIssues.includes(issue.number))) checks.push("unreferenced_named_issues");
+  if (referencedIssues.some((number) => !named(number))) checks.push("unproposed_references");
   if (proposal.requestedCount !== null && (chosen || proposal.requestedCount !== proposal.issues.length)) checks.push("requested_count");
   if (proposal.constraints.length) checks.push("constraints");
   if (proposal.withheldOperations.length) checks.push("withheld_operations");
@@ -178,7 +232,8 @@ export function validScopeProposal(value: unknown): boolean {
   if (value === undefined) return true;
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const v = value as Record<string, unknown>;
-  const keys = ["initial", "messageDigest", "issues", "requestedCount", "constraints", "withheldOperations", "checks", "route", "ownerCause", "ownerMessage"];
+  const keys = ["initial", "messageDigest", "issues", "requestedCount", "constraints", "withheldOperations", "checks", "route", "ownerCause", "ownerMessage",
+    "constraintCheck"];
   if (Object.keys(v).some((key) => !keys.includes(key))) return false;
   if (typeof v.initial !== "boolean" || typeof v.messageDigest !== "string" || !/^[0-9a-f]{64}$/u.test(v.messageDigest)) return false;
   if (!Array.isArray(v.issues) || v.issues.length > SCOPE_PROPOSAL_LIMITS.issues || v.issues.some((raw) => {
@@ -192,9 +247,23 @@ export function validScopeProposal(value: unknown): boolean {
       v.constraints.some((c) => !plainText(c, SCOPE_PROPOSAL_LIMITS.constraintChars))) return false;
   if (!Array.isArray(v.withheldOperations) || v.withheldOperations.some((o) => !OPERATIONS.includes(o as CampaignAuthorityOperation))) return false;
   if (!Array.isArray(v.checks) || v.checks.some((c) => !CHECKS.includes(c as ScopeProposalCheck))) return false;
-  if (v.route === "admitted") return v.checks.length === 0 && v.ownerCause === undefined && v.ownerMessage === undefined;
-  return v.route === "owner" && (v.ownerCause === "constraint_check_unavailable" || v.ownerCause === "proposal_unstructured") &&
-    plainText(v.ownerMessage, SCOPE_PROPOSAL_LIMITS.ownerMessageChars);
+  const check = v.constraintCheck as Record<string, unknown> | undefined;
+  if (check !== undefined && (!check || typeof check !== "object" || Array.isArray(check) ||
+      Object.keys(check).some((key) => !["occurrenceId", "verdict", "reason"].includes(key)) ||
+      typeof check.occurrenceId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/u.test(check.occurrenceId) ||
+      !["admit", "uncertain", "failed"].includes(check.verdict as string) ||
+      (check.reason !== undefined && !plainText(check.reason, 300)))) return false;
+  // Only a constraint check's admit admits a proposal that states anything checkable.
+  if (v.route === "admitted") {
+    return v.ownerCause === undefined && v.ownerMessage === undefined &&
+      (v.checks.length === 0 ? check === undefined : check?.verdict === "admit");
+  }
+  if (v.route !== "owner" || !OWNER_CAUSES.includes(v.ownerCause as ScopeProposalOwnerCause) ||
+      !plainText(v.ownerMessage, SCOPE_PROPOSAL_LIMITS.ownerMessageChars)) return false;
+  // A check names its outcome exactly when the owner route is that check's.
+  if (v.ownerCause === "constraint_check_uncertain") return check?.verdict === "uncertain";
+  if (v.ownerCause === "constraint_check_failed") return check?.verdict === "failed";
+  return check === undefined;
 }
 
 /* ------------------------- The owner's one approval, as an Owner Question ------------------------- */
@@ -219,6 +288,7 @@ const CHECK_PHRASES: Record<ScopeProposalCheck, string> = {
   chosen_issues: "issues the Orchestrator chose",
   requested_count: "a count you asked for",
   unreferenced_named_issues: "issues it says you named that your message writes only as plain numbers",
+  unproposed_references: "issues your message mentions that it doesn't propose as ones you named",
   constraints: "constraints it read from your message",
   withheld_operations: "operations your message rules out",
   proposal_unstructured: "a proposal the Orchestrator's machine can't structure",
@@ -242,11 +312,17 @@ export function scopeProposalMaterial(snapshot: ScopeProposalSnapshot): string {
   if (proposal.issues.length) lines.push("");
   lines.push(`**Count you asked for:** ${proposal.requestedCount ?? "none stated"}`, "");
   if (proposal.constraints.length) lines.push("**Constraints it read**", "", ...proposal.constraints.map((c) => `- ${escapeMarkdown(c)}`), "");
-  if (proposal.withheldOperations.length) lines.push(`**Withheld operations:** ${proposal.withheldOperations.map((o) => `\`${o}\``).join(", ")}`, "");
+  if (proposal.withheldOperations.length) lines.push(`**Withheld operations:** ${proposal.withheldOperations.map(campaignOperationLabel).join(", ")}`, "");
   lines.push("**Rationale**", "", escapeMarkdown(snapshot.explanation), "");
+  const includes = listed(proposal.checks.map((check) => CHECK_PHRASES[check])) || "nothing the server could check";
+  const reason = proposal.constraintCheck?.reason ? ` (${escapeMarkdown(proposal.constraintCheck.reason)})` : "";
   const why = proposal.ownerCause === "proposal_unstructured"
     ? "the Orchestrator's machine can't send a structured proposal, so nothing could check it"
-    : `it includes ${listed(proposal.checks.map((check) => CHECK_PHRASES[check])) || "nothing the server could check"}, which no Decision Model has checked`;
+    : proposal.ownerCause === "constraint_check_uncertain"
+      ? `it includes ${includes}, and the Decision Model couldn't confirm them${reason}`
+      : proposal.ownerCause === "constraint_check_failed"
+        ? `it includes ${includes}, and the Decision Model's check failed`
+        : `it includes ${includes}, which no Decision Model has checked`;
   lines.push(`This needs your approval because ${why}. ` +
     "Approving admits exactly these issues. Something Else declines it and sends your words to the Orchestrator.");
   return lines.join("\n");
