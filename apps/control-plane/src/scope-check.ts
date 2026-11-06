@@ -47,7 +47,7 @@ function issueLabel(repository: string, number: number, title: string, room: num
  * Every parameter fits the framework's bound with the constraint whole: the issue's title shortens
  * first, then goes, and when even the bare reference and the whole constraint can't fit, the result
  * is null, so the proposal is never checked against part of a constraint and goes to the owner. */
-export function scopeCheckParameters(repository: string, proposal: Pick<CampaignScopeProposal, "issues" | "constraints">): Record<string, string[]> | null {
+export function scopeCheckParameters(repository: string, proposal: Pick<CampaignScopeProposal, "issues" | "constraints" | "repositoryConstraint">): Record<string, string[]> | null {
   const max = DECISION_QUESTION_PARAMETER_MAX_CHARS;
   const named = proposal.issues.filter((issue) => issue.origin === "owner_named")
     .map((issue) => issueLabel(issue.repository ?? repository, issue.number, issue.title, max));
@@ -62,7 +62,10 @@ export function scopeCheckParameters(repository: string, proposal: Pick<Campaign
       pairs.push(`${issueLabel(home, issue.number, issue.title, max - suffix.length)}${suffix}`);
     }
   }
-  return { ...(named.length ? { named_asked_for: named } : {}), ...(pairs.length ? { constraint_met: pairs } : {}) };
+  // A repository limit is the agent's claim about the owner's words, so the check judges it (#4118).
+  const limit = proposal.repositoryConstraint?.repository ? `${oneLine(proposal.repositoryConstraint.name)} — ${proposal.repositoryConstraint.repository}` : null;
+  if (limit && limit.length > max) return null;
+  return { ...(named.length ? { named_asked_for: named } : {}), ...(pairs.length ? { constraint_met: pairs } : {}), ...(limit ? { repository_limit: [limit] } : {}) };
 }
 
 /** An issue's facts, with `repository` when it is outside the campaign's launch repository (#4118). */
@@ -85,7 +88,8 @@ function inputsWith(ownerMessage: string, proposal: CampaignScopeProposal, expla
         repository: campaign.repository, operations: campaign.operations, inScope: campaign.inScope,
         ...(campaign.otherInScope?.length ? { otherInScope: campaign.otherInScope } : {}),
         ...(campaign.admitted ? { admitted: { requestedCount: campaign.admitted.requestedCount, constraints: campaign.admitted.constraints,
-          withheldOperations: campaign.admitted.withheldOperations } } : {}),
+          withheldOperations: campaign.admitted.withheldOperations,
+          ...(campaign.admitted.repositoryLimit ? { repositoryLimit: campaign.admitted.repositoryLimit } : {}) } } : {}),
       }),
     },
     questions: { parameters },

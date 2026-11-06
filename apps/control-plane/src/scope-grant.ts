@@ -27,11 +27,15 @@ export function resolveRepositoryName(name: string, entries: ReadonlyArray<{ rep
   return matches.length === 1 ? matches[0]!.repository.toLowerCase() : null;
 }
 
-/** Whether the message's own words contain the name the Orchestrator says it used, ignoring case and
- * runs of spaces. A floor: a name the owner never wrote can't limit, or stand for, anything. */
+/** Whether the message's own words contain the name the Orchestrator says it used, as whole words,
+ * ignoring case and runs of spaces: "api" is not in "rapidly". A floor: a name the owner never wrote
+ * can't limit, or stand for, anything. Whether the message limits the work to it is the check's. */
 export function repositoryNameInMessage(text: string, name: string): boolean {
   const flat = (value: string) => value.toLowerCase().replace(/\s+/gu, " ").trim();
-  return flat(text).includes(flat(name));
+  const wanted = flat(name);
+  if (!wanted) return false;
+  const escaped = wanted.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return new RegExp(`(?<![\\p{L}\\p{N}_-])${escaped}(?![\\p{L}\\p{N}_-])`, "u").test(flat(text));
 }
 
 /** The repository a name the model returned resolves to: an empty name is the boundary's only

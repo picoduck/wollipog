@@ -12258,9 +12258,14 @@ export class SessionsService {
     const ownerMessage = exact !== null && firstMessageDigest(exact) === first.messageDigest ? exact : boundary.objective;
     const unnamed = proposal?.issues.find((issue) => issue.origin === "owner_named" && !writtenForRepository(ownerMessage, issue.number, issue.repository, launch));
     if (unnamed) return refuse("owner_named_not_in_message", issueDetails(unnamed));
-    // A repository the owner's message limits the work to (#4118): a name the owner never wrote limits
-    // nothing, and every issue must be in the one repository it means. A name that matches none or
-    // several grants nothing: the proposal is the owner's, whatever else it states.
+    // A repository the Orchestrator says the owner's message limits the work to (#4118): a name the
+    // owner never wrote limits nothing, and every issue must be in the one repository it means. Whether
+    // the words really limit the work is the check's (`repository_limit`). A name that matches none
+    // or several grants nothing: the proposal is the owner's, whatever else it states. A later
+    // addition stays inside the limit the initial scope was admitted with, named again or not.
+    const admittedLimit = first.initialScope?.repositoryLimit;
+    const outsideLimit = admittedLimit && refs.find((r) => r.repository !== admittedLimit);
+    if (outsideLimit) return refuse("repository_constraint_mismatch", issueDetails(outsideLimit));
     let repositoryConstraint: CampaignScopeProposal["repositoryConstraint"];
     if (proposal?.repositoryName !== undefined) {
       if (!repositoryNameInMessage(ownerMessage, proposal.repositoryName)) return refuse("repository_name_not_in_message");
@@ -12340,7 +12345,8 @@ export class SessionsService {
     const unresolvedName = repositoryConstraint?.repository === null;
     const checks: ScopeProposalCheck[] = proposal
       ? [...scopeProposalChecks(proposal, issueReferencesAcrossRepositories(ownerMessage, launch, repositories).filter((r) => !inScope(r))),
-        ...(laterNamed ? ["later_named_issues" as const] : []), ...(unresolvedName ? ["repository_name_unresolved" as const] : [])]
+        ...(laterNamed ? ["later_named_issues" as const] : []), ...(unresolvedName ? ["repository_name_unresolved" as const] : []),
+        ...(repositoryConstraint?.repository ? ["repository_limit" as const] : [])]
       : ["proposal_unstructured"];
     const issues = proposal?.issues ?? refs.map((r) => ({ ...r, origin: "orchestrator_chosen" as const, rationale: "" }));
     // The proposal as recorded, before any route: the floors' facts beside the Orchestrator's words.

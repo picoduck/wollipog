@@ -42,6 +42,14 @@ test("a repository name means one boundary repository, or nothing (#4118)", () =
   for (const name of ["tools", "the tools repo", "shared", "billing", "repo", "the", " "]) assert.equal(resolveRepositoryName(name, entries), null, name);
   assert.equal(repositoryNameInMessage("Fix bugs in  The API\nrepo please.", "the api repo"), true);
   assert.equal(repositoryNameInMessage("Fix bugs please.", "the api repo"), false);
+  // Whole words only: a name inside a longer word was never written.
+  assert.equal(repositoryNameInMessage("Fix this rapidly.", "api"), false);
+  assert.equal(repositoryNameInMessage("Fix the api-gateway first.", "api"), false);
+  assert.equal(repositoryNameInMessage("Fix the top bug in api.", "api"), true);
+  assert.equal(repositoryNameInMessage("Fix owner/api (the top bug).", "owner/api"), true);
+  assert.equal(repositoryNameInMessage("Fix my-org/my.repo first.", "my-org/my.repo"), true);
+  assert.equal(repositoryNameInMessage("Fix my-org/myxrepo first.", "my-org/my.repo"), false, "the name is literal text");
+  assert.equal(repositoryNameInMessage("Fix it.", " "), false);
 });
 
 test("a number is written for a repository only where the message qualifies it so; a bare one is the launch repository's (#4118)", () => {

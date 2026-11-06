@@ -1514,7 +1514,7 @@ export const TOOLS: McpTool[] = [
           requestedCount: { type: ["integer", "null"], minimum: 1, maximum: 100 },
           constraints: { type: "array", maxItems: 10, items: { type: "string", minLength: 1, maxLength: 200 } },
           withheldOperations: { type: "array", items: { type: "string", enum: [...CAMPAIGN_SCOPE_PROPOSAL_OPERATIONS] } },
-          repositoryName: { type: "string", minLength: 1, maxLength: 200, description: "The repository the owner's message limits the work to, in the message's own words (\"the api repo\"). The server resolves it; leave it out when the message names none." },
+          repositoryName: { type: "string", minLength: 1, maxLength: 200, description: "The repository the owner's message limits the work to, in the message's own words (\"the api repo\"). The server resolves it and the constraint check judges whether the message really limits the work to it; leave it out when the message sets no such limit." },
         }, required: ["issues", "requestedCount", "constraints", "withheldOperations"], additionalProperties: false },
     }, required: ["requestId", "expectedRevision", "explanation", "additions", "removals"], additionalProperties: false },
     handler: async (args, deps) => {

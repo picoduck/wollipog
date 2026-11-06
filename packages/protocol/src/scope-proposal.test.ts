@@ -48,10 +48,16 @@ test("a recorded repository name that resolved to nothing is always the owner's 
   assert.equal(validScopeProposal({ ...unresolved, route: "admitted", ownerMessage: undefined, ownerCause: undefined,
     constraintCheck: { occurrenceId: "dec_1", verdict: "admit" } }), false, "no check can admit a name that means nothing");
   assert.equal(validScopeProposal({ ...unresolved, checks: ["chosen_issues"], route: "owner", ownerCause: "constraint_check_unavailable" }), false, "the record and its check agree");
-  assert.equal(validScopeProposal({ ...base, repositoryConstraint: { name: "the api repo", repository: "owner/api" }, checks: ["chosen_issues"], route: "owner",
+  assert.equal(validScopeProposal({ ...base, repositoryConstraint: { name: "the api repo", repository: "owner/api" }, checks: ["chosen_issues", "repository_limit"], route: "owner",
     ownerCause: "constraint_check_unavailable" }), true);
-  assert.equal(validScopeProposal({ ...base, repositoryConstraint: { name: "the api repo", repository: "not a repository" }, checks: ["chosen_issues"], route: "owner",
+  assert.equal(validScopeProposal({ ...base, repositoryConstraint: { name: "the api repo", repository: "not a repository" }, checks: ["chosen_issues", "repository_limit"], route: "owner",
     ownerCause: "constraint_check_unavailable" }), false);
+  // A name that matched one repository is the agent's claim of a limit, so it is always checked.
+  const claimed = { ...base, repositoryConstraint: { name: "the api repo", repository: "owner/api" }, route: "admitted", ownerMessage: undefined };
+  assert.equal(validScopeProposal({ ...claimed, checks: [] }), false, "never the no-model path");
+  assert.equal(validScopeProposal({ ...claimed, checks: ["repository_limit"] }), false, "only a check's admit admits it");
+  assert.equal(validScopeProposal({ ...claimed, checks: ["repository_limit"], constraintCheck: { occurrenceId: "dec_1", verdict: "admit" } }), true);
+  assert.equal(validScopeProposal({ ...base, checks: ["chosen_issues", "repository_limit"], route: "owner", ownerCause: "constraint_check_unavailable" }), false, "the check needs a limit to judge");
   assert.equal(validScopeProposal({ ...base, issues: [{ ...base.issues[0], repository: "not a repository" }], checks: ["chosen_issues"], route: "owner", ownerCause: "constraint_check_unavailable" }), false);
   const additions = [{ repository: "owner/api", number: 1 }];
   const input = { issues: [{ repository: "OWNER/API", number: 1, origin: "owner_named", rationale: "r" }], requestedCount: null, constraints: [], withheldOperations: [] };

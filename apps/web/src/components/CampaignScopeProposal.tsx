@@ -26,6 +26,7 @@ const CHECKS: Partial<Record<ScopeProposalCheckName, string>> = {
   later_named_issues: "issues it says you named but proposes only now",
   constraints: "constraints it read",
   withheld_operations: "operations it withholds",
+  repository_limit: "the repository it says you limited the work to",
 };
 
 /** How a proposal was checked: the floors alone, the Decision Model's constraint check, or the

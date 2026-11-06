@@ -69,7 +69,8 @@ export interface CampaignScopeProposalInput {
   /** Operations the message withholds ("fix but don't merge" withholds `pr_merge`). */
   withheldOperations: CampaignAuthorityOperation[];
   /** A repository the owner's message limits the work to, in the message's own words ("the api
-   * repo") (#4118). The server resolves it against the boundary; no model reads it. */
+   * repo") (#4118). The server resolves it against the boundary, and the constraint check judges
+   * whether the message really limits the work to it. */
   repositoryName?: string;
 }
 
@@ -82,9 +83,11 @@ export interface CampaignScopeProposalInput {
  * `later_named_issues`: a later addition marks an issue owner-named. An issue the owner asked for
  * belongs in the initial scope, and an earlier check may have found it only mentioned, so a later
  * one is always checked. `repository_name_unresolved`: the repository the owner's message names
- * matches no boundary repository or several, so it grants nothing and the proposal is the owner's. */
+ * matches no boundary repository or several, so it grants nothing and the proposal is the owner's.
+ * `repository_limit`: the name matches one, but whether the owner's words limit the work to it,
+ * rather than excluding or only mentioning it, needs the check. */
 export type ScopeProposalCheck = "requested_count" | "chosen_issues" | "unreferenced_named_issues" | "unproposed_references" | "later_named_issues" |
-  "constraints" | "withheld_operations" | "proposal_unstructured" | "repository_name_unresolved";
+  "constraints" | "withheld_operations" | "proposal_unstructured" | "repository_name_unresolved" | "repository_limit";
 
 /** Why a proposal is the owner's one approval. `constraint_check_uncertain` and
  * `constraint_check_failed`: the Decision Model's constraint check could not settle it, or failed
@@ -115,8 +118,10 @@ export interface CampaignScopeProposal {
   /** `repository` names an issue outside the launch repository (#4118); a launch issue stays implicit,
    * as the snapshot's top-level numbers do. */
   issues: Array<{ repository?: string; number: number; origin: ScopeProposalIssueOrigin; rationale: string; title: string }>;
-  /** The repository the owner's message limits the work to, as the server resolved it (#4118):
-   * `repository` is the one boundary repository `name` matched, or null when it matched none or several. */
+  /** The repository the Orchestrator says the owner's message limits the work to, as the server
+   * resolved its name (#4118): `repository` is the one boundary repository `name` matched, or null
+   * when it matched none or several. The name is only proven to be written in the message; the
+   * `repository_limit` check judges whether the message limits the work to it. */
   repositoryConstraint?: { name: string; repository: string | null };
   requestedCount: number | null;
   constraints: string[];
@@ -141,6 +146,8 @@ export interface FullControlInitialScope {
   requestedCount: number | null;
   constraints: string[];
   withheldOperations: CampaignAuthorityOperation[];
+  /** The one repository its proposal was limited to (#4118). A later addition stays inside it. */
+  repositoryLimit?: string;
 }
 
 /** One proposal for Campaign Status's Scope Proposal section. */
@@ -172,7 +179,7 @@ export interface CampaignScopeCheckView {
 const OPERATIONS: readonly CampaignAuthorityOperation[] = ["implementation_question", "pr_merge", "merged_branch_deletion",
   "follow_up_issue_publication", "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"];
 const CHECKS: readonly ScopeProposalCheck[] = ["requested_count", "chosen_issues", "unreferenced_named_issues", "unproposed_references",
-  "later_named_issues", "constraints", "withheld_operations", "proposal_unstructured", "repository_name_unresolved"];
+  "later_named_issues", "constraints", "withheld_operations", "proposal_unstructured", "repository_name_unresolved", "repository_limit"];
 const OWNER_CAUSES: readonly ScopeProposalOwnerCause[] = ["constraint_check_uncertain", "constraint_check_failed", "constraint_check_unavailable",
   "proposal_unstructured", "repository_name_unresolved"];
 
@@ -269,6 +276,8 @@ export function validScopeProposal(value: unknown): boolean {
       (named.repository !== null && (typeof named.repository !== "string" || !campaignRepositoryLocation(named.repository))))) return false;
   // A name that resolved to nothing grants nothing: it is always the owner's.
   if ((named !== undefined && named.repository === null) !== (Array.isArray(v.checks) && v.checks.includes("repository_name_unresolved"))) return false;
+  // A name that matched one is only the agent's claim of a limit: it never takes the no-model path.
+  if ((named !== undefined && named.repository !== null) !== (Array.isArray(v.checks) && v.checks.includes("repository_limit"))) return false;
   if (v.requestedCount !== null && (!Number.isSafeInteger(v.requestedCount) || (v.requestedCount as number) < 1 || (v.requestedCount as number) > 100)) return false;
   if (!Array.isArray(v.constraints) || v.constraints.length > SCOPE_PROPOSAL_LIMITS.constraints ||
       v.constraints.some((c) => !plainText(c, SCOPE_PROPOSAL_LIMITS.constraintChars))) return false;
@@ -321,6 +330,7 @@ const CHECK_PHRASES: Record<ScopeProposalCheck, string> = {
   withheld_operations: "operations your message rules out",
   proposal_unstructured: "a proposal the Orchestrator's machine can't structure",
   repository_name_unresolved: "a repository name that matches no repository in this campaign, or more than one",
+  repository_limit: "a repository it read your message as limiting the work to",
 };
 
 const listed = (items: readonly string[]) => items.length > 1 ? `${items.slice(0, -1).join(", ")} and ${items.at(-1)}` : items[0] ?? "";

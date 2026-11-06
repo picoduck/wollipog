@@ -18049,7 +18049,8 @@ export class ControlPlaneDb {
         const first = memberPolicy.firstMessageScope;
         if (id === root.id && first?.state === "established" && first.grant?.status === "proposal" && !first.initialScope) {
           first.initialScope = { admittedAt: now, occurrenceId, requestedCount: snapshot.scopeProposal?.requestedCount ?? null,
-            constraints: [...snapshot.scopeProposal?.constraints ?? []], withheldOperations: [...withheld] };
+            constraints: [...snapshot.scopeProposal?.constraints ?? []], withheldOperations: [...withheld],
+            ...(snapshot.scopeProposal?.repositoryConstraint?.repository ? { repositoryLimit: snapshot.scopeProposal.repositoryConstraint.repository } : {}) };
         }
         memberPolicy.issueNumbers = [...memberScope.issueNumbers];
         memberPolicy.issueScope = memberScope;

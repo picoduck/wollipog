@@ -3786,6 +3786,42 @@ test("a repository the owner's message names limits the proposal when it means o
   } finally { await server.close(); f.db.close(); }
 });
 
+test("a named repository is only the agent's claim of a limit: the check judges it, and an admitted limit binds later additions (#4118)", async () => {
+  // "Don't touch" writes the name without limiting the work to it, and "api" isn't written in "rapidly".
+  const excluded = await multiRepositoryProposals("Fix other/repo#40 rapidly, and don't touch r2 a's other issues.");
+  try {
+    assert.deepEqual((await excluded.propose([otherNamed(40)], { repositoryName: "api" })).errorDetails, { code: "repository_name_not_in_message" }, "a name inside a word isn't written");
+    excluded.f.decision.state.check = (message) => scopeCheckAnswer(message, (id) => id.startsWith("repository_limit") ? { value: "does_not_limit" } : undefined);
+    const refused = await excluded.propose([otherNamed(40)], { repositoryName: "r2 a" });
+    assert.equal(excluded.f.decision.checkCalls.length, 1, "naming a repository always reaches the model, even with nothing else to check");
+    assert.deepEqual(Object.values(scopeCheckParametersOf(excluded.f.decision.checkCalls[0]!)).at(-1), "r2 a — other/repo");
+    assert.equal(refused.errorDetails?.code, "constraint_check_refused");
+    assert.match(String(refused.errorDetails?.question), /^repository_limit__/u);
+    assert.equal(excluded.ownerRequests().length, 0);
+  } finally { await excluded.server.close(); excluded.f.db.close(); }
+
+  const { f, server, propose, apply, id } = await multiRepositoryProposals("Fix the top 3 bugs in r2 a, and only there.");
+  try {
+    f.decision.state.check = (message) => scopeCheckAnswer(message);
+    const admitted = await propose([otherChosen(50)], { requestedCount: 3, repositoryName: "r2 a" });
+    assert.equal(admitted.ok, true, admitted.error ?? "");
+    assert.equal(admitted.data!.authority, "orchestrator");
+    assert.deepEqual((admitted.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.checks, ["chosen_issues", "requested_count", "repository_limit"]);
+    assert.equal(apply(admitted.data!.occurrenceId).ok, true);
+    const first = f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!;
+    assert.equal(first.state === "established" ? first.initialScope?.repositoryLimit : null, "other/repo");
+
+    // Leaving the name out, or naming another repository, doesn't leave the admitted limit.
+    assert.deepEqual((await propose([chosen(60)], {})).errorDetails, { code: "repository_constraint_mismatch", issue: 60 });
+    assert.deepEqual((await propose([chosen(60)], { repositoryName: "repo" })).errorDetails, { code: "repository_constraint_mismatch", issue: 60 });
+    const calls = f.decision.checkCalls.length;
+    assert.equal((await propose([otherChosen(51)], {})).ok, true, "inside the limit stays open");
+    assert.equal(f.decision.checkCalls.length, calls + 1);
+    const campaign = JSON.parse(JSON.parse(/<untrusted_data name="campaign">\n(.*?)\n<\/untrusted_data>/su.exec(f.decision.checkCalls.at(-1)!.input)![1]!) as string) as { admitted: { repositoryLimit: string } };
+    assert.equal(campaign.admitted.repositoryLimit, "other/repo");
+  } finally { await server.close(); f.db.close(); }
+});
+
 test("an explicit Maximum Issues counts a proposal's additions in every repository (#4118, #4282)", async () => {
   const { server, f, propose } = await multiRepositoryProposals("Fix #12 and other/repo#40.", { issues: { maxIssues: 1 } });
   try {
