@@ -2,12 +2,11 @@ import type { DecisionErrorClass, DecisionKind, DecisionModelResolvedTarget, Run
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import { DECISION_KINDS } from "./decision-kinds.js";
-import type { DecisionQuestionAnswer, TypedDecisionDefinition } from "./decision-questions.js";
 import { DecisionRuntime } from "./decision-runtime.js";
 import { EMPTY_GRANT } from "./scope-grant-test-fixture.js";
+import { typedAnswersFor, typedOutput, type FakeTypedAnswer } from "./typed-decision-test-fixture.js";
 
-/** One fake typed answer (#4283); the confidence defaults to 0.95 and the evidence to a fixed line. */
-export interface FakeTypedAnswer { value: boolean | string | number; confidence?: number; evidence?: string }
+export { typedAnswersFor, typedOutput, type FakeTypedAnswer } from "./typed-decision-test-fixture.js";
 
 /** One fake attempt, never a real provider:
  * - a verdict, with a single-verdict kind's fields (such as a scope grant's). For a typed kind the
@@ -56,52 +55,6 @@ export function fakeDecisionKind(message: RunDecisionMessage): DecisionKind {
   const kind = (Object.keys(DECISION_KINDS) as DecisionKind[]).find((name) => DECISION_KINDS[name].instructions === message.instructions);
   if (!kind) throw new Error("the attempt carried unknown instructions");
   return kind;
-}
-
-function satisfiedValue(answer: DecisionQuestionAnswer): boolean | string | number {
-  switch (answer.type) {
-    case "boolean": return answer.satisfiedWhen;
-    case "choice": return answer.satisfied[0]!;
-    case "score": return answer.maximum;
-  }
-}
-
-function violatedValue(answer: DecisionQuestionAnswer): boolean | string | number {
-  switch (answer.type) {
-    case "boolean": return !answer.satisfiedWhen;
-    case "choice": return answer.violated[0]!;
-    case "score": return answer.minimum;
-  }
-}
-
-/** A typed kind's complete output (#4283): every question answered satisfied with confidence 0.95,
- * except the listed ones. The migrated kinds ask no per-item or parameterized question. */
-export function typedOutput(typed: TypedDecisionDefinition, answers: Readonly<Record<string, FakeTypedAnswer>> = {}): Record<string, unknown> {
-  for (const id of Object.keys(answers)) {
-    if (!typed.questions.some((question) => question.questionId === id)) throw new Error(`no question ${id}`);
-  }
-  return Object.fromEntries(typed.questions.map((question) => {
-    if (question.subject || question.parameterized) throw new Error("the fake answers only questions asked once");
-    const chosen = answers[question.questionId];
-    return [question.questionId, {
-      value: chosen?.value ?? satisfiedValue(question.answer),
-      confidence: chosen?.confidence ?? 0.95,
-      evidence: chosen?.evidence ?? "The quoted data says so.",
-    }];
-  }));
-}
-
-/** The answers that make the server derive `verdict` for a typed kind: the admitting verdict answers
- * every question satisfied, the refusing one violates the first question confidently, and
- * `uncertain` answers the first question below the kind's threshold. */
-export function typedAnswersFor(typed: TypedDecisionDefinition, verdict: string): Record<string, FakeTypedAnswer> {
-  const first = typed.questions[0]!;
-  if (verdict === typed.verdicts.admit) return {};
-  if (verdict === typed.verdicts.refuse) return { [first.questionId]: { value: violatedValue(first.answer) } };
-  if (verdict === "uncertain") {
-    return { [first.questionId]: { value: satisfiedValue(first.answer), confidence: typed.confidenceThreshold / 2 } };
-  }
-  throw new Error(`a typed kind never derives ${verdict}`);
 }
 
 /** The structured output one fake step answers with, or null for a failure. A typed kind's verdict
