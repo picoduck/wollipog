@@ -6,6 +6,7 @@ import { useApi } from "../api-context.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { CampaignScopeGrantSection, ScopeGrantReviewFacts } from "./CampaignScopeGrant.js";
+import { CampaignScopeProposalSection, ScopeProposalFacts } from "./CampaignScopeProposal.js";
 
 const issueCount = (count: number) => `${count} issue${count === 1 ? "" : "s"}`;
 
@@ -27,7 +28,8 @@ export function CampaignIssueScopeSummary({ snapshot }: { snapshot: CampaignIssu
   return <>
     {snapshot.grantReview && <ScopeGrantReviewFacts review={snapshot.grantReview} />}
     {snapshot.ownerReview && <ScopeOwnerReviewFacts review={snapshot.ownerReview} />}
-    <p>{snapshot.explanation}</p>
+    {snapshot.scopeProposal ? <ScopeProposalFacts repository={snapshot.repository} proposal={snapshot.scopeProposal} explanation={snapshot.explanation} />
+      : <p>{snapshot.explanation}</p>}
     <dl className="facts">
       <div><dt>Scope Revision</dt><dd>{snapshot.expectedRevision} to {snapshot.expectedRevision + 1}</dd></div>
       {raise && <div><dt>Maximum Issues</dt><dd>{raise.from} to {raise.from + raise.increase}</dd></div>}
@@ -136,8 +138,10 @@ export function CampaignIssueScopePanel({ session, campaignId, policyRevision, b
   const grantEdit = view?.canPropose && policyRevision !== undefined && view.policyRevision !== undefined
     ? { campaignId, policyRevision: view.policyRevision, onSaved: () => setReload((n) => n + 1) } : undefined;
   // A new revision remounts the section, closing an editor opened on the older one.
-  return <>{view?.scopeGrant && <CampaignScopeGrantSection key={view.policyRevision} grant={view.scopeGrant} edit={grantEdit}
-    ceilingsShown={boundaryShown} />}
+  // Under the propose-then-check flow (#4282) the Orchestrator's proposals replace the Scope Grant.
+  return <>{view?.scopeGrant && (view.scopeGrant.status === "proposal"
+    ? <CampaignScopeProposalSection grant={view.scopeGrant} proposals={view.scopeProposals ?? []} ceilingsShown={boundaryShown} />
+    : <CampaignScopeGrantSection key={view.policyRevision} grant={view.scopeGrant} edit={grantEdit} ceilingsShown={boundaryShown} />)}
   <section className="campaign-detail-section" aria-labelledby={headingId}>
     <h3 id={headingId} className="section-title">Authorized Issue Scope</h3>
     {error && <Notice tone="danger" role="alert" title="Couldn't Load or Update Issue Scope"
