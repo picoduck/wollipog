@@ -303,6 +303,45 @@ test("a campaign complete with handoffs lists the owner's items without a recove
   await assertNoHorizontalOverflow(page, ".campaign-status");
 });
 
+// UI evidence for #3361: set CAMPAIGN_RECOVERY_HOLD_EVIDENCE_DIR to capture each recovery hold. The
+// capture comes before the assertions, so the same run against the old panel records "before".
+const RECOVERY_HOLD_EVIDENCE_DIR = process.env.CAMPAIGN_RECOVERY_HOLD_EVIDENCE_DIR;
+const RECOVERY_HOLDS = [
+  { name: "complete", query: "activity=complete&automation=complete", label: "Campaign Complete", notice: null },
+  { name: "cleanup", query: "activity=cleanup&automation=complete", label: "Complete, Needs Cleanup", notice: null },
+  { name: "active", query: "activity=active&automation=complete", label: "Campaign Active", notice: "No Recovery Needed" },
+  { name: "stuck", query: "activity=stuck&automation=held", label: "Campaign Stuck", notice: "Authorized Recovery Unavailable" },
+] as const;
+for (const theme of ["dark", "light"] as const) {
+  for (const [device, viewport] of [["desktop", { width: 1440, height: 1000 }], ["phone", { width: 390, height: 844 }]] as const) {
+    for (const hold of RECOVERY_HOLDS) {
+      test(`${hold.label} shows ${hold.notice ?? "no recovery notice"} for its recovery hold on a ${device} ${theme} viewport (#3361)`, async ({ page }) => {
+        await page.setViewportSize(viewport);
+        await page.goto(`/campaign-status-e2e.html?scenario=campaign&${hold.query}&theme=${theme}`);
+        await expect(page.locator(".campaign-status-summary")).toContainText(hold.label);
+        const titled = (title: string) => page.locator(".notice", { has: page.locator(".notice-title", { hasText: title }) });
+        // Frame where the recovery notice is, or where it would be: just above Authorized Issue Scope.
+        const notice = page.locator(".notice", { has: page.locator(".notice-title", { hasText: /^(No Recovery Needed|Authorized Recovery Unavailable)$/u }) });
+        await (await notice.count() ? notice : page.getByRole("heading", { name: "Authorized Issue Scope" })).scrollIntoViewIfNeeded();
+        if (RECOVERY_HOLD_EVIDENCE_DIR) await page.screenshot({ path: `${RECOVERY_HOLD_EVIDENCE_DIR}/recovery-${hold.name}-${device}-${theme}.png` });
+        if (hold.notice === "No Recovery Needed") {
+          await expect(titled("No Recovery Needed")).toHaveClass(/\bt-neutral\b/u);
+          await expect(titled("No Recovery Needed")).toHaveAttribute("role", "status");
+          await expect(titled("No Recovery Needed")).toContainText("The campaign has no unfinished original scoped recovery obligation.");
+          await expect(titled("Authorized Recovery Unavailable")).toHaveCount(0);
+        } else if (hold.notice) {
+          await expect(titled("Authorized Recovery Unavailable")).toHaveClass(/\bt-warning\b/u);
+          await expect(titled("Authorized Recovery Unavailable")).toContainText("Reconcile its original obligation before continuing.");
+          await expect(titled("No Recovery Needed")).toHaveCount(0);
+        } else {
+          await expect(page.getByText(/Authorized Recovery Unavailable|No Recovery Needed/u)).toHaveCount(0);
+        }
+        await assertNoHorizontalOverflow(page, ".campaign-status");
+      });
+    }
+  }
+}
+
 test("a campaign without a recorded plan says so", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=planless");
   const notice = page.locator(".campaign-status-summary .notice");
