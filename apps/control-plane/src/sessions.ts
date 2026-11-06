@@ -16528,8 +16528,9 @@ export class SessionsService {
         ...(decision.withdrawal && outcome === "revoked" ? { withdrawn: true } : {}),
       }, outcome, actor, now);
     }
-    // Only the resolving record carries the message digest; later consume/revoke records do not.
-    const resolvingRecord = outcome === "allowed" || outcome === "denied";
+    // Only the resolving record carries the message digest; later consume/revoke records do not. The
+    // owner's answer to an Owner Question (#4270) resolves it too, so its words are bound by digest.
+    const resolvingRecord = outcome === "allowed" || outcome === "denied" || (outcome === "answered" && stage === "resolution");
     // Identity and digest only: never the URI (it may carry a signed query) and never the bytes.
     const evidenceDigests = decision.resourceSnapshot.category === "ui_evidence_approval"
       ? decision.resourceSnapshot.evidence.map((item) => ({ evidenceId: item.evidenceId, sha256: item.sha256 }))
