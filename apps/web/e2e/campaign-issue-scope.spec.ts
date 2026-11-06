@@ -271,6 +271,9 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
     expect(geometry.scroll).toBeLessThanOrEqual(geometry.client + 1);
     // Tall enough to show the whole panel, so the screenshot is complete evidence at each width.
     await page.setViewportSize({ width: viewport.width, height: 1900 });
+    // Settled, with nothing hovered, so both selected rows show their resting state.
+    await page.mouse.move(0, 0);
+    await page.evaluate(() => Promise.all(document.getAnimations().filter((animation) => animation.effect?.getTiming().iterations !== Infinity).map((animation) => animation.finished)));
     await page.screenshot({ path: `playwright-report/epic-repositories-${viewport.width}.png`, fullPage: true });
   });
 }
