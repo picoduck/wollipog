@@ -254,7 +254,37 @@ the runtime; `apps/control-plane/src/scope-selection.ts` builds the inputs and t
   the occurrence's `humanRequestId` names it.
 
 `campaign_selection_proposals` keeps each reviewed proposal's issues and rationale, and the scope
-change an admit created, for Campaign Status. The audit still keeps only input digests.
+change an admit created, for Campaign Status. The audit still keeps only input digests. Since #4282
+this review serves only campaigns whose stored grant predates the propose-then-check flow.
+
+## Scope Check (`scope_check`, #4282)
+
+Under the propose-then-check flow the Orchestrator reads the owner's first message and proposes the
+scope; the server reads nothing from the text. After the deterministic floors, a proposal that states
+anything checkable is asked the `scope_check` kind's typed questions (#4283) in one call.
+`proposeOrchestratorScope` and `scopeProposalCheck` in `apps/control-plane/src/sessions.ts` run it;
+`apps/control-plane/src/scope-check.ts` builds the inputs, the key and the Campaign Status view.
+
+- **Inputs.** The owner's exact message is the owner's words. The data fields are quoted and
+  untrusted: `proposal` (each issue's origin and rationale, the count, constraints, withheld
+  operations and the overall rationale), `issues` (each issue's number, title, state, labels and a
+  body excerpt that shrinks to fit) and `campaign` (repository, operations, issues in scope and any
+  admitted count, constraints and withheld operations).
+- **Questions** (`SCOPE_CHECK_TYPED`, threshold 0.8): `count_consistent`; `named_asked_for`, one per
+  owner-named issue; `constraint_met`, one per chosen issue and stated constraint, so a refusal names
+  both; `constraints_complete`; `nothing_omitted`; `operations_respected`. Each is a choice with a
+  `cannot_tell` answer that never admits or refuses. None asks about priority, importance, impact or
+  effort. Too many questions for one call is never checked in part: the proposal is the owner's.
+- **Verdicts.** The server derives `admit`, `refuse` (naming the deciding question and item) or
+  `uncertain`. Admit records `constraintCheck` on an Orchestrator-owned change; refuse returns
+  `constraint_check_refused`; uncertain, a failure after the runtime's retries, or inputs that can't
+  fit, make the proposal the owner's one approval, presented as an Owner Question. The runtime's own
+  person route creates nothing: the caller does.
+- **Occurrence key.** The campaign, boundary revision, scope revision, the sorted additions (a shared
+  prefix) and the structured proposal: origins, count, normalized and sorted constraints, withheld
+  operations. The rationale is left out, so a repeat reads the recorded outcome. One set of additions
+  gets at most three distinct checks per scope revision; past that it is the owner's. A check still
+  pending with other inputs is waited for within the runtime's bound, then settled as timed out.
 
 ## Audit and Usage
 

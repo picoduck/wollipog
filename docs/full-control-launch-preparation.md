@@ -92,17 +92,35 @@ only) establishes the boundary before the Orchestrator's first turn:
   `issue_not_open`); not already in scope (`already_in_scope`) nor held by another active campaign
   (`other_campaign_scope`); within an explicit Maximum Issues (`capacity_exhausted`; a derived one
   grows to fit the scope plus follow-up room, never past 100); and no Human Required label
-  (`human_required_label`). Withheld operations only ever narrow the launch's.
+  (`human_required_label`); a stated count written in the message as digits or a word
+  (`requested_count_not_in_message`); and chosen issues within the count, counting every chosen
+  issue earlier proposals admitted, even one since removed (`proposal_count_exceeded`: the stated
+  count, the admitted count for a later addition, or 3). Withheld operations only ever narrow the
+  launch's.
 - A proposal with nothing checkable beyond owner-named issues (every one written in the message as
   an issue reference of the campaign repository, `#12`, `owner/repo#12` or its URL, not only as a
   bare number such as a count; no Orchestrator-chosen issue, no constraint, no withheld operation,
   and no count other than the named issues') is admitted after
   the floors with no model call: an Orchestrator-owned `campaign_issue_scope` change carrying
   `scopeProposal` and server-derived `issueAdmission`, which the Orchestrator applies by resolving
-  it. Anything else needs a constraint check. Until the Decision Model's constraint check exists
-  (#4282's second slice), and whenever it later fails or is uncertain, it fails closed: the owner
-  gets exactly one person-owned approval of the proposal (`scopeProposal.route: "owner"`), presented
-  as an Owner Question (Approve Scope, Decline Scope, or an answer in their own words, which declines
+  it. Anything else goes to the Decision Model's constraint check (`scope_check`, #4283's typed
+  questions, in one call). It reads the owner's exact message, the proposal and the proposed issues'
+  facts as quoted data, and answers only checkable questions: does the count agree with the message;
+  is each owner-named issue asked for, not only mentioned; does each chosen issue meet each stated
+  constraint (one question per issue and constraint); does the proposal list every stated constraint;
+  does it omit an issue the owner asked for; does it withhold every operation the message rules out.
+  It never asks about priority, importance, impact or effort. The server derives the verdict at an 80%
+  confidence threshold. Admit is an Orchestrator-owned change carrying `constraintCheck`. Refuse
+  (`constraint_check_refused`) names the deciding question and issue, and the Orchestrator revises.
+  One check per structured proposal (additions with origins, count, normalized constraints, withheld
+  operations; never the rationale) is recorded, so a repeat reads its outcome; one set of additions
+  gets at most three distinct checks per scope revision, after which it is the owner's. A later
+  addition that marks an issue owner-named is always checked (`later_named_issues`), and a reference
+  the message writes but the proposal doesn't add as owner-named needs the check
+  (`unproposed_references`). When the check is uncertain, fails after the runtime's retries, or can't
+  run (inputs too large for one call), it fails closed: the owner gets exactly one person-owned
+  approval of the proposal (`scopeProposal.route: "owner"`, `ownerCause` naming why), presented as
+  an Owner Question (Approve Scope, Decline Scope, or an answer in their own words, which declines
   it and reaches the Orchestrator as a prompt). Proposing the same issues again returns that request.
   Approving applies exactly the proposal, grows a derived Maximum Issues to fit and withholds the
   stated operations. Nothing is parsed from the message text on any route.
@@ -112,7 +130,10 @@ only) establishes the boundary before the Orchestrator's first turn:
 - Campaign Status shows a **Scope Proposal** section in place of the Scope Grant: Maximum Issues,
   Repository and Operations, then each proposal with its issues (Named by You or Chosen by
   Orchestrator, with the rationale), the count, constraints, withheld operations, rationale, how it
-  was checked and what it led to.
+  was checked and what it led to; a checked proposal also shows the Decision Model Verdict and each
+  typed question with its answer, confidence and evidence (#4283's checklist). When the Full Control
+  section already shows Maximum Issues and Operations, this section leaves those two rows out. Each
+  check, a refused one included, is also listed in Decision Model Checks as a Scope Proposal.
 - A campaign whose first message was read before #4282 keeps its stored grant and scope, and the
   rest of this section describes that grant. The issue scope came from a typed **scope grant**
   (#4102): the Decision Model (`scope_grant`) read only the exact message and returned explicit
