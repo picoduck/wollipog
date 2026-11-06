@@ -46,11 +46,13 @@ import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMess
 import { firstMessageTargetEpics } from "./first-message-issue-intent.js";
 import { onlyOtherRepositories, proposalMaxIssues } from "./scope-grant.js";
 import { normalizeScopeProposalInput, scopeProposalAgentQuestions, scopeProposalAnswer, scopeProposalChecks, scopeProposalOfRequest,
-  type CampaignScopeProposal, type ScopeProposalCheck } from "@wollipog/protocol";
-import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, ownerReviewMaxIssues, scopeGrantCandidates, writtenAsDigits,
+  type CampaignScopeProposal, type ScopeProposalCheck, type ScopeProposalOwnerCause } from "@wollipog/protocol";
+import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, ownerReviewMaxIssues, scopeGrantCandidates, writtenAsCount, writtenAsDigits,
   type ScopeGrantFields } from "./scope-grant.js";
 import { recordUnfinishedDecision, runCampaignCheck, type CampaignCheckOutcome } from "./campaign-decision-checks.js";
-import { DecisionInputError } from "./decision-kinds.js";
+import { DecisionInputError, type DecisionInputs } from "./decision-kinds.js";
+import { SCOPE_CHECKS_PER_ADDITIONS, scopeCheckAdditionsPrefix, scopeCheckInputDigest, scopeCheckInputs, scopeCheckKey,
+  scopeProposalChosenLimit } from "./scope-check.js";
 import { scopeGrantDigest, scopeReviewInputDigest, scopeReviewInputs, scopeReviewKey } from "./scope-selection.js";
 import { boundedIssueNumbers, validCampaignIssueFacts, type CampaignIssueFacts, type CampaignScopeGrantReview, type CampaignScopeOwnerReview, type DecisionErrorClass, type FullControlScopeGrant } from "@wollipog/protocol";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
@@ -12192,16 +12194,25 @@ export class SessionsService {
     // What the proposal needs checked beyond the floors; nothing is the no-model fast path.
     // The fast path also needs every owner-named number written as an issue reference of the campaign
     // repository, not a bare number such as a count; this only narrows the fast path, never admits.
-    const checks: ScopeProposalCheck[] = proposal ? scopeProposalChecks(proposal, issueReferencesInMessage(ownerMessage, repository))
+    // A reference already in scope was admitted before, so a later addition leaves nothing open about
+    // it. A later addition's owner-named issue is always checked: one the owner asked for belongs in
+    // the initial scope, and an earlier check may have found it only mentioned.
+    const laterNamed = !initial && Boolean(proposal?.issues.some((issue) => issue.origin === "owner_named"));
+    const checks: ScopeProposalCheck[] = proposal
+      ? [...scopeProposalChecks(proposal, issueReferencesInMessage(ownerMessage, repository).filter((n) => !before.includes(n))),
+        ...(laterNamed ? ["later_named_issues" as const] : [])]
       : ["proposal_unstructured"];
-    const route = checks.length ? "owner" as const : "admitted" as const;
     const issues = proposal?.issues ?? additions.map((number) => ({ number, origin: "orchestrator_chosen" as const, rationale: "" }));
-    const record: CampaignScopeProposal = { initial, messageDigest: first.messageDigest,
+    // The proposal as recorded, before any route: the floors' facts beside the Orchestrator's words.
+    const base: CampaignScopeProposal = { initial, messageDigest: first.messageDigest,
       issues: issues.map((issue) => ({ number: issue.number, origin: issue.origin, rationale: issue.rationale,
         title: (titles.get(issue.number) ?? "").replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").trim().slice(0, 300) })),
       requestedCount: proposal?.requestedCount ?? null, constraints: proposal?.constraints ?? [], withheldOperations: proposal?.withheldOperations ?? [],
-      checks, route, ...(route === "owner" ? { ownerCause: structured ? "constraint_check_unavailable" as const : "proposal_unstructured" as const,
-        ownerMessage: boundary.objective.replace(/[\p{Cc}]+/gu, " ").slice(0, 4000) } : {}) };
+      checks, route: "admitted" };
+    const ownerRecord = (cause: ScopeProposalOwnerCause, constraintCheck?: CampaignScopeProposal["constraintCheck"]): CampaignScopeProposal => ({
+      ...base, route: "owner", ownerCause: cause, ownerMessage: boundary.objective.replace(/[\p{Cc}]+/gu, " ").slice(0, 4000),
+      ...(constraintCheck ? { constraintCheck } : {}) });
+    const record: CampaignScopeProposal = checks.length ? ownerRecord(structured ? "constraint_check_unavailable" : "proposal_unstructured") : base;
     // Floor 5: an explicit Maximum Issues is never exceeded; a derived one grows to fit when applied.
     const scopeSize = before.length + additions.length;
     const requested = scopeSize + reservedPublicationSlots(this.db, latest);
@@ -12216,33 +12227,144 @@ export class SessionsService {
       const labeled = facts.find((fact) => humanRequiredIssueLabel(policies, where, fact.labels) !== null);
       if (labeled) return refuse("human_required_label", { issue: labeled.number });
     }
+    // Floor 7: a count the Orchestrator read is one the owner's message writes, as digits or a word.
+    if (structured && base.requestedCount !== null && !writtenAsCount(ownerMessage, base.requestedCount)) {
+      return refuse("requested_count_not_in_message", { requested: base.requestedCount });
+    }
+    // Floor 8: the issues the Orchestrator chose stay within the count the owner stated, the admitted
+    // one for a later addition, or the default of 3 (as #4102). The check still confirms the count.
+    // A later addition counts every distinct chosen issue earlier proposals admitted, even one since
+    // removed (so removing never frees room), and re-adding one of them takes no second slot.
+    const chosenCount = new Set([...base.issues.filter((issue) => issue.origin === "orchestrator_chosen").map((issue) => issue.number),
+      ...(first.initialScope ? this.db.appliedProposalChosenIssues(sessionId) : [])]).size;
+    const chosenLimit = scopeProposalChosenLimit(base, first.initialScope);
+    if (structured && chosenCount > chosenLimit) return refuse("proposal_count_exceeded", { limit: chosenLimit, requested: chosenCount });
     const scopeRequest: CampaignIssueScopeRequest = { requestId: request.requestId, expectedRevision: request.expectedRevision,
       additions: request.additions, removals: [], explanation: request.explanation };
-    if (route === "admitted") {
-      // Admitted by the floors alone: an Orchestrator-owned change bound to this exact proposal.
-      const snapshot = scopeSnapshot(this.db, latest, repository, scopeRequest, { scopeProposal: record,
-        issueAdmission: { boundaryRevision: boundary.revision, evidenceDigest: issueEvidenceDigest({ kind: "scope_proposal_floors", proposal: record }) } });
+    /** An Orchestrator-owned change bound to this exact proposal and the evidence that admitted it. */
+    const admit = (admitted: CampaignScopeProposal, evidence: Record<string, unknown>): ServiceResult<WorkflowDecisionView> => {
+      const snapshot = scopeSnapshot(this.db, latest, repository, scopeRequest, { scopeProposal: admitted,
+        issueAdmission: { boundaryRevision: boundary.revision, evidenceDigest: issueEvidenceDigest({ ...evidence, proposal: admitted }) } });
       if (!snapshot) return malformed();
       const created = this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: `campaign_issue_scope:${sessionId}`,
         resourceSnapshot: snapshot }, canAccess, { trustedIssueScope: true });
-      if (created.ok && created.data) log("admitted", { checks: 0, authority: created.data.authority });
+      if (created.ok && created.data) log("admitted", { checks: admitted.checks.length, authority: created.data.authority,
+        ...(admitted.constraintCheck ? { checkOccurrenceId: admitted.constraintCheck.occurrenceId } : {}) });
       return created;
-    }
-    // The owner's one approval. Proposing the same issues again while it is pending returns it,
-    // whatever the rationale now says: it is never decided again behind the owner's back.
-    const pending = this.db.pendingWorkflowDecisionsForController(sessionId).find((d) => {
+    };
+    /** The owner's pending approval of these same additions at this revision, if any. */
+    const pendingOwnerApproval = () => this.db.pendingWorkflowDecisionsForController(sessionId).find((d) => {
       const s = d.resourceSnapshot;
       return d.sessionId === sessionId && s.category === "campaign_issue_scope" && s.scopeProposal?.route === "owner" &&
         s.expectedRevision === request.expectedRevision && JSON.stringify(s.additions) === JSON.stringify([...additions].sort((a, b) => a - b));
     });
-    if (pending) return ok(pending);
-    const snapshot = scopeSnapshot(this.db, latest, repository, scopeRequest, { scopeProposal: record });
-    if (!snapshot) return malformed();
-    // The owner's approval re-authorizes the boundary, so it lists and revokes every outstanding decision (#3915).
-    snapshot.affectedDecisions = everyOutstandingScopeDecision(this.db, sessionId);
-    log("owner_review", { checks, cause: record.ownerCause });
-    return this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: `campaign_issue_scope:${sessionId}`,
-      resourceSnapshot: snapshot }, canAccess, { trustedIssueScope: true });
+    /** The owner's one approval. Proposing the same issues again while it is pending returns it,
+     * whatever the rationale now says: it is never decided again behind the owner's back. */
+    const ownerApproval = (owned: CampaignScopeProposal): ServiceResult<WorkflowDecisionView> => {
+      const pending = pendingOwnerApproval();
+      if (pending) return ok(pending);
+      const snapshot = scopeSnapshot(this.db, latest, repository, scopeRequest, { scopeProposal: owned });
+      if (!snapshot) return malformed();
+      // The owner's approval re-authorizes the boundary, so it lists and revokes every outstanding decision (#3915).
+      snapshot.affectedDecisions = everyOutstandingScopeDecision(this.db, sessionId);
+      log("owner_review", { checks, cause: owned.ownerCause, ...(owned.constraintCheck ? { checkOccurrenceId: owned.constraintCheck.occurrenceId } : {}) });
+      return this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: `campaign_issue_scope:${sessionId}`,
+        resourceSnapshot: snapshot }, canAccess, { trustedIssueScope: true });
+    };
+    // While the owner's approval of these same issues is pending, any proposal of them returns it:
+    // neither the fast path nor a revised proposal's check can replace it behind the owner's back.
+    const awaitingOwner = pendingOwnerApproval();
+    if (awaitingOwner) {
+      log("owner_review", { checks, cause: "owner_pending", ownerRequest: awaitingOwner.occurrenceId });
+      return ok(awaitingOwner);
+    }
+    // Nothing checkable: admitted by the floors alone, with no model call.
+    if (!checks.length) return admit(record, { kind: "scope_proposal_floors" });
+    // An older runner's unstructured proposal can't be checked: it is the owner's.
+    if (!structured) return ownerApproval(record);
+    // The Decision Model's constraint check, on typed questions in one call (#4282, #4283).
+    const organizationId = this.db.sessionScope(sessionId)?.organizationId;
+    if (!organizationId) return ownerApproval(record);
+    const checkKey = scopeCheckKey(sessionId, boundary.revision, request.expectedRevision, base);
+    // A revised proposal of the same issues is checked again only a few times; past that it is the
+    // owner's, so rewording can never shop for an admit. A repeat of a checked proposal reads its outcome.
+    const earlierChecks = this.db.decisionOccurrencesByKeyPrefix(sessionId,
+      scopeCheckAdditionsPrefix(sessionId, boundary.revision, request.expectedRevision, additions), SCOPE_CHECKS_PER_ADDITIONS + 1);
+    if (!earlierChecks.some((earlier) => earlier.occurrenceKey === checkKey) && earlierChecks.length >= SCOPE_CHECKS_PER_ADDITIONS) {
+      log("owner_review", { checks, cause: "constraint_check_unavailable", repeatedChecks: earlierChecks.length });
+      return ownerApproval(record);
+    }
+    const occurrence = await this.scopeProposalCheck(latest, organizationId, checkKey,
+      scopeCheckInputs(ownerMessage, base, request.explanation, facts ?? [], { repository, operations: latestBoundary.operations, inScope: before,
+        ...(first.initialScope ? { admitted: first.initialScope } : {}) }));
+    const reason = occurrence.reason ? occurrence.reason.slice(0, 300) : undefined;
+    const constraintCheck = (verdict: NonNullable<CampaignScopeProposal["constraintCheck"]>["verdict"]) =>
+      ({ occurrenceId: occurrence.occurrenceId, verdict, ...(reason ? { reason } : {}) });
+    if (occurrence.state === "decided" && occurrence.verdict === "refuse") {
+      log("refused", { reason: "constraint_check_refused", checkOccurrenceId: occurrence.occurrenceId });
+      const refusal = CAMPAIGN_SCOPE_ADMISSION_REFUSALS.constraint_check_refused;
+      return { ok: false, status: refusal.status, error: `${refusal.message}${reason ? ` ${reason}` : ""}`,
+        errorDetails: { code: "constraint_check_refused", occurrenceId: occurrence.occurrenceId, ...(reason ? { reason } : {}),
+          ...(occurrence.typedAnswers?.decisive ? { question: occurrence.typedAnswers.decisive.questionId } : {}) } };
+    }
+    if (occurrence.state === "decided" && occurrence.verdict === "admit") {
+      // An owner approval of these same issues that a concurrent proposal created while this check
+      // ran wins: an admit never replaces it. Nothing awaits between here and the admission below.
+      const ownerMeanwhile = pendingOwnerApproval();
+      if (ownerMeanwhile) {
+        log("owner_review", { checks, cause: "owner_pending", ownerRequest: ownerMeanwhile.occurrenceId, checkOccurrenceId: occurrence.occurrenceId });
+        return ok(ownerMeanwhile);
+      }
+      // A repeat of the same checked proposal returns the change this check already admitted.
+      const existing = this.db.pendingWorkflowDecisionsForController(sessionId).find((d) => d.sessionId === sessionId &&
+        d.resourceSnapshot.category === "campaign_issue_scope" && d.resourceSnapshot.scopeProposal?.constraintCheck?.occurrenceId === occurrence.occurrenceId);
+      if (existing) return ok(existing);
+      return admit({ ...base, constraintCheck: constraintCheck("admit") }, { kind: "scope_proposal_check", occurrenceId: occurrence.occurrenceId });
+    }
+    // Uncertain, or failed after the runtime's retries: exactly one owner approval. Nothing is parsed.
+    return occurrence.state === "uncertain"
+      ? ownerApproval(ownerRecord("constraint_check_uncertain", constraintCheck("uncertain")))
+      : ownerApproval(ownerRecord("constraint_check_failed", constraintCheck("failed")));
+  }
+
+  /**
+   * One scope proposal's constraint check (#4282): the occurrence for this exact structured proposal
+   * at this boundary and scope revision. A recorded outcome is read, never asked again, whatever the
+   * rationale now says; a check still running with other inputs is waited for within the runtime's
+   * bound, and one past it (its process stopped) is settled as timed out. Inputs that cannot fit one
+   * call, or a runtime that cannot finish, leave a durable failure, which is the owner's. The runtime's
+   * person route creates nothing: the caller turns the outcome into the owner's one approval.
+   */
+  private async scopeProposalCheck(root: SessionView, organizationId: string, occurrenceKey: string,
+    inputs: DecisionInputs | null): Promise<DecisionOccurrenceRecord> {
+    const unfinished = (failureClass: "configuration" | "provider_failed") => this.db.getDecisionOccurrence(recordUnfinishedDecision(this.db,
+      { kind: "scope_check", organizationId, campaignSessionId: root.id, occurrenceKey, inputs: inputs ?? { data: {} } }, failureClass, Date.now()))!;
+    const digest = inputs ? scopeCheckInputDigest(inputs) : null;
+    let settled = this.db.decisionOccurrenceByKey(occurrenceKey);
+    if (settled?.state === "pending" && settled.inputDigest !== digest) {
+      const deadline = settled.createdAt + DECISION_TOTAL_BOUND_MS + 5_000;
+      while (settled?.state === "pending" && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        settled = this.db.decisionOccurrenceByKey(occurrenceKey);
+      }
+      if (settled?.state === "pending") {
+        this.db.settleDecisionOccurrence(settled.occurrenceId, { state: "failed", failureClass: "timed_out", now: Date.now() });
+        settled = this.db.decisionOccurrenceByKey(occurrenceKey);
+      }
+    }
+    if (settled && settled.state !== "pending") return settled;
+    if (!inputs || !digest) return unfinished("configuration");
+    try {
+      const outcome = await this.decisionRuntime.decide({
+        organizationId, kind: "scope_check", campaignSessionId: root.id, occurrenceKey, inputs,
+        automaticHarness: root.agentId ? { runnerId: root.runnerId, agentId: root.agentId, driver: root.driver } : null,
+        routeToHuman: () => null,
+      });
+      return this.db.getDecisionOccurrence(outcome.occurrenceId)!;
+    } catch (error) {
+      this.log.warn(JSON.stringify({ event: "campaign_scope_check_unavailable", sessionId: root.id, error: (error as Error).message.slice(0, 200) }));
+      return unfinished(error instanceof DecisionInputError ? "configuration" : "provider_failed");
+    }
   }
 
   /**

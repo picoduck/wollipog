@@ -965,7 +965,14 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      it was sent and never lets a delayed or reordered update replace it with an older one, even
 //      within one issue-scope revision. A pre-v310 runner is never sent the field and keeps
 //      replacing control with each synchronization.
-export const PROTOCOL_VERSION = 310;
+// 312: the Decision Model checks a scope proposal's stated constraints (#4282). A proposal that
+//      states anything checkable is asked the `scope_check` kind's typed questions in one call (the
+//      count, named versus merely mentioned, each stated constraint per chosen issue, omissions and
+//      withheld operations; never priority), and the server derives admit, refuse or uncertain. The
+//      recorded proposal carries `constraintCheck`; Campaign Status shows its answers. The call goes
+//      only to a runner with typed Decision questions (v307), and any other outcome is the owner's
+//      one approval. (309 to 311 are claimed by open pull requests.)
+export const PROTOCOL_VERSION = 312;
 
 export * from "./campaign-authority.js";
 export * from "./decision-questions.js";
@@ -7605,7 +7612,8 @@ export interface SessionNamingConnectionTestResult {
  * `scope_grant` reads a Full Control owner's first message into a typed scope grant (#4102), and
  * `credential_screen` screens Full Control questions (#4104); the other Full Control callers add
  * their kinds here with their prompts. */
-export type DecisionKind = "probe" | "scope_grant" | "credential_screen" | "follow_up_relatedness" | "closure_reason" | "scope_review";
+export type DecisionKind = "probe" | "scope_grant" | "credential_screen" | "follow_up_relatedness" | "closure_reason" | "scope_review" |
+  "scope_check";
 
 /** Why one Decision attempt failed. The control plane, not the runner, decides what is transient:
  * see DECISION_TRANSIENT_ERROR_CLASSES. */

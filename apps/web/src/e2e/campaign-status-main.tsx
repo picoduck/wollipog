@@ -734,12 +734,51 @@ let scopeGrantFixture: import("@wollipog/protocol").FullControlScopeGrant | null
   reason: "The message doesn't say whether #12 is a request or background.", ceilings: launchCeilings(1),
 } : null;
 
+/** The constraint check's typed answers for the waiting proposal (#4282): every question satisfied
+ * except #152 against "UI only", which the model couldn't settle, so the proposal came to the owner. */
+const SCOPE_CHECK_ANSWERS: import("@wollipog/protocol").DecisionTypedAnswersView = (() => {
+  const choice = (values: string[]) => ({ type: "choice" as const, values });
+  const pairs = [131, 140, 152].flatMap((number) => ["open", "UI only"].map((constraint) => ({ number, constraint })));
+  const titles: Record<number, string> = { 123: "Composer Epic", 124: "Member Work", 131: "Sidebar Collapses on Resize", 140: "Badge Contrast in Light Theme",
+    152: "Composer Hint Overlaps Send" };
+  const questions = [
+    { questionId: "count_consistent", label: "Count Matches Your Message", text: "Does the proposal's count agree with the owner's message?",
+      answer: choice(["consistent", "inconsistent", "cannot_tell"]) },
+    ...[123, 124].map((number, index) => ({ questionId: `named_asked_for__${index + 1}`, label: `team/repo#${number} ${titles[number]}`,
+      parameter: `team/repo#${number} ${titles[number]}`, text: "Does the owner's message ask the campaign to work on the issue quoted below?",
+      answer: choice(["asked_for", "only_mentioned", "cannot_tell"]) })),
+    ...pairs.map(({ number, constraint }, index) => ({ questionId: `constraint_met__${index + 1}`, label: `team/repo#${number} ${titles[number]} — ${constraint}`,
+      parameter: `team/repo#${number} ${titles[number]} — ${constraint}`, text: "Does the issue satisfy that constraint?",
+      answer: choice(["satisfies", "violates", "cannot_tell"]) })),
+    { questionId: "constraints_complete", label: "Every Stated Constraint Listed", text: "Does the proposal list every stated constraint?",
+      answer: choice(["complete", "missing_constraint", "cannot_tell"]) },
+    { questionId: "nothing_omitted", label: "No Requested Issue Left Out", text: "Does the proposal add every issue the owner asked for?",
+      answer: choice(["complete", "omits_requested", "cannot_tell"]) },
+    { questionId: "operations_respected", label: "Withheld Operations Respected", text: "Does the proposal withhold every operation the message rules out?",
+      answer: choice(["respected", "not_respected", "cannot_tell"]) },
+  ];
+  const satisfied: Record<string, [string, string]> = { count_consistent: ["consistent", "The owner asks for the 3 highest-priority open UI issues."],
+    named_asked_for: ["asked_for", "The owner writes \"Fix #123 and #124\"."], constraint_met: ["satisfies", "It is open and labeled ui."],
+    constraints_complete: ["complete", "Open and UI only are the only filters stated."], nothing_omitted: ["complete", "Both named issues are proposed."],
+    operations_respected: ["respected", "\"Don't merge anything yet\" withholds PR Merge, which the proposal withholds."] };
+  const answers = questions.map((question) => {
+    const unsure = question.questionId === "constraint_met__6";
+    const [value, evidence] = unsure ? ["cannot_tell", "Its labels don't say whether it is UI work."] : satisfied[question.questionId.split("__")[0]!]!;
+    return { questionId: question.questionId, value, confidence: unsure ? 0.55 : 0.93, evidence, assessment: unsure ? "unknown" as const : "satisfied" as const };
+  });
+  return { confidenceThreshold: 0.8, questions, answers, decisive: { questionId: "constraint_met__6" } };
+})();
+
 const SCOPE_PROPOSALS: import("@wollipog/protocol").CampaignScopeProposalView[] = [{
   occurrenceId: "wd_scope_2", createdAt: NOW - 60_000, outcome: "waiting_for_owner",
   explanation: "You named #123 and #124. For the rest I ranked open UI issues by priority label, then by age.",
-  proposal: { initial: true, messageDigest: "a".repeat(64), requestedCount: 5, constraints: ["open", "UI only"], withheldOperations: ["pr_merge"],
-    checks: ["chosen_issues", "requested_count", "constraints", "withheld_operations"], route: "owner", ownerCause: "constraint_check_unavailable",
-    ownerMessage: "Fix #123 and #124, then the 5 highest-priority open UI issues. Don't merge anything yet.",
+  check: { occurrenceId: "dec_scope_check", state: "uncertain", verdict: "uncertain", typedAnswers: SCOPE_CHECK_ANSWERS,
+    reason: "The answer can't be settled for 'team/repo#152 Composer Hint Overlaps Send — UI only'." },
+  proposal: { initial: true, messageDigest: "a".repeat(64), requestedCount: 3, constraints: ["open", "UI only"], withheldOperations: ["pr_merge"],
+    checks: ["chosen_issues", "requested_count", "constraints", "withheld_operations"], route: "owner", ownerCause: "constraint_check_uncertain",
+    constraintCheck: { occurrenceId: "dec_scope_check", verdict: "uncertain",
+      reason: "The answer can't be settled for 'team/repo#152 Composer Hint Overlaps Send — UI only'." },
+    ownerMessage: "Fix #123 and #124, then the 3 highest-priority open UI issues. Don't merge anything yet.",
     issues: [
       { number: 123, origin: "owner_named", rationale: "You named it first.", title: "Composer Epic" },
       { number: 124, origin: "owner_named", rationale: "You named it second.", title: "Member Work" },

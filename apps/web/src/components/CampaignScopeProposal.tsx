@@ -1,5 +1,8 @@
 import React, { useId } from "react";
-import type { CampaignScopeProposal, CampaignScopeProposalView, FullControlScopeGrant, ScopeProposalCheck } from "@wollipog/protocol";
+import type { CampaignScopeCheckView, CampaignScopeProposal, CampaignScopeProposalView, FullControlScopeGrant,
+  ScopeProposalCheck as ScopeProposalCheckName } from "@wollipog/protocol";
+import { DECISION_FAILURE_LABELS } from "./CampaignDecisionModelChecks.js";
+import { DecisionAnswerChecklist } from "./DecisionAnswerChecklist.js";
 import { Notice } from "./Notice.js";
 import { StatusBadge } from "./StatusBadge.js";
 import type { StatusTone } from "../status-meta.js";
@@ -15,21 +18,58 @@ const OUTCOMES: Record<CampaignScopeProposalView["outcome"], { label: string; to
   replaced: { label: "Replaced", tone: "neutral" },
 };
 
-const CHECKS: Partial<Record<ScopeProposalCheck, string>> = {
+const CHECKS: Partial<Record<ScopeProposalCheckName, string>> = {
   chosen_issues: "issues the Orchestrator chose",
   requested_count: "a count you asked for",
   unreferenced_named_issues: "issues your message writes only as plain numbers",
+  unproposed_references: "issues your message mentions that it doesn't propose as ones you named",
+  later_named_issues: "issues it says you named but proposes only now",
   constraints: "constraints it read",
   withheld_operations: "operations it withholds",
 };
 
-/** How a proposal was checked: the floors alone, or the owner's approval, and why. */
+/** How a proposal was checked: the floors alone, the Decision Model's constraint check, or the
+ * owner's approval, and why. */
 function checkedBy(proposal: CampaignScopeProposal): string {
-  if (proposal.route === "admitted") return "Deterministic checks only. It named only issues your message references, so no model was asked.";
-  if (proposal.ownerCause === "proposal_unstructured") return "Deterministic checks, then your approval: the Orchestrator's machine can't send a structured proposal.";
   const what = proposal.checks.flatMap((check) => CHECKS[check] ?? []);
   const list = what.length > 1 ? `${what.slice(0, -1).join(", ")} and ${what.at(-1)}` : what[0] ?? "nothing it could check";
-  return `Deterministic checks, then your approval: it includes ${list}, which no Decision Model checks yet.`;
+  if (proposal.route === "admitted") {
+    return proposal.constraintCheck
+      ? `Deterministic checks, then the Decision Model confirmed ${list} against your message.`
+      : "Deterministic checks only. It named only issues your message references, so no model was asked.";
+  }
+  switch (proposal.ownerCause) {
+    case "proposal_unstructured": return "Deterministic checks, then your approval: the Orchestrator's machine can't send a structured proposal.";
+    case "constraint_check_uncertain": return `Deterministic checks, then the Decision Model couldn't confirm ${list}, so it needs your approval.`;
+    case "constraint_check_failed": return `Deterministic checks, then the Decision Model's check of ${list} failed, so it needs your approval.`;
+    default: return `Deterministic checks, then your approval: it includes ${list}, which no Decision Model checked.`;
+  }
+}
+
+/** The Decision Model's verdict on a proposal, derived by the server from the answers. */
+const CHECK_VERDICTS: Record<string, { label: string; tone: StatusTone }> = {
+  admit: { label: "Within Your Message", tone: "success" },
+  refuse: { label: "Outside Your Message", tone: "danger" },
+};
+
+function checkVerdict(check: CampaignScopeCheckView): { label: string; tone: StatusTone } {
+  if (check.state === "pending") return { label: "Checking", tone: "info" };
+  if (check.state === "failed") return { label: "Check Failed", tone: "warning" };
+  if (check.state === "uncertain") return { label: "Uncertain", tone: "warning" };
+  return CHECK_VERDICTS[check.verdict ?? ""] ?? { label: "Uncertain", tone: "warning" };
+}
+
+/** The constraint check's verdict and each typed question with its answer and confidence (#4282). */
+export function ScopeProposalCheck({ check }: { check: CampaignScopeCheckView }) {
+  const verdict = checkVerdict(check);
+  // The same row structure as Decision Model Checks: the checklist sits in the value column of an
+  // Answers row, so the label column stays aligned.
+  return <dl className="facts">
+    <div><dt>Decision Model Verdict</dt><dd><StatusBadge noDot tone={verdict.tone} label={verdict.label} />
+      {check.reason ? <> {check.reason}</> : null}
+      {check.failureClass ? <> {DECISION_FAILURE_LABELS[check.failureClass]}</> : null}</dd></div>
+    {check.typedAnswers ? <div><dt>Answers</dt><dd><DecisionAnswerChecklist typed={check.typedAnswers} /></dd></div> : null}
+  </dl>;
 }
 
 /** The facts of one Orchestrator proposal (#4282): each issue with whether you named it or the
@@ -80,6 +120,7 @@ export function CampaignScopeProposalSection({ grant, proposals, ceilingsShown =
       return <article key={view.occurrenceId} aria-label={index === 0 ? "Latest Proposal" : `Earlier Proposal ${index}`}>
         <h4>{index === 0 ? "Latest Proposal" : "Earlier Proposal"} <StatusBadge noDot tone={outcome.tone} label={outcome.label} /></h4>
         <ScopeProposalFacts repository={repository} proposal={view.proposal} explanation={view.explanation} />
+        {view.check ? <ScopeProposalCheck check={view.check} /> : null}
       </article>;
     })}
   </section>;

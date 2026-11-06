@@ -21,13 +21,40 @@ export function decisionAnswerClaim(question: DecisionQuestionView, answer: Deci
   return `${item ? `${item.label} ` : ""}${verb} '${question.parameter ?? question.label}'`;
 }
 
-/** The answer's value in words, as the question allowed it. */
+/** A human phrase for each allowed choice answer the Decision kinds ask (#4282, #4283). Display only:
+ * the stored value, the audit and the verdict derivation keep the identifier. */
+const ANSWER_PHRASES: Readonly<Record<string, string>> = {
+  cannot_tell: "Can't tell",
+  // Scope check (#4282).
+  consistent: "Consistent",
+  inconsistent: "Inconsistent",
+  asked_for: "Asked for",
+  only_mentioned: "Only mentioned",
+  satisfies: "Satisfies",
+  violates: "Violates",
+  complete: "Complete",
+  missing_constraint: "A constraint is missing",
+  omits_requested: "Leaves out a requested issue",
+  respected: "Respected",
+  not_respected: "Not respected",
+  // Follow-up relatedness and closure reasons (#4283).
+  completes_requested_work: "Completes the requested work",
+  gap_found_in_requested_work: "A gap found in the requested work",
+  separate_work: "Separate work",
+  contradicts_evidence: "Contradicts the evidence",
+  supports: "Supports",
+  does_not_support: "Doesn't support",
+};
+
+/** The answer's value in words, as the question allowed it: a known answer's phrase, yes or no, a
+ * score on its scale, or an unknown identifier with its underscores read as spaces. */
 export function decisionAnswerValueText(question: DecisionQuestionView, value: DecisionAnswerView["value"]): string {
-  if (typeof value === "boolean") return value ? "yes" : "no";
+  if (typeof value === "boolean") return value ? "Yes" : "No";
   if (typeof value === "number") {
     return question.answer.type === "score" ? `${value} on ${question.answer.minimum} to ${question.answer.maximum}` : String(value);
   }
-  return value.replace(/_/gu, " ");
+  const phrase = ANSWER_PHRASES[value] ?? value.replace(/_/gu, " ");
+  return phrase.charAt(0).toUpperCase() + phrase.slice(1);
 }
 
 function percent(value: number): string {
@@ -59,7 +86,7 @@ export function DecisionAnswerChecklist({ typed }: { typed: DecisionTypedAnswers
               <Icon size={14} className="decision-answer-icon" />
               <span className="decision-answer-claim">{decisionAnswerClaim(question, answer, typed.confidenceThreshold)}</span>
               <span className="campaign-status-meta">
-                Answered {decisionAnswerValueText(question, answer.value)} with {percent(answer.confidence)} confidence
+                {decisionAnswerValueText(question, answer.value)} ({percent(answer.confidence)} confidence)
                 {decided ? "; this answer decided the verdict" : ""}. {answer.evidence}
               </span>
             </li>

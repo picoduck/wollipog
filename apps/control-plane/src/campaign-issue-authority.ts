@@ -114,7 +114,9 @@ export type CampaignScopeAdmissionFailure =
   | "selection_not_granted" | "selection_additions_only" | "repository_outside_boundary" | "not_an_issue" | "issue_not_open"
   | "already_in_scope" | "other_campaign_scope" | "selection_count_exhausted" | "human_required_label"
   // The Orchestrator's own scope proposal (#4282): its floors beyond those above.
-  | "owner_named_not_in_message" | "proposal_additions_only";
+  | "owner_named_not_in_message" | "proposal_additions_only" | "proposal_count_exceeded" | "requested_count_not_in_message"
+  // The Decision Model's constraint check of that proposal (#4282) refused it.
+  | "constraint_check_refused";
 
 const HUMAN_SCOPE_ROUTE = "ask the campaign owner to propose this change from Campaign Status";
 
@@ -157,6 +159,12 @@ export const CAMPAIGN_SCOPE_ADMISSION_REFUSALS: Readonly<Record<CampaignScopeAdm
   owner_named_not_in_message: { status: 409, message: "A proposed issue is marked as named by the owner, but the owner's message doesn't " +
     "write its number for this campaign's repository. Mark it as your own choice, with your rationale, or leave it out." },
   proposal_additions_only: { status: 400, message: "A scope proposal adds issues only; propose removals as their own change." },
+  proposal_count_exceeded: { status: 409, message: "The proposal chooses more issues than the owner's count allows: the count the owner " +
+    "stated, the campaign's admitted count, or 3 when the owner stated none. Choose fewer issues." },
+  requested_count_not_in_message: { status: 409, message: "The proposal's count isn't written in the owner's message, as digits or a " +
+    "word. Give the count the owner wrote, or null when the message states none." },
+  constraint_check_refused: { status: 409, message: "The Decision Model found that this proposal doesn't stay within what the owner's " +
+    "message allows. Revise it and propose again; proposing the same issues with another rationale gets the same answer." },
 };
 
 /** The accepted recommendation a consumed publication delivered as `issue`. A bounded grant names it.

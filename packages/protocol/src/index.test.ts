@@ -120,7 +120,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 310);
+  assert.equal(PROTOCOL_VERSION, 312);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -358,8 +358,10 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 310", () => {
-  assert.equal(PROTOCOL_VERSION, 310);
+test("PROTOCOL_VERSION is 312", () => {
+  assert.equal(PROTOCOL_VERSION, 312);
+  // A scope proposal's constraint check (#4282) is a typed Decision call, sent only to a v307 runner.
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.typedDecisionQuestions, 307);
   // Only a v308 runner sends a structured scope proposal, and only to a v308 control plane (#4282).
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.campaignScopeProposals, 308);
   // Only a v307 runner is sent a typed-question Decision call's larger schema and output (#4283).

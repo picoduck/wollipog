@@ -113,9 +113,9 @@ export function decisionTestSummary(result: DecisionModelTestResult): string {
 
 /** Kinds Campaign Status lists in Decision Model Checks, beside the request each one affected: the
  * question screen, follow-up relatedness and closure-reason choice (#4104), and the review of each
- * selection proposal (#4103). */
+ * selection proposal (#4103), and the constraint check of each Orchestrator scope proposal (#4282). */
 const DECISION_MODEL_CHECK_KINDS: ReadonlySet<DecisionKind> = new Set<DecisionKind>([
-  "credential_screen", "follow_up_relatedness", "closure_reason", "scope_review",
+  "credential_screen", "follow_up_relatedness", "closure_reason", "scope_review", "scope_check",
 ]);
 
 /**

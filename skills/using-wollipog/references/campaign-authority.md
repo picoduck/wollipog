@@ -60,8 +60,9 @@ first campaign action, right after the report, is proposing the initial scope wi
 the constraints read and the operations withheld). `create_session` refuses campaign work until that
 proposal is admitted. Deterministic checks refuse a proposal naming its issue and condition; one of
 only owner-named issues the message writes as issue references, with nothing else to check, is
-admitted with no model call; anything else is
-the owner's one approval, asked as an Owner Question. Ranking criteria are the root's own call.
+admitted with no model call; anything else goes to the Decision Model's constraint check, which
+admits, refuses naming the question and issue, or, when uncertain or failed, makes it the owner's one
+approval, asked as an Owner Question. Ranking criteria are the root's own call and are never checked.
 
 When such a rule keeps a gate for a person, the gate reaches the owner as a typed request, never
 only as prose:

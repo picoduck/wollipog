@@ -223,7 +223,9 @@ const scopeProposalSnapshot: CampaignIssueScopeSnapshot & { scopeProposal: Campa
   explanation: "You named #4101. For the other two I ranked open UI bugs by priority label, then by age.",
   affectedAssignments: [], affectedDecisions: [], activeChildren: [],
   scopeProposal: { initial: true, messageDigest: "a".repeat(64), requestedCount: 3, constraints: ["open", "UI only"], withheldOperations: ["pr_merge"],
-    checks: ["chosen_issues", "constraints", "withheld_operations"], route: "owner", ownerCause: "constraint_check_unavailable",
+    checks: ["chosen_issues", "constraints", "withheld_operations"], route: "owner", ownerCause: "constraint_check_uncertain",
+    constraintCheck: { occurrenceId: "dec_scope_check", verdict: "uncertain",
+      reason: "The answer can't be settled for 'picoduck/wollipog#4140 Badge Contrast in Light Theme — UI only'." },
     ownerMessage: "Fix #4101 and the two most important open UI bugs, but don't merge anything yet.",
     issues: [
       { number: 4101, origin: "owner_named", rationale: "You named it.", title: "Composer Loses Draft on Reconnect" },
