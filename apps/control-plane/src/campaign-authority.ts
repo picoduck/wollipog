@@ -1,6 +1,6 @@
 import {
-  campaignAuthorityPreflight, resolveCampaignAuthority, runnerSupportsProtocol, validCampaignControl,
-  type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope, type CredentialScreenFact,
+  campaignAuthorityPreflight, campaignBoundaryRepositories, campaignScopeHolds, resolveCampaignAuthority, runnerSupportsProtocol, validCampaignControl,
+  type CampaignAuthorityEvaluation, type CampaignBoundaryRepository, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope, type CredentialScreenFact,
   type ParentControlPolicy, type PendingApproval, type SessionView, type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
 import type { HumanPrincipal } from "./identity.js";
@@ -87,8 +87,27 @@ export function campaignBoundaryCurrent(controller: Pick<SessionView, "orchestra
  * must name it, so a scope the server is still synchronizing never admits more than either says. */
 export function campaignIssueInScope(policy: SessionView["orchestratorPolicy"], issue: { repository: string; number: number }): boolean {
   const scope = policy?.issueScope;
-  return Boolean(scope && scope.repository.toLowerCase() === issue.repository.toLowerCase() &&
-    scope.issueNumbers.includes(issue.number) && policy?.issueNumbers?.includes(issue.number));
+  if (!scope || !campaignScopeHolds(scope, issue)) return false;
+  // The launch repository's numbers are also what its runner enforces; both must hold the issue.
+  return issue.repository.toLowerCase() !== scope.repository.toLowerCase() || Boolean(policy?.issueNumbers?.includes(issue.number));
+}
+
+/** The campaign's launch repository: its Full Control boundary's, or the one its scope recorded.
+ * Empty when neither is known, as for a legacy campaign that never saved one (#2664). */
+export function campaignLaunchRepository(root: Pick<SessionView, "orchestratorPolicy">): string {
+  const control = root.orchestratorPolicy?.control;
+  return (control?.mode === "full_control" ? control.boundary.repository : root.orchestratorPolicy?.issueScope?.repository ?? "").toLowerCase();
+}
+
+/** The repositories the campaign's issue scope may hold, the launch repository first (#4118): a
+ * Full Control boundary's entries, each with its verified Locations in order. A Custom campaign
+ * stores no repository list yet, so its one entry is the launch repository its scope recorded. */
+export function campaignScopeRepositories(root: Pick<SessionView, "orchestratorPolicy">): CampaignBoundaryRepository[] {
+  const control = root.orchestratorPolicy?.control;
+  if (control?.mode === "full_control") return campaignBoundaryRepositories(control.boundary)
+    .map((entry) => ({ repository: entry.repository.toLowerCase(), locationIds: entry.locationIds }));
+  const launch = campaignLaunchRepository(root);
+  return launch ? [{ repository: launch, locationIds: [] }] : [];
 }
 
 /** Under Full Control the issue scope bounds what the Orchestrator may deliver (#4062): a child is

@@ -895,7 +895,7 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      an issue or a pull request, its state, labels, assignees, title and a bounded body excerpt.
 //      A pull request is reported there instead of failing the read. The control plane's
 //      selection floors read these facts; an older runner reports none, so its selection
-//      proposals take the owner's route. (290 is claimed by an open pull request.)
+//      proposals take the owner's route.
 // 295: closing patterns in GitLab merges (#3762). A GitLab `pr_merge` snapshot may declare
 //      `intendedClosures`, and requesting or arming it first asks the child's runner for
 //      `gitlab_merge_closures`, which reports every issue the merge would close: GitLab's default
@@ -972,7 +972,15 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      recorded proposal carries `constraintCheck`; Campaign Status shows its answers. The call goes
 //      only to a runner with typed Decision questions (v307), and any other outcome is the owner's
 //      one approval. (309 to 311 are claimed by open pull requests.)
-export const PROTOCOL_VERSION = 312;
+// 313: repository-qualified campaign issue scope (#4118). The control plane stores the scope as
+//      `issues`, `{ repository, number }` pairs across the boundary's repositories, and sends each
+//      participating runner only its own Location repository's numbers, in the earlier shape. A
+//      v313 runner accepts that part when its origin is any repository of the boundary, not only
+//      the launch one. An Orchestrator participant in another boundary repository needs v313;
+//      one-repository campaigns are unchanged for older runners. (This change first claimed 290,
+//      293, 299, 301, 304, 305 and 309, which no released version uses; 292 and 300 are claimed by
+//      open pull requests.)
+export const PROTOCOL_VERSION = 313;
 
 export * from "./campaign-authority.js";
 export * from "./decision-questions.js";
@@ -1022,7 +1030,9 @@ export {
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
 export const MAX_SKILL_REPORT_REQUESTS = 64;
-export { boundedIssueNumbers, campaignIssueForgeUrl, epicChecklistMembers, normalizeCampaignIssueScopeSnapshot, validIssueAdmission, validIssueLineage } from "./campaign-issue-scope.js";
+export { boundedIssueNumbers, campaignIssueForgeUrl, epicChecklistMembers, normalizeCampaignIssueScopeSnapshot, validIssueAdmission, validIssueLineage,
+  CAMPAIGN_ISSUE_SCOPE_MAX, canonicalCampaignIssues, campaignScopeIssues, campaignScopeNumbers, campaignScopeHolds, campaignScopeWithIssues,
+  campaignScopeForRepository, campaignScopeChangeGroups, campaignScopeChangeResult, campaignScopeChangeBefore } from "./campaign-issue-scope.js";
 export const UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL = 202;
 
 export type ArtifactUploadPreference = "manual" | "wollipog_automatic" | "external_hosting";
@@ -1565,6 +1575,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   campaignIssueNumberGrant: 302,
   /** v310 orders campaign control metadata by `controlRevision` (#3363). */
   campaignControlRevision: 310,
+  /** v313 synchronizes its own repository's part of a multi-repository issue scope (#4118). */
+  repositoryQualifiedIssueScope: 313,
 } as const;
 
 /* ========================================================================== */
@@ -5440,8 +5452,15 @@ export interface CampaignIssueScopeSeed {
 }
 
 export interface CampaignIssueScope {
+  /** The launch Location's repository: the boundary's first entry. */
   repository: string;
+  /** The numbers of `issues` in `repository`, kept for runners and clients that read one
+   * repository (#4118). Always derived from `issues` when it is present. */
   issueNumbers: number[];
+  /** Every authorized issue, repository-qualified (#4118), sorted by repository then number. A
+   * scope stored before #4118 omits it and reads as `issueNumbers` in `repository`. A runner is
+   * sent its own repository's part in the shape above, without this list. */
+  issues?: CampaignIssueRef[];
   revision: number;
   authorizedByUserId: string;
   authorizedAt: number;
@@ -5464,6 +5483,14 @@ export interface CampaignIssueScopeRequest {
   proposal?: import("./scope-proposal.js").CampaignScopeProposalInput;
 }
 
+/** One repository's part of a scope change (#4118). */
+export interface CampaignIssueScopeRepositoryChange {
+  repository: string;
+  before: number[];
+  additions: number[];
+  removals: number[];
+}
+
 export interface CampaignIssueAdmission {
   boundaryRevision: number;
   evidenceDigest: string;
@@ -5473,13 +5500,18 @@ export interface CampaignIssueAdmission {
 
 export interface CampaignIssueScopeSnapshot {
   category: "campaign_issue_scope";
+  /** The launch Location's repository; `before`, `additions` and `removals` are its numbers. */
   repository: string;
   expectedRevision: number;
   before: number[];
   additions: number[];
   removals: number[];
+  /** The same change in every other boundary repository the scope holds or the change touches
+   * (#4118), sorted by repository. Omitted when the scope stays in the launch repository. */
+  otherRepositories?: CampaignIssueScopeRepositoryChange[];
   explanation: string;
-  affectedAssignments: Array<{ sessionId: string; issue: number }>;
+  /** `repository` is present only for an assignment outside the launch repository. */
+  affectedAssignments: Array<{ sessionId: string; issue: number; repository?: string }>;
   affectedDecisions: string[];
   activeChildren: Array<{ sessionId: string; title: string; assignmentDigest: string }>;
   lineage?: CampaignIssueScopeRequest["lineage"];
@@ -5602,6 +5634,18 @@ export interface SetCampaignFollowUpLimitRequest {
   expectedRevision: number;
 }
 
+/** One boundary repository in a campaign's scope view (#4118). */
+export interface CampaignIssueScopeRepositoryView {
+  repository: string;
+  /** Its authorized issue numbers. */
+  issueNumbers: number[];
+  /** `verified`: the launch repository was verified through the campaign runner for this view;
+   * another repository has a boundary-verified Location online to verify changes through.
+   * `no_location_online`: none of its Locations is online, so changes in it are refused. `saved`:
+   * the view shows the saved scope without verifying, as when the campaign runner is disconnected. */
+  state: "verified" | "no_location_online" | "saved";
+}
+
 /** The owner's change to how many issues a Full Control scope grant's selection may admit (#4102).
  * Compare-and-set on the campaign's policy revision. A derived Maximum Issues moves with it; an
  * explicit Maximum Issues never grows, so the count stays within what it leaves after the named issues. */
@@ -5612,8 +5656,12 @@ export interface SetScopeGrantSelectionCountRequest {
 
 export interface CampaignIssueScopeView {
   campaignSessionId: string;
+  /** The launch Location's repository; `issueNumbers` are its numbers. Kept for older clients. */
   repository: string;
   issueNumbers: number[];
+  /** Every boundary repository with its scope, the launch repository first (#4118). A repository
+   * appears when the boundary holds it, so an empty one can still be added to. */
+  repositories?: CampaignIssueScopeRepositoryView[];
   revision: number;
   authorization?: CampaignIssueScope;
   supported: boolean;

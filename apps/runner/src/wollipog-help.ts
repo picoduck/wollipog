@@ -142,6 +142,8 @@ needed. If the result is uncertain, inspect GitHub and never replay the action o
 a shell command.
 
 Issue scope: issue-scope get [--epic <number>]; issue-scope request --proposal <json>.
+The scope is grouped by repository; a proposal may name issues in any of the campaign's
+repositories, and one outside them is refused with repository_outside_boundary.
 Tools: get_campaign_issue_scope, request_campaign_issue_scope_change, request_github_issue_closure, close_github_issue; recover with decision get.
 `;
 }

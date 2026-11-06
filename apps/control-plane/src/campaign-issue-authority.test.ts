@@ -906,6 +906,27 @@ test("every bounded publication needs a runner whose duplicate search and compar
   }
 });
 
+test("#4118 Maximum Issues counts issues in every repository for a follow-up publication and a reauthorization", async () => {
+  const h = harness(true, 2);
+  try {
+    // One launch-repository issue and one in another repository: the campaign is full at two.
+    const policy = h.db.sessionOrchestratorPolicy("root")!;
+    policy.issueScope = { ...policy.issueScope!, issues: [{ repository: "other/repo", number: 40 }, { repository: "team/repo", number: 100 }] };
+    h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), "root");
+    const recommendationId = acceptedRecommendation(h);
+    const published = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "full-across-repositories", resourceKey: "full-across-repositories",
+      resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "[Feature]: Related repair", sanitizedBody: body,
+        labels: ["enhancement"], recommendationId } });
+    assert.ok(published.ok, published.error ?? "publication");
+    assert.equal(published.data!.authority, "human");
+    assert.equal(published.data!.authorityEvaluation?.admissionFailure, "capacity_exhausted");
+    // A new authorization can't name a limit below the whole scope either.
+    const refused = h.svc.setCampaignControl("root", { mode: "full_control", objective: "Implement epic 100", operations: ["campaign_issue_scope"], delegatablePolicyIds: [],
+      issueAuthority: { epics: [100], relatedFollowUps: true, maxIssues: 1, closureReasons: [] } }, h.db.getSession("root")!.parentControlPolicy!.revision, h.principal);
+    assert.equal(refused.error, "The issue boundary exceeds its human-set scope limit.");
+  } finally { h.db.close(); }
+});
+
 test("a child's publication outside the proof is refused when it can correct it, and otherwise routes to the person with a visible admission failure (#2940, #4065)", async () => {
   const cases: Array<{ name: string; expected: string; refused: boolean; maximum?: number; setup?: (h: ReturnType<typeof harness>) => string;
     change?: (snapshot: { sanitizedTitle: string; sanitizedBody: string; labels: string[]; recommendationId: string }) => void }> = [

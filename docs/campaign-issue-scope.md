@@ -133,9 +133,36 @@ occurrence, under the same policy revision; exactly one revision bump since; and
 boundary still current and still giving the Orchestrator the merge. Any later policy change, any
 other revocation, or an approval that was never armed stays terminal.
 
-Protocol v208 capability-gates the complete operation before any update. Active Orchestrator participants
-must share the campaign runner and repository workspace; finish or move incompatible participants first.
-The control plane persists the authoritative policy on matching Orchestrator members and records an empty scope at the same revision on retired participants in another repository workspace. Restarts and provider launches independently preserve the repository boundary. The runner stores the
+Protocol v208 capability-gates the complete operation before any update. Every active Orchestrator
+participant must run in a Location of one of the campaign's repositories (#4118); finish or move
+incompatible participants first. A participant outside the launch repository needs a v313 runner.
+
+## Repository-Qualified Scope
+
+The scope holds `{ repository, number }` pairs (`issues`) across the campaign's repositories: a Full
+Control boundary's entries, or for Custom, which stores no repository list yet, its launch repository.
+`owner/app#5` and `owner/api#5` are separate entries with separate authority. `repository` and
+`issueNumbers` stay as the launch repository's part for older clients and runners. A scope saved before
+#4118 reads as its numbers in its repository, at the same revision; nothing is rewritten and no
+approval is invalidated. A legacy campaign with no saved repository stays unverified (#2664).
+
+- **Changes.** `request_campaign_issue_scope_change` accepts refs in any campaign repository. A ref in
+  any other repository is refused with the fixed code `repository_outside_boundary`, decided from the
+  stored boundary before any runner call. Its sentence tells the Orchestrator to ask the owner to
+  include a Project Location of that repository, then retry; otherwise to report that the work needs a
+  repository with no Location in the Project. The launch repository's part is verified through the
+  campaign runner as before. Each other repository's part is verified through the first online Location
+  in its boundary entry, never through the root's runner, and the Location must still answer as that
+  repository. If any repository has no Location online, the whole request is refused naming it and
+  nothing changes. The approval snapshot keeps the launch repository's numbers at the top level and
+  lists every other repository the scope holds or the change touches under `otherRepositories`.
+- **Admission.** Maximum Issues counts issues across all repositories. Epic lineage admits only the
+  launch repository's epic members, and follow-up lineage only a publication in the launch repository,
+  until cross-repository follow-ups (#4119) and repository-qualified epics land.
+- **Participants.** The root holds the whole scope. Every other Orchestrator participant, and its runner,
+  holds only its own Location repository's numbers in the earlier one-repository shape, so a number is
+  never read in the wrong repository. A retired participant in no campaign repository records the
+  revision with no numbers. Restarts and provider launches independently preserve that boundary. The runner stores the
 scope revision and updates live Claude permission classification, then restores it on reconnect/restart.
 Closure inspection and execution are fenced against both repository and scope revision. Synchronization
 failure is recoverable by reconnecting/updating the runner; closure remains refused until synchronization.

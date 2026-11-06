@@ -277,7 +277,10 @@ function issueScopeSession(): SessionView {
     : {category:"campaign_issue_scope" as const,repository:"team/repo",expectedRevision:1,before:[123,124],additions:[125],removals:[124],
     explanation: tallBody ? Array.from({ length: 12 }, (_, index) =>
       `Review scope item ${index + 1}: confirm the requested work, dependencies, and affected assignments before approving this campaign change.`).join("\n\n")
-      : "Update the intended epic members.",affectedAssignments:[{sessionId:"child",issue:124}],affectedDecisions:["closure-member-124"],activeChildren:[{sessionId:"child",title:"Implement Member Work",assignmentDigest:"a".repeat(64)}]};
+      : "Update the intended epic members.",affectedAssignments:[{sessionId:"child",issue:124}],affectedDecisions:["closure-member-124"],activeChildren:[{sessionId:"child",title:"Implement Member Work",assignmentDigest:"a".repeat(64)}],
+    // `repositories=1`: the same change also adds and removes issues in a second campaign repository (#4118).
+    ...(query.get("repositories") === "1" ? { otherRepositories: [{ repository: "team/api", before: [5, 124], additions: [40], removals: [5] }],
+      affectedAssignments: [{ sessionId: "child", issue: 124 }, { sessionId: "api-child", issue: 5, repository: "team/api" }] } : {})};
   return {...base,title:"Campaign Issue Scope",pendingApproval:{...base.pendingApproval!,title:"Campaign Issue Scope Approval Required",context:{input:JSON.stringify(snapshot)},
     workflowDecision:{...base.pendingApproval!.workflowDecision!,category:"campaign_issue_scope",resourceSnapshot:snapshot,controllingSessionId:base.id,authority:"human"}}};
 }

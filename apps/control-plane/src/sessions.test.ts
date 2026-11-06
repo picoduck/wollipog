@@ -31108,6 +31108,14 @@ test("human campaign scope recovery, additions, denial, removal and closure use 
     assert.deepEqual(policy.issueNumbers,[123,124]);
     assert.equal(policy.issueScope!.revision,1);
     assert.equal(policy.issueScope!.authorizedByUserId,"owner");
+    // Custom holds the same repository-qualified scope (#4118). It stores no other repository yet,
+    // so a ref elsewhere is refused from the stored scope, before any runner call.
+    assert.deepEqual(policy.issueScope!.issues,[{repository:"team/repo",number:123},{repository:"team/repo",number:124}]);
+    const sentBefore = hub.sentToRunner.length;
+    const elsewhere = await svc.proposeCampaignIssueScope(id,{...proposal,requestId:"elsewhere",expectedRevision:1,additions:[{repository:"other/repo",number:5}]},()=>true,{kind:"human",actorId:"owner",userId:"owner",userName:"Owner",organizationId:"org_personal",organizationName:"Personal",role:"owner",deviceId:"test",localBootstrap:false});
+    assert.equal(elsewhere.ok,false);
+    assert.deepEqual(elsewhere.errorDetails,{code:"repository_outside_boundary",repository:"other/repo"});
+    assert.equal(hub.sentToRunner.length,sentBefore,"no runner call for a repository outside the campaign");
     hub.online = false;
     let offlineRequests = 0;
     const onlineHandler = hub.requestHandler;
@@ -31242,7 +31250,7 @@ test("scope approval cannot authorize a stopped Orchestrator in another reposito
     assert.deepEqual(db.campaignIssueScopeRootsForRunner("unrelated-runner"),[]);
     const restarted=svc.restart(child.data.id);
     assert.equal(restarted.ok,false,"restart must retain the campaign repository boundary");
-    assert.match(restarted.error!,/campaign.*repository workspace/);
+    assert.match(restarted.error!,/restart in a Location of one of the campaign.s repositories/);
     await new Promise((resolve)=>setTimeout(resolve,0));
   } finally {db.close();}
 });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL,
-  type GithubIssueClosureRequest, type RunnerMetadata } from "@wollipog/protocol";
+  type CampaignControl, type GithubIssueClosureRequest, type RunnerMetadata } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
@@ -201,7 +201,28 @@ test("#3382 a scope refusal names why recovery is unavailable while a participan
     const result = await h.close(PROPOSAL);
     assert.equal(result.errorDetails?.code, "campaign_issue_scope_missing");
     assert.equal(result.errorDetails?.recovery, "unavailable");
-    assert.match(result.error!, /Every active Orchestrator participant must use the campaign's runner and repository workspace/);
+    // The participant is in no Location of a campaign repository (#4118).
+    assert.match(result.error!, /Every active Orchestrator participant must run in a Location of one of the campaign's repositories/);
+    h.assertNothingRan();
+  } finally { h.db.close(); }
+});
+
+test("#4118 a participant in another campaign repository's Location leaves the scope recovery route available", async () => {
+  const h = harness({ scope: [3], full: true });
+  try {
+    // A participant whose workspace is a verified Location of a second boundary repository.
+    h.db.createSession({ id: "nested", runnerId: "r", workspaceId: "other", agentId: "codex", title: "nested", useWorktree: false, driver: "codex-app-server",
+      now: 1, config: {}, role: "orchestrator", orchestratorPolicy: h.db.sessionOrchestratorPolicy("root")!, parentSessionId: "root" });
+    h.db.updateSessionStatus("nested", "running", 2);
+    const project = h.db.createProject({ name: "Project" });
+    const location = h.db.addProjectLocation(project.id, { runnerId: "r", workspaceId: "other" });
+    const stored = h.db.sessionOrchestratorPolicy("root")!;
+    const control = stored.control as Extract<CampaignControl, { mode: "full_control" }>;
+    control.boundary.repositories = [{ repository: "team/repo", locationIds: [] }, { repository: "team/api", locationIds: [location.id] }];
+    h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(stored));
+    const result = await h.close(PROPOSAL);
+    assert.equal(result.errorDetails?.code, "campaign_issue_outside_scope");
+    assert.equal(result.errorDetails?.recovery, "owner_scope_review_or_lineage", "a proposal can change the scope with this participant in place");
     h.assertNothingRan();
   } finally { h.db.close(); }
 });

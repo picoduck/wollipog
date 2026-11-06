@@ -72,6 +72,49 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
     await scope.screenshot({ path: info.outputPath(`scope-reconnected-${viewport.width}.png`) });
   });
 
+  test(`a multi-repository scope is grouped under Repositories and accepts issues from each at ${viewport.width}px (#4118)`, async ({ page }, info) => {
+    await page.setViewportSize(viewport);
+    await page.route("**/api/sessions/*/campaign/issue-scope", async (route) => {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        campaignSessionId: "s_root", repository: "owner/app", issueNumbers: [5, 12], revision: 4, supported: true, canPropose: true, candidates: [],
+        repositories: [{ repository: "owner/app", issueNumbers: [5, 12], state: "verified" },
+          { repository: "owner/api", issueNumbers: [5, 40], state: "verified" },
+          { repository: "owner/docs", issueNumbers: [], state: "no_location_online" }],
+        outsideScope: [{ workItemId: "w_stray", title: "Stray Work", issue: { repository: "owner/api", number: 99 }, sessionId: null }] }) });
+    });
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=unsupported-target");
+    const scope = page.getByRole("region", { name: "Authorized Issue Scope" });
+    const repositories = scope.locator("dl.facts > div").filter({ has: page.getByRole("term").getByText("Repositories", { exact: true }) });
+    await expect(repositories.locator("li")).toHaveText(["owner/app: #5, #12", "owner/api: #5, #40",
+      "owner/docs (No Location Online): None"]);
+    await expect(scope.locator("dl.facts > div").filter({ has: page.getByRole("term").getByText("Authorized Issues", { exact: true }) })).toHaveCount(0);
+    await scope.getByLabel("Issue Additions", { exact: true }).fill("owner/api#41, owner/app#41");
+    // The whole panel, with the qualified entry typed, at this width; a tall viewport fits it unscrolled.
+    await page.setViewportSize({ width: viewport.width, height: 2400 });
+    await scope.scrollIntoViewIfNeeded();
+    await scope.screenshot({ path: info.outputPath(`scope-repositories-panel-${viewport.width}.png`) });
+    // The same panel in place, at the full page width (Campaign Status is a side panel).
+    await page.screenshot({ path: info.outputPath(`scope-repositories-page-${viewport.width}.png`) });
+    await page.setViewportSize(viewport);
+    await scope.getByRole("button", { name: "Request Scope Approval", exact: true }).click();
+    await expect(scope.getByRole("status").filter({ hasText: "Scope is unchanged" })).toContainText("Scope is unchanged");
+    expect(await page.evaluate(() => (window as unknown as { __SCOPE_PROPOSAL__: unknown }).__SCOPE_PROPOSAL__)).toMatchObject({
+      expectedRevision: 4, additions: [{ repository: "owner/api", number: 41 }, { repository: "owner/app", number: 41 }], removals: [],
+    });
+    const geometry = await scope.evaluate((element) => ({ client: element.clientWidth, scroll: element.scrollWidth }));
+    expect(geometry.scroll).toBeLessThanOrEqual(geometry.client + 1);
+  });
+
+  test(`a multi-repository scope approval qualifies each change by its repository at ${viewport.width}px (#4118)`, async ({ page }, info) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/request-surfaces-e2e.html?scenario=issue-scope&repositories=1");
+    const fact = (term: string) => page.locator("dl.facts > div").filter({ has: page.getByRole("term").getByText(term, { exact: true }) }).locator("dd").first();
+    await expect(fact("Additions")).toHaveText("team/repo#125, team/api#40");
+    await expect(fact("Removals")).toHaveText("team/repo#124, team/api#5");
+    await expect(fact("Affected Assignments")).toHaveText("team/repo#124: child, team/api#5: api-child");
+    await page.screenshot({ path: info.outputPath(`scope-approval-repositories-${viewport.width}.png`), fullPage: true });
+  });
+
   test(`human scope recovery and epic selection at ${viewport.width}px`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign");
