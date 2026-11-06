@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { campaignPublicationSafe, campaignPublicationTitle, type CampaignPublicationAdmissionFailure, type SessionView, type GithubIssueClosureSnapshot,
+import { campaignPublicationSafe, campaignPublicationTitle, campaignScopeIssues, type CampaignPublicationAdmissionFailure, type SessionView, type GithubIssueClosureSnapshot,
   type WorkflowDecisionResourceSnapshot, type CampaignWorkItemDetail, type CampaignPullRequestRef, type CampaignRecommendation,
   ISSUE_CLOSURE_DELIVERY_GAPS_MAX, issueClosureDeliveryGap, type IssueClosureDeliveryGap, type IssueClosureDeliveryGapCode,
   type IssueClosureEpicMembers } from "@wollipog/protocol";
@@ -27,6 +27,13 @@ export function campaignScopeTargetFailureMessage(reason: unknown): string {
     default:
       return "Campaign scope requires a valid local or SSH host execution target belonging to its runner. Container and cloud targets are not supported.";
   }
+}
+
+/** How many issues the campaign holds across every repository (#4118): the size Maximum Issues
+ * limits. `issueNumbers` is only the launch repository's part. */
+export function heldCampaignIssues(root: Pick<SessionView, "orchestratorPolicy">): number {
+  const policy = root.orchestratorPolicy;
+  return policy?.issueScope ? campaignScopeIssues(policy.issueScope).length : policy?.issueNumbers?.length ?? 0;
 }
 
 export function issueBoundary(root: SessionView) {
@@ -96,7 +103,7 @@ export function publicationEvidenceCheck(db: ControlPlaneDb, root: SessionView,
   const grants = db.campaignPublicationReservations(root.id);
   if (grants.some((d) => d.status === "consumed" && d.resourceSnapshot.category === snapshot.category && d.resourceSnapshot.recommendationId === snapshot.recommendationId)) return failed("recommendation_spent");
   const reservations = reservedPublicationSlots(db, root, undefined, snapshot.recommendationId);
-  if ((root.orchestratorPolicy?.issueNumbers?.length ?? 0) + reservations >= db.campaignIssueLimit(root.id, boundary.issueAuthority.maxIssues)) {
+  if (heldCampaignIssues(root) + reservations >= db.campaignIssueLimit(root.id, boundary.issueAuthority.maxIssues)) {
     return failed("capacity_exhausted");
   }
   return { evidence: { recommendation, origins, scopeRevision: boundary.issueScopeRevision, boundaryRevision: boundary.revision } };

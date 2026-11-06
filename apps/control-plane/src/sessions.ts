@@ -60,7 +60,7 @@ import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compat
   everyOutstandingScopeDecision, campaignAwaitsInitialScope, campaignScopeIsProposed, participantScope, participantScopeRefusal, repositoryOutsideBoundary, scopeRequestOutsideBoundary } from "./campaign-issue-scope.js";
 import { boundedDecisionString, issueClosureRequestInvalid, issueClosureRequestInvalidFields, issueClosureScopeRefusal } from "./issue-closure-request-refusal.js";
 import { needsCampaignIssueScopeSeed, readingNamesIssues, seedEpicCandidate } from "./campaign-issue-scope-seed.js";
-import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
+import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, heldCampaignIssues, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, githubIssueClosureRefusal, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure,
   CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, CAMPAIGN_PUBLICATION_CORRECTABLE_FAILURES, type CampaignPullRequestRef } from "@wollipog/protocol";
 import type { ForgeReadResult } from "./campaign-forge-observations.js";
@@ -10404,7 +10404,7 @@ export class SessionsService {
     if (!control) return fail("Full Control requires authenticated repository scope and a valid boundary", 400);
     if (control.mode === "full_control") {
       if (control.boundary.issueAuthority) {
-        if (scope!.issueNumbers.length + reservedPublicationSlots(this.db, session, undefined, undefined, true) >
+        if (campaignScopeIssues(scope!).length + reservedPublicationSlots(this.db, session, undefined, undefined, true) >
             this.db.campaignIssueLimit(sessionId, control.boundary.issueAuthority.maxIssues)) {
           return fail("The issue boundary exceeds its human-set scope limit.", 409);
         }
@@ -12303,8 +12303,7 @@ export class SessionsService {
     const record: CampaignScopeProposal = checks.length ? ownerRecord(structured ? "constraint_check_unavailable" : "proposal_unstructured") : base;
     // Floor 5: an explicit Maximum Issues is never exceeded; a derived one grows to fit when applied.
     // The size counts every repository the scope already holds (#4118).
-    const issueScope = latest.orchestratorPolicy?.issueScope;
-    const scopeSize = (issueScope ? campaignScopeIssues(issueScope).length : before.length) + additions.length;
+    const scopeSize = heldCampaignIssues(latest) + additions.length;
     const requested = scopeSize + reservedPublicationSlots(this.db, latest);
     const limit = this.db.campaignIssueLimit(sessionId,
       proposalMaxIssues(latest.orchestratorPolicy, { scopeProposal: record }, latestBoundary, scopeSize) ?? latestBoundary.issueAuthority.maxIssues);
@@ -12536,7 +12535,7 @@ export class SessionsService {
     const admitted = this.db.consumedSelectionAdditions(sessionId).length;
     if (admitted + additions.length > count) return refuse("selection_count_exhausted", { count, admitted, requested: additions.length });
     const limit = this.db.campaignIssueLimit(sessionId, latestBoundary.issueAuthority!.maxIssues);
-    const requested = before.length + additions.length + reservedPublicationSlots(this.db, latest);
+    const requested = heldCampaignIssues(latest) + additions.length + reservedPublicationSlots(this.db, latest);
     if (requested > limit) return refuse("capacity_exhausted", { limit, requested });
     // Floor 6: no Human Required issue label rule.
     if (facts) {
