@@ -81,12 +81,12 @@ function harness(prompt: string, members: Record<number, CampaignIssueScopeCandi
   let request = 0;
   /** The Custom Orchestrator proposes these issues as the ones the person named. */
   const propose = (numbers: number[], extra: { constraints?: string[]; requestedCount?: number | null; origin?: "owner_named" | "orchestrator_chosen";
-    rationale?: string; explanation?: string; repository?: string } = {}) =>
+    rationale?: string; explanation?: string; repository?: string; repositoryNames?: string[] } = {}) =>
     svc.proposeCampaignSeedScope(id, { requestId: `seed-${++request}`, expectedRevision: 0, removals: [],
       additions: numbers.map((number) => ({ repository: extra.repository ?? "team/repo", number })), explanation: extra.explanation ?? "How I read the person's message.",
       proposal: { issues: numbers.map((number) => ({ repository: extra.repository ?? "team/repo", number, origin: extra.origin ?? "owner_named",
         rationale: extra.rationale ?? `The message names #${number}.` })), requestedCount: extra.requestedCount ?? null,
-        constraints: extra.constraints ?? [], withheldOperations: [] } });
+        constraints: extra.constraints ?? [], withheldOperations: [], ...(extra.repositoryNames ? { repositoryNames: extra.repositoryNames } : {}) } });
   /** No new person step: nothing waits for the person, and the seed is not theirs. */
   const noPersonStep = (label: string) => {
     assert.equal(db.pendingWorkflowDecisionsForController(id).filter((decision) => decision.authority === "human").length, 0, `${label}: no person request`);
@@ -624,6 +624,15 @@ test("the floors only narrow: an invented number, another repository's issue, an
   try {
     assert.equal((await chosen.propose([12], { origin: "orchestrator_chosen" }))?.errorDetails?.code, "seed_owner_named_only");
   } finally { chosen.db.close(); }
+  // A limit the seed can't keep is refused by name, rather than ignored (#4118).
+  const limited = harness("Orchestrate issue #12 in the api repo only.");
+  try {
+    const refused = await limited.propose([12], { repositoryNames: ["the api repo"] });
+    assert.equal(refused?.errorDetails?.code, "seed_repository_limit");
+    assert.match(refused!.error!, /state the limit in constraints/u);
+    assert.equal(limited.policy().issueScopeSeed!.state, "pending");
+    assert.equal(limited.policy().issueNumbers, undefined, "no part is granted");
+  } finally { limited.db.close(); }
 });
 
 test("an older runner gets the person route: at once on launch, and for a proposal it sends without structure (#4259, #4282)", async () => {

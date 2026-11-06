@@ -3207,7 +3207,8 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   /** The Locations that joined the boundary after launch, newest last, bounded (#4117). */
   locationJoins?: import("./project-location-inspection.js").CampaignLocationJoin[];
   /** A Custom campaign's repositories (#4117): its own Location's repository first, then those its
-   * owner approved adding. Full Control keeps them in its authority boundary instead. */
+   * Project verified when it was created (#4118) and those its owner approved adding. Full Control
+   * keeps them in its authority boundary instead. */
   repositories?: import("./campaign-authority.js").CampaignBoundaryRepository[];
   /** The epic a Custom campaign's first message names, once its seed (below) found one; a proposal
    * seed, never authority. */

@@ -37,7 +37,7 @@ import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignRepositoryLimits, campaignControlForRunner, campaignControlRevisionForRunner, campaignLaunchRepository, campaignScopeRepositories, carriedCampaignRepositories } from "./campaign-authority.js";
-import { campaignBoundaryRepositoryAt } from "./campaign-repository-boundary.js";
+import { campaignBoundaryRepositoryAt, launchBoundaryRepositories } from "./campaign-repository-boundary.js";
 import { inspectBoundaryPublication, verifyBoundaryPublishedIssue } from "./project-location-inspection.js";
 import { campaignBoundaryRepository } from "@wollipog/protocol";
 import { genericRequestScreenData, implementationQuestionScreenData, ownerDecisionScreenData, screenCredentialRequest, type CredentialScreenSurface } from "./credential-screen.js";
@@ -5824,7 +5824,38 @@ export class SessionsService {
     if (!capture && session.reviewPolicy) this.log.info(JSON.stringify({ event: "campaign_child_review_policy_snapshot",
       entryPoint: "create_session", sessionId: id, parentSessionId, ...session.reviewPolicy }));
     if (!capture && session.orchestratorPolicy?.issueScopeSeed?.state === "pending") this.startCampaignIssueScopeSeed(id, requestedText, delivery ? "unattributed" : "launch_request");
+    if (!capture && session.orchestratorPolicy && !session.parentSessionId && session.projectId && session.orchestratorPolicy.control?.mode !== "full_control") {
+      void this.establishCustomCampaignRepositories(id).catch((error: unknown) =>
+        this.log.warn(`Could not read the Project's repositories for campaign ${id}: ${error instanceof Error ? error.message : String(error)}`));
+    }
     return ok(this.db.getSession(id)!, 201);
+  }
+
+  /** A Custom campaign's initial repositories (#4118): every verified Location of its Project that
+   * its owner can reach, inspected in its own path, as a Full Control launch builds its boundary.
+   * It grants nothing: a person still approves every scope change, and a Location added later still
+   * needs an approved repository addition. A Project with one repository records nothing, so such a
+   * campaign reads as it always has, and so does one whose own Location can't be read now. */
+  private async establishCustomCampaignRepositories(rootId: string): Promise<void> {
+    const root = this.db.getSession(rootId);
+    const scope = this.db.sessionScope(rootId);
+    const owner = scope?.owner.kind === "user" ? this.db.operatingHumanPrincipal(scope.owner.userId, scope.organizationId) : null;
+    const launchLocationId = root?.projectLocationId ?? null;
+    if (!root?.projectId || !owner || !launchLocationId || !this.db.canAccessProject(owner, root.projectId) ||
+        !runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "campaignRepositoryAddition")) return;
+    const projectId = root.projectId;
+    const locations = (this.db.getProject(projectId)?.locations ?? []).filter((location) => location.availability !== "runner_removed" &&
+      (location.id === launchLocationId || this.db.canAccessWorkspace(owner, location.runnerId, location.workspaceId)));
+    const results = await Promise.all(locations.map((location) =>
+      inspectProjectLocation({ db: this.db, hub: this.hub }, location.id, { projectId, requireProtocol: "campaignRepositoryBoundary" })));
+    const inspections = new Map(locations.map((location, index) => [location.id, results[index]!]));
+    const own = inspections.get(launchLocationId);
+    if (!own?.ok) return;
+    const { repositories, excluded } = launchBoundaryRepositories({ launchRepository: own.location.repository, launchLocationId,
+      locations: locations.map((location) => ({ id: location.id, name: location.name })), inspections });
+    if (repositories.length > 1 && this.db.recordCustomCampaignRepositories(rootId, { projectId, projectLocationId: launchLocationId }, repositories, excluded, Date.now())) {
+      this.hub.sessionChangedById(rootId);
+    }
   }
 
   promptFromUser(
@@ -6311,6 +6342,9 @@ export class SessionsService {
     const chosen = proposal.issues.find((issue) => issue.origin !== "owner_named");
     if (chosen) return refused("seed_owner_named_only", "A Custom campaign's first-message proposal adds only issues the person's message names " +
       "(origin owner_named). Propose an issue you chose through the person's scope approval instead.", { issue: chosen.number });
+    // The seed has no limit to keep, and ignoring one would grant more than the person's words (#4118).
+    if (proposal.repositoryNames?.length) return refused("seed_repository_limit", "A Custom campaign's first-message proposal can't carry a repository limit. " +
+      "Leave repositoryNames out and state the limit in constraints, so the check reads it against the person's message.");
     // Only the exact message the server recorded for this seed is checked against.
     const text = this.db.initialUserMessageText(sessionId)?.trim() ?? null;
     if (text === null || firstMessageDigest(text) !== messageDigest) return owner("configuration", ownerMessage);

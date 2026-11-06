@@ -162,7 +162,8 @@ export const CAMPAIGN_SCOPE_ADMISSION_REFUSALS: Readonly<Record<CampaignScopeAdm
     `issues, and this campaign's grant has none. Name a human-authorized epic or the consumed publication of an accepted follow-up, or ${HUMAN_SCOPE_ROUTE}.` },
   selection_additions_only: { status: 400, message: "A selection proposal adds issues only; propose removals as their own change." },
   repository_outside_boundary: { status: 403, message: "A proposed issue is not in a repository in this campaign's boundary; " +
-    "propose issues from the campaign's own repositories." },
+    "propose issues from the campaign's own repositories. If the campaign's Project has a Location of that repository, ask the " +
+    "campaign's owner to add it with request_campaign_repository_addition, then retry once the addition is carried out." },
   not_an_issue: { status: 409, message: "A proposed number is a pull request, not an issue; propose issues only." },
   issue_not_open: { status: 409, message: "A proposed issue is closed; propose open issues only." },
   already_in_scope: { status: 409, message: "A proposed issue is already in this campaign's scope." },

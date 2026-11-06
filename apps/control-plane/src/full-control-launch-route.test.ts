@@ -2265,6 +2265,7 @@ test("rationale or issue text that claims a higher count, another repository or 
     const foreign = await f.sessions.proposeCampaignIssueScope(c.id, { requestId: "foreign", expectedRevision: c.revision(),
       additions: [{ repository: "other/repo", number: 9 }], removals: [], explanation: planted, lineage: { kind: "selection" } });
     assert.equal(foreign.errorDetails?.code, "repository_outside_boundary");
+    assert.match(foreign.error!, /request_campaign_repository_addition/u, "it names the route that can add the repository (#4118)");
     assert.equal(f.decision.reviewCalls.length, 1, "no ceiling refusal reached the model");
   } finally { await server.close(); f.db.close(); }
 });
@@ -4129,6 +4130,80 @@ const repositoriesOf = (boundary: { repositories?: Array<{ repository: string }>
   return [launch!, ...others.sort()];
 };
 const thirdChosen = (number: number): ProposalIssue => ({ ...chosen(number), repository: "third/repo" });
+
+test("narrowing a boundary drops an epic in a repository that left, keeps one that stayed, and the boundary stays valid (#4118, #4117)", async () => {
+  const c = await threeRepositoryProposals("Fix the top bug in r2 c, and only there.");
+  const { f, id } = c;
+  try {
+    // A first-message campaign has no such epics today, so this stores them to prove the order:
+    // the scope narrows the epics before the boundary is re-minted without their repository.
+    const stored = c.policy();
+    const authority = (stored.control as Extract<CampaignControl, { mode: "full_control" }>).boundary.issueAuthority!;
+    authority.otherEpics = [{ repository: "other/repo", number: 40 }, { repository: "third/repo", number: 50 }];
+    assert.equal(validCampaignControl(stored.control), true);
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(stored), id);
+    f.decision.state.check = (message) => scopeCheckAnswer(message);
+    const proposed = await c.propose([thirdChosen(50)], { repositoryNames: ["r2 c"] });
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(c.apply(proposed.data!.occurrenceId).ok, true, "a boundary it couldn't re-mint would apply nothing");
+    assert.deepEqual(repositoriesOf(c.boundary()), ["owner/repo", "third/repo"]);
+    assert.deepEqual(c.boundary().issueAuthority!.otherEpics, [{ repository: "third/repo", number: 50 }]);
+    assert.equal(validCampaignControl(c.policy().control), true);
+  } finally { await c.server.close(); c.f.db.close(); }
+});
+
+test("a Custom campaign starts with its Project's verified repositories, and a person still approves every scope change (#4118)", async () => {
+  const f = fixture();
+  const p = multiRepositoryProject(f);
+  const { server } = await app(f);
+  const create = (projectLocationId: string, projectId: string) => {
+    const created = f.sessions.createSession({ ...request, runnerId: "r", workspaceId: "w", projectId, projectLocationId, prompt: "Plan the work." }, undefined, f.scope);
+    assert.ok(created.ok && created.data, created.error ?? "created");
+    return created.data.id;
+  };
+  const listed = async (id: string) => {
+    for (let attempt = 0; attempt < 200 && !f.db.getSession(id)!.orchestratorPolicy!.repositories; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    return f.db.getSession(id)!.orchestratorPolicy!;
+  };
+  try {
+    const id = create(p.launchLocation.id, p.project.id);
+    const policy = await listed(id);
+    assert.equal(policy.control?.mode ?? "custom", "custom");
+    assert.deepEqual(policy.repositories, [
+      { repository: "owner/repo", locationIds: [p.twin.id, p.launchLocation.id] },
+      { repository: "other/repo", locationIds: [p.other.id] },
+    ]);
+    assert.deepEqual(policy.excludedLocations!.map((item) => [item.locationId, item.failure]).sort(), [[p.plain.id, "not_repository"], [p.offline.id, "runner_offline"],
+      [p.old.id, "runner_too_old"], [p.v2.id, "runner_too_old"]].sort());
+    // Each is read in its own path; a failing runner is never asked.
+    const inspected = f.sent.filter((message) => message.type === "campaign_launch_inspect") as Array<Extract<ControlPlaneToRunner, { type: "campaign_launch_inspect" }>>;
+    assert.deepEqual(inspected.map((message) => message.workspacePath).sort(), ["/fixture/plain-folder", "/fixture/repository", "/fixture/two/other", "/fixture/two/repository"]);
+    assert.deepEqual(campaignScopeRepositories(f.db.getSession(id)!).map((entry) => entry.repository), ["owner/repo", "other/repo"]);
+
+    // The list grants nothing: the same request a person approves today, now possible in this repository.
+    const proposed = await f.sessions.proposeCampaignIssueScope(id, { requestId: randomUUID(), expectedRevision: 0,
+      additions: [{ repository: "other/repo", number: 40 }], removals: [], explanation: "Fix this one too." }, () => true);
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "human");
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.issueScope, undefined, "nothing joins before a person approves");
+    assert.equal((await f.sessions.proposeCampaignIssueScope(id, { requestId: randomUUID(), expectedRevision: 0,
+      additions: [{ repository: "third/repo", number: 1 }], removals: [], explanation: "Not in this Project." }, () => true)).errorDetails?.code, "repository_outside_boundary");
+
+    // A Project with one repository records nothing, so its campaign reads as it always has.
+    const single = f.db.createProject({ name: "One", scope: f.scope });
+    const only = f.db.addProjectLocation(single.id, { runnerId: "r", workspaceId: "w" });
+    const lone = create(only.id, single.id);
+    const sent = f.sent.length;
+    for (let attempt = 0; attempt < 200 && !f.sent.slice(sent).some((message) => message.type === "campaign_launch_inspect"); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(f.db.getSession(lone)!.orchestratorPolicy!.repositories, undefined);
+    assert.equal(f.db.campaignProjection(lone)!.repositoryBoundary, undefined);
+
+    // A list an approved addition recorded first is never replaced.
+    assert.equal(f.db.recordCustomCampaignRepositories(id, { projectId: p.project.id, projectLocationId: p.launchLocation.id },
+      [{ repository: "owner/repo", locationIds: [p.launchLocation.id] }], [], Date.now()), false);
+  } finally { await server.close(); f.db.close(); }
+});
 
 test("a first message limited to two of three repositories narrows the boundary when the Orchestrator's proposal is admitted (#4117)", async () => {
   const c = await threeRepositoryProposals("Fix the top bug in Fixture Repo and the top bug in r2 c, and leave everything else alone.");
