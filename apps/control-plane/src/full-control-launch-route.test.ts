@@ -5,7 +5,7 @@ import {
   CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CONTROLLED_REVIEW_PROFILE, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, WORKFLOW_DECISION_CATEGORIES,
   campaignWorkflowOwner, SCOPE_GRANT_DEFAULT_SELECTION_COUNT,
   type CampaignIssueFacts, type CampaignIssueScopeRequest, type CampaignIssueScopeSnapshot, type FullControlScopeGrant, type CampaignLaunchInspectionResult, type CampaignLaunchPreflight, type CampaignLaunchProposal, type ControlledReviewCapability,
-  type CampaignWorkItemDetail, type ControlPlaneToRunner, type CreateSessionRequest, type FullControlFirstMessageScope, type FullControlLaunchRequest, type GithubIssueClosureSnapshot, type RunnerMetadata, type RunnerRuntimeInfo,
+  type CampaignWorkItemDetail, type ControlPlaneToRunner, type ExecutionTargetDefinition, type CreateSessionRequest, type FullControlFirstMessageScope, type FullControlLaunchRequest, type GithubIssueClosureSnapshot, type RunnerMetadata, type RunnerRuntimeInfo,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
@@ -47,7 +47,7 @@ const pacedVideoContract = { id: "wollipog-paced-video-review-v1", revision: 1 }
 const reviewerAttestation = syntheticMediaReviewerAttestation("claude");
 
 function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: number; priced?: boolean; images?: boolean; pacedVideo?: boolean;
-  hostingVideo?: boolean; videoPort?: boolean } = {}) {
+  hostingVideo?: boolean; videoPort?: boolean; executionTargets?: ExecutionTargetDefinition[] } = {}) {
   const db = ControlPlaneDb.open(":memory:");
   const identity = db.localIdentityContext();
   const human: HumanPrincipal = { ...identity, kind: "human", actorId: identity.userId };
@@ -58,7 +58,7 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
         permissionModes: ["default", "orchestrator"], supportsImages: true, supportsApprovals: true,
         ...(options.images === false ? {} : { imageToolResults: true }),
         ...(options.pacedVideo ? { pacedVideoReviewContract: pacedVideoContract, mediaReviewerAttestation: reviewerAttestation } : {}) } }],
-    runtime: "runtime" in options ? options.runtime : runtime };
+    runtime: "runtime" in options ? options.runtime : runtime, ...(options.executionTargets ? { executionTargets: options.executionTargets } : {}) };
   const reconnect = (at: number) => db.registerRunner(meta, at, options.protocolVersion ?? PROTOCOL_VERSION);
   reconnect(Date.now());
   if (options.priced !== false) {
@@ -335,6 +335,130 @@ test("each genuine impossibility blocks launch with a specific reason and create
       assert.deepEqual(f.starts, [], item.name);
     } finally { await server.close(); f.db.close(); }
   }
+});
+
+// A runner-checked container placement the fixture runner also offers, configured for its agent.
+const containerTarget: ExecutionTargetDefinition = { id: "runner:r:container:tools", runnerId: "r", name: "fixture · Tools",
+  kind: "container", workspaceStrategy: "worktree", adapter: "container",
+  boundaries: { filesystem: "container", network: "deny", secrets: "none", billing: "none" },
+  environment: { id: "tools", revision: 1, image: `example/agent@sha256:${"e".repeat(64)}`, setupCheckDigest: "f".repeat(64) },
+  compatibleAgentIds: ["claude"], available: true };
+const withSession = (session: NonNullable<NonNullable<FullControlLaunchRequest["overrides"]>["session"]>): FullControlLaunchRequest =>
+  ({ ...launch, overrides: { ...launch.overrides, session: { ...launch.overrides!.session, ...session } } });
+
+async function admitLaunch(server: Awaited<ReturnType<typeof app>>["server"], body: FullControlLaunchRequest, requestId: string) {
+  const { response, preflight: checked } = await preflight(server, body);
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
+  return server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+    payload: { ...body, requestId, preflightDigest: checked!.digest } });
+}
+
+test("New Session's Run On reaches the Full Control root through ordinary creation, and no choice keeps the host's (#2940)", async () => {
+  const f = fixture({ executionTargets: [containerTarget] });
+  const { server } = await app(f);
+  try {
+    const targets = f.db.getRunner("r")!.executionTargets!;
+    const inPlace = targets.find((target) => target.adapter === "host" && target.workspaceStrategy === "in_place")!;
+    const worktree = targets.find((target) => target.adapter === "host" && target.workspaceStrategy === "worktree")!;
+    // No choice: the root lands on the host's in-place target, exactly as before.
+    const plain = await admitLaunch(server, launch, "default-target");
+    assert.equal(plain.statusCode, 201, plain.body);
+    assert.equal(f.db.getSession(plain.json().id)!.executionTarget!.id, inPlace.id);
+    // A non-default host target is the one the root starts on, with the workspace strategy it implies.
+    const chosen = withSession({ executionTargetId: worktree.id });
+    const { preflight: checked } = await preflight(server, chosen);
+    assert.equal(checked!.advanced.plan.executionTarget.id, worktree.id, "the reviewed plan names the chosen target");
+    assert.equal(checked!.advanced.plan.useWorktree, true);
+    const admitted = await admitLaunch(server, chosen, "chosen-target");
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const root = f.db.getSession(admitted.json().id)!;
+    assert.equal(root.executionTarget!.id, worktree.id);
+    assert.equal(root.useWorktree, true);
+    assert.equal(root.orchestratorPolicy!.control!.mode, "full_control");
+    const start = f.starts.at(-1) as Extract<ControlPlaneToRunner, { type: "start_session" }>;
+    assert.equal(start.spec.executionTarget!.id, worktree.id);
+    assert.equal(start.spec.useWorktree, true);
+    // Run On and Working Copy that disagree are the ordinary validator's refusal, not a silent pick.
+    const conflict = await preflight(server, withSession({ executionTargetId: worktree.id, useWorktree: false }));
+    assert.equal(conflict.response.statusCode, 400);
+    assert.match(conflict.response.json().error, /executionTargetId conflicts with useWorktree/);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a Run On or Harness choice an Orchestrator can't use refuses the Full Control launch in words and creates nothing (#2940)", async () => {
+  const offline: ExecutionTargetDefinition = { ...containerTarget, id: "runner:r:container:offline",
+    environment: { ...containerTarget.environment!, id: "offline" }, available: false,
+    unavailableReason: "The Tools image is not pulled." };
+  const shapeError = /a workspace is required/;
+  const cases: Array<{ name: string; body: FullControlLaunchRequest; status: number; error: RegExp }> = [
+    { name: "container target", body: withSession({ executionTargetId: containerTarget.id }), status: 409,
+      error: /^Full Control launch is blocked: An Orchestrator runs only on its machine's host, so Full Control can't start on a container target\. Choose a host target under Run On\.$/ },
+    { name: "unavailable container target", body: withSession({ executionTargetId: offline.id }), status: 409, error: /can't start on a container target/ },
+    { name: "Native TUI", body: withSession({ launchSurface: "native_tui" }), status: 409,
+      error: /^Full Control launch is blocked: Full Control needs the Direct harness, because Native TUI doesn't track usage or show approval cards\. Choose Direct under Harness\.$/ },
+    { name: "unknown target", body: withSession({ executionTargetId: "runner:elsewhere:host:in_place" }), status: 400,
+      error: /execution target is unknown or does not belong to the selected runner/ },
+    { name: "malformed harness", body: withSession({ launchSurface: "terminal" as "direct" }), status: 400, error: shapeError },
+    // ACP session context is not a Full Control override; it is refused, never dropped.
+    { name: "ACP context", body: withSession({ acpSessionContext: { additionalDirectories: ["/fixture/other"] } } as never), status: 400, error: shapeError },
+  ];
+  for (const item of cases) {
+    const f = fixture({ executionTargets: [containerTarget, offline] });
+    const { server } = await app(f);
+    try {
+      const checked = await preflight(server, item.body);
+      assert.equal(checked.response.statusCode, item.status, `${item.name}: ${checked.response.body}`);
+      assert.match(checked.response.json().error, item.error, item.name);
+      const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+        payload: { ...item.body, requestId: "refused", preflightDigest: "a".repeat(64) } });
+      assert.equal(admitted.statusCode, item.status, item.name);
+      assert.match(admitted.json().error, item.error === shapeError ? /exact preflight digest are required/ : item.error, item.name);
+      assert.equal(sessionCount(f), 0, item.name);
+      assert.deepEqual(f.starts, [], item.name);
+      assert.equal(f.sent.some((message) => message.type === "campaign_launch_inspect"), false, `${item.name}: nothing is inspected`);
+    } finally { await server.close(); f.db.close(); }
+  }
+});
+
+test("saving Orchestrator defaults changes nothing in a running Full Control campaign (#2940)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const admitted = await admitLaunch(server, launch, "defaults-later");
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const id = admitted.json().id as string;
+    const before = f.db.getSession(id)!;
+    const snapshot = () => {
+      const view = f.db.getSession(id)!;
+      return structuredClone({ policy: view.orchestratorPolicy, parentControl: view.parentControlPolicy, model: view.model,
+        projection: f.db.campaignProjection(id)!.decisionOwners, budget: f.db.campaignBudgets.view(id)!.authority });
+    };
+    const kept = snapshot();
+    // Every saved default the launch read is now different: Custom control, Human owners, other limits.
+    f.settings.update(f.human, { defaults: { ...structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS), controlMode: "custom",
+      behavior: { ...structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS.behavior), completion: "retain", followUps: "recommend_only",
+        childModel: "claude-sonnet-5-5", maximumConcurrentChildren: 1 },
+      campaignBudget: { costUsd: 1, toolCalls: 2 } } });
+    assert.equal(f.settings.view(f.human).defaults.controlMode, "custom", "the saved default did change");
+    assert.deepEqual(snapshot(), kept);
+    assert.equal(before.orchestratorPolicy!.control!.mode, "full_control");
+    assert.equal(kept.policy!.behavior.completion, "stop_and_archive");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("ordinary creation refuses a non-host Full Control root on its own, so the route's check is never the only one (#2940)", () => {
+  const f = fixture({ executionTargets: [containerTarget] });
+  try {
+    let plan: unknown;
+    const prepared = f.sessions.createSession({ ...request, config: { model: "claude-opus-5-5" }, executionTargetId: containerTarget.id },
+      undefined, f.scope, false, false, false, { defaultOwnerUserId: f.human.userId, orchestratorDefaults: f.settings.view(f.human),
+        validateOrchestratorDefaults: (defaults) => f.settings.compatibilityError(f.human, defaults), inspectLaunchPlan: (value) => { plan = value; } });
+    assert.equal(prepared.ok, false);
+    assert.equal(prepared.status, 409);
+    assert.equal(plan, undefined, "no launch plan names a container target");
+    assert.equal(sessionCount(f), 0);
+  } finally { f.db.close(); }
 });
 
 test("infrastructure gaps never block launch: each is informational and the campaign uses the regular review workflow", async () => {

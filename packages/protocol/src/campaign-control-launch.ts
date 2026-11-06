@@ -34,8 +34,12 @@ export interface CampaignLaunchProposal {
 /** Optional Human overrides. Each replaces only the derived value it names; none can add an
  * authority field, provenance, readiness claim or evidence envelope. */
 export interface FullControlLaunchOverrides {
-  /** Root Orchestrator selection. Omitted fields use the account's saved defaults. */
-  session?: Partial<Pick<CreateSessionRequest, "agentId" | "providerAccountId" | "title" | "useWorktree" | "config" | "orchestrator">>;
+  /** Root Orchestrator selection. Omitted fields use the account's saved defaults. New Session's
+   * Run On (`executionTargetId`) and Harness (`launchSurface`) are forwarded so the ordinary
+   * creation validator honors or refuses them; neither is ever replaced by a default. ACP session
+   * context is excluded: it applies only to ACP agents, which cannot hold Full Control (#2940). */
+  session?: Partial<Pick<CreateSessionRequest, "agentId" | "providerAccountId" | "title" | "useWorktree" | "executionTargetId" |
+    "launchSurface" | "config" | "orchestrator">>;
   objective?: string;
   /** May only narrow the default operation set. */
   operations?: CampaignAuthorityOperation[];

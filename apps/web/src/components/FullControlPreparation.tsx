@@ -75,14 +75,19 @@ async function withOneRefresh<T>(attempt: () => Promise<T>): Promise<T> {
  * first message in it is the task and the issue scope. The server's own check is authorized as
  * the one start action, so there is nothing to fill in or review first. */
 export function launchFullControlCampaign(api: ApiClient, request: CreateSessionRequest): Promise<SessionView> {
-  const { runnerId, workspaceId, projectId, projectLocationId, agentId, providerAccountId, title, useWorktree, config, orchestrator } = request;
+  // Run On and Harness travel with the root, so the server honors or refuses them rather than
+  // starting on the host default. ACP session context is never sent: only ACP agents carry it, and
+  // the server refuses an ACP root for Full Control on its own.
+  const { runnerId, workspaceId, projectId, projectLocationId, agentId, providerAccountId, title, useWorktree, executionTargetId,
+    launchSurface, config, orchestrator } = request;
   if (!workspaceId) {
     return Promise.reject(new FullControlBlockedError("Full Control needs a registered workspace whose origin is on GitHub; choose one instead of a browsed folder."));
   }
   const launch: FullControlLaunchRequest = {
     runnerId, workspaceId, ...(projectId !== undefined ? { projectId } : {}), ...(projectLocationId !== undefined ? { projectLocationId } : {}),
     overrides: { session: { agentId, ...(providerAccountId ? { providerAccountId } : {}), ...(title ? { title } : {}),
-      ...(useWorktree !== undefined ? { useWorktree } : {}), ...(config ? { config } : {}), ...(orchestrator ? { orchestrator } : {}) } },
+      ...(useWorktree !== undefined ? { useWorktree } : {}), ...(executionTargetId ? { executionTargetId } : {}),
+      ...(launchSurface ? { launchSurface } : {}), ...(config ? { config } : {}), ...(orchestrator ? { orchestrator } : {}) } },
   };
   // One identity for the whole action: a lost answer recovers the root it already started.
   const requestId = newRequestId();

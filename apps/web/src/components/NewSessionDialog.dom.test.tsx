@@ -1860,6 +1860,66 @@ test("a genuine impossibility stops Full Control with one inline error where lau
   } finally { await unmountFixture(fixture); }
 });
 
+/** A machine whose Run On offers a container next to its two host placements. */
+const runOnRunner = (): RunnerView => ({ ...fullControlRunner(), executionTargets: [...hostTargets(), {
+  id: "container", runnerId: runner.runnerId, name: "Offline Container", kind: "container", workspaceStrategy: "worktree",
+  adapter: "container", boundaries: { filesystem: "container", network: "deny", secrets: "none", billing: "none" },
+  compatibleAgentIds: ["claude"], available: true }] });
+
+test("Full Control forwards New Session's Run On and Harness to the server instead of starting on the host default (#2940)", async () => {
+  const preflights: import("@wollipog/protocol").FullControlLaunchRequest[] = [];
+  const admissions: Array<Record<string, unknown>> = [];
+  const fixture = await mountFixture({ runners: [runOnRunner()] }, undefined, undefined, undefined, undefined, undefined, {
+    fullControlLaunchPreflight: async (input) => { preflights.push(structuredClone(input)); return { preflight: launchPreflight(true, input) }; },
+    createFullControlCampaign: async (input) => { admissions.push(structuredClone(input) as unknown as Record<string, unknown>); return { id: "campaign-3" } as SessionView; },
+  });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    await chooseControlMode(fixture.container, "Full Control");
+    await chooseSelectOption(fixture.container, "Run On", "Runner Host · worktree");
+    await act(async () => createButton(fixture.container).click());
+    await act(async () => { await Promise.resolve(); });
+    assert.equal(preflights.length, 1);
+    const session = preflights[0]!.overrides!.session!;
+    assert.equal(session.executionTargetId, "host-worktree", "the chosen target, not the host default");
+    assert.equal(session.useWorktree, true);
+    assert.equal(Object.hasOwn(session, "launchSurface"), false, "Direct is the server's default and is not sent");
+    assert.equal(Object.hasOwn(session, "acpSessionContext"), false, "ACP session context never travels");
+    assert.equal((admissions[0]!.overrides as typeof preflights[0]["overrides"])!.session!.executionTargetId, "host-worktree",
+      "admission carries the same choice the check saw");
+    assert.equal(fixture.requests.length, 0);
+  } finally { await unmountFixture(fixture); }
+});
+
+test("a container Run On target is kept: the Orchestrator role is disabled there with its reason, exactly as for Custom (#2940)", async () => {
+  const preflights: unknown[] = [];
+  const admissions: unknown[] = [];
+  const fixture = await mountFixture({ runners: [runOnRunner()] }, undefined, undefined, undefined, undefined, undefined, {
+    fullControlLaunchPreflight: async (input) => { preflights.push(input); return { preflight: launchPreflight(true, input) }; },
+    createFullControlCampaign: async (input) => { admissions.push(input); return { id: "never" } as SessionView; },
+  });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    await chooseControlMode(fixture.container, "Full Control");
+    await chooseSelectOption(fixture.container, "Run On", "Offline Container");
+    // The Role shows the change: Orchestrator is disabled on this target and says why.
+    const option = [...permissionPresetGroup(fixture.container).querySelectorAll<HTMLElement>('[role="radio"]')]
+      .find((node) => node.textContent?.includes("Orchestrator"))!;
+    assert.equal(option.getAttribute("aria-disabled") === "true" || (option as HTMLButtonElement).disabled === true, true, "Orchestrator is disabled here");
+    assert.match(fixture.container.textContent ?? "", /Orchestrator runs only on this machine's host, not in a container or the cloud\./);
+    await act(async () => createButton(fixture.container).click());
+    await act(async () => { await Promise.resolve(); });
+    assert.equal(preflights.length, 0, "no Full Control check runs for a target the Orchestrator role can't use");
+    assert.equal(admissions.length, 0, "no campaign is admitted");
+    assert.equal(fixture.requests.length, 1);
+    assert.equal(fixture.requests[0]!.executionTargetId, "container", "the chosen target is kept, never swapped for the host");
+    assert.notEqual(fixture.requests[0]!.role, "orchestrator");
+    assert.equal(fixture.requests[0]!.orchestrator, undefined);
+  } finally { await unmountFixture(fixture); }
+});
+
 test("Orchestrator Policy shows only the control choice under Full Control, and the Custom owners again under Custom", async () => {
   const fixture = await mountFixture({ runners: [fullControlRunner()] });
   try {
