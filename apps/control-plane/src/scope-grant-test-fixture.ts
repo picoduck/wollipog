@@ -9,6 +9,7 @@ import { DECISION_KINDS } from "./decision-kinds.js";
 import { DecisionRuntime } from "./decision-runtime.js";
 import { issueReferenceSpans } from "./first-message-issue-intent.js";
 import type { ScopeGrantFields } from "./scope-grant.js";
+import { typedOutput } from "./typed-decision-test-fixture.js";
 
 export const FAKE_DECISION_TARGET: DecisionModelResolvedTarget = {
   source: "automatic", runnerId: "r", machineName: "Fixture", agentId: "claude", harnessName: "Claude",
@@ -116,8 +117,13 @@ export function fakeScopeGrantRuntime(db: ControlPlaneDb, options: {
     check: ((message: RunDecisionMessage, _attempt: number) => scopeCheckAnswer(message)) as
       (message: RunDecisionMessage, attempt: number) => ScopeGrantAnswer | Promise<ScopeGrantAnswer> };
   const scopeCheck = (message: RunDecisionMessage) => message.instructions === DECISION_KINDS.scope_check.instructions;
-  const other = options.other ??
-    (() => ({ ok: true as const, outputText: JSON.stringify({ verdict: "discusses", reason: "The request discusses access as a design subject." }) }));
+  // Every other kind confirms: a typed kind (#4283) answers its questions satisfied, so the server
+  // derives its confirming verdict (the credential screen's `discusses`).
+  const other = options.other ?? ((message: RunDecisionMessage) => {
+    const typed = Object.values(DECISION_KINDS).find((definition) => definition.instructions === message.instructions)?.typed;
+    return { ok: true as const, outputText: JSON.stringify(typed ? typedOutput(typed)
+      : { verdict: "discusses", reason: "The request discusses access as a design subject." }) };
+  });
   const scopeGrant = (message: RunDecisionMessage) => message.instructions === DECISION_KINDS.scope_grant.instructions;
   const scopeReview = (message: RunDecisionMessage) => message.instructions === DECISION_KINDS.scope_review.instructions;
   const runtime = new DecisionRuntime({

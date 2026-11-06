@@ -123,3 +123,91 @@ export const TYPED_UNCERTAIN: DecisionTypedAnswersView = {
   ],
   decisive: { questionId: "satisfies_constraint__1", itemId: "team/repo#141" },
 };
+
+/* The migrated #4104 kinds as typed questions (#4283, slice 2): the credential screen's three
+   yes-or-no questions, follow-up relatedness's one choice and closure-reason choice's two. */
+
+const NO_ASK_QUESTIONS: DecisionTypedAnswersView["questions"] = [
+  { questionId: "hands_over_credential", label: "No Credential Handed Over",
+    text: "Would answering or approving this request make whoever answers supply, disclose, enter or send a credential?",
+    answer: { type: "boolean" } },
+  { questionId: "performs_sign_in", label: "No Sign-In Performed",
+    text: "Would answering or approving this request sign in, or authorize a device, an application or an account?",
+    answer: { type: "boolean" } },
+  { questionId: "grants_access", label: "No Access Granted",
+    text: "Would answering or approving this request widen provider, repository or sandbox permissions?",
+    answer: { type: "boolean" } },
+];
+
+/** A design question about keyboard keys: no to all three, so the Orchestrator decides it. */
+export const TYPED_SCREEN_DISCUSSES: DecisionTypedAnswersView = {
+  confidenceThreshold: 0.8,
+  questions: NO_ASK_QUESTIONS,
+  answers: [
+    { questionId: "hands_over_credential", value: false, confidence: 0.97, evidence: "It asks which keyboard keys open the tools.", assessment: "satisfied" },
+    { questionId: "performs_sign_in", value: false, confidence: 0.98, evidence: "Nothing signs in.", assessment: "satisfied" },
+    { questionId: "grants_access", value: false, confidence: 0.96, evidence: "No permission changes.", assessment: "satisfied" },
+  ],
+};
+
+/** A request to paste a token: a confident yes, so it is declined. */
+export const TYPED_SCREEN_ASK: DecisionTypedAnswersView = {
+  confidenceThreshold: 0.8,
+  questions: NO_ASK_QUESTIONS,
+  answers: [
+    { questionId: "hands_over_credential", value: true, confidence: 0.98, evidence: "\"Paste a GitHub token here.\"", assessment: "violated" },
+    { questionId: "performs_sign_in", value: false, confidence: 0.85, evidence: "It asks for a token, not a sign-in.", assessment: "satisfied" },
+    { questionId: "grants_access", value: false, confidence: 0.82, evidence: "No permission is named.", assessment: "satisfied" },
+  ],
+  decisive: { questionId: "hands_over_credential" },
+};
+
+/** A yes below the threshold: uncertain, so the owner classifies it. */
+export const TYPED_SCREEN_UNCERTAIN: DecisionTypedAnswersView = {
+  confidenceThreshold: 0.8,
+  questions: NO_ASK_QUESTIONS,
+  answers: [
+    { questionId: "hands_over_credential", value: false, confidence: 0.9, evidence: "No credential is requested.", assessment: "satisfied" },
+    { questionId: "performs_sign_in", value: true, confidence: 0.6, evidence: "One option says \"sign in to the provider again\".", assessment: "violated" },
+    { questionId: "grants_access", value: false, confidence: 0.88, evidence: "No permission changes.", assessment: "satisfied" },
+  ],
+  decisive: { questionId: "performs_sign_in" },
+};
+
+const RELATION_QUESTION: DecisionTypedAnswersView["questions"] = [
+  { questionId: "relation", label: "Related to the Requested Work", text: "How does this follow-up relate to the work the owner asked for?",
+    answer: { type: "choice", values: ["completes_requested_work", "gap_found_in_requested_work", "separate_work", "cannot_tell"] } },
+];
+
+export const TYPED_RELATED: DecisionTypedAnswersView = {
+  confidenceThreshold: 0.8,
+  questions: RELATION_QUESTION,
+  answers: [{ questionId: "relation", value: "gap_found_in_requested_work", confidence: 0.91,
+    evidence: "The crash fix exposed the leftover temp file.", assessment: "satisfied" }],
+};
+
+export const TYPED_UNRELATED: DecisionTypedAnswersView = {
+  confidenceThreshold: 0.8,
+  questions: RELATION_QUESTION,
+  answers: [{ questionId: "relation", value: "separate_work", confidence: 0.93,
+    evidence: "It starts a dark-mode theme the owner did not ask for.", assessment: "violated" }],
+  decisive: { questionId: "relation" },
+};
+
+export const TYPED_CLOSURE_MISFIT: DecisionTypedAnswersView = {
+  confidenceThreshold: 0.8,
+  questions: [
+    { questionId: "evidence_supports_reason", label: "Evidence Supports the Reason",
+      text: "Does the recorded evidence support closing this issue for the stated reason?",
+      answer: { type: "choice", values: ["supports", "does_not_support", "cannot_tell"] } },
+    { questionId: "explanation_consistent", label: "Explanation Matches the Evidence",
+      text: "Is the agent's explanation consistent with the recorded evidence?",
+      answer: { type: "choice", values: ["consistent", "contradicts_evidence", "cannot_tell"] } },
+  ],
+  answers: [
+    { questionId: "evidence_supports_reason", value: "does_not_support", confidence: 0.88,
+      evidence: "The recorded reason says the work is only paused.", assessment: "violated" },
+    { questionId: "explanation_consistent", value: "consistent", confidence: 0.84, evidence: "It says the work was set aside.", assessment: "satisfied" },
+  ],
+  decisive: { questionId: "evidence_supports_reason" },
+};
