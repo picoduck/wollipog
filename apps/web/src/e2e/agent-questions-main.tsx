@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { summarizeQuestionAnswers, type AgentQuestion, type PendingApproval, type SessionView } from "@wollipog/protocol";
+import { ownerQuestionAgentQuestions, summarizeQuestionAnswers, type AgentQuestion, type OwnerDecisionSnapshot,
+  type PendingApproval, type SessionView, type WorkflowDecisionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { focusSessionRequest, useQuestionDraftRetirement } from "../components/SessionApproval.js";
@@ -194,6 +195,38 @@ const issueDraftQuestions: AgentQuestion[] = [{
   options: [{ label: "Publish These Three Issues" }, { label: "Keep as Drafts" }],
 }, { id: "note", question: "Add an optional review note.", options: [], required: false, allowOther: true }];
 
+// A Full Control root's question for its campaign's owner (#4270). `set=owner-question` presents it
+// as the question it now is; `set=owner-raw` shows the workflow decision card it used to be.
+const ownerDecision: OwnerDecisionSnapshot = {
+  category: "owner_decision",
+  question: "Should the follow-up issue for the provider bridge keep retrying a failed credential lease, or stop and report it?",
+  material: "The bridge loses its lease when the provider restarts. See [#4244](https://github.com/picoduck/wollipog/issues/4244) " +
+    "and the [design note](https://github.com/picoduck/wollipog/blob/main/docs/campaign-authority.md).\n\n" +
+    "- **Retry** keeps children working through short outages.\n- **Stop** surfaces the failure at once.",
+  recommendedOptionId: "retry",
+  options: [
+    { optionId: "retry", label: "Retry With Backoff", description: "Up to three attempts, then report." },
+    { optionId: "stop", label: "Stop and Report", description: "Fail the child's step at once." },
+  ],
+};
+const ownerQuestionSet = ownerQuestionAgentQuestions({ ...ownerDecision, kind: "question" });
+const ownerRaw = params.get("set") === "owner-raw";
+function ownerRawCard(requestId: string): PendingApproval {
+  const occurrenceId = `${params.get("epoch") ?? "occurrence"}:${requestId}`;
+  return {
+    kind: "workflow_decision", requestId: occurrenceId, occurrenceId, requestedAt: askedAt, title: "Owner Decision Required", async: true,
+    options: [
+      ...ownerDecision.options.map((option) => ({ optionId: option.optionId, name: option.label, description: option.description, kind: "allow_once" as const })),
+      { optionId: "__workflow_deny__", name: "Do Not Proceed", kind: "reject_once" as const },
+    ],
+    context: { toolName: "Typed Workflow Decision", input: JSON.stringify(ownerDecision, null, 2) },
+    workflowDecision: { occurrenceId, requestId, sessionId: "agent-question-session", controllingSessionId: "agent-question-session",
+      resourceKey: "bridge-retry", category: "owner_decision", status: "pending", authority: "human", policyRevision: 1,
+      resourceDigest: "digest", createdAt: askedAt, authorityEvaluation: { owner: "human", reason: "owner_kept" },
+      resourceSnapshot: ownerDecision } as unknown as WorkflowDecisionView,
+  };
+}
+
 // The production session shell clips page overflow. Document scrolling must not mask a missing
 // scroll region in the composer (#3256).
 function SessionShell({ children }: { children: React.ReactNode }) {
@@ -308,7 +341,9 @@ function Fixture() {
   const responseStyle = useQuestionResponseStyle();
   const [requestId, setRequestId] = useState("ask-1");
   const [questions, setQuestions] = useState(
-    params.get("set") === "issue-drafts"
+    params.get("set") === "owner-question" || ownerRaw
+      ? ownerQuestionSet
+      : params.get("set") === "issue-drafts"
       ? issueDraftQuestions
       : params.get("set") === "long"
       ? longQuestions
@@ -394,7 +429,7 @@ function Fixture() {
     }]),
     ...Array.from({ length: rowsAfter }, (_, index) => transcriptRow(QUESTION_EVENT_ID + 1 + index, index, "Later")),
   ], [dismissed, lastCall, questions, requestId, resolved]);
-  const request = useMemo<PendingApproval | null>(() => resolved ? null : {
+  const request = useMemo<PendingApproval | null>(() => resolved ? null : ownerRaw ? ownerRawCard(requestId) : {
     kind: "question",
     requestId,
     occurrenceId: `${params.get("epoch") ?? "occurrence"}:${requestId}`,
@@ -451,7 +486,7 @@ function Fixture() {
 
   // Composer Response answers in the composer (#2212): the dock's card is compact, and while Answer
   // Mode is open the question is shown there alone.
-  const composerAnswers = !resolved && responseStyle === "composer" && (!recoveryRequired || recoveryCanResume);
+  const composerAnswers = !resolved && !ownerRaw && responseStyle === "composer" && (!recoveryRequired || recoveryCanResume);
   const answering = composerAnswers && answerActive;
   const composerContent = answering ? (
     <div className="composer-box answer-mode">

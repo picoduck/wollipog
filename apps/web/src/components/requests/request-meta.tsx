@@ -1,5 +1,5 @@
 import React from "react";
-import type { PendingApproval, PermissionOption } from "@wollipog/protocol";
+import { isOwnerQuestionRequest, type PendingApproval, type PermissionOption } from "@wollipog/protocol";
 import {
   CostIcon,
   ImageIcon,
@@ -54,6 +54,8 @@ export function requestKindMeta(request: Pick<PendingApproval, "kind" | "workflo
     case "max_tool_calls":
       return META.tool_calls;
     case "workflow_decision":
+      // An Owner Question (#4270) is a question wherever its card is listed, not an approval.
+      if (isOwnerQuestionRequest(request)) return META.question;
       return request.workflowDecision?.category === "ui_evidence_approval" ? META.ui_evidence : META.workflow_decision;
     default:
       // A provider permission, and a policy's ask about one (`policy_hook`).

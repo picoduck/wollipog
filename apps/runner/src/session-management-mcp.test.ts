@@ -330,6 +330,29 @@ test("owner-decision tools are the root Orchestrator's, post to its own paths an
   assert.equal(calls.length, count, "nothing reaches the control plane");
 });
 
+test("an Owner Question posts its kind with 0 to 12 suggestions and needs a v303 control plane (#4270)", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 201, body: { occurrenceId: "workflow_1", status: "pending", authority: "human" } }));
+  deps.orchestrator = true;
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.ownerQuestions;
+  const ask = { requestId: "q-1", resourceKey: "naming", kind: "question", question: "What should the bridge be called?",
+    options: [], material: "See [the note](https://example.com/note)." };
+  const asked = await callTool(deps, "request_owner_decision", ask);
+  assert.equal(asked.isError, undefined, resultText(asked));
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/owner-decisions`);
+  assert.deepEqual(calls.at(-1)?.body, ask);
+  const count = calls.length;
+  // An approval still offers an exact choice, and an unknown kind is refused before sending.
+  assert.equal((await callTool(deps, "request_owner_decision", { ...ask, kind: "approval" })).isError, true);
+  assert.equal((await callTool(deps, "request_owner_decision", { ...ask, kind: undefined })).isError, true);
+  assert.equal((await callTool(deps, "request_owner_decision", { ...ask, kind: "other" })).isError, true);
+  // An older control plane would ask it as an approval, so nothing is sent.
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.ownerQuestions - 1;
+  const old = await callTool(deps, "request_owner_decision", { ...ask, options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] });
+  assert.equal(old.isError, true);
+  assert.match(resultText(old), /"requiredControlPlaneProtocolVersion":303/u);
+  assert.equal(calls.length, count, "nothing reaches the control plane");
+});
+
 test("typed workflow decision tools preserve exact request, resolution, and consume snapshots", async () => {
   const { deps, calls } = makeDeps(() => ({ status: 200, body: { occurrenceId: "workflow_1", status: "pending" } }));
   deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;

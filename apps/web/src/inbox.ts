@@ -1,4 +1,4 @@
-import { sessionCampaignRequests } from "@wollipog/protocol";
+import { isOwnerQuestionRequest, sessionCampaignRequests } from "@wollipog/protocol";
 import type {
   PendingApproval,
   PermissionOption,
@@ -721,7 +721,8 @@ export function approvalOptionForIntent(
   approval: PendingApproval | null | undefined,
   intent: InboxApprovalIntent,
 ): PermissionOption | null {
-  if (!approval || approval.kind === "question") return null;
+  // An Owner Question (#4270) is a structured question too, never a one-key choice.
+  if (!approval || approval.kind === "question" || isOwnerQuestionRequest(approval)) return null;
   const kind = intent === "approve" ? "allow_once" : "reject_once";
   const matches = approval.options.filter((option) => option.kind === kind);
   return matches.length === 1 ? matches[0]! : null;

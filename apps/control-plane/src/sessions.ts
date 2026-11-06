@@ -123,6 +123,12 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   WORKFLOW_DECISION_CATEGORIES,
   OWNER_DECISION_LIMITS,
+  isOwnerQuestionRequest,
+  isOwnerQuestionSnapshot,
+  OWNER_QUESTION_ANSWER_ID,
+  ownerQuestionAgentQuestions,
+  ownerQuestionAnswer,
+  type OwnerQuestionSnapshot,
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
   type AgentContext,
   type AgentDriverKind,
@@ -884,6 +890,7 @@ function decisionLiteral(value: string): string {
  * provider turn, so a child that ended its turn behind the card has nothing else to wake it. The
  * decision record stays authoritative: a child polling inside its turn may already have read it. */
 function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): string {
+  if (isOwnerQuestionSnapshot(decision.resourceSnapshot) && !decision.withdrawal) return ownerQuestionAnswerPrompt(decision, decision.resourceSnapshot);
   // A decision the owner kept (#4064), or an owner rule kept for them (#4137), is answered by that
   // owner, never by an agent or a reviewer.
   const ownerKept = decision.category === "owner_decision" || decision.ownerHandoff !== undefined || decision.ownerRule !== undefined;
@@ -917,6 +924,31 @@ function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): strin
     "The decision record is authoritative: read it with get_workflow_decision before acting. " +
       "If you have already acted on this outcome, continue from where you are.",
     "[End Wollipog Workflow Decision]",
+  ].join("\n");
+}
+
+/** The prompt that brings the owner's answer to an Owner Question back to the root (#4270): the
+ * option they chose and their own words, exactly as they wrote them. It grants nothing. */
+function ownerQuestionAnswerPrompt(decision: WorkflowDecisionView, snapshot: OwnerQuestionSnapshot): string {
+  const option = decision.selectedOptionId === undefined ? undefined
+    : snapshot.options.find((candidate) => candidate.optionId === decision.selectedOptionId);
+  const answered = decision.status === "approved" || decision.status === "consumed";
+  return [
+    `[Wollipog Owner Answer — ${decision.occurrenceId}]`,
+    answered
+      ? `Your campaign's owner answered your owner question ${decision.occurrenceId} (resource ${decisionLiteral(decision.resourceKey)}).`
+      : decision.status === "denied"
+        ? `Your campaign's owner dismissed your owner question ${decision.occurrenceId} (resource ${decisionLiteral(decision.resourceKey)}) without answering it.`
+        : `Your owner question ${decision.occurrenceId} (resource ${decisionLiteral(decision.resourceKey)}) ended unanswered.`,
+    ...(answered && option ? [`They chose option ${decisionLiteral(option.optionId)}: ${decisionLiteral(option.label)}.`] : []),
+    ...(answered && decision.childMessage ? [option ? "They added, in their own words:" : "Their answer, in their own words:",
+      decision.childMessage] : []),
+    answered
+      ? "Act on this answer. It grants no authority: an exact action that needs an approval still needs an Owner Approval or authority the campaign already delegates."
+      : "Continue with your best judgment, taking the conservative option, or ask again with request_owner_decision if it truly blocks you.",
+    "The decision record is authoritative: read it with get_workflow_decision before acting. " +
+      "If you have already acted on this outcome, continue from where you are.",
+    "[End Wollipog Owner Answer]",
   ].join("\n");
 }
 
@@ -1131,12 +1163,12 @@ function unrenderableEvidenceArtifact(item: { artifactId?: string; mediaType?: s
 /** Normalize untrusted JSON into a canonical key order before hashing or persistence. */
 /** A question with 2 to 12 uniquely identified options, one of which may be recommended. `noun`
  * names the decision kind in refusals ("implementation questions"). */
-function normalizeDecisionQuestion(value: Record<string, unknown>, noun: string, maxQuestion: number): ServiceResult<{
+function normalizeDecisionQuestion(value: Record<string, unknown>, noun: string, maxQuestion: number, minOptions = 2): ServiceResult<{
   question: string; options: WorkflowDecisionOption[]; recommendedOptionId?: string;
 }> {
   if (!boundedDecisionString(value.question, maxQuestion) || !Array.isArray(value.options) ||
-      value.options.length < 2 || value.options.length > 12) {
-    return fail(`${noun} require text and 2 to 12 options`);
+      value.options.length < minOptions || value.options.length > 12) {
+    return fail(`${noun} require text and ${minOptions} to 12 options`);
   }
   const options = value.options.flatMap((raw) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
@@ -1222,15 +1254,20 @@ export function normalizeWorkflowDecisionSnapshot(
   if (category === "owner_decision") {
     // A question its campaign's owner kept (#4064): the same option rules as an implementation
     // question, plus the material the owner needs. Only request_owner_decision creates one.
-    const question = normalizeDecisionQuestion(value, "owner decisions", OWNER_DECISION_LIMITS.question);
+    // An Owner Question (#4270) suggests 0 to 12 options; an Owner Approval offers 2 to 12.
+    if (value.kind !== undefined && value.kind !== "question") return fail("an owner decision's kind is question or absent");
+    const ownerQuestion = value.kind === "question";
+    const question = normalizeDecisionQuestion(value, ownerQuestion ? "owner questions" : "owner decisions", OWNER_DECISION_LIMITS.question,
+      ownerQuestion ? OWNER_DECISION_LIMITS.minQuestionOptions : OWNER_DECISION_LIMITS.minOptions);
     if (!question.ok || !question.data) return failAs(question);
     if (value.material !== undefined && !boundedDecisionString(value.material, OWNER_DECISION_LIMITS.material)) {
       return fail(`material must be nonempty text of at most ${OWNER_DECISION_LIMITS.material} characters`);
     }
-    if (Object.keys(value).some((key) => !["category", "question", "options", "recommendedOptionId", "material"].includes(key))) {
-      return fail("an owner decision has only a question, options, a recommended option and material");
+    if (Object.keys(value).some((key) => !["category", "question", "options", "recommendedOptionId", "material", "kind"].includes(key))) {
+      return fail("an owner decision has only a question, options, a recommended option, material and a kind");
     }
-    return ok({ category, ...question.data, ...(typeof value.material === "string" ? { material: value.material } : {}) });
+    return ok({ category, ...question.data, ...(typeof value.material === "string" ? { material: value.material } : {}),
+      ...(ownerQuestion ? { kind: "question" as const } : {}) });
   }
   if (!WORKFLOW_DECISION_CATEGORIES.includes(category as typeof WORKFLOW_DECISION_CATEGORIES[number])) {
     return fail("unknown workflow decision category");
@@ -9130,7 +9167,7 @@ export class SessionsService {
     if (!policy) return fail("Parent Control policy revision is stale", 409);
     // Any unresolved grant was bound to the previous policy revision. Revoke it now rather than
     // leaving a card that looks actionable until the child eventually attempts consumption.
-    for (const decision of this.db.unconsumedWorkflowDecisionsForController(sessionId)) {
+    for (const decision of this.db.authorityBoundWorkflowDecisionsForController(sessionId)) {
       if (decision.policyRevision === policy.revision) continue;
       this.db.markWorkflowDecisionRevoked(decision.occurrenceId, now);
       const child = this.db.getSession(decision.sessionId);
@@ -10431,7 +10468,7 @@ export class SessionsService {
         return fail("Full Control cannot delegate unknown, disabled or Human Required policy rules", 400);
       }
     }
-    const outstanding = this.db.unconsumedWorkflowDecisionsForController(sessionId);
+    const outstanding = this.db.authorityBoundWorkflowDecisionsForController(sessionId);
     try {
       if (!this.db.updateSessionCampaignControl(sessionId, control, expectedRevision, now,
         mintedScope ? { issueScope: mintedScope, firstMessage: derivedScope!.firstMessage } : undefined,
@@ -12993,12 +13030,22 @@ export class SessionsService {
     const root = this.ownerDecisionRoot(this.db.getSession(sessionId));
     if (!root.ok || !root.data) return failAs(root);
     if (!request || typeof request !== "object" || Array.isArray(request) || Object.keys(request).some((key) =>
-      !["requestId", "resourceKey", "question", "options", "recommendedOptionId", "material"].includes(key))) {
-      return fail("an owner decision has a requestId, resourceKey, question, options, and optionally recommendedOptionId and material", 400);
+      !["requestId", "resourceKey", "question", "options", "recommendedOptionId", "material", "kind"].includes(key))) {
+      return fail("an owner decision has a requestId, resourceKey, question, options, and optionally recommendedOptionId, material and kind", 400);
+    }
+    if (request.kind !== undefined && request.kind !== "question" && request.kind !== "approval") {
+      return fail("kind must be question or approval", 400);
+    }
+    // An Owner Question (#4270) is presented and answered as a question only by a current root.
+    const question = request.kind === "question";
+    if (question) {
+      const unsupported = this.capabilityFailure(root.data.runnerId, "ownerQuestions", "owner questions");
+      if (unsupported) return unsupported;
     }
     const snapshot = { category: "owner_decision" as const, question: request.question, options: request.options,
       ...(request.recommendedOptionId !== undefined ? { recommendedOptionId: request.recommendedOptionId } : {}),
-      ...(request.material !== undefined ? { material: request.material } : {}) };
+      ...(request.material !== undefined ? { material: request.material } : {}),
+      ...(question ? { kind: "question" as const } : {}) };
     const normalized = normalizeWorkflowDecisionSnapshot(snapshot);
     if (!normalized.ok || normalized.data?.category !== "owner_decision") return failAs(normalized);
     // Full Control never asks anyone for credentials or sign-in, the owner included (#4104): the floor
@@ -13014,6 +13061,47 @@ export class SessionsService {
     if (screen.state === "ask") return refused();
     return this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: request.resourceKey,
       resourceSnapshot: normalized.data }, canAccess, { trustedOwnerDecision: true, credentialScreen: screen });
+  }
+
+  /**
+   * The campaign owner's answer to an Owner Question (#4270): the option they chose, their own words,
+   * or both, from the question form (`ownerQuestionAgentQuestions`); or, with `dismiss`, no answer.
+   * Only that person answers it, never an agent. It grants nothing, so unlike an approval it is not
+   * bound to the policy revision it was asked under: a scope, boundary or policy change since leaves
+   * it answerable. The answer reaches the root as its prompt, exactly as typed.
+   */
+  answerOwnerQuestion(sessionId: string, occurrenceId: string, answers: Record<string, string | string[]>,
+    action: "submit" | "dismiss", actor: GovernanceActor): ServiceResult<SessionView> {
+    const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+    if (!decision || decision.sessionId !== sessionId || decision.controllingSessionId !== sessionId ||
+        !isOwnerQuestionSnapshot(decision.resourceSnapshot)) return fail("owner question not found", 404);
+    const snapshot = decision.resourceSnapshot;
+    if (decision.status !== "pending") {
+      return this.supersededWorkflowDecisionRefusal(decision) ?? fail("this owner question was already answered or withdrawn", 409);
+    }
+    if (decision.authority !== "human" || actor.kind !== "human" || !actor.id || !this.db.campaignOwnerUser(sessionId, actor.id)) {
+      return fail("Only the campaign's owner can answer an owner question", 403);
+    }
+    // A question the Decision Model could not screen is classified first, never answered (#4104).
+    if (decision.authorityEvaluation?.reason === "credential_screen_review") {
+      return fail("Classify this question first: Decline, or Let the Orchestrator Answer. Nobody answers it until then.", 409);
+    }
+    const root = this.db.getSession(sessionId);
+    if (!root || isTerminal(root.status)) return fail("the Orchestrator that asked this question has ended", 409);
+    const invalid = validateQuestionAnswers(ownerQuestionAgentQuestions(snapshot), answers, action);
+    if (invalid) return fail(`invalid answers: ${invalid}`, 400);
+    const answer = action === "submit" ? ownerQuestionAnswer(snapshot, answers) : null;
+    if (action === "submit" && !answer) return fail("choose an option or type an answer", 400);
+    const now = Date.now();
+    const oweResume = this.workflowDecisionResumeOwed(root);
+    const resolved = this.db.resolveWorkflowDecision(occurrenceId, "human", answer ? "approved" : "denied", now,
+      answer?.selectedOptionId, undefined, undefined, answer?.text, oweResume);
+    if (!resolved) return fail("this owner question was answered concurrently", 409);
+    this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
+    this.recordWorkflowDecisionAudit(resolved, answer ? "answered" : "denied", actor, now);
+    this.hub.sessionChangedById(sessionId);
+    this.publishCampaignAttentionTransition(root);
+    return ok(this.db.getSession(sessionId)!);
   }
 
   /** Whether a Full Control request waits for its owner to classify an uncertain or failed screen. */
@@ -13349,6 +13437,23 @@ export class SessionsService {
   ): ServiceResult<WorkflowDecisionView> {
     if (canAccess(childSessionId)) this.expireAutomationCreationDecisions(Date.now(), childSessionId);
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+    // An Owner Question (#4270) is answered only by the campaign's owner and is bound to no policy
+    // revision, so no other resolution, nor a refused one, may revoke it here.
+    if (decision && isOwnerQuestionSnapshot(decision.resourceSnapshot)) {
+      if (decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId || !canAccess(childSessionId)) {
+        return fail("workflow decision not found", 404);
+      }
+      if (authority !== "human" || actor.kind !== "human") return fail("Only the campaign's owner can answer an owner question", 403);
+      if (resolution?.outcome !== "approve" && resolution?.outcome !== "deny") return fail("workflow decision outcome must be approve or deny", 400);
+      const snapshot = decision.resourceSnapshot;
+      const index = resolution?.outcome === "approve"
+        ? snapshot.options.findIndex((option) => option.optionId === resolution.selectedOptionId) : -1;
+      if (resolution?.outcome === "approve" && index < 0) return fail("answer an owner question from its question card", 400);
+      const answered = this.answerOwnerQuestion(childSessionId, occurrenceId,
+        index < 0 ? {} : { [OWNER_QUESTION_ANSWER_ID]: ownerQuestionAgentQuestions(snapshot)[0]!.options[index]!.label },
+        index < 0 ? "dismiss" : "submit", actor);
+      return answered.ok ? ok(this.db.workflowDecisionByOccurrence(occurrenceId)!) : failAs(answered);
+    }
     if (decision?.category === "automation_creation") {
       if (decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
           parentSessionId !== childSessionId || !canAccess(childSessionId)) return fail("workflow decision not found", 404);
@@ -15468,8 +15573,10 @@ export class SessionsService {
             kind: "allow_once" as const,
           })),
           // Declining a Location switch keeps the session where it is (#4138).
-          { optionId: "__workflow_deny__", name: snapshot.category === "location_switch" ? "Stay Here" : "Do Not Proceed",
-            kind: "reject_once" as const },
+          // An Owner Question (#4270) grants nothing to refuse: the owner may only dismiss it unanswered.
+          { optionId: "__workflow_deny__", name: snapshot.category === "location_switch" ? "Stay Here"
+            : isOwnerQuestionSnapshot(snapshot) ? "Dismiss Question" : "Do Not Proceed",
+          kind: "reject_once" as const },
         ]
       : [
           { optionId: "approve", name: "Approve", kind: "allow_once" as const },
@@ -15478,7 +15585,9 @@ export class SessionsService {
     return {
       requestId: decision.occurrenceId,
       occurrenceId: decision.occurrenceId,
-      title: categoryTitle[decision.category],
+      // Clients present an Owner Question as a question card (`presentOwnerQuestionRequest`); an
+      // older client still shows this card with its options.
+      title: isOwnerQuestionSnapshot(snapshot) ? "Owner Question" : categoryTitle[decision.category],
       options,
       kind: "workflow_decision",
       // A root's own decision its owner kept (#4064) waits for that person without parking the root:
@@ -16050,9 +16159,11 @@ export class SessionsService {
     let blocking = false;
     for (const decision of this.db.pendingWorkflowDecisionsForSession(sessionId)) {
       const controller = this.workflowDecisionController(child, decision.category);
-      if (!controller || decision.controllingSessionId !== controller.session.id ||
+      // A root's Owner Question (#4270) is bound to no authority: its card comes back unchanged.
+      const unboundOwnerQuestion = isOwnerQuestionSnapshot(decision.resourceSnapshot) && decision.controllingSessionId === sessionId;
+      if (!unboundOwnerQuestion && (!controller || decision.controllingSessionId !== controller.session.id ||
           decision.policyRevision !== controller.policy.revision ||
-          !this.workflowDecisionAuthorityCurrent(controller.session, controller.policy, decision)) {
+          !this.workflowDecisionAuthorityCurrent(controller.session, controller.policy, decision))) {
         pending = removePendingRequest(pending, decision.occurrenceId);
         // A refused ancestry leaves no controller to restore the card to. Say why in the audit and
         // in the child's transcript, so the card does not just vanish (#2451).
@@ -16476,9 +16587,12 @@ export class SessionsService {
     }
     const durableTyped = this.db.pendingWorkflowDecisionsForController(parentSessionId).flatMap(
       (decision): DescendantRequestView[] => {
+        // An Owner Question (#4270) is bound to no policy revision: it waits for the owner through
+        // every scope, boundary or policy change.
+        const unbound = isOwnerQuestionSnapshot(decision.resourceSnapshot);
         if ((viewer === "orchestrator" && decision.authority !== "orchestrator") ||
-            decision.policyRevision !== typedPolicy.revision ||
-            !this.workflowDecisionAuthorityCurrent(parent, typedPolicy, decision) ||
+            (!unbound && (decision.policyRevision !== typedPolicy.revision ||
+              !this.workflowDecisionAuthorityCurrent(parent, typedPolicy, decision))) ||
             !this.workflowDecisionRelationship(parentSessionId, decision.sessionId) || !canAccess(decision.sessionId)) return [];
         const session = this.db.getSession(decision.sessionId);
         if (!session || isTerminal(session.status) || !runnerSupportsProtocol(
@@ -16684,6 +16798,14 @@ export class SessionsService {
   ): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    // An Owner Question (#4270) is presented as a question but is the owner's workflow decision: the
+    // control plane resolves it, and no runner is asked.
+    const ownerQuestionCard = pendingRequests(session.pendingApproval)
+      .find((request) => request.requestId === requestId && isOwnerQuestionRequest(request));
+    if (ownerQuestionCard) {
+      if (occurrenceId !== undefined && occurrenceId !== ownerQuestionCard.occurrenceId) return fail("question occurrence is stale or missing", 409);
+      return this.answerOwnerQuestion(sessionId, ownerQuestionCard.occurrenceId ?? requestId, answers, action, actor);
+    }
     // The exec driver never asked questions, so an answer here is to a recovered one, and submitting
     // it would resume the retired driver (#3259). Dismissing it stays available.
     if (action === "submit" && isRetiredCodexExec(session)) return fail(CODEX_EXEC_RETIRED_REASON, 409);
@@ -16913,6 +17035,15 @@ export class SessionsService {
         return (decision && this.supersededWorkflowDecisionRefusal(decision)) ?? fail("workflow decision is stale or no longer pending", 409);
       }
       const snapshot = decision.resourceSnapshot;
+      // An older client answers an Owner Question (#4270) from its options card: the chosen option is
+      // the answer, and Dismiss Question leaves it unanswered.
+      if (isOwnerQuestionSnapshot(snapshot)) {
+        if (optionId === null || optionId === "__workflow_deny__") return this.answerOwnerQuestion(sessionId, decision.occurrenceId, {}, "dismiss", actor);
+        const index = snapshot.options.findIndex((option) => option.optionId === optionId);
+        const label = index < 0 ? undefined : ownerQuestionAgentQuestions(snapshot)[0]!.options[index]!.label;
+        if (label === undefined) return fail("owner question option is not offered", 409);
+        return this.answerOwnerQuestion(sessionId, decision.occurrenceId, { [OWNER_QUESTION_ANSWER_ID]: label }, "submit", actor);
+      }
       const implementation = snapshot.category === "implementation_question" || snapshot.category === "owner_decision" ||
         snapshot.category === "location_switch";
       let deny: boolean;
