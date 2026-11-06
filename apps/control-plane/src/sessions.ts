@@ -368,7 +368,7 @@ import {
   claudeStableAliasFamily,
 } from "./claude-model-aliases.js";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
-import { inspectProjectLocation } from "./project-location-inspection.js";
+import { inspectProjectLocation, projectLocationSurvey } from "./project-location-inspection.js";
 import { SessionPromptOutbox, REVIEW_CONTINUATION_UNSUPPORTED_REASON } from "./session-prompt-outbox.js";
 import { automationCommandDigest, canonicalAutomationCommandJson } from "./automation-command-outbox.js";
 import { withHoldAdviceFor } from "./session-command-permissions.js";
@@ -5841,18 +5841,24 @@ export class SessionsService {
     const scope = this.db.sessionScope(rootId);
     const owner = scope?.owner.kind === "user" ? this.db.operatingHumanPrincipal(scope.owner.userId, scope.organizationId) : null;
     const launchLocationId = root?.projectLocationId ?? null;
-    if (!root?.projectId || !owner || !launchLocationId || !this.db.canAccessProject(owner, root.projectId) ||
-        !runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "campaignRepositoryAddition")) return;
+    const rootProtocolVersion = root ? this.db.getRunner(root.runnerId)?.protocolVersion : undefined;
+    const ownBefore = launchLocationId ? this.db.getProjectLocation(launchLocationId) : null;
+    if (!root?.projectId || !owner || !launchLocationId || !ownBefore || !runnerSupportsProtocol(rootProtocolVersion, "campaignRepositoryAddition")) return;
     const projectId = root.projectId;
-    const locations = (this.db.getProject(projectId)?.locations ?? []).filter((location) => location.availability !== "runner_removed" &&
-      (location.id === launchLocationId || this.db.canAccessWorkspace(owner, location.runnerId, location.workspaceId)));
-    const results = await Promise.all(locations.map((location) =>
-      inspectProjectLocation({ db: this.db, hub: this.hub }, location.id, { projectId, requireProtocol: "campaignRepositoryBoundary" })));
-    const inspections = new Map(locations.map((location, index) => [location.id, results[index]!]));
-    const own = inspections.get(launchLocationId);
-    if (!own?.ok) return;
-    const { repositories, excluded } = launchBoundaryRepositories({ launchRepository: own.location.repository, launchLocationId,
-      locations: locations.map((location) => ({ id: location.id, name: location.name })), inspections });
+    const ownPath = this.db.getWorkspacePath(ownBefore.runnerId, ownBefore.workspaceId);
+    const survey = projectLocationSurvey(this.db, this.hub, owner, { projectId, launchLocationId, rootProtocolVersion });
+    const [own] = await Promise.all([
+      inspectProjectLocation({ db: this.db, hub: this.hub }, launchLocationId, { projectId, requireProtocol: "campaignRepositoryBoundary" }),
+      survey.inspect(new AbortController().signal),
+    ]);
+    if (!own.ok) return;
+    // Everything is read again now that every inspection has finished: a Location that changed
+    // while another was pending is not the one that was inspected, the campaign's own included.
+    const settled = survey.settled();
+    const ownNow = this.db.getProjectLocation(launchLocationId);
+    if (!settled || ownNow?.runnerId !== ownBefore.runnerId || ownNow.workspaceId !== ownBefore.workspaceId ||
+        this.db.getWorkspacePath(ownNow.runnerId, ownNow.workspaceId) !== ownPath) return;
+    const { repositories, excluded } = launchBoundaryRepositories({ launchRepository: own.location.repository, ...settled });
     if (repositories.length > 1 && this.db.recordCustomCampaignRepositories(rootId, { projectId, projectLocationId: launchLocationId }, repositories, excluded, Date.now())) {
       this.hub.sessionChangedById(rootId);
     }
@@ -12915,9 +12921,8 @@ export class SessionsService {
     // boundary's, until multi-repository scope (#4118) lets a boundary repository carry its own.
     const repositories = boundaryRepositories(boundary);
     if (request.additions.some((r) => !r || typeof r.repository !== "string")) return malformed();
-    if (request.additions.some((r) => !repositories.includes(r.repository.toLowerCase()) || r.repository.toLowerCase() !== repository.toLowerCase())) {
-      return refuse("repository_outside_boundary");
-    }
+    if (request.additions.some((r) => !repositories.includes(r.repository.toLowerCase()))) return refuse("repository_outside_boundary");
+    if (request.additions.some((r) => r.repository.toLowerCase() !== repository.toLowerCase())) return refuse("selection_launch_repository_only");
     const additions = request.additions.map((r) => r.number);
     if (!boundedIssueNumbers(additions)) return malformed();
     let facts: CampaignIssueFacts[] | null = null;

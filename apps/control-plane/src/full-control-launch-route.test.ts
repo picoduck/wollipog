@@ -2266,6 +2266,15 @@ test("rationale or issue text that claims a higher count, another repository or 
       additions: [{ repository: "other/repo", number: 9 }], removals: [], explanation: planted, lineage: { kind: "selection" } });
     assert.equal(foreign.errorDetails?.code, "repository_outside_boundary");
     assert.match(foreign.error!, /request_campaign_repository_addition/u, "it names the route that can add the repository (#4118)");
+    // A repository already in the boundary can't be added again: what's refused is the selection.
+    const inBoundary = f.db.getSession(c.id)!.orchestratorPolicy!;
+    const boundary = (inBoundary.control as Extract<CampaignControl, { mode: "full_control" }>).boundary;
+    boundary.repositories = [...campaignBoundaryRepositories(boundary), { repository: "other/repo", locationIds: [] }];
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(inBoundary), c.id);
+    const launchOnly = await f.sessions.proposeCampaignIssueScope(c.id, { requestId: "launch-only", expectedRevision: c.revision(),
+      additions: [{ repository: "other/repo", number: 9 }], removals: [], explanation: planted, lineage: { kind: "selection" } });
+    assert.equal(launchOnly.errorDetails?.code, "selection_launch_repository_only");
+    assert.doesNotMatch(launchOnly.error!, /request_campaign_repository_addition/u);
     assert.equal(f.decision.reviewCalls.length, 1, "no ceiling refusal reached the model");
   } finally { await server.close(); f.db.close(); }
 });
@@ -4203,6 +4212,58 @@ test("a Custom campaign starts with its Project's verified repositories, and a p
     assert.equal(f.db.recordCustomCampaignRepositories(id, { projectId: p.project.id, projectLocationId: p.launchLocation.id },
       [{ repository: "owner/repo", locationIds: [p.launchLocation.id] }], [], Date.now()), false);
   } finally { await server.close(); f.db.close(); }
+});
+
+test("a Custom campaign's Locations that change while its own inspection is pending never enter its list (#4118)", async () => {
+  const run = async (change: (f: ReturnType<typeof fixture>, p: ReturnType<typeof multiRepositoryProject>) => void) => {
+    const f = fixture();
+    const p = multiRepositoryProject(f);
+    const inspect = f.state.inspect;
+    let held: Extract<ControlPlaneToRunner, { type: "campaign_launch_inspect" }> | null = null;
+    // The campaign's own Location answers last: every other inspection has already succeeded.
+    f.state.inspect = (message) => message.workspacePath === "/fixture/repository" ? (held = message, null) : inspect(message);
+    const { server } = await app(f);
+    const created = f.sessions.createSession({ ...request, projectId: p.project.id, projectLocationId: p.launchLocation.id, prompt: "Plan the work." }, undefined, f.scope);
+    assert.ok(created.ok && created.data, created.error ?? "created");
+    const id = created.data.id;
+    for (let tick = 0; tick < 50 && !held; tick += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.ok(held, "its own inspection is pending");
+    change(f, p);
+    const message = held!;
+    f.hub.resolveRunnerRequest({ type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId,
+      ok: true, repository: "owner/repo", issueNumbers: message.issueNumbers, digest: "d".repeat(64) }, "r");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const policy = f.db.getSession(id)!.orchestratorPolicy!;
+    await server.close();
+    f.db.close();
+    return { p, policy };
+  };
+
+  // One Location leaves the owner's reach, and another is repointed at another folder.
+  const moved = await run((f) => {
+    const access = f.db.canAccessWorkspace.bind(f.db);
+    f.db.canAccessWorkspace = (principal, runnerId, workspaceId) => !(runnerId === "r2" && workspaceId === "b") && access(principal, runnerId, workspaceId);
+    f.db.registerRunner({ runnerId: "v2", hostname: "v2", os: "linux", version: "test", agents: [],
+      workspaces: [{ id: "y", name: "v2 y", path: "/fixture/v2-moved" }], runtime: { ...runtime, campaignLaunchInspection: { version: 3 } } }, Date.now(), PROTOCOL_VERSION);
+  });
+  assert.deepEqual(moved.policy.repositories, [
+    { repository: "owner/repo", locationIds: [moved.p.launchLocation.id] },
+    { repository: "other/repo", locationIds: [moved.p.other.id] },
+  ]);
+  assert.equal(moved.policy.excludedLocations!.find((item) => item.locationId === moved.p.v2.id)?.failure, "read_failed", "not the Location that was inspected");
+  assert.doesNotMatch(JSON.stringify(moved.policy.excludedLocations), new RegExp(moved.p.twin.id), "a Location out of reach is not named");
+
+  // With the other repository's only Location gone, one repository is left, so nothing is recorded.
+  const removed = await run((f, p) => { f.db.removeProjectLocation(p.other.id); });
+  assert.equal(removed.policy.repositories, undefined);
+
+  // The campaign's own Location repointed: what was read isn't what it is now.
+  const own = await run((f) => {
+    const path = f.db.getWorkspacePath.bind(f.db);
+    f.db.getWorkspacePath = (runnerId, workspaceId) => runnerId === "r" && workspaceId === "w" ? "/fixture/moved" : path(runnerId, workspaceId);
+  });
+  assert.equal(own.policy.repositories, undefined);
 });
 
 test("a first message limited to two of three repositories narrows the boundary when the Orchestrator's proposal is admitted (#4117)", async () => {
