@@ -147,7 +147,8 @@ test("the header's Session Status explains the campaign state, never a prompt th
   await status.click();
   const dialog = page.getByRole("dialog", { name: "Session Status" });
   if (ASSERT) {
-    await expect(dialog).toContainText("This Full Control campaign continues automatically.");
+    // This fixture carries no campaign projection, so readiness isn't proven and the line claims none (#2940).
+    await expect(dialog).toContainText("This Full Control campaign continues automatically where it can; Campaign Status shows anything it still needs from you.");
     await expect(dialog).not.toContainText("waiting for your next prompt");
   } else {
     await expect(dialog).toBeVisible();

@@ -89,6 +89,13 @@ import type {
 } from "@wollipog/protocol";
 import { RetentionResponse, scanRetentionSources } from "./history-retention.js";
 import type { WorktreeHookSnapshot } from "./worktree-setup.js";
+import type { LeaseProcessEvidence } from "./provider-home-lease-evidence.js";
+
+/** A runner process, identified by its pid and lifecycle evidence (#4256). */
+export interface RetiringProviderRunner {
+  pid: number;
+  process: LeaseProcessEvidence;
+}
 import { SESSION_COMMAND_AUTHORITY_PROTOCOL_VERSION } from "./session-command-authority.js";
 
 /** An approved, runner-verified Location switch waiting for the provider's turn to end (#4138). */
@@ -133,6 +140,10 @@ export interface SessionMeta {
    * It outlives a runner restart, so a restarted runner, which holds no provider of the session,
    * still attests no final checkpoint for a provider an interrupted shutdown may have left running. */
   retiringProviderGeneration?: string;
+  /** Every runner process that has run a provider of the fenced generation since the fence was set,
+   * with the evidence a later runner process proves each gone with (#4256). Absent once any of them
+   * could record no evidence: such a fence is never lifted by a later runner process. */
+  retiringProviderRunners?: RetiringProviderRunner[];
   /** Human-correlated two-phase role change. Retiring/prepared fence every provider submission. */
   roleConversion?: {
     command: import("@wollipog/protocol").PrepareSessionRoleMessage;
@@ -256,7 +267,7 @@ export interface SessionMeta {
   /** Effective Orchestrator restriction. Missing legacy metadata remains strict at launch, and a
    * missing `integrationIsolation` matches that: a strict launch never carried user integrations. */
   orchestrator?: { strictProjectIsolation: boolean; integrationIsolation?: boolean; issueNumbers?: number[]; issueScope?: import("@wollipog/protocol").CampaignIssueScope; control?: import("@wollipog/protocol").CampaignControl;
-    /** v304 (#3363): the authoritative control revision `control` was read at; orders control updates. */
+    /** v309 (#3363): the authoritative control revision `control` was read at; orders control updates. */
     controlRevision?: number };
   /** v276 (#4074): a delegated image evidence reviewer. Every launch of it restricts the harness to
    * the two review tools, and it is never relaunched without this marker. */

@@ -40,6 +40,7 @@ import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullContro
 import { genericRequestScreenData, implementationQuestionScreenData, ownerDecisionScreenData, screenCredentialRequest, type CredentialScreenSurface } from "./credential-screen.js";
 import { DECISION_TOTAL_BOUND_MS, DecisionRuntime, hubDecisionTransport, type DecisionOutcome } from "./decision-runtime.js";
 import { DecisionModelSettings } from "./decision-model-settings.js";
+import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, credentialFormFloor, type CredentialScreenFact, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, fullControlAutomaticResponse, type CampaignAuthorityEvaluation, type FullControlAutomaticResponse, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
 import { firstMessageTargetEpics } from "./first-message-issue-intent.js";
@@ -4578,6 +4579,9 @@ export class SessionsService {
         issueScope: import("@wollipog/protocol").CampaignIssueScope;
         /** Project Locations the reviewed launch inspection left out of the boundary (#4117). */
         excludedLocations?: import("@wollipog/protocol").CampaignExcludedLocation[];
+        /** What the reviewed preflight disclosed about capabilities and evidence (#2940), kept for
+         * Campaign Status. Informational; it grants nothing. */
+        launchDisclosure?: import("@wollipog/protocol").CampaignLaunchDisclosure;
         /** Minted against the new root id only when every launch peer declares the private
          * media contract; screenshot review never depends on it. */
         evidenceAuthority?: EvidenceAuthorityProposal;
@@ -5489,6 +5493,9 @@ export class SessionsService {
       }
       orchestratorPolicy.control = control;
       if (humanLaunch.excludedLocations?.length) orchestratorPolicy.excludedLocations = structuredClone(humanLaunch.excludedLocations);
+      if (humanLaunch.launchDisclosure && validCampaignLaunchDisclosure(humanLaunch.launchDisclosure)) {
+        orchestratorPolicy.launchDisclosure = structuredClone(humanLaunch.launchDisclosure);
+      }
       orchestratorPolicy.issueScope = structuredClone(humanLaunch.issueScope);
       orchestratorPolicy.issueNumbers = [...humanLaunch.issueScope.issueNumbers];
       if (humanLaunch.firstMessage) orchestratorPolicy.firstMessageScope = { state: "pending", derivedLimits: { ...humanLaunch.firstMessage.derivedLimits } };
@@ -10417,7 +10424,9 @@ export class SessionsService {
    * with the boundary. `firstMessage` when no message has been sent: the next one is the task. */
   derivedScope?: { repository: string; issueNumbers: number[]; firstMessage: boolean },
   /** This authorization's own limit provenance, which a waiting campaign keeps (#2940). */
-  derivedLimits?: import("@wollipog/protocol").FullControlDerivedLimits): ServiceResult<SessionView> {
+  derivedLimits?: import("@wollipog/protocol").FullControlDerivedLimits,
+  /** Enable only: what its reviewed preflight disclosed about capabilities and evidence (#2940). */
+  launchDisclosure?: import("@wollipog/protocol").CampaignLaunchDisclosure): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session || principal.kind !== "human" || !this.db.isSessionOwner(principal, sessionId)) return fail("campaign not found", 404);
     const root = this.orchestratorCampaignController(session);
@@ -10488,7 +10497,8 @@ export class SessionsService {
     try {
       if (!this.db.updateSessionCampaignControl(sessionId, control, expectedRevision, now,
         mintedScope ? { issueScope: mintedScope, firstMessage: derivedScope!.firstMessage } : undefined,
-        proposal.mode === "full_control" ? derivedLimits : undefined)) return fail("campaign authority revision changed; refresh and retry", 409);
+        proposal.mode === "full_control" ? derivedLimits : undefined,
+        proposal.mode === "full_control" ? launchDisclosure : undefined)) return fail("campaign authority revision changed; refresh and retry", 409);
     } catch (error) { return fail((error as Error).message, 409); }
     // The runner holds the scope it enforces issue writes against, and a diagnostic copy of this
     // control: every change synchronizes both now, at the new policy revision (#3363), rather than
@@ -12402,7 +12412,7 @@ export class SessionsService {
 
   /** A relaunch's copy of its campaign control (#3363): the campaign root's current control, with
    * the root's policy revision that names it, so the runner orders it against any update still in
-   * flight. A pre-v304 runner keeps today's relaunch, which carries no control. */
+   * flight. A pre-v309 runner keeps today's relaunch, which carries no control. */
   private orderedRunnerControl(sessionId: string, protocolVersion: number | null | undefined): { control?: CampaignControl; controlRevision?: number } {
     if (!runnerSupportsProtocol(protocolVersion, "campaignControlRevision")) return {};
     const rootId = this.db.resolvedCampaignSessionId(sessionId) ?? sessionId;
@@ -12428,7 +12438,7 @@ export class SessionsService {
       try {
         const requestId = `issue_scope_sync_${randomUUID()}`;
         const protocolVersion = this.db.getRunner(member.runnerId)?.protocolVersion;
-        // A pre-v304 runner keeps today's synchronization: its member's own stored control.
+        // A pre-v309 runner keeps today's synchronization: its member's own stored control.
         const ordered = runnerSupportsProtocol(protocolVersion, "campaignControlRevision");
         const sent = ordered ? control : member.orchestratorPolicy?.control;
         const result = await this.hub.requestFromRunner(member.runnerId, requestId,
@@ -16564,8 +16574,9 @@ export class SessionsService {
         ...(decision.withdrawal && outcome === "revoked" ? { withdrawn: true } : {}),
       }, outcome, actor, now);
     }
-    // Only the resolving record carries the message digest; later consume/revoke records do not.
-    const resolvingRecord = outcome === "allowed" || outcome === "denied";
+    // Only the resolving record carries the message digest; later consume/revoke records do not. The
+    // owner's answer to an Owner Question (#4270) resolves it too, so its words are bound by digest.
+    const resolvingRecord = outcome === "allowed" || outcome === "denied" || (outcome === "answered" && stage === "resolution");
     // Identity and digest only: never the URI (it may carry a signed query) and never the bytes.
     const evidenceDigests = decision.resourceSnapshot.category === "ui_evidence_approval"
       ? decision.resourceSnapshot.evidence.map((item) => ({ evidenceId: item.evidenceId, sha256: item.sha256 }))

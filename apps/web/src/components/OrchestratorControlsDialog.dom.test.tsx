@@ -380,8 +380,13 @@ function fullControlProjection(): SessionView {
   const base = fullCampaign();
   return { ...base, parentControl: "questions_and_approvals",
     orchestratorCampaign: { ...CAMPAIGN, control: base.orchestratorPolicy!.control, policyRevision: 3,
-      decisionOwners: { ...HUMAN_ONLY, pr_merge: "orchestrator" } } } as SessionView;
+      decisionOwners: { ...HUMAN_ONLY, pr_merge: "orchestrator" }, fullControlHumanRequired: [],
+      recovery: { unattendedReady: true, automation: { state: "available" }, automatic: 0, waitingHuman: 0, blocked: 0, records: [], truncated: false } } } as SessionView;
 }
+
+/** The line a Full Control campaign in effect shows here (#2940): this boundary leaves every decision
+ * but PR merge to the person, so it never reads as running end to end. */
+const NARROWED_LINE = "The Orchestrator runs this campaign end to end, except the decisions Campaign Status lists under Human Required.";
 
 /** The Custom-only surfaces: none of them has an effect under a Full Control boundary (#2940).
  * Campaign Behavior does: it governs every child Full Control creates, so it stays while Full
@@ -393,8 +398,34 @@ function assertOnlyFullControl(dialog: HTMLElement, { inEffect }: { inEffect: bo
   assertNoDomNode(dialog.querySelector('[role="radiogroup"][aria-label="PR Merge Approval"]'));
   assertNoDomNode(dialog.querySelector('[role="radiogroup"][aria-label="Review Round Extensions"]'));
   assertNoDomNode(dialog.querySelector(".orchestrator-gate-helper"), "no evidence or retention disclosure");
-  assert.match(dialog.textContent ?? "", /The Orchestrator runs this campaign end to end\./);
+  // Chosen, the option describes the mode; in effect, the line states this campaign's readiness.
+  assert.ok((dialog.textContent ?? "").includes(inEffect ? NARROWED_LINE : "The Orchestrator runs this campaign end to end."));
 }
+
+test("under Full Control the dialog's line claims end to end only when the server's facts prove it (#2940)", async () => {
+  const owners = Object.fromEntries(Object.keys(HUMAN_ONLY).map((category) => [category, "orchestrator"])) as unknown as ParentControlDecisionPolicy;
+  const base = fullControlProjection();
+  const every = { ...base.orchestratorCampaign!.control!, boundary: { ...(base.orchestratorCampaign!.control as { boundary: object }).boundary,
+    operations: ["implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval",
+      "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"],
+    issueAuthority: { epics: [12], relatedFollowUps: true, maxIssues: 3, closureReasons: ["completed"] } } };
+  const lineOf = async (campaign: Partial<OrchestratorCampaignProjection>) => {
+    const harness = await open({ ...base, orchestratorCampaign: { ...base.orchestratorCampaign!, control: every, decisionOwners: owners,
+      uiEvidenceReview: { status: "available", effectiveOwner: "orchestrator" },
+      recovery: { unattendedReady: true, automation: { state: "available" }, automatic: 0, waitingHuman: 0, blocked: 0, records: [], truncated: false },
+      ...campaign } } as SessionView, {});
+    // The Orchestrator Control section's notes: its effective mode, then its line.
+    const notes = [...harness.dialog().querySelector("section")!.querySelectorAll("p.section-note")].map((node) => node.textContent);
+    await harness.unmount();
+    assert.equal(notes[0], "Effective Mode: Full Control.");
+    return notes[1];
+  };
+  assert.equal(await lineOf({}), "The Orchestrator runs this campaign end to end.");
+  assert.equal(await lineOf({ fullControlHumanRequired: ["human_required_rules"] }),
+    "The Orchestrator runs this campaign end to end, except the decisions Campaign Status lists under Human Required.");
+  assert.equal(await lineOf({ fullControlHumanRequired: undefined }),
+    "Full Control is in effect, but whether anything still needs you isn't reported here.");
+});
 
 test("under Full Control the dialog shows only the mode, its line and Revoke, and the Custom sections return after Revoke", async () => {
   const initial = fullControlProjection();

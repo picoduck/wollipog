@@ -109,14 +109,34 @@ test("an at-rest root of an active Full Control campaign shows an informational 
     result: { revision: "r1", at: 1, owner: "human" as const }, acknowledgedRevision: null };
   const fullControl = { mode: "full_control", boundary: { version: 1, revision: 3, issueScopeRevision: 1, repository: "owner/repo",
     objective: "Deliver", authorizedByUserId: "user", authorizedAt: 1, operations: [], delegatablePolicyIds: [] } };
-  const campaign = (status: string, control: unknown = fullControl) =>
-    ({ status, policyRevision: 3, control }) as unknown as NonNullable<SessionView["orchestratorCampaign"]>;
+  // The live facts readiness reads (#2940): owners for the decisions this boundary leaves out stay the
+  // Human's, so the ready fixture's boundary holds every operation.
+  const ready = { fullControlHumanRequired: [], uiEvidenceReview: { status: "available", effectiveOwner: "orchestrator" },
+    recovery: { unattendedReady: true, automation: { state: "available" }, automatic: 0, waitingHuman: 0, blocked: 0, records: [], truncated: false },
+    decisionOwners: { implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "orchestrator",
+      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "orchestrator", review_round_extension: "orchestrator" } };
+  const everyOperation = { ...fullControl, boundary: { ...fullControl.boundary, operations: ["implementation_question", "pr_merge",
+    "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval", "issue_closure", "campaign_issue_scope",
+    "question", "tool_approval", "policy_ask"],
+  issueAuthority: { epics: [], relatedFollowUps: true, maxIssues: 3, closureReasons: ["completed"] } } };
+  const campaign = (status: string, control: unknown = everyOperation, facts: object = ready) =>
+    ({ status, policyRevision: 3, control, ...facts }) as unknown as NonNullable<SessionView["orchestratorCampaign"]>;
   const active = session({ status: "idle", attention, orchestratorCampaign: campaign("active") });
   const status = sessionRowStatus(active);
   assert.equal(label(status), "Campaign Active");
   assert.deepEqual([status.badge?.meta.tone, Boolean(status.badge?.meta.pulse)], ["info", false]);
   assert.equal(status.badge?.ariaLabel, "Status: Campaign Active");
   assert.equal(status.badge?.title, "This Full Control campaign continues automatically. Its intermediate results are informational.");
+  // Readiness the facts don't prove is never claimed (#2940 criterion 8).
+  assert.equal(sessionRowStatus(session({ status: "idle", attention, orchestratorCampaign: campaign("active", everyOperation,
+    { ...ready, fullControlHumanRequired: ["human_required_rules"] }) })).badge?.title,
+  "This Full Control campaign continues automatically, except the decisions and limits Campaign Status lists under Full Control. Its intermediate results are informational.");
+  assert.equal(sessionRowStatus(session({ status: "idle", attention, orchestratorCampaign: campaign("active", fullControl) })).badge?.title,
+    "This Full Control campaign continues automatically, except the decisions and limits Campaign Status lists under Full Control. Its intermediate results are informational.",
+    "decisions the boundary leaves out come to the person");
+  assert.equal(sessionRowStatus(session({ status: "idle", attention, orchestratorCampaign: campaign("active", everyOperation, {}) })).badge?.title,
+    "This Full Control campaign continues automatically where it can; Campaign Status shows anything it still needs from you. Its intermediate results are informational.",
+    "a projection without readiness facts claims none");
   assert.equal(label(sessionRowStatus({ ...active, attention: { ...attention, result: null } })), "Campaign Active",
     "an at-rest active root never reads as awaiting a prompt");
   assert.equal(label(sessionRowStatus({ ...active, status: "completed" })), "Campaign Active");
@@ -307,6 +327,28 @@ test("family work suppresses review readiness without hiding requests or recover
     ["continuation_pending", "Follow-Up Pending"]] as const) {
     assert.equal(label(sessionRowStatus(session({ attention, backgroundWorkState }))), expected);
   }
+});
+
+test("the header's Campaign Active claims continuing automatically only when the server's facts prove it (#2940)", () => {
+  const attention = { version: 1 as const, humanActions: [], meaningfulAt: 1,
+    result: { revision: "r1", at: 1, owner: "human" as const }, acknowledgedRevision: null };
+  const owners = { implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "orchestrator",
+    follow_up_issue_publication: "orchestrator", ui_evidence_approval: "orchestrator", review_round_extension: "orchestrator" };
+  const control = { mode: "full_control", boundary: { version: 1, revision: 3, issueScopeRevision: 1, repository: "owner/repo",
+    objective: "Deliver", authorizedByUserId: "user", authorizedAt: 1, delegatablePolicyIds: [],
+    operations: ["implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval",
+      "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"],
+    issueAuthority: { epics: [], relatedFollowUps: true, maxIssues: 3, closureReasons: ["completed"] } } };
+  const ready = { status: "active", policyRevision: 3, control, decisionOwners: owners, fullControlHumanRequired: [],
+    uiEvidenceReview: { status: "available", effectiveOwner: "orchestrator" },
+    recovery: { unattendedReady: true, automation: { state: "available" }, automatic: 0, waitingHuman: 0, blocked: 0, records: [], truncated: false } };
+  const describe = (campaign: object) => sessionHeaderStatusSummary(session({ status: "idle", attention,
+    orchestratorCampaign: campaign as unknown as NonNullable<SessionView["orchestratorCampaign"]> })).primary.description;
+  assert.equal(describe(ready), "This Full Control campaign continues automatically. Its intermediate results are informational.");
+  assert.equal(describe({ ...ready, fullControlHumanRequired: ["human_required_rules"] }),
+    "This Full Control campaign continues automatically, except the decisions and limits Campaign Status lists under Full Control. Its intermediate results are informational.");
+  assert.equal(describe({ status: "active", policyRevision: 3, control }),
+    "This Full Control campaign continues automatically where it can; Campaign Status shows anything it still needs from you. Its intermediate results are informational.");
 });
 
 test("an active or complete Full Control root's header shows the campaign state instead of Awaiting Prompt (#2938)", () => {

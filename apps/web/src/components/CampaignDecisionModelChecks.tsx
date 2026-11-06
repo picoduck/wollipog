@@ -3,6 +3,7 @@ import type { CampaignDecisionsResponse, DecisionErrorClass } from "@wollipog/pr
 import { useApi } from "../api-context.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
+import { DecisionAnswerChecklist } from "./DecisionAnswerChecklist.js";
 import { isDecisionModelCheck } from "./decision-model.js";
 import type { CampaignRequestTarget } from "./CampaignStatusPanel.js";
 
@@ -212,6 +213,12 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
                   <div>
                     <dt>Reason</dt>
                     <dd>{decision.reason}</dd>
+                  </div>
+                )}
+                {decision.typedAnswers && (
+                  <div>
+                    <dt>Answers</dt>
+                    <dd><DecisionAnswerChecklist typed={decision.typedAnswers} /></dd>
                   </div>
                 )}
                 {decision.failureClass && (

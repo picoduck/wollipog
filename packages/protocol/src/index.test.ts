@@ -120,7 +120,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 304);
+  assert.equal(PROTOCOL_VERSION, 309);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -358,8 +358,12 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 304", () => {
-  assert.equal(PROTOCOL_VERSION, 304);
+test("PROTOCOL_VERSION is 309", () => {
+  assert.equal(PROTOCOL_VERSION, 309);
+  // Only a v307 runner is sent a typed-question Decision call's larger schema and output (#4283).
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.typedDecisionQuestions, 307);
+  assert.equal(runnerSupportsProtocol(306, "typedDecisionQuestions"), false);
+  assert.equal(runnerSupportsProtocol(307, "typedDecisionQuestions"), true);
   // Owner Questions need a v303 control plane and root runner (#4270).
   assert.equal(runnerSupportsProtocol(302, "ownerQuestions"), false);
   assert.equal(runnerSupportsProtocol(303, "ownerQuestions"), true);
@@ -378,9 +382,9 @@ test("PROTOCOL_VERSION is 304", () => {
   // Selection floors read issue facts from a v291 runner (#4103).
   assert.equal(runnerSupportsProtocol(290, "campaignIssueFacts"), false);
   assert.equal(runnerSupportsProtocol(291, "campaignIssueFacts"), true);
-  // Campaign control metadata is ordered by its own revision on a v304 runner (#3363).
-  assert.equal(runnerSupportsProtocol(303, "campaignControlRevision"), false);
-  assert.equal(runnerSupportsProtocol(304, "campaignControlRevision"), true);
+  // Campaign control metadata is ordered by its own revision on a v309 runner (#3363).
+  assert.equal(runnerSupportsProtocol(308, "campaignControlRevision"), false);
+  assert.equal(runnerSupportsProtocol(309, "campaignControlRevision"), true);
   // A regular session's Location switch needs a v287 runner and control plane (#4138), and
   // Switch and Continue of the live session a v289 runner.
   assert.equal(runnerSupportsProtocol(286, "sessionLocationSwitch"), false);

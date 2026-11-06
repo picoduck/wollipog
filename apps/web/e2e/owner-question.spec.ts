@@ -1,0 +1,79 @@
+import { expect, test, type Page } from "@playwright/test";
+
+/** An Owner Question (#4270): a Full Control root's design question for its campaign's owner, asked
+ * in the composer like any agent question rather than as an approval. */
+const QUESTION = "Should the follow-up issue for the provider bridge keep retrying a failed credential lease, or stop and report it?";
+
+async function openOwnerQuestion(page: Page) {
+  await page.goto("/agent-questions-e2e.html?set=owner-question&style=composer");
+  const card = page.locator(".composer-answer");
+  await expect(card).toBeVisible();
+  return card;
+}
+
+for (const viewport of [{ name: "desktop", width: 1280, height: 800 }, { name: "phone", width: 390, height: 844 }]) {
+  test(`an Owner Question is a composer question card with Markdown background and a Needs Your Input badge (${viewport.name})`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    const card = await openOwnerQuestion(page);
+    await expect(card.locator(".answer-title")).toHaveText(QUESTION);
+
+    // The suggested options, the recommended one marked, then Something Else, with a free-text field.
+    const options = card.getByRole("radio");
+    await expect(options).toHaveCount(3);
+    await expect(card.getByRole("radio", { name: /^Retry with Backoff \(Recommended\)/u })).toBeVisible();
+    await expect(card.getByRole("radio", { name: /^Stop and Report/u })).toBeVisible();
+    await expect(card.getByRole("radio", { name: /^Something Else…/u })).toBeVisible();
+    const field = card.locator("input.composer-answer-input");
+    await expect(field).toBeVisible();
+    await expect(field).toBeEditable();
+    await expect(field).toHaveAccessibleName(QUESTION);
+
+    // The background is Markdown: its links are real links, its list a list, not a monospace block.
+    const background = card.locator(".answer-context");
+    await expect(background.getByRole("link", { name: "design note", exact: true }))
+      .toHaveAttribute("href", "https://github.com/picoduck/wollipog/blob/main/docs/campaign-authority.md");
+    await expect(background.getByRole("link", { name: "#4244", exact: true }))
+      .toHaveAttribute("href", "https://github.com/picoduck/wollipog/issues/4244");
+    await expect(background.getByRole("listitem")).toHaveCount(2);
+    await expect(background.locator("code, pre, .code-well")).toHaveCount(0);
+
+    // The badge asks for input, never for an approval, and names itself as it reads.
+    const status = page.getByRole("group", { name: "Session Status" });
+    await expect(status.getByText("Needs Your Input", { exact: true })).toBeVisible();
+    await expect(status.getByLabel("Attention: Needs Your Input", { exact: true })).toBeVisible();
+    await expect(page.getByText("Approval Required")).toHaveCount(0);
+    await expect(page.getByText("Do Not Proceed")).toHaveCount(0);
+
+    // Title Case controls whose accessible names match what they show.
+    for (const name of ["Next", "Show Context", "Exit Answer Mode"]) {
+      await expect(card.getByRole("button", { name, exact: true })).toBeVisible();
+    }
+    await expect(card.getByRole("button", { name: "Next", exact: true })).toHaveText("Next");
+    await expect(card.getByRole("button", { name: "Show Context", exact: true })).toContainText("Show Context");
+
+    // The question, its answer field and its send control fit together, without scrolling the question away.
+    for (const locator of [card.locator(".answer-title"), field, card.getByRole("button", { name: "Next", exact: true })]) {
+      await expect(locator).toBeInViewport({ ratio: 1 });
+    }
+    await field.focus();
+    await expect(card.locator(".answer-title")).toBeInViewport();
+    await expect(card.getByRole("button", { name: "Next", exact: true })).toBeInViewport({ ratio: 1 });
+  });
+}
+
+test("the owner answers an Owner Question in their own words, then adds an optional note", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const card = await openOwnerQuestion(page);
+  const field = card.locator("input.composer-answer-input");
+  await field.fill("Retry twice, then stop and tell me.");
+  await card.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(card.locator(".answer-title")).toHaveText("Anything to add for the Orchestrator?");
+  await card.locator("input.composer-answer-input").fill("Log every retry.");
+  await card.getByRole("button", { name: "Submit Answers", exact: true }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Question Answered" })).toHaveCount(1);
+  expect(await page.evaluate(() => window.agentQuestionCalls.map(({ requestId, action, answers }) => ({ requestId, action, answers })))).toEqual([
+    { requestId: "ask-1", action: "submit",
+      answers: { owner_question_answer: "Retry twice, then stop and tell me.", owner_question_note: "Log every retry." } },
+  ]);
+  await expect(page.getByRole("group", { name: "Session Status" }).getByText("Needs Your Input")).toHaveCount(0);
+});
