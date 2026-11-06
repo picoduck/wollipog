@@ -1600,6 +1600,12 @@ export function createApiClient(transport: ApiTransport) {
       `/api/runners/${encodeURIComponent(runnerId)}/capacity`,
       { method: "PUT", body: JSON.stringify(body) },
     ),
+  updateMachineReviewerSecurity: (runnerId: string,
+    body: { policy: import("@wollipog/protocol").ReviewerSecurityPolicy; expectedRevision: number }) =>
+    req<{ reviewerSecurity: import("@wollipog/protocol").RunnerReviewerSecurityConfiguration }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/reviewer-security`,
+      { method: "PUT", body: JSON.stringify(body) },
+    ),
   updateMachineAutomaticAccountSwitching: (
     runnerId: string,
     body: { enabled: boolean; expectedRevision: number },

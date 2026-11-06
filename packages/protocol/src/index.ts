@@ -1028,7 +1028,8 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 // 324: a new Custom campaign starts with the repositories its Project verified (#4118), in the
 //      `repositories` list v317 added, and a Custom seed proposal refuses `repositoryNames` by name
 //      rather than ignoring it. Both are the control plane's: no runner or client needs this version.
-export const PROTOCOL_VERSION = 324;
+// 325: human-controlled reviewer executable permission policy on each Machine.
+export const PROTOCOL_VERSION = 325;
 
 export * from "./campaign-authority.js";
 export * from "./decision-questions.js";
@@ -1293,6 +1294,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   harnessSelectionBackgroundConsumers: 177,
   automaticAccountSwitchHarnessSelection: 178,
   automaticProviderAccountSwitch: 173,
+  reviewerSecurityPolicy: 325,
   sessionProviderAccountSwitch: 171,
   /** v180 current-identity inspection and account selection from an Authentication Required card. */
   providerAuthenticationAccountRecovery: 180,
@@ -4463,6 +4465,15 @@ export interface RunnerCapacityConfiguration {
   revision: number;
 }
 
+/** Local-user permission policy for reviewer executables on one Machine. */
+export type ReviewerSecurityPolicy = "strict" | "personal_machine";
+
+/** Human-controlled local executable checks; session write boundaries always apply. */
+export interface RunnerReviewerSecurityConfiguration {
+  policy: ReviewerSecurityPolicy;
+  revision: number;
+}
+
 /** Durable control-plane configuration for opt-in provider-account failover on one Machine. */
 export interface RunnerAutomaticAccountSwitchConfiguration {
   enabled: boolean;
@@ -4560,6 +4571,8 @@ export interface RunnerView {
   capacity?: RunnerCapacityState;
   /** v173 control-plane-authoritative opt-in; absent means disabled. */
   automaticAccountSwitching?: RunnerAutomaticAccountSwitchConfiguration;
+  /** v325; omission preserves Strict. */
+  reviewerSecurity?: RunnerReviewerSecurityConfiguration;
   /** Principal-specific mutation permission; absent on older control planes. */
   canManage?: boolean;
   /** Protocol v60 projection. Placement is separate from the agent definitions above. */
@@ -11505,6 +11518,8 @@ export interface RegisteredMessage {
   runnerCapacity?: RunnerCapacityConfiguration;
   /** Present once the Machine has a persisted automatic account-switch preference. */
   automaticAccountSwitching?: RunnerAutomaticAccountSwitchConfiguration;
+  /** v325; omission preserves Strict. */
+  reviewerSecurity?: RunnerReviewerSecurityConfiguration;
   /** Complete Machine choices, including unavailable installations. Protocol v177+. */
   harnessInstallationChoices?: HarnessInstallationChoice[];
   /** Protocol v209+. At most 64 pending admissions, scoped to this authenticated runner.
@@ -12231,6 +12246,11 @@ export interface RediscoverMessage {
 /** Idempotent monotonic application of the control plane's durable Machine capacity setting. */
 export interface ConfigureRunnerCapacityMessage extends RunnerCapacityConfiguration {
   type: "configure_runner_capacity";
+}
+
+/** Idempotent monotonic application of the Machine's human-selected executable policy. */
+export interface ConfigureReviewerSecurityMessage extends RunnerReviewerSecurityConfiguration {
+  type: "configure_reviewer_security";
 }
 
 /** Idempotent monotonic application of the Machine's automatic account-switch preference. */
@@ -13553,6 +13573,7 @@ export type ControlPlaneToRunner =
   | RediscoverMessage
   | ConfigureRunnerCapacityMessage
   | ConfigureAutomaticAccountSwitchMessage
+  | ConfigureReviewerSecurityMessage
   | RefreshSubscriptionUsageMessage
   | GenerateSessionTitleMessage
   | RunDecisionMessage

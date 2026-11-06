@@ -7690,6 +7690,8 @@ export class ControlPlaneDb {
       "automatic_account_switch INTEGER NOT NULL DEFAULT 0 CHECK (automatic_account_switch IN (0, 1))",
       "automatic_account_switch_revision INTEGER NOT NULL DEFAULT 0 CHECK (automatic_account_switch_revision >= 0)",
       "automatic_account_switch_updated_at INTEGER",
+      "reviewer_security_policy TEXT NOT NULL DEFAULT 'strict' CHECK (reviewer_security_policy IN ('strict', 'personal_machine'))",
+      "reviewer_security_revision INTEGER NOT NULL DEFAULT 0 CHECK (reviewer_security_revision >= 0)",
     ]) {
       try {
         db.exec(`ALTER TABLE machine_overrides ADD COLUMN ${column}`);
@@ -8849,7 +8851,7 @@ export class ControlPlaneDb {
     if (!trimmed) {
       this.stmt("UPDATE machine_overrides SET display_name=NULL WHERE runner_id=?").run(runnerId);
       this.stmt(
-        "DELETE FROM machine_overrides WHERE runner_id=? AND runner_capacity IS NULL AND automatic_account_switch=0 AND automatic_account_switch_revision=0",
+        "DELETE FROM machine_overrides WHERE runner_id=? AND runner_capacity IS NULL AND automatic_account_switch=0 AND automatic_account_switch_revision=0 AND reviewer_security_revision=0",
       ).run(runnerId);
       return;
     }
@@ -8857,6 +8859,25 @@ export class ControlPlaneDb {
       `INSERT INTO machine_overrides (runner_id, display_name) VALUES (?, ?)
        ON CONFLICT(runner_id) DO UPDATE SET display_name=excluded.display_name`,
     ).run(runnerId, trimmed);
+  }
+
+  machineReviewerSecurity(runnerId: string): import("@wollipog/protocol").RunnerReviewerSecurityConfiguration {
+    const row = this.stmt("SELECT reviewer_security_policy, reviewer_security_revision FROM machine_overrides WHERE runner_id=?")
+      .get(runnerId) as { reviewer_security_policy: import("@wollipog/protocol").ReviewerSecurityPolicy; reviewer_security_revision: number } | undefined;
+    return { policy: row?.reviewer_security_policy ?? "strict", revision: row?.reviewer_security_revision ?? 0 };
+  }
+
+  setMachineReviewerSecurity(runnerId: string, policy: import("@wollipog/protocol").ReviewerSecurityPolicy, expectedRevision: number) {
+    return this.atomic(() => {
+      const current = this.machineReviewerSecurity(runnerId);
+      if (current.revision !== expectedRevision) return { ok: false as const, configuration: current };
+      const configuration = { policy, revision: expectedRevision + 1 };
+      this.stmt(`INSERT INTO machine_overrides (runner_id, reviewer_security_policy, reviewer_security_revision)
+        VALUES (?, ?, ?) ON CONFLICT(runner_id) DO UPDATE SET
+        reviewer_security_policy=excluded.reviewer_security_policy, reviewer_security_revision=excluded.reviewer_security_revision`)
+        .run(runnerId, policy, configuration.revision);
+      return { ok: true as const, configuration };
+    });
   }
 
   machineRunnerCapacityConfiguration(runnerId: string): RunnerCapacityConfiguration | null {
@@ -15409,6 +15430,9 @@ export class ControlPlaneDb {
               authority: configured ? "control_plane" : "runner_local",
             };
       }
+    }
+    if (runnerSupportsProtocol(row.protocol_version, "reviewerSecurityPolicy")) {
+      view.reviewerSecurity = this.machineReviewerSecurity(row.runner_id);
     }
     if (runnerSupportsProtocol(row.protocol_version, "automaticProviderAccountSwitch")) {
       view.automaticAccountSwitching = this.machineAutomaticAccountSwitchConfiguration(row.runner_id) ?? {

@@ -102,6 +102,7 @@ let runner: RunnerView | null = {
   agentsRefreshed: true,
   canManage: identityRole !== "viewer",
   automaticAccountSwitching: { enabled: false, revision: 0 },
+  reviewerSecurity: { policy: "strict", revision: 0 },
   capacity: {
     configuredUnits: 16,
     revision: 2,
@@ -555,6 +556,15 @@ const client = {
     };
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { capacity: { configuredUnits: runner.capacity.configuredUnits, revision: runner.capacity.revision } };
+  },
+  updateMachineReviewerSecurity: async (_runnerId, body) => {
+    if (!runner) throw new Error("runner not found");
+    if (body.expectedRevision !== (runner.reviewerSecurity?.revision ?? 0)) {
+      throw new Error("Reviewer Executable Policy changed in another client");
+    }
+    runner.reviewerSecurity = { policy: body.policy, revision: body.expectedRevision + 1 };
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { reviewerSecurity: structuredClone(runner.reviewerSecurity) };
   },
   updateMachineAutomaticAccountSwitching: async (
     _runnerId: string,

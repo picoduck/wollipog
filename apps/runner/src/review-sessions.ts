@@ -93,6 +93,7 @@ export function defaultReviewSessionDependencies(
   agents: () => readonly AgentDefinition[] = () => [],
   agentPath: ReviewSessionDependencies["agentPath"] = () => process.env.PATH,
   codexProtection: () => CodexReviewerProtection | undefined = () => undefined,
+  securityPolicy: () => import("@wollipog/protocol").ReviewerSecurityPolicy = () => "strict",
 ): ReviewSessionDependencies {
   const uid = process.getuid?.() ?? -1;
   const hostProviderHomes = () =>
@@ -131,11 +132,11 @@ export function defaultReviewSessionDependencies(
       return gitlabMergeRequestFacts(JSON.parse(raw), `${host}/${project}`, iid);
     },
     gitlabHostConfigured: (glab, host, env) => gitlabHostConfigured(glab, host, env),
-    tools: () => discoverReviewTools({ home: homedir(), dataDir, uid, pathEnv: process.env.PATH, extraRoots: extraRoots() }),
+    tools: () => discoverReviewTools({ home: homedir(), dataDir, uid, pathEnv: process.env.PATH, extraRoots: extraRoots(), securityPolicy: securityPolicy() }),
     verifyCommand: (command, pathEnv = process.env.PATH) => {
       const grants = sessionWritableGrants();
       try {
-        verifySpawnedCommand(command, pathEnv, sessionWritableRoots(homedir(), dataDir, extraRoots(grants)), uid, undefined, codexProtection());
+        verifySpawnedCommand(command, pathEnv, sessionWritableRoots(homedir(), dataDir, extraRoots(grants)), uid, undefined, codexProtection(), securityPolicy());
       } catch (error) {
         // Name the grant that makes the reviewer session-writable and how to withdraw it (#4122).
         // Roots no configured grant names can only be avoided by moving the reviewer.
@@ -200,7 +201,7 @@ export function gitlabMergeRequestFacts(value: unknown, repository: string, iid:
  * a refusal, not something to skip: it is exactly what would run.
  */
 export function verifySpawnedCommand(command: string, pathEnv: string | undefined, roots: readonly string[], uid: number,
-  rootUid?: number, codex?: CodexReviewerProtection): string {
+  rootUid?: number, codex?: CodexReviewerProtection, policy: import("@wollipog/protocol").ReviewerSecurityPolicy = "strict"): string {
   let candidate: string | undefined;
   if (isAbsolute(command)) {
     candidate = command;
@@ -217,10 +218,10 @@ export function verifySpawnedCommand(command: string, pathEnv: string | undefine
     }
   }
   if (!candidate) throw new Error(`${command} is not installed`);
-  const resolved = trustedPath(candidate, roots, uid, rootUid, codex);
-  const interpreter = reviewerInterpreter(resolved, pathEnv, roots, uid, rootUid);
+  const resolved = trustedPath(candidate, roots, uid, rootUid, codex, undefined, policy);
+  const interpreter = reviewerInterpreter(resolved, pathEnv, roots, uid, rootUid, policy);
   // An `env <program>` interpreter is found on PATH at spawn too: its first match must be trusted.
-  if (interpreter) verifySpawnedCommand(interpreter.name, pathEnv, roots, uid, rootUid);
+  if (interpreter) verifySpawnedCommand(interpreter.name, pathEnv, roots, uid, rootUid, undefined, policy);
   return resolved;
 }
 
