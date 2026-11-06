@@ -1,5 +1,5 @@
 import {
-  campaignAuthorityPreflight, campaignBoundaryRepositories, campaignScopeHolds, initialScopeRepositoryLimits, resolveCampaignAuthority, runnerSupportsProtocol, validCampaignControl,
+  campaignAuthorityPreflight, campaignBoundaryRepositories, campaignBoundaryRepository, campaignScopeHolds, initialScopeRepositoryLimits, resolveCampaignAuthority, runnerSupportsProtocol, validCampaignControl,
   type CampaignAuthorityEvaluation, type CampaignBoundaryRepository, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope, type CredentialScreenFact,
   type OrchestratorCampaignPolicy, type ParentControlPolicy, type PendingApproval, type SessionView, type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
@@ -130,11 +130,28 @@ export function campaignIssueInScope(policy: SessionView["orchestratorPolicy"], 
   return issue.repository.toLowerCase() !== scope.repository.toLowerCase() || Boolean(policy?.issueNumbers?.includes(issue.number));
 }
 
+/** Whether a closure's issue is one the campaign holds (#4119): another repository's issue by the
+ * repository-qualified scope, and the launch repository's by the numbers its runner enforces. */
+export function campaignClosureIssueHeld(policy: SessionView["orchestratorPolicy"], issue: { repository: string; number: number }): boolean {
+  const scope = policy?.issueScope;
+  if (scope && issue.repository.toLowerCase() !== scope.repository.toLowerCase()) return campaignScopeHolds(scope, issue);
+  return Boolean(policy?.issueNumbers?.includes(issue.number));
+}
+
 /** The campaign's launch repository: its Full Control boundary's, or the one its scope recorded.
  * Empty when neither is known, as for a legacy campaign that never saved one (#2664). */
 export function campaignLaunchRepository(root: Pick<SessionView, "orchestratorPolicy">): string {
   const control = root.orchestratorPolicy?.control;
   return (control?.mode === "full_control" ? control.boundary.repository : root.orchestratorPolicy?.issueScope?.repository ?? "").toLowerCase();
+}
+
+/** The repository named here, in lower case, when it is not the campaign's launch repository (#4119):
+ * the launch repository's gates stay in the root's own checkout. Null for the launch repository, for
+ * no repository, and for a legacy campaign that never recorded one. */
+export function campaignOtherRepository(root: Pick<SessionView, "orchestratorPolicy">, repository: string | undefined): string | null {
+  const launch = campaignLaunchRepository(root);
+  const named = repository?.toLowerCase();
+  return named && launch && named !== launch ? named : null;
 }
 
 /** The repositories the campaign's issue scope may hold, the launch repository first (#4118): a
@@ -275,6 +292,6 @@ function closureProofIncomplete(
       snapshot.issueAdmission || !snapshot.deliveryGaps?.length || (protocol ?? 0) < 217 || (controllerProtocol ?? 0) < 217) return false;
   const boundary = control.boundary;
   return campaignBoundaryCurrent({ ...controller, parentControlPolicy: policy }) && boundary.operations.includes("issue_closure") &&
-    boundary.issueAuthority!.closureReasons.includes(snapshot.reason) && snapshot.repository.toLowerCase() === boundary.repository.toLowerCase() &&
+    boundary.issueAuthority!.closureReasons.includes(snapshot.reason) && campaignBoundaryRepository(boundary, snapshot.repository) !== null &&
     campaignIssueInScope(controller.orchestratorPolicy, { repository: snapshot.repository, number: snapshot.issue });
 }

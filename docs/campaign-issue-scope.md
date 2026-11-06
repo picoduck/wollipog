@@ -196,8 +196,8 @@ approval is invalidated. A legacy campaign with no saved repository stays unveri
   A re-authorization and an enable keep the limit. Only `campaign_repository_addition`, which the owner
   approves, gives that repository an entry, and its issues then pass the limit. Its other available
   Locations then wait for Include in Campaign, because the approval named one Location.
-- **Admission.** Maximum Issues counts issues across all repositories. Follow-up lineage admits only a
-  publication in the launch repository until cross-repository follow-ups (#4119) land.
+- **Admission.** Maximum Issues counts issues across all repositories. Follow-up lineage admits a
+  publication in any boundary repository (#4119), and one in another repository than its origins records both.
 - **Epics.** `issueAuthority.epics` are the launch repository's, and `issueAuthority.otherEpics` holds
   the boundary's other repositories' as qualified refs. A stored boundary has none, and its epics read as
   the launch repository's at the same revision. A person's launch authorizes them: `otherIssues` on a
@@ -219,6 +219,17 @@ Closure inspection and execution are fenced against both repository and scope re
 failure is recoverable by reconnecting/updating the runner; closure remains refused until synchronization.
 GitHub credentials, governance, and the independent exact issue-closure decision remain authoritative;
 Custom closure approval is human-owned.
+
+A closure in another campaign repository (#4119) names it with `repository`; the root stays the requester.
+The issue is inspected and closed on the runner of the first of that repository's Locations that is in the
+campaign's Project and online at v323 or later, in that Location's path, with that runner's own forge login.
+That runner holds no copy of the campaign's scope, so it can't reread it at its mutation fence as the root's
+runner does. Its `execute` runs every forge check and answers `prepared`; the control plane then rechecks the
+scope, the boundary, the active children, the evidence digest and the Location's path, and only then sends
+`commit`. Without a commit in time, nothing is written. The runner fences what only it can see: the checkout's
+origin, the forge digest, and one durable attempt record per occurrence. A repository that is not one of the campaign's is refused before anything is inspected, and
+an owner's approved `campaign_repository_addition` is the way in. A scope change whose changed repository is
+not the closure's still invalidates it, as it always has.
 
 Campaign GitHub operations support validated local and SSH host targets belonging to the runner.
 Container and cloud placements are unsupported. A target refusal is reported separately from origin

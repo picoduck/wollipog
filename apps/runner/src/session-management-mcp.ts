@@ -441,7 +441,7 @@ async function pullRequestWatchCompatibilityError(deps: McpDeps): Promise<ToolRe
     : controlPlaneUpdateRequired(needsNewerWollipog("Merge-queue watches need"), required, actual);
 }
 
-async function issueClosureCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+async function issueClosureCompatibilityError(deps: McpDeps, repository?: unknown): Promise<ToolResult | null> {
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
     const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
@@ -449,8 +449,12 @@ async function issueClosureCompatibilityError(deps: McpDeps): Promise<ToolResult
     actual = compatibility.data?.protocolVersion;
   }
   const required = RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueClosure;
-  return Number.isInteger(actual) && actual! >= required
-    ? null : controlPlaneUpdateRequired(needsNewerWollipog("Human-approved issue closure needs"), required, actual);
+  if (!Number.isInteger(actual) || actual! < required) return controlPlaneUpdateRequired(needsNewerWollipog("Human-approved issue closure needs"), required, actual);
+  // #4119: an older control plane would ignore `repository` and inspect the launch repository's
+  // issue with the same number, so the request would be about the wrong issue. Refuse by name.
+  const location = RUNNER_CAPABILITY_MIN_PROTOCOL.locationIssueClosure;
+  return repository !== undefined && actual! < location
+    ? controlPlaneUpdateRequired(needsNewerWollipog("Closing an issue in another campaign repository needs"), location, actual) : null;
 }
 
 /** A pre-v220 control plane would ignore `campaignWorkItemId` and start the child unattributed,
@@ -1612,9 +1616,10 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_github_issue_closure",
-    description: "Propose closing one authorized campaign issue with fresh forge/conflict evidence. Custom requires a human; bounded Full Control additionally requires verified delivery and actual default-branch merges, or a recorded supported not-planned disposition. An in-scope Full Control closure that fails that proof stays a person's, with reason closure_proof_incomplete and proofGaps naming each gap, its work item and pull requests, and the action that would let a new request become Orchestrator-owned and supersede it. An already-closed issue is reported without posting a comment. GitLab issues are supported from runner protocol v249 through the session's glab login: not_planned closes the issue after a note stating 'Closed as not planned: <explanation>' (then the comment), and completed posts the comment as a note only when one is supplied.",
+    description: "Propose closing one authorized campaign issue with fresh forge/conflict evidence. Custom requires a human; bounded Full Control additionally requires verified delivery and actual default-branch merges, or a recorded supported not-planned disposition. An in-scope Full Control closure that fails that proof stays a person's, with reason closure_proof_incomplete and proofGaps naming each gap, its work item and pull requests, and the action that would let a new request become Orchestrator-owned and supersede it. An already-closed issue is reported without posting a comment. GitLab issues are supported from runner protocol v249 through the session's glab login: not_planned closes the issue after a note stating 'Closed as not planned: <explanation>' (then the comment), and completed posts the comment as a note only when one is supplied. repository names the campaign repository the issue belongs to and defaults to the launch repository; the issue is then inspected and closed through a Location of that repository, with that runner's own forge login. A repository that is not one of the campaign's is refused, and an owner's approved addition is the way in.",
     inputSchema: { type: "object", properties: {
       requestId: { type: "string" }, issue: { type: "integer", minimum: 1 },
+      repository: { type: "string", minLength: 1, maxLength: 256 },
       reason: { type: "string", enum: ["completed", "not_planned"] },
       explanation: { type: "string", minLength: 1, maxLength: 4000 },
       evidence: { type: "array", minItems: 1, maxItems: 32, items: { type: "string", minLength: 1, maxLength: 4000 } },
@@ -1623,7 +1628,7 @@ export const TOOLS: McpTool[] = [
     }, required: ["requestId", "issue", "reason", "explanation", "evidence"], additionalProperties: false },
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
-      const compatibility = await issueClosureCompatibilityError(deps);
+      const compatibility = await issueClosureCompatibilityError(deps, args?.repository);
       if (compatibility) return compatibility;
       const result = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/github-issue-closures`, args, deps.requestTimeoutMs ?? 75_000);
       return result.ok ? textResult(result.data) : errorResult(result.message);

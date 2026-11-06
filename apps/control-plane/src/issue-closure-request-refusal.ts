@@ -1,5 +1,6 @@
-import type { CampaignScopeGrantReview, SessionView } from "@wollipog/protocol";
+import { campaignRepositoryLocation, campaignScopeForRepository, type CampaignScopeGrantReview, type SessionView } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
+import { campaignOtherRepository } from "./campaign-authority.js";
 import { issueBoundary } from "./campaign-issue-authority.js";
 import { participantScopeRefusal, scopeCompatibility, scopeParticipants } from "./campaign-issue-scope.js";
 
@@ -53,6 +54,7 @@ export function issueClosureRequestInvalidFields(request: unknown): string[] {
   if (!Array.isArray(r.evidence) || r.evidence.length < 1 || r.evidence.length > 32 ||
       r.evidence.some((item) => !boundedDecisionString(item, 4000))) fields.push("evidence");
   if (r.comment !== undefined && !boundedDecisionString(r.comment, 65_536)) fields.push("comment");
+  if (r.repository !== undefined && campaignRepositoryLocation(r.repository) === null) fields.push("repository");
   return fields;
 }
 
@@ -61,7 +63,7 @@ export function issueClosureRequestInvalid(fields: string[]): IssueClosureReques
     error: `The closure request is malformed: ${fields.join(", ")} ${fields.length === 1 ? "is" : "are"} missing or invalid. ` +
       "A closure needs requestId (up to 256 characters), issue (a positive issue number), reason (completed or not_planned), " +
       "explanation (up to 4000 characters), evidence (1 to 32 items of up to 4000 characters each), and optionally comment " +
-      "(up to 65536 characters). Correct the request and retry; nothing was inspected or requested." };
+      "(up to 65536 characters) and repository (owner/name, or a GitLab project with its host). Correct the request and retry; nothing was inspected or requested." };
 }
 
 /** Why the campaign's issue scope cannot change right now, or null when a scope change can be
@@ -83,13 +85,15 @@ function scopeChangeUnavailable(db: ControlPlaneDb, root: SessionView): string |
  * `grantReview` is the cause `proposeCampaignIssueScope` would give an addition without lineage
  * (the first message's scope grant failed, was uncertain, or asked the campaign to select issues). */
 export function issueClosureScopeRefusal(db: ControlPlaneDb, root: SessionView, issue: number,
-  grantReview?: CampaignScopeGrantReview["cause"]): IssueClosureRequestRefusal | null {
-  const numbers = root.orchestratorPolicy?.issueNumbers ?? [];
-  if (numbers.includes(issue)) return null;
+  grantReview?: CampaignScopeGrantReview["cause"], repository?: string): IssueClosureRequestRefusal | null {
   const scope = root.orchestratorPolicy?.issueScope;
+  // Another repository's issue is read from the repository-qualified scope (#4119).
+  const other = campaignOtherRepository(root, repository);
+  const numbers = other && scope ? campaignScopeForRepository(scope, other).issueNumbers : root.orchestratorPolicy?.issueNumbers ?? [];
+  if (numbers.includes(issue)) return null;
   const revision = scope?.revision ?? 0;
   const code: IssueClosureRequestRefusalCode = numbers.length ? "campaign_issue_outside_scope" : "campaign_issue_scope_missing";
-  const where = scope?.repository ? ` in ${scope.repository}` : "";
+  const where = other ? ` in ${other}` : scope?.repository ? ` in ${scope.repository}` : "";
   const listed = numbers.slice(0, SCOPE_LISTED).map((n) => `#${n}`).join(", ") +
     (numbers.length > SCOPE_LISTED ? `, and ${numbers.length - SCOPE_LISTED} more` : "");
   const refusal = numbers.length

@@ -185,6 +185,9 @@ test(
     await waitForHealth(httpBase, child, () => output);
 
     const lock = inspectionDb = new DatabaseSync(databasePath);
+    // Acquire the fixture’s write intent after any in-flight control-plane writer finishes.
+    // This connection is not the product connection whose bounded contention we test below.
+    lock.exec("PRAGMA busy_timeout=5000");
     const snapshot = { id: "locked-session", workspaceId: "ws", agentId: "claude", driver: "claude-code",
       title: "After lock", status: "idle", useWorktree: false, worktreePath: null, config: {}, preview: null,
       pendingApproval: null, tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, createdAt: now, updatedAt: now };
