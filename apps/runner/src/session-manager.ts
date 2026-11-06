@@ -914,6 +914,8 @@ interface ProviderRetirement {
   parkingGeneration?: number;
   /** The campaign generation whose final checkpoint this retirement fences until it is proven (#3788). */
   campaignGeneration?: string;
+  /** Settles once this retirement's own disposal of the provider returned (true) or threw (false). */
+  disposal: Promise<boolean>;
 }
 
 type ProviderAuthenticationInspectionResult =
@@ -1607,9 +1609,10 @@ export class SessionManager {
   /** Campaign generations of this process's providers that runner shutdown disposed mid-retirement
    * or that exited unproven, awaiting the process-tree reaping that proves them gone (#3788). */
   private readonly shutdownRetirements = new Map<string, Set<string>>();
-  /** Each provider instance that exited by itself, with its campaign generation, awaiting proof that
-   * its whole process tree is gone (#3788). A resumed provider of the same generation adds its own. */
-  private readonly exitRetirements = new Map<string, Map<Driver, string>>();
+  /** Each provider instance that exited by itself (#3788), or whose Stop, park or handoff retirement
+   * completed (#4257), with its campaign generation, awaiting proof that its whole process tree is
+   * gone. A resumed provider of the same generation adds its own. */
+  private readonly treeProofRetirements = new Map<string, Map<Driver, string>>();
   /** Fences an earlier runner process left for a generation this process has providers of again
    * (#3788). Nothing this process proves covers that earlier provider, so they are never lifted. */
   private readonly inheritedFences = new Map<string, string>();
@@ -17318,6 +17321,7 @@ export class SessionManager {
     // Until this exact provider is proven gone, no final checkpoint may name its generation, even
     // from a restarted runner that no longer holds it (#3788).
     const campaignGeneration = this.fenceRetiringProvider(sessionId);
+    let disposed!: (returned: boolean) => void;
     const retirement: ProviderRetirement = {
       client: entry.client,
       entry,
@@ -17329,13 +17333,16 @@ export class SessionManager {
       unconfirmed: false,
       ...(options.parkingGeneration === undefined ? {} : { parkingGeneration: options.parkingGeneration }),
       ...(campaignGeneration === undefined ? {} : { campaignGeneration }),
+      disposal: new Promise<boolean>((resolve) => { disposed = resolve; }),
     };
     this.closing.set(sessionId, retirement);
     if (!entry.client.close) {
       try {
         this.disposeDriver(entry.client, { forceImmediate: true });
+        disposed(true);
         this.completeProviderRetirement(sessionId, retirement);
       } catch (error) {
+        disposed(false);
         retirement.unconfirmed = true;
         this.log(`session ${sessionId} provider retirement remains unconfirmed: ${errText(error)}`);
         // Keep `closing` installed as the exact-client fence, but preserve the synchronous Stop
@@ -17345,8 +17352,12 @@ export class SessionManager {
       return retirement;
     }
     retirement.promise = this.closeAndDispose(sessionId, entry.client, true).then(
-      () => this.completeProviderRetirement(sessionId, retirement),
+      () => {
+        disposed(true);
+        this.completeProviderRetirement(sessionId, retirement);
+      },
       (error) => {
+        disposed(false);
         // No exit proof exists. Retain every ownership boundary until this exact client later
         // reports exit or runner shutdown successfully disposes it.
         retirement.unconfirmed = true;
@@ -17357,11 +17368,21 @@ export class SessionManager {
     return retirement;
   }
 
+  /** Complete the retirement once its disposal returned or its root exited (`rootExited`). That ends
+   * the provider's local ownership, but not its campaign generation's fence: a descendant can
+   * outlive the root, so the fence lifts only on the exact driver's whole-tree proof (#4257). */
   private completeProviderRetirement(
     sessionId: string,
     retirement: ProviderRetirement,
+    rootExited = false,
   ): void {
     if (this.closing.get(sessionId) !== retirement) return;
+    // An allocation delivered while the provider was closing names a generation it must fence too.
+    retirement.campaignGeneration ??= this.fenceRetiringProvider(sessionId);
+    if (!this.shuttingDown && retirement.campaignGeneration !== undefined) {
+      this.awaitProcessTreeProof(sessionId, retirement.client, retirement.campaignGeneration,
+        this.retiredProviderTreeProof(retirement, rootExited));
+    }
     this.closing.delete(sessionId);
     if (retirement.parking) this.parkingSessions.delete(sessionId);
     // Callers suppress inventory refresh between active deletion and closing-fence installation.
@@ -17381,12 +17402,6 @@ export class SessionManager {
       this.awaitShutdownProof(sessionId, retirement.campaignGeneration);
       return;
     }
-    this.clearRetiringProvider(sessionId, retirement.campaignGeneration);
-    const settledMeta=this.store.readMeta(sessionId);
-    // The exact provider has retired, even if Stop interrupted a running turn. Its last usage
-    // callbacks have been persisted; stale in-memory turn flags cannot keep the reservation live.
-    if(!this.active.has(sessionId) && settledMeta?.campaignBudgetDispatch &&
-        ["completed","failed","stopped"].includes(settledMeta.status)) this.emitStatus(sessionId,settledMeta.status,undefined,undefined,undefined,true);
     if (this.pendingDeletions.delete(sessionId)) {
       // Deletion reaps every journal record this session owns, so it supersedes the replay below.
       setImmediate(() => {
@@ -18824,7 +18839,7 @@ export class SessionManager {
     const closing = this.closing.get(sessionId);
     if (closing?.client === expectedClient) {
       try {
-        this.completeProviderRetirement(sessionId, closing);
+        this.completeProviderRetirement(sessionId, closing, true);
       } catch (error) {
         this.log(`provider retirement cleanup failed for ${sessionId}: ${errText(error)}`);
       }
@@ -19018,10 +19033,10 @@ export class SessionManager {
     }
     this.active.clear();
     // An exited provider still awaiting its tree proof is covered by shutdown's reaping too (#3788).
-    for (const [sessionId, providers] of this.exitRetirements) {
+    for (const [sessionId, providers] of this.treeProofRetirements) {
       for (const generation of providers.values()) this.awaitShutdownProof(sessionId, generation);
     }
-    this.exitRetirements.clear();
+    this.treeProofRetirements.clear();
     const shutdownRetirementClients = new Set<Driver>();
     for (const retirement of [...this.closing.values()]) {
       shutdownRetirementClients.add(retirement.client);
@@ -19171,27 +19186,51 @@ export class SessionManager {
   private fenceExitedProvider(sessionId: string, client: Driver): void {
     const generation = this.fenceRetiringProvider(sessionId);
     if (generation === undefined) return;
-    const providers = this.exitRetirements.get(sessionId) ?? new Map<Driver, string>();
+    this.awaitProcessTreeProof(sessionId, client, generation,
+      client.proveProcessTreeExit ? client.proveProcessTreeExit({ terminate: false }) : Promise.resolve(false));
+  }
+
+  /**
+   * The proof that retires a provider whose Stop, park or handoff completed (#4257), under the rule
+   * a provider that exits by itself follows: the killing proof once this retirement's disposal
+   * returned. A disposal that threw leaves only the root's own exit, so only the non-killing proof
+   * that follows it. A driver without a proof never proves it.
+   */
+  private async retiredProviderTreeProof(retirement: ProviderRetirement, rootExited: boolean): Promise<boolean> {
+    const client = retirement.client;
+    if (!client.proveProcessTreeExit) return false;
+    const disposed = await retirement.disposal;
+    if (disposed) return client.proveProcessTreeExit({ terminate: true });
+    return rootExited ? client.proveProcessTreeExit({ terminate: false }) : false;
+  }
+
+  /** Keep `generation` fenced until `proof` shows this exact provider's whole process tree gone, then
+   * attest the final checkpoint. A false or rejected proof keeps the fence until a shutdown reaps
+   * every tree; shutdown takes over any proof still pending. */
+  private awaitProcessTreeProof(sessionId: string, client: Driver, generation: string, proof: Promise<boolean>): void {
+    const providers = this.treeProofRetirements.get(sessionId) ?? new Map<Driver, string>();
     providers.set(client, generation);
-    this.exitRetirements.set(sessionId, providers);
-    const proof = client.proveProcessTreeExit ? client.proveProcessTreeExit({ terminate: false }) : Promise.resolve(false);
+    this.treeProofRetirements.set(sessionId, providers);
     void proof.catch(() => false).then((proven) => {
       // Shutdown took this fence over; its reaping proof decides it.
-      if (this.shuttingDown || this.exitRetirements.get(sessionId)?.get(client) !== generation) return;
+      const current = this.treeProofRetirements.get(sessionId);
+      if (this.shuttingDown || current?.get(client) !== generation) return;
       if (!proven) {
-        this.log(`session ${sessionId} keeps its campaign slot: its exited provider's process tree was not proven gone`);
+        this.log(`session ${sessionId} keeps its campaign slot: its retired provider's process tree was not proven gone`);
         return;
       }
-      providers.delete(client);
-      if (providers.size === 0) this.exitRetirements.delete(sessionId);
+      current.delete(client);
+      if (current.size === 0) this.treeProofRetirements.delete(sessionId);
       try {
         this.clearRetiringProvider(sessionId, generation);
+        // The exact provider has retired, even if Stop interrupted a running turn. Its last usage
+        // callbacks have been persisted; stale in-memory turn flags cannot keep the reservation live.
         const meta = this.store.readMeta(sessionId);
         if (meta && !this.active.has(sessionId) && isTerminal(meta.status)) {
           this.emitStatus(sessionId, meta.status, undefined, undefined, undefined, true);
         }
       } catch (error) {
-        this.log(`exited provider retirement proof failed for ${sessionId}: ${errText(error)}`);
+        this.log(`provider retirement proof failed for ${sessionId}: ${errText(error)}`);
       }
     });
   }
@@ -19200,7 +19239,7 @@ export class SessionManager {
    * exit proof (#3788). */
   private retirementOutstanding(sessionId: string, generation: string): boolean {
     return this.closing.get(sessionId)?.campaignGeneration === generation ||
-      [...this.exitRetirements.get(sessionId)?.values() ?? []].includes(generation);
+      [...this.treeProofRetirements.get(sessionId)?.values() ?? []].includes(generation);
   }
 
   /** Fence the current campaign generation's final checkpoint while one of its providers retires

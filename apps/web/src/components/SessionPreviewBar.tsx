@@ -1,6 +1,6 @@
 import React, { useLayoutEffect, useRef } from "react";
 import type { SessionView } from "@wollipog/protocol";
-import { sessionStatusSummary } from "../status-meta.js";
+import { sessionHeaderStatusSummary } from "../session-row-status.js";
 import { sessionDisplayTitle } from "../session-title.js";
 import { sessionBranchState } from "../worktree-identity.js";
 import { AgentIcon } from "./AgentIcon.js";
@@ -15,7 +15,7 @@ export type PreviewSessionMenuOpener = (anchor: { x: number; y: number }, restor
 /**
  * The Sessions preview's detail bar and meta line (docs/design-system.md §4.3, §11.3; #2210).
  *
- * One 48px row: the one-line title, the session's lifecycle and secondary badges (`sessionStatusSummary()`, the
+ * One 48px row: the one-line title, the session's lifecycle and secondary badges (`sessionHeaderStatusSummary()`, the
  * ranking the session bar uses, with its plain "+N"), then Snooze and Archive as icon buttons, ⋯ for
  * the session's context menu and Open Session last. The preview is a quick look, so there is no back
  * button and the badges are not controls: the session's own bar is where a condition is acted on.
@@ -81,7 +81,7 @@ export function SessionPreviewBar({
     };
   });
   // The row's context: only what a Sessions row also knows, so the two badges agree.
-  const { primary, secondary, more } = sessionStatusSummary(session, { runnerOnline });
+  const { primary, secondary, more } = sessionHeaderStatusSummary(session, { runnerOnline });
   const title = sessionDisplayTitle(session.title);
   const branchState = sessionBranchState(session);
   const branch = branchState.kind === "branch" ? branchState.worktree.branch : null;
