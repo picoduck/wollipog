@@ -241,6 +241,49 @@ prompt and grants nothing: enqueueing, merging and branch deletion keep their ty
 merge requests, older runners and older control planes are refused, so those sessions keep
 blocking waits.
 
+### Tracked Waits and Their Liveness Contracts
+
+Wollipog shows a deliberate wait as Waiting, never as a stall inferred from silence (#1280,
+#4249). Each tracked wait has an explicit liveness contract, and only a broken contract reads as
+Stalled or as an existing concrete failure. Elapsed time alone never does.
+
+- **`wait_session` and `wait_pull_request` calls (protocol 298).** Once a call has waited 15
+  seconds, the runner's MCP server reports it through `POST /api/sessions/:id/waits` (own session
+  credential only). It reports again at most every 15 seconds after a successful poll, and once more
+  when the call returns, fails or is cancelled. A report carries durations (elapsed, remaining and
+  polling interval), never runner timestamps, so every bound is measured on the control plane's
+  clock. The control plane keeps the waits in memory and refuses a report from a session outside a
+  turn, or one that names a session the caller cannot read. It forgets a session's waits when its
+  turn ends, and projects them as `SessionView.waits`. A wait is healthy unless one of these breaks:
+  - *Progress*: a successful poll was reported within three report intervals plus 30 seconds
+    (`3 × max(interval, 15 s) + 30 s`): 75 seconds for `wait_session`, 2 minutes for
+    `wait_pull_request` at its 30-second default. Otherwise the wait is `progress_lost`.
+  - *Target*: the watched session still exists (`target_missing`) and has not sat in a requested
+    state for more than 30 seconds while the wait still runs (`target_reached`). A pull request's
+    state is read only by the runner, so its outcome ends the call itself.
+  - *Deadline*: the call is not still reported in progress 60 seconds past its own timeout
+    (`deadline_passed`).
+
+  A 5-second sweep reclassifies every wait and publishes each change, so the Sessions list, Board,
+  thread rollups and detail header read one server value. Healthy waits show Waiting on Children
+  (a descendant), Waiting on Session or Waiting on Pull Request. A broken one shows Wait Stalled,
+  whose description names the part that broke. A Stalled wait is a warning, not a request, so it
+  adds to no count. An older control plane refuses the report and the runner stops reporting that
+  call; an older dashboard ignores the field and shows the lifecycle.
+- **A parked merge-queue watch (#4071).** Healthy while the watch is `watching` and its runner is
+  connected; a disconnected runner reads Disconnected. It shows Waiting on Merge Queue, then Merge
+  Queue Wake Pending once the watch fired and its wake has not reached the session. A watch no
+  runner can keep reads Merge Queue Watch Lost. A runner that cannot read GitHub for about half an
+  hour reports it lost.
+- **A managed background job.** Healthy while the connected runner still lists it and the session's
+  background work is current: it reads Running however long it has run. A job the runner stops
+  listing without a result reads Unverified, and one a runner restart orphaned reads Lost. Managed
+  jobs declare no deadline. The control plane's one-hour mark (`stalledSince`,
+  `BACKGROUND_JOB_STALL_MS`) is kept only for campaign safety: past it, a job no longer counts as a
+  campaign child's wait (`campaignChildWait`, `sessionsWithLiveBackgroundJobs`), so a monitor that
+  never fires cannot hide a finished report. Held results keep their own one-hour Result Blocked
+  bound. Neither is shown as a Stalled job.
+
 A GitLab merge request (#3602) is waited on through the local `glab` login instead, with the same
 timeout, interval, budget, and read-only contract. Give it as a merge request URL,
 `<gitlab-host>/group/project!IID`, or an IID with `--repo <gitlab-host>/group/project`; the host is

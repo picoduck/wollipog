@@ -326,7 +326,7 @@ export function BackgroundWorkPanel({
     // Lost (#2859): the runner restarted under a running job, so its result can't come back. The
     // person can ask the agent to run it again from its turn; there is no Rerun.
     const lostJobs = jobs.filter((job) =>
-      backgroundJobCurrentState(job, aggregateState, runnerOnline, inventorySupported, now) === "lost");
+      backgroundJobCurrentState(job, aggregateState, runnerOnline, inventorySupported) === "lost");
     const title = lostJobs.length > 1 ? `Lost Track of ${lostJobs.length} Background Jobs` : "Lost Track of a Background Job";
     const lostTurns = [...new Set(lostJobs.map((job) => job.parentTurnId))];
     const viewTurn = lostTurns.length === 1 && turnViewable(lostTurns[0]!) ? lostTurns[0]! : null;
@@ -407,7 +407,7 @@ export function BackgroundWorkPanel({
   const historicalRecovery = historicalBackgroundResultRecovery(session);
   const groupViews = groups.map((group, groupIndex) => {
     const states = new Map(group.jobs.map((job) => [job.id, backgroundJobCurrentState(
-      job, session.backgroundWorkState, runnerOnline, inventorySupported, now)] as const));
+      job, session.backgroundWorkState, runnerOnline, inventorySupported)] as const));
     return {
       group,
       groupIndex,
@@ -567,7 +567,7 @@ export function BackgroundWorkPanel({
                   </li>
                 )) : group.jobs.map((job) => {
                   const state = states.get(job.id)!;
-                  const running = state === "running" || state === "stalled";
+                  const running = state === "running";
                   const end = job.terminalObservedAt ?? (running ? now : job.lastObservedAt);
                   const unfinishedSiblings = Math.max(0, counts.total - counts.finished - (job.terminalStatus ? 0 : 1));
                   const pageKey = backgroundJobPageKey(job.id);
