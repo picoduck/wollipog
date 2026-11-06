@@ -5698,12 +5698,18 @@ app.post("/api/sessions/:id/project", async (req, reply) => {
       error: "Project management permission or personal session ownership is required",
     });
   }
-  return respond(reply, svc.setProject(
+  const existingLocations = new Set(body.linkLocation && typeof body.projectId === "string"
+    ? (db.getProject(body.projectId)?.locations ?? []).map((location) => location.id) : []);
+  const moved = svc.setProject(
     id,
     body.projectId as string | null,
     principal.userId,
     { linkLocation: body.linkLocation },
-  ));
+  );
+  // A Location this move added is a Location added to the Project, as Add Location's are (#4117).
+  const linkedLocationId = body.linkLocation && moved.ok ? moved.data?.projectLocationId : null;
+  if (linkedLocationId && !existingLocations.has(linkedLocationId)) void campaignLocations.locationAdded(linkedLocationId, principal);
+  return respond(reply, moved);
 });
 
 app.post("/api/sessions/:id/stop", async (req, reply) =>
