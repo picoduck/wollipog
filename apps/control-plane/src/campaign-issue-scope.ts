@@ -145,12 +145,20 @@ export function scopeView(db: ControlPlaneDb, root: SessionView, repository: str
 export function scopeRequestOutsideBoundary(root: SessionView, request: CampaignIssueScopeRequest): string | null {
   const allowed = new Set(campaignScopeRepositories(root).map((entry) => entry.repository));
   if (!allowed.size || !request || !Array.isArray(request.additions) || !Array.isArray(request.removals)) return null;
-  for (const ref of [...request.additions, ...request.removals]) {
+  const epic = request.lineage?.kind === "epic" && request.lineage.repository !== undefined ? [{ repository: request.lineage.repository }] : [];
+  for (const ref of [...request.additions, ...request.removals, ...epic]) {
     if (ref && typeof ref.repository === "string" && campaignRepositoryLocation(ref.repository) && !allowed.has(ref.repository.toLowerCase())) {
       return ref.repository.toLowerCase();
     }
   }
   return null;
+}
+
+/** An epic's lineage names its repository in lower case, and only outside the launch repository. */
+function canonicalLineage(lineage: NonNullable<CampaignIssueScopeRequest["lineage"]>, launch: string): NonNullable<CampaignIssueScopeRequest["lineage"]> {
+  if (lineage.kind !== "epic" || typeof lineage.repository !== "string") return lineage;
+  const { repository, ...rest } = lineage;
+  return repository.toLowerCase() === launch ? rest : { ...rest, repository: repository.toLowerCase() };
 }
 
 /** The exact change, grouped by repository (#4118): `repository` is the launch repository, whose
@@ -205,7 +213,7 @@ export function scopeSnapshot(db: ControlPlaneDb, root: SessionView, repository:
   return normalizeCampaignIssueScopeSnapshot({ category: "campaign_issue_scope", repository: launch, expectedRevision: request.expectedRevision,
     before: own!.before, additions: own!.additions, removals: own!.removals, ...(others.length ? { otherRepositories: others } : {}),
     explanation: request.explanation, affectedAssignments, affectedDecisions, activeChildren,
-    ...(request.lineage === undefined ? {} : { lineage: request.lineage }),
+    ...(request.lineage === undefined ? {} : { lineage: canonicalLineage(request.lineage, launch) }),
     ...(proposal.scopeProposal ? { scopeProposal: proposal.scopeProposal } : {}),
     ...(proposal.issueAdmission ? { issueAdmission: proposal.issueAdmission } : {}) });
 }

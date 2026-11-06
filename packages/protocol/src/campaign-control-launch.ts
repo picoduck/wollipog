@@ -1,5 +1,5 @@
 import type {
-  CampaignAuthorityBoundary, CampaignAuthorityOperation, ControlledReviewCapability, CreateSessionRequest,
+  CampaignAuthorityBoundary, CampaignAuthorityOperation, CampaignIssueRef, ControlledReviewCapability, CreateSessionRequest,
   OrchestratorCampaignPolicy, ResourceScope, SessionConfig, SessionLaunchSpec,
 } from "./index.js";
 
@@ -24,6 +24,8 @@ export interface CampaignLaunchProposal {
   /** Verified Project repositories (#4117); the first entry's repository is `repository`. */
   repositories?: CampaignAuthorityBoundary["repositories"];
   issueNumbers: number[];
+  /** Issues in the boundary's other repositories (#4118), each read through a Location of its own. */
+  otherIssues?: CampaignIssueRef[];
   objective: string;
   operations: CampaignAuthorityBoundary["operations"];
   delegatablePolicyIds: string[];
@@ -59,6 +61,9 @@ export interface FullControlLaunchRequest {
    * task-only boundary, and its owner's first message sets the objective and issue scope. */
   task?: string;
   issueNumbers?: number[];
+  /** Issues in the Project's other repositories (#4118). Like `issueNumbers`, they become the scope
+   * and its epics, so a person's launch is what authorizes an epic in another repository. */
+  otherIssues?: CampaignIssueRef[];
   overrides?: FullControlLaunchOverrides;
   /** Admission only: caller idempotency key and the exact digest the Human reviewed. */
   requestId?: string;
@@ -99,6 +104,9 @@ export interface CampaignLaunchInspectionMessage {
   /** Also report each of `issueNumbers` as `issueFacts` (#4118): sent only to a runner with
    * `locationIssueFacts`, and an older one refuses it as invalid. */
   facts?: true;
+  /** Resolve this epic's members as `candidates` (#4118), with no `issueNumbers`: sent only to a
+   * v317 runner, and an older one refuses it as invalid. */
+  epic?: number;
 }
 
 export const CAMPAIGN_LAUNCH_INSPECTION_ERRORS = {
@@ -128,6 +136,8 @@ export interface CampaignLaunchInspectionResult {
   digest?: string;
   /** Each requested number's bounded facts, with a pull request reported rather than refused. */
   issueFacts?: import("./index.js").CampaignIssueFacts[];
+  /** The asked-for epic and its members. */
+  candidates?: NonNullable<import("./index.js").CampaignIssueScopeView["candidates"]>;
   error?: string;
   failure?: CampaignLaunchInspectionFailure;
   /** Set when the inspection stopped because its request was cancelled. Never admits a launch. */
@@ -160,6 +170,7 @@ export interface CampaignLaunchSummary {
   /** Project Locations left out of the boundary, each with its fixed reason. They never block launch. */
   excludedLocations?: import("./project-location-inspection.js").CampaignExcludedLocation[];
   issueNumbers: number[];
+  otherIssues?: CampaignIssueRef[];
   objective: string;
   root: { agentId: string; driver: string; model: string | null; effort: string | null;
     isolation: { mode: string; network: string } | null; strictProjectIsolation: boolean; integrationIsolation: boolean;

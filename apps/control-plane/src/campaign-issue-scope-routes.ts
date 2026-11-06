@@ -25,7 +25,8 @@ app.get("/api/sessions/:id/campaign/issue-scope", async (req, reply) => {
   }
   const epicRaw = (req.query as { epic?: string }).epic;
   const epic = epicRaw === undefined ? undefined : /^[1-9][0-9]*$/u.test(epicRaw) ? Number(epicRaw) : Number.NaN;
-  const result = await svc.campaignIssueScope(id, epic, (sessionId) => db.canAccessSession(principal, sessionId));
+  const repository = (req.query as { repository?: string }).repository;
+  const result = await svc.campaignIssueScope(id, epic, (sessionId) => db.canAccessSession(principal, sessionId), true, repository);
   if (result.ok && result.data) result.data.canPropose = principal.kind !== "agent" && principal.role !== "viewer" && db.isSessionOwner(principal, rootId);
   return respond(reply, result);
 });

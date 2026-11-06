@@ -59,6 +59,27 @@ test("a facts inspection reports each issue's bounded facts, a pull request incl
   } finally { await rm(path, { recursive: true, force: true }); }
 });
 
+test("an epic inspection returns the epic and its members, with no issue list to match (#4118)", async () => {
+  const path = await mkdtemp(join(tmpdir(), "campaign-launch-inspection-"));
+  try {
+    const run = async (_cwd: string, command: string, args: string[]) => {
+      if (command === "git") return args[0] === "remote" ? "https://github.com/owner/api.git" : args.includes("--is-inside-work-tree") ? "true" : "a".repeat(40);
+      if (args.at(-1)!.includes("/sub_issues")) return JSON.stringify([{ number: 41, title: "Member", html_url: "https://github.com/owner/api/issues/41" }]);
+      return JSON.stringify({ number: 40, title: "Epic", body: "", state: "open", html_url: "https://github.com/owner/api/issues/40", labels: [], assignees: [] });
+    };
+    const result = await inspectCampaignLaunch({ type: "campaign_launch_inspect", requestId: "epic-1", workspaceId: "w", issueNumbers: [], epic: 40 }, [{ id: "w", path }], run);
+    assert.equal(result.ok, true, result.error ?? "");
+    assert.deepEqual(result.issueNumbers, []);
+    assert.deepEqual(result.candidates!.map((c) => [c.issue.repository, c.issue.number, c.source]), [["owner/api", 40, "umbrella"], ["owner/api", 41, "sub_issue"]]);
+    const plain = await inspectCampaignLaunch({ type: "campaign_launch_inspect", requestId: "epic-2", workspaceId: "w", issueNumbers: [] }, [{ id: "w", path }], run);
+    assert.equal(plain.candidates, undefined, "only a caller that asked gets candidates");
+    for (const invalid of [{ epic: 0, issueNumbers: [] }, { epic: 40, issueNumbers: [1] }, { epic: 40, issueNumbers: [], facts: true }]) {
+      const refused = await inspectCampaignLaunch({ type: "campaign_launch_inspect", requestId: "epic-3", workspaceId: "w", ...invalid } as CampaignLaunchInspectionMessage, [{ id: "w", path }], run);
+      assert.equal(refused.failure, "invalid_request");
+    }
+  } finally { await rm(path, { recursive: true, force: true }); }
+});
+
 test("inspection errors cannot expose credential-bearing origin or environment diagnostics", async () => {
   const result = await inspectCampaignLaunch({ type: "campaign_launch_inspect", requestId: "read-1", workspaceId: "w", issueNumbers: [1] }, [{ id: "w", path: tmpdir() }],
     async () => { throw new Error("https://secret:token@github.com/owner/repo PRIVATE_ENV=value"); });

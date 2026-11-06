@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import {
-  CAMPAIGN_LAUNCH_INSPECTION_ERRORS, campaignAuthorityPreflight, campaignRepositoryLocation, runnerSupportsProtocol, validCampaignControl,
+  CAMPAIGN_LAUNCH_INSPECTION_ERRORS, campaignAuthorityPreflight, campaignRepositoryLocation, canonicalCampaignIssues, runnerSupportsProtocol, validCampaignControl,
   FULL_CONTROL_EVIDENCE_EXCEPTIONS, FULL_CONTROL_HUMAN_REQUIRED_LABELS, FULL_CONTROL_STANDING_HUMAN_REQUIRED_REASON,
   FULL_CONTROL_DECLINED_NOTE, fullControlStandingHumanRequired,
   CAMPAIGN_EVIDENCE_PROVIDER_DISCLOSURE_REVISION, CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE,
@@ -15,7 +15,7 @@ import type { UiEvidenceReviewEvaluation } from "./ui-evidence-review.js";
 import { launchBoundaryRepositories, type CampaignProjectLocation } from "./campaign-repository-boundary.js";
 import { issueReferenceSpans, MAX_MESSAGE_ISSUES } from "./first-message-issue-intent.js";
 
-const keys = ["repository", "repositories", "issueNumbers", "objective", "operations", "delegatablePolicyIds", "issueAuthority", "budgetAuthority"];
+const keys = ["repository", "repositories", "issueNumbers", "otherIssues", "objective", "operations", "delegatablePolicyIds", "issueAuthority", "budgetAuthority"];
 
 /** The derived default: every operation Full Control can own. Overrides may only narrow it. */
 export const FULL_CONTROL_LAUNCH_OPERATIONS: readonly CampaignAuthorityOperation[] = [
@@ -31,8 +31,10 @@ export function parseCampaignLaunchProposal(value: unknown): CampaignLaunchPropo
       !Array.isArray(p.issueNumbers) || p.issueNumbers.length > 100 ||
       p.issueNumbers.some((n) => !Number.isSafeInteger(n) || n < 1) || new Set(p.issueNumbers).size !== p.issueNumbers.length ||
       typeof p.repository !== "string" || p.repository !== p.repository.trim() ||
-      !p.issueAuthority || p.issueAuthority.maxIssues < p.issueNumbers.length ||
+      (p.otherIssues !== undefined && !canonicalCampaignIssues(p.otherIssues)?.length) ||
+      !p.issueAuthority || p.issueAuthority.maxIssues < p.issueNumbers.length + (p.otherIssues?.length ?? 0) ||
       !Array.isArray(p.issueAuthority.epics) || !p.issueAuthority.epics.every((n) => p.issueNumbers.includes(n)) ||
+      JSON.stringify(p.issueAuthority.otherEpics ?? []) !== JSON.stringify(p.otherIssues ?? []) ||
       !p.budgetAuthority || p.budgetAuthority.concurrency === undefined || p.budgetAuthority.acceptedFollowUps === undefined ||
       p.budgetAuthority.concurrency > 64) return null;
   // Reuse the foundation's exact schema validation. This temporary validation value is never
@@ -58,8 +60,9 @@ const text = (value: unknown, max: number) => typeof value === "string" && value
 /** Strict shape check only. Values become authority solely through the derived proposal, which
  * the foundation schema validates again, and one explicit Human authorization. */
 export function parseFullControlLaunchRequest(value: unknown, admit: boolean): FullControlLaunchRequest | null {
-  if (!record(value) || !only(value, ["runnerId", "workspaceId", "projectId", "projectLocationId", "task", "issueNumbers", "overrides", "requestId", "preflightDigest"])) return null;
+  if (!record(value) || !only(value, ["runnerId", "workspaceId", "projectId", "projectLocationId", "task", "issueNumbers", "otherIssues", "overrides", "requestId", "preflightDigest"])) return null;
   const r = value as unknown as FullControlLaunchRequest;
+  if (r.otherIssues !== undefined && !canonicalCampaignIssues(r.otherIssues)) return null;
   if (!text(r.runnerId, 256) || !text(r.workspaceId, 256) ||
       (r.projectId != null && !text(r.projectId, 256)) || (r.projectLocationId != null && !text(r.projectLocationId, 256)) ||
       (r.task !== undefined && !text(r.task, 4000)) ||
@@ -110,8 +113,8 @@ export function awaitsFirstMessage(policy: Pick<OrchestratorCampaignPolicy, "fir
 }
 
 /** A launch that names no task, issues or objective: the owner's first message supplies them (#2940). */
-export function firstMessageLaunch(request: Pick<FullControlLaunchRequest, "task" | "issueNumbers" | "overrides">): boolean {
-  return request.task === undefined && !request.issueNumbers?.length && request.overrides?.objective === undefined;
+export function firstMessageLaunch(request: Pick<FullControlLaunchRequest, "task" | "issueNumbers" | "otherIssues" | "overrides">): boolean {
+  return request.task === undefined && !request.issueNumbers?.length && !request.otherIssues?.length && request.overrides?.objective === undefined;
 }
 
 /** Issue references in the owner's first message that name the campaign's own repository (see
@@ -264,6 +267,8 @@ export interface CampaignLaunchFacts {
   /** Enabling Full Control on an existing campaign: its Human-established issue scope stands in for
    * the workspace inspection. `authorizedByCaller` is false when another person established it. */
   campaignScope?: { repository: string; issueNumbers: number[]; authorizedByCaller: boolean } | null;
+  /** The request's `otherIssues` were each read through a Location of their own repository (#4118). */
+  otherIssuesRead?: boolean;
   /** Enabling on an existing campaign: a live participant already holds its own cost or tool limit. */
   participantCeiling?: boolean;
   /** A launch in a Project (#4117): its active Locations in Project order and each one's own
@@ -334,11 +339,18 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   const boundary = repository && !campaignScope && facts.projectLocations &&
     runnerSupportsProtocol(runner.protocolVersion, "campaignRepositoryBoundary")
     ? launchBoundaryRepositories({ launchRepository: repository, ...facts.projectLocations }) : null;
-  const locationName = new Map(facts.projectLocations?.locations.map((location) => [location.id, location.name]) ?? []);
+  // Issues the launch names in the Project's other repositories (#4118): each read through a Location
+  // of its own, on a root that keeps its own repository's part of a multi-repository scope. Like
+  // `issueNumbers`, the person's launch authorizes them as the scope and its epics.
+  const otherIssues = campaignScope ? [] : canonicalCampaignIssues(request.otherIssues ?? []) ?? [];
+  const otherIssuesVerified = !otherIssues.length || Boolean(facts.otherIssuesRead && boundary &&
+    runnerSupportsProtocol(runner.protocolVersion, "repositoryQualifiedIssueScope") &&
+    otherIssues.every((issue) => issue.repository !== repository && boundary.repositories.some((entry) => entry.repository.toLowerCase() === issue.repository)));
+  const locationName =new Map(facts.projectLocations?.locations.map((location) => [location.id, location.name]) ?? []);
 
   const acceptedFollowUps = overrides.budget?.acceptedFollowUps ??
-    (behavior.followUps === "execute_approved" ? Math.min(MAX_DERIVED_FOLLOW_UPS, Math.max(1, issueNumbers.length)) : 0);
-  const concurrency = overrides.budget?.concurrency ?? behavior.maximumConcurrentChildren;
+    (behavior.followUps === "execute_approved" ? Math.min(MAX_DERIVED_FOLLOW_UPS, Math.max(1, issueNumbers.length + otherIssues.length)) : 0);
+  const concurrency =overrides.budget?.concurrency ?? behavior.maximumConcurrentChildren;
   // The envelope is a Human amount: this request's override or the Human's saved Full Control
   // default. Saved per-session limits (root ceilings, Project child-session defaults) are tighter
   // ceilings, never the envelope, and controlled review refuses to run under them.
@@ -350,10 +362,11 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   const ceiling = costUsd !== undefined || toolCalls !== undefined;
   const budgetSource = !ceiling ? "unset" as const : overridden ? "override" as const : "saved_defaults" as const;
   const relatedFollowUps = overrides.issues?.relatedFollowUps ?? behavior.followUps === "execute_approved";
-  const maxIssues = overrides.issues?.maxIssues ?? Math.min(100, Math.max(1, issueNumbers.length + acceptedFollowUps));
+  const maxIssues = overrides.issues?.maxIssues ?? Math.min(100, Math.max(1, issueNumbers.length + otherIssues.length + acceptedFollowUps));
   const closureReasons = overrides.issues?.closureReasons ?? ["completed" as const];
-  const objective = overrides.objective ?? request.task?.trim() ?? (issueNumbers.length
-    ? `Deliver ${repository ?? "the selected repository"} ${issueNumbers.map((n) => `#${n}`).join(", ")}.`
+  const otherNames = otherIssues.map((issue) => `${issue.repository}#${issue.number}`);
+  const objective = overrides.objective ?? request.task?.trim() ?? (issueNumbers.length || otherNames.length
+    ? `Deliver ${[...(issueNumbers.length ? [`${repository ?? "the selected repository"} ${issueNumbers.map((n) => `#${n}`).join(", ")}`] : []), ...otherNames].join(", ")}.`
     : FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE);
   const advertisedReview = runner.runtime?.campaignReview;
   const reviewOwnerScope = plan.scope.owner.kind === "user";
@@ -371,8 +384,9 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   const delegatablePolicyIds = overrides.delegatablePolicyIds ?? [];
 
   const proposal = repository ? parseCampaignLaunchProposal({
-    repository, ...(boundary ? { repositories: boundary.repositories } : {}), issueNumbers, objective, operations, delegatablePolicyIds,
-    issueAuthority: { epics: issueNumbers, relatedFollowUps, maxIssues, closureReasons },
+    repository, ...(boundary ? { repositories: boundary.repositories } : {}), issueNumbers, ...(otherIssues.length ? { otherIssues } : {}),
+    objective, operations, delegatablePolicyIds,
+    issueAuthority: { epics: issueNumbers, ...(otherIssues.length ? { otherEpics: otherIssues } : {}), relatedFollowUps, maxIssues, closureReasons },
     budgetAuthority: { version: 1, ...(costUsd !== undefined ? { costUsd } : {}), ...(toolCalls !== undefined ? { toolCalls } : {}),
       concurrency, acceptedFollowUps,
       ...(overrides.budget?.checkpointsUsd?.length ? { checkpointsUsd: overrides.budget.checkpointsUsd } : {}),
@@ -383,13 +397,15 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   const add = (id: CampaignLaunchCapability["id"], capability: string, state: CampaignLaunchCapability["state"], reason: string, mandatory = true) =>
     capabilities.push({ id, capability, state, reason, mandatory });
 
-  add("repository_scope", "Repository and Issue Scope", verified ? "verified" : "unsupported", campaignScope ? verified
+  add("repository_scope", "Repository and Issue Scope", verified && otherIssuesVerified ? "verified" : "unsupported", verified && !otherIssuesVerified
+    ? "An issue this launch names in another repository could not be read through a Location of that repository in this Project. Check that a Location of each repository is online on an up-to-date runner, or leave the issue out."
+    : campaignScope ? verified
     ? `This campaign's Human-established scope is ${repository}${issueNumbers.length ? ` with issues ${issueNumbers.map((n) => `#${n}`).join(", ")}` : " with no issues yet"}.`
     : !campaignScope.authorizedByCaller ? "Only the person who established this campaign's issue scope can enable Full Control for it."
     : !campaignScope.repository ? "The runner could not verify this campaign's repository; check that the runner is online and the origin is github.com."
     : "This campaign's issue scope is not repository-qualified; establish its scope first."
     : verified
-    ? `The registered workspace's origin is ${repository}${issueNumbers.length ? ` and issues ${issueNumbers.map((n) => `#${n}`).join(", ")} were read from it` : "; no issues were selected, so the campaign starts with an empty issue scope"}.`
+    ? `The registered workspace's origin is ${repository}${issueNumbers.length ? ` and issues ${issueNumbers.map((n) => `#${n}`).join(", ")} were read from it` : otherNames.length ? "" : "; no issues were selected, so the campaign starts with an empty issue scope"}.${otherNames.length ? ` ${otherNames.join(", ")} were read through their own Locations.` : ""}`
     : inspection?.cancelled ? "The workspace inspection was cancelled before it finished; refresh the preflight."
     : inspectionVersion < 3 ? "This runner cannot inspect the authorized project location; update the runner."
     : inspection?.failure && Object.hasOwn(CAMPAIGN_LAUNCH_INSPECTION_ERRORS, inspection.failure)
@@ -477,7 +493,7 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
         locations: entry.locationIds.map((locationId) => ({ locationId, name: locationName.get(locationId) ?? locationId })) })),
       excludedLocations: boundary.excluded,
     } : {}),
-    issueNumbers, objective,
+    issueNumbers, ...(otherIssues.length ? { otherIssues } : {}), objective,
     root: { agentId: plan.agentId, driver: plan.driver, model: plan.config.model ?? null, effort: plan.config.effort ?? null,
       isolation: isolation ? { mode: isolation.mode, network: isolation.network } : null,
       strictProjectIsolation: plan.policy.execution.strictProjectIsolation, integrationIsolation: plan.policy.execution.integrationIsolation,

@@ -288,6 +288,9 @@ export function validIssueLineage(value: unknown): boolean {
   if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
   if (v.kind === "selection") return Object.keys(v).length === 1;
-  return Object.keys(v).length === 2 && (v.kind === "epic" && Number.isSafeInteger(v.epic) && (v.epic as number) > 0 ||
-    v.kind === "follow_up" && typeof v.publicationOccurrenceId === "string" && v.publicationOccurrenceId.length > 0 && v.publicationOccurrenceId.length <= 256);
+  // An epic's `repository` names one outside the launch repository (#4118).
+  if (v.kind === "epic") return Object.keys(v).every((key) => ["kind", "epic", "repository"].includes(key)) && Number.isSafeInteger(v.epic) && (v.epic as number) > 0 &&
+    (v.repository === undefined || typeof v.repository === "string" && campaignRepositoryLocation(v.repository) !== null);
+  return Object.keys(v).length === 2 &&
+    v.kind === "follow_up" && typeof v.publicationOccurrenceId === "string" && v.publicationOccurrenceId.length > 0 && v.publicationOccurrenceId.length <= 256;
 }

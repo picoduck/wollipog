@@ -68,7 +68,7 @@ import {
   REVIEW_FULL_REASON_LIMIT, REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
   compactReviewFinding, REVIEW_ROUND_REFUSALS, type ReviewLaunchPolicy, type ReviewSessionRequest, type ReviewSessionUpdate, type ReviewSessionView, type ReviewSessionsPage,
   type PullRequestWatchOutcome, type PullRequestWatchUpdate, type PullRequestWatchView, type SessionWaitView,
-  campaignScopeForRepository, campaignScopeChangeGroups, campaignScopeChangeResult, campaignScopeHolds, campaignScopeIssues, type CampaignIssueScopeRepositoryView,
+  campaignBoundaryEpics, campaignScopeForRepository, campaignScopeChangeGroups, campaignScopeChangeResult, campaignScopeHolds, campaignScopeIssues, type CampaignIssueScopeRepositoryView,
   CAMPAIGN_ISSUE_SCOPE_MAX, canonicalCampaignIssues, type CampaignIssueRef,
 } from "@wollipog/protocol";
 import { SESSION_REVIEW_JOB_ID_PATTERN, type SessionReviewJobArtifacts, type SessionReviewJobRequest, type SessionReviewJobView, type SessionReviewJobsPage,
@@ -11873,10 +11873,21 @@ export class SessionsService {
         c.issue.repository.toLowerCase() === publication.repository && c.title === publication.sanitizedTitle));
   }
 
-  async campaignIssueScope(sessionId: string, epic?: number, canAccess: (id: string) => boolean = () => true, resolveInitialEpic = true): Promise<ServiceResult<CampaignIssueScopeView>> {
+  /** `repository` names the epic's repository, defaulting to the launch repository (#4118). An epic
+   * in another boundary repository is read through a Location of its own, and a repository outside
+   * the boundary is refused before any runner call. */
+  async campaignIssueScope(sessionId: string, epic?: number, canAccess: (id: string) => boolean = () => true, resolveInitialEpic = true,
+    repository?: string): Promise<ServiceResult<CampaignIssueScopeView>> {
     const rootId = this.db.campaignRootForMember(sessionId);
     const found = rootId ? this.db.getSession(rootId) : null;
     if (!found?.orchestratorPolicy || !canAccess(found.id)) return fail("campaign not found", 404);
+    if (repository !== undefined && (epic === undefined || !campaignRepositoryLocation(repository))) return fail("repository must be owner/name, with an epic", 400);
+    const epicRepository = repository?.toLowerCase();
+    const otherEpic = epicRepository !== undefined && epicRepository !== campaignLaunchRepository(found);
+    if (otherEpic && !campaignScopeRepositories(found).some((entry) => entry.repository === epicRepository)) {
+      const refusal = repositoryOutsideBoundary(epicRepository);
+      return { ok: false, status: refusal.status, error: refusal.error, errorDetails: refusal.errorDetails };
+    }
     // Reading the scope starts a pre-upgrade campaign's seed too (#4258), so Campaign Status shows it.
     const root = this.seedPreUpgradeCampaign(found);
     if (!root.orchestratorPolicy) return fail("campaign not found", 404);
@@ -11890,7 +11901,8 @@ export class SessionsService {
     });
     try {
       const requestId = `issue_scope_inspect_${randomUUID()}`;
-      const seed = epic ?? (resolveInitialEpic && !stored ? root.orchestratorPolicy.issueScopeProposalEpic : undefined);
+      if (epic !== undefined && (!Number.isSafeInteger(epic) || epic < 1)) return fail("epic must be a positive issue number", 400);
+      const seed = otherEpic ? undefined : epic ?? (resolveInitialEpic && !stored ? root.orchestratorPolicy.issueScopeProposalEpic : undefined);
       if (seed !== undefined && (!Number.isSafeInteger(seed) || seed < 1)) return fail("epic must be a positive issue number", 400);
       let response = await this.hub.requestFromRunner(root.runnerId, requestId,
         { type: "campaign_issue_scope", operation: "inspect", requestId, sessionId: root.id, ...(seed === undefined ? {} : { epic: seed }) }, 60_000);
@@ -11910,7 +11922,12 @@ export class SessionsService {
       // #3539: a GitLab repository needs every participating runner to read GitLab issues.
       const gitlab = gitlabIssueCompatibility(this.db, root, response.repository);
       if (gitlab) return ok({ ...scopeView(this.db, root, response.repository.toLowerCase()), supported: false, ...compatibilityFields(gitlab) });
-      return ok({ ...scopeView(this.db, root, response.repository.toLowerCase(), this.scopeRepositoryStates(root, response.repository)), candidates: response.candidates ?? [], ...(candidateMessage ? {candidateMessage} : {}) });
+      const view = scopeView(this.db, root, response.repository.toLowerCase(), this.scopeRepositoryStates(root, response.repository));
+      if (otherEpic) {
+        const members = await this.readScopeRepositoryEpic(root, epicRepository, epic!);
+        return ok({ ...view, candidates: "candidates" in members ? members.candidates : [], ...("error" in members ? { candidateMessage: members.error } : {}) });
+      }
+      return ok({ ...view, candidates: response.candidates ?? [], ...(candidateMessage ? {candidateMessage} : {}) });
     } catch { return fail("Campaign scope inspection requires an online runner with GitHub access. Reconnect the runner and retry.", 409); }
   }
 
@@ -12044,13 +12061,16 @@ export class SessionsService {
         } else if (additionCount && snapshot.lineage) {
           if (snapshot.lineage.kind === "selection") return refuse("selection_not_granted");
           if (snapshot.lineage.kind === "epic") {
-            if (!boundary.issueAuthority!.epics.includes(snapshot.lineage.epic)) return refuse("epic_not_authorized");
-            // The epic is the launch repository's, so its members are too.
-            if (otherAdditions) return refuse("epic_members_unverified");
-            const members = await this.campaignIssueScope(sessionId, snapshot.lineage.epic, canAccess, false);
-            if (!members.ok || members.data?.candidateMessage || !snapshot.additions.every((n) => members.data?.candidates?.some((c) =>
-              c.issue.number === n && c.issue.repository.toLowerCase() === snapshot.repository && ["umbrella", "sub_issue", "member_checklist"].includes(c.source)))) return refuse("epic_members_unverified");
-            evidence = { epic: snapshot.lineage.epic, members: members.data?.candidates };
+            // The epic and its members are one repository's: its lineage names it, or it is the launch one (#4118).
+            const { epic, repository: named } = snapshot.lineage;
+            const epicRepository = named ?? snapshot.repository;
+            if (!campaignBoundaryEpics(boundary).some((held) => held.repository === epicRepository && held.number === epic)) return refuse("epic_not_authorized");
+            const added = groups.filter((group) => group.additions.length);
+            if (added.some((group) => group.repository !== epicRepository)) return refuse("epic_members_unverified");
+            const members = await this.campaignIssueScope(sessionId, epic, canAccess, false, named);
+            if (!members.ok || members.data?.candidateMessage || !added.every((group) => group.additions.every((n) => members.data?.candidates?.some((c) =>
+              c.issue.number === n && c.issue.repository.toLowerCase() === epicRepository && ["umbrella", "sub_issue", "member_checklist"].includes(c.source))))) return refuse("epic_members_unverified");
+            evidence = { epic, ...(named ? { repository: named } : {}), members: members.data?.candidates };
           } else {
             if (!boundary.issueAuthority!.relatedFollowUps) return refuse("follow_ups_not_authorized");
             if (additionCount !== 1) return refuse("follow_up_not_single");
@@ -12177,6 +12197,21 @@ export class SessionsService {
 
   /** Read one other repository's proposed issues with their facts through its own Location (#4118). A
    * fixed sentence naming the repository when it cannot; nothing is changed either way. */
+  /** An epic in another boundary repository and its members, read through one of its online Locations (#4118). */
+  private async readScopeRepositoryEpic(root: SessionView, repository: string, epic: number):
+    Promise<{ error: string } | { candidates: NonNullable<CampaignIssueScopeView["candidates"]> }> {
+    const locationId = this.onlineScopeLocation(root, repository);
+    if (!locationId) return { error: `No Location of ${repository} is online, so this epic's members can't be read. Retry once one of its Locations is online.` };
+    const inspection = await inspectProjectLocation({ db: this.db, hub: this.hub }, locationId, { epic });
+    if (!inspection.ok && inspection.failure === "runner_too_old") {
+      return { error: `The runner of ${repository}'s Location is too old to read an epic's members. Update and reconnect it, then retry.` };
+    }
+    if (!inspection.ok || inspection.location.repository !== repository || !inspection.candidates) {
+      return { error: `Could not resolve the epic's members in ${repository} through its Location. Check that Location's repository and gh or glab access, and the member list, or enter an explicit set of repository-qualified issues below.` };
+    }
+    return { candidates: inspection.candidates };
+  }
+
   private async readScopeRepositoryFacts(root: SessionView, repository: string, numbers: readonly number[]):
     Promise<{ error: string } | { facts: CampaignIssueFacts[]; runnerId: string; workspaceId: string }> {
     const locationId = this.onlineScopeLocation(root, repository);

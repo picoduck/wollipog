@@ -22,6 +22,8 @@ for (const [name, value] of Object.entries({
   MouseEvent: domWindow.MouseEvent,
   KeyboardEvent: domWindow.KeyboardEvent,
   getComputedStyle: domWindow.getComputedStyle.bind(domWindow),
+  requestAnimationFrame: domWindow.requestAnimationFrame.bind(domWindow),
+  cancelAnimationFrame: domWindow.cancelAnimationFrame.bind(domWindow),
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
@@ -105,6 +107,50 @@ test("a campaign with no context-only references shows neither the row nor the s
     assert.equal("Context-Only References" in facts(host), false);
     assert.equal(contextGroup(host), undefined);
   } finally { await unmount(); }
+});
+
+test("an epic is resolved in the chosen repository, and its members are selected by repository, not number (#4118)", async () => {
+  const resolved = view({ repository: "owner/app", issueNumbers: [5], contextIssueNumbers: undefined,
+    repositories: [{ repository: "owner/app", issueNumbers: [5], state: "verified" }, { repository: "owner/api", issueNumbers: [], state: "verified" }],
+    candidates: [{ issue: { repository: "owner/api", number: 5 }, title: "Same number, another issue", source: "umbrella" }] });
+  const reads: unknown[][] = [];
+  const proposals: CampaignIssueScopeRequest[] = [];
+  const client = { ...api,
+    campaignIssueScope: async (...args: unknown[]) => { reads.push(args); return { ...resolved, candidates: args[1] === undefined ? [] : resolved.candidates }; },
+    proposeCampaignIssueScope: async (_id: string, request: CampaignIssueScopeRequest) => { proposals.push(request); return { status: "pending" } as WorkflowDecisionView; },
+  } as unknown as ApiClient;
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  await act(async () => { root.render(<ApiProvider client={client}><CampaignIssueScopePanel session={{ id: "s_root", orchestratorPolicy: { issueScope: { revision: 2 } } } as unknown as SessionView} campaignId="s_root" /></ApiProvider>); });
+  await settle();
+  try {
+    const label = [...host.querySelectorAll("div.field > span")].find((node) => node.textContent === "Epic Repository");
+    assert.ok(label, "the field is offered only with several repositories");
+    await act(async () => { label!.parentElement!.querySelector("button")!.click(); });
+    await settle();
+    const option = [...document.querySelectorAll<HTMLElement>("[role=option]")].find((item) => item.textContent === "owner/api")!;
+    await act(async () => { option.click(); });
+    const input = [...host.querySelectorAll("label.field")].find((node) => node.textContent?.startsWith("Epic Issue Number"))!.querySelector("input")!;
+    await act(async () => {
+      input.focus();
+      Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")!.set!.call(input, "5");
+      input.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true }) as unknown as Event);
+      input.dispatchEvent(new domWindow.KeyboardEvent("keyup", { bubbles: true }) as unknown as Event);
+    });
+    await settle();
+    await act(async () => { [...host.querySelectorAll("button")].find((button) => button.textContent === "Resolve Epic Members")!.click(); });
+    await settle();
+    assert.deepEqual(reads.at(-1)!.slice(0, 2), ["s_root", 5]);
+    assert.equal(reads.at(-1)![3], "owner/api");
+    // owner/app#5 is held, but owner/api#5 is another issue and stays selectable.
+    const member = [...host.querySelectorAll<HTMLInputElement>("fieldset input[type=checkbox]")][0]!;
+    assert.equal(member.disabled, false);
+    await act(async () => { member.click(); });
+    await act(async () => { [...host.querySelectorAll("button")].find((button) => button.textContent === "Request Scope Approval")!.click(); });
+    await settle();
+    assert.deepEqual(proposals[0]!.additions, [{ repository: "owner/api", number: 5 }]);
+  } finally { await act(async () => root.unmount()); }
 });
 
 test("a multi-repository scope is grouped under Repositories, and a proposal may name any of them (#4118)", async () => {

@@ -2,7 +2,8 @@ import { supportsPacedVideoReviewPeer } from "./paced-video-review.js";
 import { campaignEvidenceAuthorityBound, type CampaignEvidenceAuthority } from "./campaign-evidence-authority.js";
 import { parentControlRequestEligible, runnerCapabilityRequirementError, runnerSupportsProtocol, type RunnerCapabilityRequirementDetails } from "./index.js";
 import { validCampaignBudgetAuthority, type CampaignBudgetAuthority } from "./campaign-budget.js";
-import { campaignRepositoryLocation } from "./campaign-work-ledger.js";
+import { canonicalCampaignIssues } from "./campaign-issue-scope.js";
+import { campaignRepositoryLocation, type CampaignIssueRef } from "./campaign-work-ledger.js";
 import type { CampaignPublicationAdmissionFailure } from "./campaign-issue-publication.js";
 import type { ApprovalContext, GovernancePolicy, ParentControlDecisionPolicy, ParentControlMode, PendingApproval, WorkflowDecisionCategory, WorkflowDecisionResourceSnapshot } from "./index.js";
 
@@ -26,7 +27,12 @@ export interface CampaignAuthorityBoundary {
   delegatablePolicyIds: string[];
   /** Human-established issue-write boundary. Omission preserves human-only scope/closure. */
   issueAuthority?: {
+    /** The authorized epics in the launch repository. A boundary stored before #4118 holds only
+     * these, and they read as that repository's. */
     epics: number[];
+    /** The authorized epics in the boundary's other repositories (#4118), canonical and never
+     * empty. Read every epic through `campaignBoundaryEpics`. */
+    otherEpics?: CampaignIssueRef[];
     relatedFollowUps: boolean;
     maxIssues: number;
     closureReasons: Array<"completed" | "not_planned">;
@@ -61,6 +67,13 @@ export function campaignBoundaryRepository(boundary: Pick<CampaignAuthorityBound
   repository: string): CampaignBoundaryRepository | null {
   const wanted = repository.toLowerCase();
   return campaignBoundaryRepositories(boundary).find((entry) => entry.repository.toLowerCase() === wanted) ?? null;
+}
+
+/** Every epic the boundary authorizes, repository-qualified (#4118), the launch repository's first. */
+export function campaignBoundaryEpics(boundary: Pick<CampaignAuthorityBoundary, "repository" | "issueAuthority">): CampaignIssueRef[] {
+  const repository = boundary.repository.toLowerCase();
+  return [...(boundary.issueAuthority?.epics ?? []).map((number) => ({ repository, number })),
+    ...(boundary.issueAuthority?.otherEpics ?? []).map((issue) => ({ ...issue }))];
 }
 
 function validBoundaryRepositories(value: unknown, repository: string): boolean {
@@ -174,7 +187,7 @@ export function validCampaignControl(value: unknown): value is CampaignControl {
   const bounded = (v: unknown, max: number) => typeof v === "string" && v.trim().length > 0 && v.length <= max && !/[\x00-\x1f\x7f]/u.test(v);
   return Boolean(b && !Array.isArray(b) && b.version === 1 &&
     Object.keys(b).every((key) => ["version", "revision", "issueScopeRevision", "repository", "objective", "authorizedByUserId", "authorizedAt", "operations", "delegatablePolicyIds", "issueAuthority", "budgetAuthority", "evidenceAuthority", "repositories"].includes(key)) &&
-    (b.issueAuthority === undefined || validIssueAuthority(b.issueAuthority)) &&
+    (b.issueAuthority === undefined || validIssueAuthority(b.issueAuthority, b)) &&
     (b.repositories === undefined || typeof b.repository === "string" && validBoundaryRepositories(b.repositories, b.repository)) &&
     (b.budgetAuthority === undefined || validCampaignBudgetAuthority(b.budgetAuthority)) &&
     Number.isSafeInteger(b.revision) && b.revision > 0 && bounded(b.repository, 256) && campaignRepositoryLocation(b.repository) !== null &&
@@ -187,10 +200,20 @@ export function validCampaignControl(value: unknown): value is CampaignControl {
     (b.evidenceAuthority === undefined || campaignEvidenceAuthorityBound(b.evidenceAuthority, b)));
 }
 
-function validIssueAuthority(value: NonNullable<CampaignAuthorityBoundary["issueAuthority"]>): boolean {
-  return Boolean(value && Object.keys(value).every((key) => ["epics", "relatedFollowUps", "maxIssues", "closureReasons"].includes(key)) &&
+/** Another repository's epics: canonical, never empty, and each in a boundary repository other than the launch one. */
+function validOtherEpics(value: unknown, boundary: Pick<CampaignAuthorityBoundary, "repository" | "repositories">): boolean {
+  const canonical = canonicalCampaignIssues(value);
+  if (!canonical?.length || JSON.stringify(canonical) !== JSON.stringify(value) || typeof boundary.repository !== "string") return false;
+  const launch = boundary.repository.toLowerCase();
+  return canonical.every((issue) => issue.repository !== launch && campaignBoundaryRepository(boundary, issue.repository) !== null);
+}
+
+function validIssueAuthority(value: NonNullable<CampaignAuthorityBoundary["issueAuthority"]>,
+  boundary: Pick<CampaignAuthorityBoundary, "repository" | "repositories">): boolean {
+  return Boolean(value && Object.keys(value).every((key) => ["epics", "otherEpics", "relatedFollowUps", "maxIssues", "closureReasons"].includes(key)) &&
     Array.isArray(value.epics) && value.epics.length <= 100 && new Set(value.epics).size === value.epics.length &&
-    value.epics.every((n) => Number.isSafeInteger(n) && n > 0) && typeof value.relatedFollowUps === "boolean" &&
+    value.epics.every((n) => Number.isSafeInteger(n) && n > 0) && (value.otherEpics === undefined || validOtherEpics(value.otherEpics, boundary)) &&
+    typeof value.relatedFollowUps === "boolean" &&
     Number.isSafeInteger(value.maxIssues) && value.maxIssues > 0 && value.maxIssues <= 100 &&
     Array.isArray(value.closureReasons) && new Set(value.closureReasons).size === value.closureReasons.length &&
     value.closureReasons.every((reason) => ["completed", "not_planned"].includes(reason)));

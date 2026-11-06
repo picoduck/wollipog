@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   PROJECT_LOCATION_INSPECTION_FAILURES, supportsPacedVideoReviewPeer, humanRequiredRulesExist, runnerSupportsProtocol, campaignLaunchDisclosure,
+  campaignScopeIssues, campaignScopeWithIssues, canonicalCampaignIssues,
   type CampaignLaunchInspectionResult, type CampaignIssueScope, type PreparedCampaignLaunch, type ProjectLocationInspection,
 } from "@wollipog/protocol";
 import type { AuthPrincipal } from "./identity.js";
@@ -119,6 +120,7 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
         path: db.getWorkspacePath(location.runnerId, location.workspaceId) }]));
     let inspection: CampaignLaunchInspectionResult | undefined;
     const inspections = new Map<string, ProjectLocationInspection>();
+    let otherIssuesRead = false;
     try {
       const others = (projectLocations ?? []).filter((location) => location.id !== launchLocationId);
       const [launched, ...results] = await Promise.all([
@@ -129,6 +131,20 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
       ]);
       inspection = launched;
       others.forEach((location, index) => inspections.set(location.id, results[index]!));
+      // Each issue the launch names in another repository is read through a Location of that
+      // repository (#4118), never through the launch runner.
+      const groups = new Map<string, number[]>();
+      for (const issue of canonicalCampaignIssues(body.otherIssues ?? []) ?? []) groups.set(issue.repository, [...groups.get(issue.repository) ?? [], issue.number]);
+      otherIssuesRead = (await Promise.all([...groups].map(async ([repository, issueNumbers]) => {
+        const location = others.find((candidate) => {
+          const inspected = inspections.get(candidate.id);
+          return inspected?.ok && inspected.location.repository === repository;
+        });
+        if (!location) return false;
+        const read = await inspectProjectLocation({ db, hub }, location.id, { projectId: projectId!, signal: lifetime.signal,
+          timeoutMs: dependencies.inspectionTimeoutMs, requireProtocol: "campaignRepositoryBoundary", issueNumbers });
+        return read.ok && read.location.repository === repository;
+      }))).every(Boolean);
     } finally { reply.raw.off("close", onClose); }
     if (lifetime.signal.aborted) {
       request.log.info({ event: "full_control_launch_preflight_cancelled", requestId: request.id,
@@ -167,7 +183,7 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
     const agent = runnerNow.agents.find((candidate) => candidate.id === plan.agentId);
     const policyIds = body.overrides?.delegatablePolicyIds ?? [];
     const { preflight, proposal } = campaignLaunchPreflight({
-      request: body, plan, runner: runnerNow, inspection, organizationId: principal.organizationId,
+      request: body, plan, runner: runnerNow, inspection, organizationId: principal.organizationId, otherIssuesRead,
       projectLocations: settledLocations ? { launchLocationId: plan.projectLocationId ?? null,
         locations: settledLocations.map((location) => ({ id: location.id, name: location.name })), inspections } : null,
       projectDefaults: plan.projectId ? db.projectChildSessionDefaults(plan.projectId) : null,
@@ -196,8 +212,9 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
     }
     // The one explicit Human authorization mints scope and authority from the reviewed inspection.
     const now = Date.now();
-    const issueScope: CampaignIssueScope = { repository: proposal.repository, issueNumbers: [...proposal.issueNumbers],
+    const launchScope: CampaignIssueScope = { repository: proposal.repository, issueNumbers: [...proposal.issueNumbers],
       revision: 1, authorizedByUserId: principal.userId, authorizedAt: now };
+    const issueScope = proposal.otherIssues ? campaignScopeWithIssues(launchScope, [...campaignScopeIssues(launchScope), ...proposal.otherIssues]) : launchScope;
     const control = authorizeFullControl(principal, issueScope, proposal, 1, now);
     if (control?.mode !== "full_control") return reply.code(409).send({ error: "the reviewed proposal is outside the Full Control schema", preflight });
     const evidence = preflight.summary.evidence;
