@@ -46,8 +46,12 @@ verification with Stop and Archive, archival or provider exit, without reloading
 when its final usage has not settled yet. A pending, provisional or unretired stop keeps the slot.
 A provider that exits by itself with a non-zero code is reported `failed` at once, but it has retired
 only when its driver proves that every process it started, descendants included, is gone; the runner
-then reports the checkpoint (#3788). A driver that cannot prove that keeps the slot until a shutdown
-proves it. The runner records each retirement in progress durably: until it is proven,
+then reports the checkpoint (#3788). A stopped provider follows the same rule (#4257): neither its
+graceful close nor its root's exit retires it, because a descendant can outlive the root. Its
+retirement ends only when the exact driver, after disposing it, proves its whole process tree gone
+(the non-killing proof after the root's own exit, when its disposal failed). A parked or handed-off
+provider follows it too. A driver that cannot prove that, or a proof that comes back false, keeps
+the slot until a shutdown proves it. The runner records each retirement in progress durably: until it is proven,
 no runner process, a restarted one included, attests a final checkpoint for that generation. A
 runner shutdown that interrupts a retirement proves it only once every provider process tree is
 reaped; it then stores the checkpoint, and the restarted runner's negotiated session snapshots deliver

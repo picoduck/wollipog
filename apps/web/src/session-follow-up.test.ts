@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { OrchestratorCampaignProjection, SessionReminderView, SessionView } from "@wollipog/protocol";
-import { activeFullControlCampaign, completedFullControlCampaign, outstandingSessionResult, sessionFollowUp } from "./session-follow-up.js";
+import { activeFullControlCampaign, completedFullControlCampaign, outstandingSessionResult, sessionBoardColumn, sessionFollowUp } from "./session-follow-up.js";
 import { sortSessionsForReminders } from "./session-reminders.js";
 
 const FULL_CONTROL = { mode: "full_control", boundary: { version: 1, revision: 3, issueScopeRevision: 1, repository: "owner/repo",
@@ -133,4 +133,42 @@ test("a fired reminder on a completed Full Control root still sorts ahead of ord
     ["root", "running"], "the reminder's priority is kept");
   assert.deepEqual(sortSessionsForReminders([running, completed], new Map(), "ordinary").map((session) => session.id),
     ["running", "root"], "without the reminder the completed root is quiet");
+});
+
+test("an at-rest Full Control root sits in the Board column its campaign state implies (#2938)", () => {
+  // The shape a list snapshot sends: the server's lifecycle column and the root's campaign status.
+  const summary = (status: OrchestratorCampaignProjection["status"] | undefined, extra: Partial<SessionView> = {}) =>
+    ({ id: "root", projection: "summary", status: "idle", column: "review", pendingApproval: null, attention,
+      ...(status ? { fullControlCampaignStatus: status } : {}), ...extra }) as unknown as SessionView;
+  assert.equal(sessionBoardColumn(summary("active")), "running", "work is running somewhere in the campaign");
+  assert.equal(sessionBoardColumn(summary("verified_complete")), "done");
+  assert.equal(sessionBoardColumn(summary("complete_needs_cleanup")), "done", "cleanup is listed in Campaign Status, not review work");
+  // A person's attention keeps the column it has today.
+  for (const status of ["stuck", "waiting_human", "blocked", "complete_with_handoffs"] as const) {
+    assert.equal(sessionBoardColumn(summary(status)), "review", status);
+  }
+  // The detail projection decides the same way.
+  assert.equal(sessionBoardColumn(root({ column: "review", orchestratorCampaign: campaign("active") })), "running");
+  assert.equal(sessionBoardColumn(root({ column: "review" })), "done");
+
+  // Exclusions keep the server's column.
+  const question = { requestId: "q", kind: "question" as const, title: "Choose", options: [] };
+  const cases: Array<[string, SessionView, string]> = [
+    ["no campaign status (an older control plane, or not a campaign)", summary(undefined), "review"],
+    ["a Custom campaign", root({ column: "review", orchestratorCampaign: campaign("active", { mode: "custom" }) }), "review"],
+    ["a descendant", summary("active", { parentSessionId: "parent" }), "review"],
+    ["a running root", summary("active", { status: "running", column: "running" }), "running"],
+    ["an input-required root", summary("verified_complete", { status: "input_required", column: "input_required" }), "input_required"],
+    ["a failed root", summary("active", { status: "failed", column: "done" }), "done"],
+    ["a stopped root", summary("active", { status: "stopped", column: "done" }), "done"],
+    ["a root the person filed in Done", summary("active", { column: "done" }), "done"],
+    ["a root the person filed in Queued", summary("verified_complete", { column: "queued" }), "queued"],
+    ["a request for the person", summary("verified_complete", { pendingApproval: question,
+      attention: { ...attention, humanActions: [{ requestId: "q", rank: 3, requestedAt: 1 }] } }), "review"],
+    ["a human-owned campaign request", summary("active", { campaignRequests: { human: 1, orchestrator: 0, humanRequestTokens: [] } }), "review"],
+    ["a pending Stop", summary("active", { stopOperation: { status: "stop_pending" } as SessionView["stopOperation"] }), "review"],
+  ];
+  for (const [name, session, column] of cases) assert.equal(sessionBoardColumn(session), column, name);
+  assert.equal(sessionBoardColumn(summary("active"), { reminderFired: true }), "review", "a fired reminder is the person's own follow-up");
+  assert.equal(sessionBoardColumn(summary("verified_complete"), { reminderFired: true }), "review");
 });

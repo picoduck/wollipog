@@ -94,6 +94,8 @@ function harness(t: { after(fn: () => void): void }, options: {
         reviewDiagnostics: () => ({ permissionDenials: options.denials ?? 0 }),
         cancel: () => finish?.(),
         dispose: () => { record.disposed = true; },
+        // A retired campaign reviewer's slot is released on its whole-tree proof (#4257).
+        proveProcessTreeExit: async () => record.disposed,
         setConfig: () => {},
         resolvePermission: () => false,
         agentSessionId: () => "provider-session",
