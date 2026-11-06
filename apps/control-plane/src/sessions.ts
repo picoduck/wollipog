@@ -36,7 +36,7 @@ import { acknowledgementRepairFrame } from "./claude-cost-repair.js";
 import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
-import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignControlForRunner, campaignControlRevisionForRunner, campaignLaunchRepository, campaignScopeRepositories } from "./campaign-authority.js";
+import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignControlForRunner, campaignControlRevisionForRunner, campaignLaunchRepository, campaignScopeRepositories, carriedCampaignRepositories } from "./campaign-authority.js";
 import { campaignBoundaryRepositoryAt } from "./campaign-repository-boundary.js";
 import { genericRequestScreenData, implementationQuestionScreenData, ownerDecisionScreenData, screenCredentialRequest, type CredentialScreenSurface } from "./credential-screen.js";
 import { DECISION_TOTAL_BOUND_MS, DecisionRuntime, hubDecisionTransport, type DecisionOutcome } from "./decision-runtime.js";
@@ -10601,7 +10601,12 @@ export class SessionsService {
   /** This authorization's own limit provenance, which a waiting campaign keeps (#2940). */
   derivedLimits?: import("@wollipog/protocol").FullControlDerivedLimits,
   /** Enable only: what its reviewed preflight disclosed about capabilities and evidence (#2940). */
-  launchDisclosure?: import("@wollipog/protocol").CampaignLaunchDisclosure): ServiceResult<SessionView> {
+  launchDisclosure?: import("@wollipog/protocol").CampaignLaunchDisclosure,
+  /** Enable only (#4117): the repositories and exclusions the reviewed enable preflight built from
+   * every verified Location of the campaign's Project, exactly as a launch does. Server-derived;
+   * no caller proposal carries them. */
+  projectRepositories?: { repositories: import("@wollipog/protocol").CampaignBoundaryRepository[];
+    excludedLocations: import("@wollipog/protocol").CampaignExcludedLocation[] }): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session || principal.kind !== "human" || !this.db.isSessionOwner(principal, sessionId)) return fail("campaign not found", 404);
     const root = this.orchestratorCampaignController(session);
@@ -10620,8 +10625,13 @@ export class SessionsService {
     const mintedScope: CampaignIssueScope | undefined = derivedScope ? { repository: derivedScope.repository.toLowerCase(),
       issueNumbers: [...derivedScope.issueNumbers].sort((a, b) => a - b), revision: 1, authorizedByUserId: principal.userId, authorizedAt: now } : undefined;
     const scope = storedScope ?? mintedScope;
+    // #4117: an authorization keeps the campaign's repositories. A reviewed enable brings the ones
+    // its preflight verified; otherwise the boundary (or a Custom list) the campaign already has is
+    // carried over, so a reauthorization never drops a repository back to one.
+    const repositories = proposal.mode !== "full_control" || !scope ? undefined
+      : projectRepositories?.repositories ?? carriedCampaignRepositories(session, scope.repository);
     const control = proposal.mode === "custom" ? { mode: "custom" as const } : scope &&
-      authorizeFullControl(principal, scope, proposal, expectedRevision + 1, now);
+      authorizeFullControl(principal, scope, { ...proposal, ...(repositories ? { repositories } : {}) }, expectedRevision + 1, now);
     if (!control) return fail("Full Control requires authenticated repository scope and a valid boundary", 400);
     if (control.mode === "full_control") {
       if (control.boundary.issueAuthority) {
@@ -10653,7 +10663,10 @@ export class SessionsService {
       for (const id of [sessionId, ...this.db.campaignDescendantIds(sessionId)]) {
         const participant = this.db.getSession(id);
         if (!participant || isTerminal(participant.status)) continue;
-        if (participant.runnerId !== session.runnerId || participant.workspaceId !== session.workspaceId) return fail("campaign participants must share the repository workspace and runner", 409);
+        // Under the boundary being authorized, each participant runs in one of its Locations (#4119).
+        if (!this.campaignServesOwnRepository({ ...session, orchestratorPolicy: { ...session.orchestratorPolicy!, control } }, participant)) {
+          return fail("campaign participants must run in a Location of a repository in the campaign's boundary", 409);
+        }
         const preflight = campaignAuthorityPreflight(control, participant.driver, this.db.getRunner(participant.runnerId)?.protocolVersion,
           this.pacedVideoInstallationContract(participant.runnerId, participant.agentId));
         if (!preflight.supported) return campaignRefusalFail(preflight.requirement ?? preflight.reason!);
@@ -10673,7 +10686,8 @@ export class SessionsService {
       if (!this.db.updateSessionCampaignControl(sessionId, control, expectedRevision, now,
         mintedScope ? { issueScope: mintedScope, firstMessage: derivedScope!.firstMessage } : undefined,
         proposal.mode === "full_control" ? derivedLimits : undefined,
-        proposal.mode === "full_control" ? launchDisclosure : undefined)) return fail("campaign authority revision changed; refresh and retry", 409);
+        proposal.mode === "full_control" ? launchDisclosure : undefined,
+        control.mode === "full_control" ? projectRepositories?.excludedLocations : undefined)) return fail("campaign authority revision changed; refresh and retry", 409);
     } catch (error) { return fail((error as Error).message, 409); }
     // The runner holds the scope it enforces issue writes against, and a diagnostic copy of this
     // control: every change synchronizes both now, at the new policy revision (#3363), rather than
