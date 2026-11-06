@@ -28,19 +28,20 @@ const CHILD_TOKEN = "agent-credential-of-the-child";
 const ROOT = "campaign-locations-root";
 const CHILD = "campaign-locations-child";
 const ADOPTED = "campaign-locations-adopted";
+const ADOPTED_DETACHED = "campaign-locations-adopted-detached";
 const REPOSITORY = "owner/launch";
 /** What each folder's origin says, as a runner would read it. */
 const ORIGINS: Record<string, string> = { "/work/launch": REPOSITORY, "/work/second": "owner/second", "/work/spare": "owner/spare",
-  "/work/imported": "owner/imported", "/away/third": "owner/third" };
+  "/work/imported": "owner/imported", "/work/revived": "owner/revived", "/away/third": "owner/third" };
 
 const runnerMetadata = (runnerId: string, workspaces: RunnerMetadata["workspaces"]): RunnerMetadata => ({ runnerId, hostname: runnerId, os: "linux", version: "integration", workspaces,
   agents: [{ id: "claude-agent", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code", context: { kind: "native" }, available: true }],
   runtime: { dataDir: "/data", worktreeRoot: "/data/worktrees", maxConcurrentSessions: 4, campaignLaunchInspection: { version: 3 } } });
 const HOME_WORKSPACES = [{ id: "launch", name: "Launch", path: "/work/launch" }, { id: "second", name: "Second", path: "/work/second" },
-  { id: "spare", name: "Spare", path: "/work/spare" }];
+  { id: "spare", name: "Spare", path: "/work/spare" }, { id: "revived", name: "Revived", path: "/work/revived" }];
 const AWAY_WORKSPACES = [{ id: "third", name: "Third", path: "/away/third" }];
 
-function seed(database: string): { projectId: string; awayLocationId: string; spareLocationId: string; ownerId: string } {
+function seed(database: string): { projectId: string; awayLocationId: string; spareLocationId: string; detachedLocationId: string; ownerId: string } {
   const db = ControlPlaneDb.open(database);
   try {
     const now = Date.now();
@@ -56,6 +57,7 @@ function seed(database: string): { projectId: string; awayLocationId: string; sp
     const project = db.createProject({ name: "Campaign Locations", scope });
     const launch = db.addProjectLocation(project.id, { runnerId: HOME, workspaceId: "launch", addedByUserId: identity.userId });
     const away = db.addProjectLocation(project.id, { runnerId: AWAY, workspaceId: "third", addedByUserId: identity.userId });
+    const detached = db.addProjectLocation(project.id, { runnerId: HOME, workspaceId: "revived", addedByUserId: identity.userId });
     const elsewhere = db.createProject({ name: "Elsewhere", scope });
     const spare = db.addProjectLocation(elsewhere.id, { runnerId: HOME, workspaceId: "spare", addedByUserId: identity.userId });
     const control: CampaignControl = { mode: "full_control", boundary: { version: 1, revision: 2, issueScopeRevision: 2, repository: REPOSITORY, objective: "Work across the Project",
@@ -82,7 +84,10 @@ function seed(database: string): { projectId: string; awayLocationId: string; sp
     db.createSessionFromSnapshot({ id: ADOPTED, workspaceId: null, agentId: null, title: "Imported Session", status: "idle", driver: "codex", useWorktree: false, worktreePath: null,
       workspacePath: "/work/imported", config: {}, preview: null, pendingApproval: null, tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: true, seq: 0, createdAt: now, updatedAt: now },
     HOME, now, scope, { projectId: null, projectLocationId: null });
-    return { projectId: project.id, awayLocationId: away.id, spareLocationId: spare.id, ownerId: identity.userId };
+    db.createSessionFromSnapshot({ id: ADOPTED_DETACHED, workspaceId: null, agentId: null, title: "Imported Session at a Detached Location", status: "idle", driver: "codex", useWorktree: false, worktreePath: null,
+      workspacePath: "/work/revived", config: {}, preview: null, pendingApproval: null, tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: true, seq: 0, createdAt: now, updatedAt: now },
+    HOME, now, scope, { projectId: null, projectLocationId: null });
+    return { projectId: project.id, awayLocationId: away.id, spareLocationId: spare.id, detachedLocationId: detached.id, ownerId: identity.userId };
   } finally { db.close(); }
 }
 
@@ -163,6 +168,7 @@ async function startControlPlane(t: TestContext) {
     const db = ControlPlaneDb.attach(database);
     try { return work(db); } finally { db.close(); }
   };
+  const write = <T>(work: (db: ControlPlaneDb) => T): T => read(work);
   const boundary = () => read((db) => (db.getSession(ROOT)!.orchestratorPolicy!.control as Extract<CampaignControl, { mode: "full_control" }>).boundary);
   const until = async (what: string, predicate: () => boolean) => {
     for (let waited = 0; ; waited += 25) {
@@ -178,7 +184,7 @@ async function startControlPlane(t: TestContext) {
     held: JSON.stringify(boundary().repositories),
     revision: boundary().revision,
   }));
-  return { ...seeded, connect, post, get, asOwner, read, boundary, until, rows, homeMessages };
+  return { ...seeded, connect, post, get, asOwner, read, write, boundary, until, rows, homeMessages };
 }
 
 test("an owner's POST of a Location reaches a live campaign, which inspects it and adds it at a new revision (#4117)", { timeout: 90_000 }, async (t) => {
@@ -232,6 +238,20 @@ test("a session credential is refused by every route that adds a Location, and n
   const added = await cp.asOwner(`/api/projects/${cp.projectId}/locations`, { runnerId: HOME, workspaceId: "second" });
   assert.equal(added.status, 200, await added.clone().text());
   assert.equal(cp.rows().locations, before.locations + 1);
+});
+
+test("linking a detached Location by moving an adopted session revives it under its own id, as an addition the campaign hears about (#4117)", { timeout: 90_000 }, async (t) => {
+  const cp = await startControlPlane(t);
+  const before = cp.boundary().revision;
+  // The Location detached after its runner was removed, so the Project still lists it as such.
+  cp.write((db) => db.raw().prepare("UPDATE project_locations SET detached_at=? WHERE id=?").run(Date.now(), cp.detachedLocationId));
+  assert.equal(cp.read((db) => db.getProjectLocation(cp.detachedLocationId)?.availability), "runner_removed");
+  const moved = await cp.asOwner(`/api/sessions/${ADOPTED_DETACHED}/project`, { projectId: cp.projectId, linkLocation: true });
+  assert.equal(moved.status, 200, await moved.clone().text());
+  assert.equal(cp.read((db) => db.getSession(ADOPTED_DETACHED)!.projectLocationId), cp.detachedLocationId, "the same Location, revived");
+  assert.equal(cp.read((db) => db.projectLocationAddedBy(cp.detachedLocationId)), cp.ownerId);
+  await cp.until("the revived Location to join", () => Boolean(cp.boundary().repositories?.some((entry) => entry.locationIds.includes(cp.detachedLocationId))));
+  assert.equal(cp.boundary().revision, before + 1);
 });
 
 test("a Location an owner links by moving an adopted session records them as its adder and joins the campaign (#4117)", { timeout: 90_000 }, async (t) => {

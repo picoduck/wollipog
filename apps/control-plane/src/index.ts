@@ -5698,8 +5698,9 @@ app.post("/api/sessions/:id/project", async (req, reply) => {
       error: "Project management permission or personal session ownership is required",
     });
   }
+  // Active only: linking a detached Location revives it under the same id, and that is an addition.
   const existingLocations = new Set(body.linkLocation && typeof body.projectId === "string"
-    ? (db.getProject(body.projectId)?.locations ?? []).map((location) => location.id) : []);
+    ? (db.getProject(body.projectId)?.locations ?? []).filter((location) => location.availability !== "runner_removed").map((location) => location.id) : []);
   const moved = svc.setProject(
     id,
     body.projectId as string | null,

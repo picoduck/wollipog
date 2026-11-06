@@ -5297,10 +5297,25 @@ test("a declined addition changes nothing and is not asked again for the same wo
       const { owner, reason } = evaluateCampaignAuthority(root, { ...root, boundaryRepository: campaignBoundaryRepositoryAt(f.db, root, root) }, PROTOCOL_VERSION, snapshot, root.parentControlPolicy, PROTOCOL_VERSION);
       assert.deepEqual({ owner, reason }, { owner: "human", reason: "outside_boundary" }, snapshot.category);
     }
-    // Nor can a publication be asked for through the real route and come back the Orchestrator's.
-    const published = f.sessions.createWorkflowDecision(c.rootId, { requestId: "publish-after-decline", resourceKey: "publish-after-decline",
-      resourceSnapshot: blocked[0]! }, () => true);
-    assert.notEqual(published.ok && published.data!.authority, "orchestrator", "publishing there isn't the Orchestrator's to decide");
+    // Through the real publication route too, with real lineage: an accepted follow-up in that repository.
+    const worker = f.sessions.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude", title: "Child", prompt: "Deliver #7", useWorktree: false },
+      undefined, f.scope, false, false, false, { parentSessionId: c.rootId });
+    assert.equal(worker.ok, true, worker.error ?? "created");
+    f.db.updateSessionStatus(worker.data!.id, "running", Date.now());
+    assert.equal(f.sessions.recordCampaignPlan(c.rootId, { items: [{ key: "issue:7", issue: { repository: "owner/repo", number: 7 } }], planComplete: true }).ok, true);
+    const page = f.db.campaignWorkLedger.page(c.rootId, { state: "all", limit: 100 }, Date.now());
+    assert.ok(page.ok);
+    const title = "Document the Third Repository's Upgrade";
+    const followUp = f.sessions.recordCampaignFollowUp(c.rootId, { originSessionId: worker.data!.id, repository: "third/repo", title, originWorkItemIds: [page.data.items[0]!.id] });
+    assert.equal(followUp.ok, true, followUp.error ?? "recorded");
+    assert.equal(f.sessions.adjudicateCampaignRecommendation(c.rootId, { recommendationId: followUp.data!.id, disposition: "accepted",
+      reason: "Observed while delivering #7", publicationRequired: true }).ok, true);
+    const published = await f.sessions.createWorkflowDecisionWithVideo(worker.data!.id, { requestId: "publish-after-decline", resourceKey: "publish-after-decline", resourceSnapshot: {
+      category: "follow_up_issue_publication", repository: "third/repo", sanitizedTitle: title, labels: [], recommendationId: followUp.data!.id,
+      sanitizedBody: "## Problem\nRelated failure\n## Proposed Behavior\nRepair it\n## Acceptance Criteria\n- Verified repair\n## Security and Compatibility\nNone" } });
+    assert.equal(published.ok, true, published.error ?? "requested");
+    assert.equal(published.data!.authority, "human", "publishing there isn't the Orchestrator's to decide");
+    assert.equal(published.data!.authorityEvaluation?.admissionFailure, "target_outside_boundary");
     const repeated = await c.request("add-third-repeat");
     assert.equal(repeated.ok, false);
     assert.match(repeated.error!, /declined/);
