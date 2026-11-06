@@ -328,6 +328,9 @@ function fullControlProjection(kind: "rules" | "ready" | "old" | "degraded"): Pa
     decisionOwners: { implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "orchestrator",
       follow_up_issue_publication: "orchestrator", ui_evidence_approval: "orchestrator", review_round_extension: "orchestrator" },
     fullControlHumanRequired: kind === "rules" ? ["human_required_rules"] : [],
+    // Nothing waits in recovery unless `recovery=` adds a record (its own fixture wins below).
+    ...(recoveryRecord ? {} : { recovery: { unattendedReady: true, automation: { state: "available" as const }, automatic: 0,
+      waitingHuman: 0, blocked: 0, records: [], truncated: false } }),
     uiEvidenceReview: kind === "degraded"
       ? { status: "unavailable", effectiveOwner: "orchestrator", reasonCode: "model_unsupported",
         reason: "The Orchestrator model \"text-only\" does not accept image input. It asks for inspectable evidence or denies the claim as unproven." }

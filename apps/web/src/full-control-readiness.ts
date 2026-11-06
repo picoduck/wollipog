@@ -31,8 +31,9 @@ export interface ReadinessFact {
  * Whether a running Full Control campaign can finish unattended, from the server's live facts only
  * (#2940 criterion 8). It never claims more than the projection proves:
  *
- * - `unattended`: the server reports no Human Required rule, every decision the campaign makes is
- *   the Orchestrator's, and no capability it needs is limited.
+ * - `unattended`: the server reports no Human Required rule, every decision and request class the
+ *   campaign makes is the Orchestrator's, no recovery item waits for the person or is blocked, and no
+ *   capability it needs is limited.
  * - `qualified`: something comes to a person (`humanRequired`) or a needed capability is limited
  *   (`limited`); the line says so.
  * - `unknown`: the server doesn't report enough to tell, so nothing claims readiness.
@@ -62,11 +63,23 @@ const ISSUE_OPERATIONS = [
   ["campaign_issue_scope", "Issue Scope Changes"],
 ] as const satisfies ReadonlyArray<readonly [CampaignAuthorityOperation, string]>;
 
+/** Descendant requests outside the typed gates: a boundary that leaves one out sends it to the person
+ * (`outside_boundary`). */
+const REQUEST_OPERATIONS = [
+  ["question", "Questions"],
+  ["tool_approval", "Tool Approvals"],
+  ["policy_ask", "Policy Asks"],
+] as const satisfies ReadonlyArray<readonly [CampaignAuthorityOperation, string]>;
+
+const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
 export function fullControlReadiness(campaign: ReadinessCampaign | undefined): FullControlReadiness {
   const control = campaign?.control;
+  const recovery = campaign?.recovery;
+  const automation = recovery?.automation;
   // Every fact readiness reads must be reported; a missing one never reads as ready.
   if (!campaign || control?.mode !== "full_control" || !Array.isArray(campaign.fullControlHumanRequired) ||
-      !campaign.decisionOwners || !campaign.uiEvidenceReview) {
+      !campaign.decisionOwners || !campaign.uiEvidenceReview || !recovery || !automation) {
     const line = "Full Control is in effect, but whether anything still needs you isn't reported here.";
     return { state: "unknown", humanRequired: [], limited: [], line, elsewhereLine: line };
   }
@@ -90,13 +103,27 @@ export function fullControlReadiness(campaign: ReadinessCampaign | undefined): F
       ? "This campaign has no issue authority, so it comes to you."
       : "This campaign's Full Control authorization leaves it out, so it comes to you." });
   }
+  for (const [operation, label] of REQUEST_OPERATIONS) {
+    if (boundary.operations.includes(operation)) continue;
+    humanRequired.push({ key: operation, label,
+      reason: "This campaign's Full Control authorization leaves these requests out, so they come to you." });
+  }
+  // Recovery records waiting for the person, or blocked, keep the campaign from finishing unattended
+  // (`unattendedReady`), whatever its standing rules say.
+  if (recovery.waitingHuman > 0) {
+    humanRequired.push({ key: "recovery_waiting", label: "Recovery Waiting for You",
+      reason: `${count(recovery.waitingHuman, "recovery item needs", "recovery items need")} your input; Campaign Status shows each one.` });
+  }
   const limited: ReadinessFact[] = [];
+  if (recovery.blocked > 0) {
+    limited.push({ key: "recovery_blocked", label: "Blocked Recovery",
+      reason: `${count(recovery.blocked, "recovery item is", "recovery items are")} blocked; Campaign Status shows why.` });
+  }
   if (campaign.decisionOwners.ui_evidence_approval === "orchestrator" && campaign.uiEvidenceReview.status === "unavailable") {
     limited.push({ key: "image_evidence", label: "Screenshot Evidence Review",
       reason: campaign.uiEvidenceReview.reason ?? "The Orchestrator can't view evidence images, so it denies UI evidence it can't inspect." });
   }
-  const automation = campaign.recovery?.automation;
-  if (automation?.state === "authority_unavailable" || automation?.state === "unsupported_capability") {
+  if (automation.state === "authority_unavailable" || automation.state === "unsupported_capability") {
     limited.push({ key: "recovery", label: "Automatic Recovery",
       reason: automation.reason ?? "Wollipog can't recover this campaign's interrupted work automatically." });
   }

@@ -73,6 +73,7 @@ function campaign(patch: Partial<CampaignAuthorityView> = {}, objective = "Deliv
     uiEvidenceReview: { status: "available", effectiveOwner: "orchestrator" },
     videoEvidenceReview: { status: "unavailable", reason: "No current live proof certifies the media-only reviewer. It asks for screenshots or denies the claim as unproven." },
     fullControlHumanRequired: ["human_required_rules"],
+    recovery: { unattendedReady: true, automation: { state: "available" }, automatic: 0, waitingHuman: 0, blocked: 0, records: [], truncated: false },
     launchDisclosure: disclosure,
     maxIssuesSource: "derived",
     ...patch,

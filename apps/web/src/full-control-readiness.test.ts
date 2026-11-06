@@ -60,6 +60,28 @@ test("a decision the boundary leaves out, or one Wollipog can't delegate now, is
   assert.deepEqual(extensions.humanRequired.map((fact) => fact.label), ["Review Round Extensions"]);
 });
 
+test("a boundary that leaves out questions, tool approvals or policy asks lists them as Human Required (#2940 review)", () => {
+  for (const [operation, label] of [["question", "Questions"], ["tool_approval", "Tool Approvals"], ["policy_ask", "Policy Asks"]] as const) {
+    const readiness = fullControlReadiness(campaign({}, ALL_OPERATIONS.filter((item) => item !== operation)));
+    assert.equal(readiness.state, "qualified", operation);
+    assert.deepEqual(readiness.humanRequired.map((fact) => [fact.label, fact.reason]),
+      [[label, "This campaign's Full Control authorization leaves these requests out, so they come to you."]], operation);
+  }
+});
+
+test("recovery waiting for the person or blocked never reads as unattended, even with automation available (#2940 review)", () => {
+  const ready = campaign().recovery!;
+  const waiting = fullControlReadiness(campaign({ recovery: { ...ready, unattendedReady: false, waitingHuman: 2 } }));
+  assert.equal(waiting.state, "qualified");
+  assert.deepEqual(waiting.humanRequired.map((fact) => [fact.label, fact.reason]),
+    [["Recovery Waiting for You", "2 recovery items need your input; Campaign Status shows each one."]]);
+  const blocked = fullControlReadiness(campaign({ recovery: { ...ready, unattendedReady: false, blocked: 1 } }));
+  assert.equal(blocked.state, "qualified");
+  assert.deepEqual(blocked.limited.map((fact) => [fact.label, fact.reason]),
+    [["Blocked Recovery", "1 recovery item is blocked; Campaign Status shows why."]]);
+  assert.equal(blocked.line, "The Orchestrator runs this campaign, but some capabilities it needs are limited, so it may not finish unattended.");
+});
+
 test("limited screenshot review or recovery qualifies the line without claiming unattended readiness (#2940)", () => {
   const images = fullControlReadiness(campaign({ uiEvidenceReview: { status: "unavailable", effectiveOwner: "orchestrator",
     reasonCode: "model_unsupported", reason: "The model can't read images. It asks for inspectable evidence or denies the claim as unproven." } }));
@@ -82,6 +104,8 @@ test("a server that doesn't report the facts never reads as ready (#2940)", () =
     ["Custom", { ...campaign(), control: { mode: "custom" } }],
     ["no Human Required report", { ...campaign(), fullControlHumanRequired: undefined }],
     ["no owners", { ...campaign(), decisionOwners: undefined }],
+    ["no recovery", { ...campaign(), recovery: undefined }],
+    ["no recovery automation", { ...campaign(), recovery: { ...campaign().recovery!, automation: undefined } }],
   ] as Array<[string, ReadinessCampaign | undefined]>) {
     const readiness = fullControlReadiness(value);
     assert.equal(readiness.state, "unknown", name);

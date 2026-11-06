@@ -380,7 +380,8 @@ function fullControlProjection(): SessionView {
   const base = fullCampaign();
   return { ...base, parentControl: "questions_and_approvals",
     orchestratorCampaign: { ...CAMPAIGN, control: base.orchestratorPolicy!.control, policyRevision: 3,
-      decisionOwners: { ...HUMAN_ONLY, pr_merge: "orchestrator" }, fullControlHumanRequired: [] } } as SessionView;
+      decisionOwners: { ...HUMAN_ONLY, pr_merge: "orchestrator" }, fullControlHumanRequired: [],
+      recovery: { unattendedReady: true, automation: { state: "available" }, automatic: 0, waitingHuman: 0, blocked: 0, records: [], truncated: false } } } as SessionView;
 }
 
 /** The line a Full Control campaign in effect shows here (#2940): this boundary leaves every decision
@@ -406,10 +407,13 @@ test("under Full Control the dialog's line claims end to end only when the serve
   const base = fullControlProjection();
   const every = { ...base.orchestratorCampaign!.control!, boundary: { ...(base.orchestratorCampaign!.control as { boundary: object }).boundary,
     operations: ["implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval",
-      "issue_closure", "campaign_issue_scope"], issueAuthority: { epics: [12], relatedFollowUps: true, maxIssues: 3, closureReasons: ["completed"] } } };
+      "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"],
+    issueAuthority: { epics: [12], relatedFollowUps: true, maxIssues: 3, closureReasons: ["completed"] } } };
   const lineOf = async (campaign: Partial<OrchestratorCampaignProjection>) => {
     const harness = await open({ ...base, orchestratorCampaign: { ...base.orchestratorCampaign!, control: every, decisionOwners: owners,
-      uiEvidenceReview: { status: "available", effectiveOwner: "orchestrator" }, ...campaign } } as SessionView, {});
+      uiEvidenceReview: { status: "available", effectiveOwner: "orchestrator" },
+      recovery: { unattendedReady: true, automation: { state: "available" }, automatic: 0, waitingHuman: 0, blocked: 0, records: [], truncated: false },
+      ...campaign } } as SessionView, {});
     // The Orchestrator Control section's notes: its effective mode, then its line.
     const notes = [...harness.dialog().querySelector("section")!.querySelectorAll("p.section-note")].map((node) => node.textContent);
     await harness.unmount();

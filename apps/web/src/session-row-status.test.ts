@@ -83,10 +83,12 @@ test("an at-rest root of an active Full Control campaign shows an informational 
   // The live facts readiness reads (#2940): owners for the decisions this boundary leaves out stay the
   // Human's, so the ready fixture's boundary holds every operation.
   const ready = { fullControlHumanRequired: [], uiEvidenceReview: { status: "available", effectiveOwner: "orchestrator" },
+    recovery: { unattendedReady: true, automation: { state: "available" }, automatic: 0, waitingHuman: 0, blocked: 0, records: [], truncated: false },
     decisionOwners: { implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "orchestrator",
       follow_up_issue_publication: "orchestrator", ui_evidence_approval: "orchestrator", review_round_extension: "orchestrator" } };
   const everyOperation = { ...fullControl, boundary: { ...fullControl.boundary, operations: ["implementation_question", "pr_merge",
-    "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval", "issue_closure", "campaign_issue_scope"],
+    "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval", "issue_closure", "campaign_issue_scope",
+    "question", "tool_approval", "policy_ask"],
   issueAuthority: { epics: [], relatedFollowUps: true, maxIssues: 3, closureReasons: ["completed"] } } };
   const campaign = (status: string, control: unknown = everyOperation, facts: object = ready) =>
     ({ status, policyRevision: 3, control, ...facts }) as unknown as NonNullable<SessionView["orchestratorCampaign"]>;

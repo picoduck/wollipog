@@ -50,9 +50,10 @@ When the section is shown, the Scope Grant section leaves out the Maximum Issues
 rows it would repeat.
 
 The readiness line states only what the server's live facts prove. "The Orchestrator runs this
-campaign end to end." appears only when no Human Required rule exists, every decision the campaign
-makes is the Orchestrator's, screenshot review is available, and automatic recovery isn't blocked
-by missing authority or capability. Otherwise it is qualified ("…except the decisions listed under
+campaign end to end." appears only when no Human Required rule exists, every decision and request
+class (questions, tool approvals, policy asks) the campaign makes is the Orchestrator's, no recovery
+item waits for the person or is blocked, screenshot review is available, and automatic recovery
+isn't blocked by missing authority or capability. Otherwise it is qualified ("…except the decisions listed under
 Human Required", or "some capabilities it needs are limited, so it may not finish unattended"),
 and a server that doesn't report these facts gets no readiness claim. Orchestrator Controls and the
 session row's Campaign Active description use the same rule and point to Campaign Status. Video

@@ -426,6 +426,9 @@ if (composerFixture) {
       session.orchestratorCampaign.decisionOwners = fixtureEffectiveOwners(session.orchestratorPolicy.control, current);
       // `humanRules=1` (#2940): the server reports a person-marked Human Required rule; otherwise none.
       session.orchestratorCampaign.fullControlHumanRequired = params.get("humanRules") === "1" ? ["human_required_rules"] : [];
+      // The server's recovery facts: nothing waits or is blocked, and automatic recovery is available.
+      session.orchestratorCampaign.recovery = { unattendedReady: true, automation: { state: "available" }, automatic: 0,
+        waitingHuman: 0, blocked: 0, records: [], truncated: false };
       // `video=certified|uncertified` (#1321): the server's campaign fact for delegated video review,
       // with UI evidence delegated to an image-capable Orchestrator. Source UI fixture only.
       const videoFixture = params.get("video");
