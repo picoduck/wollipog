@@ -321,3 +321,27 @@ test("a typed check shows its answers as a short checklist beside the server's v
     api.campaignDecisions = read;
   }
 });
+
+test("a typed check names a parameterized question by its complete parameter, never only its shortened label (#4283)", async () => {
+  const read = api.campaignDecisions;
+  const shared = "Only issues in the web dashboard that change no stored data and touch none of the session, runner or account paths, and ";
+  const parameter = `${shared}only if no reviewer has marked them security-sensitive.`;
+  const question = TYPED_REFUSED.questions.find((candidate) => candidate.items)!;
+  const typed = {
+    ...TYPED_REFUSED,
+    questions: TYPED_REFUSED.questions.map((candidate) => candidate === question
+      ? { ...candidate, label: `${shared.slice(0, 119)}…`, parameter } : candidate),
+  };
+  const decisions = [decision("dec_long", { kind: "probe", verdict: "confirm", subject: undefined, reason: "Checked.", typedAnswers: typed })];
+  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions, usage: { ...usage, calls: 1, unpricedCalls: 0 } });
+  const view = await render(<CampaignDecisions campaignId="root-1" />);
+  try {
+    const claims = [...view.container.querySelectorAll("ul[aria-label='Answers'] .decision-answer-claim")].map((claim) => claim.textContent);
+    const item = question.items![0]!.label;
+    assert.ok(claims.includes(`${item} Satisfies '${parameter}'`), `claims: ${JSON.stringify(claims)}`);
+    assert.ok(claims.every((claim) => !claim?.includes("…")), "no claim falls back to the shortened label");
+  } finally {
+    view.unmount();
+    api.campaignDecisions = read;
+  }
+});

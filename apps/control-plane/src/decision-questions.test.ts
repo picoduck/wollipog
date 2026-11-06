@@ -14,7 +14,13 @@ import type {
   RunDecisionResultMessage,
   RunnerView,
 } from "@wollipog/protocol";
-import { DECISION_MAX_QUESTIONS, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL } from "@wollipog/protocol";
+import {
+  DECISION_MAX_QUESTIONS,
+  DECISION_QUESTION_LABEL_MAX_CHARS,
+  DECISION_QUESTION_PARAMETER_MAX_CHARS,
+  PROTOCOL_VERSION,
+  RUNNER_CAPABILITY_MIN_PROTOCOL,
+} from "@wollipog/protocol";
 import { ControlPlaneDb, type DecisionOccurrenceRecord } from "./db.js";
 import {
   assertDecisionKind,
@@ -82,8 +88,8 @@ type Answers = Record<string, Answer | Record<string, Answer>>;
 
 /** A complete, valid typed output: every question and item satisfied with confidence 0.95, with
  * overrides by question id (and item id for per-item questions). */
-function output(overrides: Answers = {}): Record<string, unknown> {
-  const instances = instantiateQuestions(TYPED, INPUTS.questions!);
+function output(overrides: Answers = {}, questions = INPUTS.questions!): Record<string, unknown> {
+  const instances = instantiateQuestions(TYPED, questions);
   const satisfied: Record<string, unknown> = { count_matches: true, named_requested: "requested", fit_score: 9 };
   return Object.fromEntries(instances.map((instance) => {
     const base = (itemId?: string) => {
@@ -248,6 +254,28 @@ test("all answers satisfied with confidence admits", async () => {
   // The call sent the kind's instructions and the typed schema.
   assert.equal(run.sent[0]!.instructions, DEFINITION.instructions);
   assert.deepEqual(run.sent[0]!.outputSchema, prepareDecision(DEFINITION, INPUTS).outputSchema);
+});
+
+test("the audit keeps a long parameter whole, so two constraints differing past the label bound stay distinct", async () => {
+  const shared = "Only issues in the web dashboard that change no stored data and touch none of the session, runner or account paths, and ";
+  const first = `${shared}only if labeled area/ui by a maintainer.`;
+  const second = `${shared}only if no reviewer has marked them security-sensitive.`;
+  // The two differ only after the characters a shortened label keeps.
+  assert.ok(shared.length >= DECISION_QUESTION_LABEL_MAX_CHARS - 1 && first.length > DECISION_QUESTION_LABEL_MAX_CHARS);
+  assert.ok(second.length > DECISION_QUESTION_LABEL_MAX_CHARS && second.length <= DECISION_QUESTION_PARAMETER_MAX_CHARS);
+  const questions = { ...INPUTS.questions!, parameters: { satisfies_constraint: [first, second] } };
+  const inputs: DecisionInputs = { ...INPUTS, questions };
+  const run = harness([answered(output({}, questions))]);
+  const outcome = await run.decide(inputs);
+  assert.equal(outcome.outcome === "verdict" && outcome.verdict, "admit");
+  // Read back from the database: the labels are shortened alike, but each full parameter survives.
+  const stored = run.db.getDecisionOccurrence(outcome.occurrenceId)!.typedAnswers!;
+  const [one, two] = stored.questions.filter((question) => question.questionId.startsWith("satisfies_constraint__"));
+  assert.equal(one!.label, two!.label, "both labels shorten to the same display text");
+  assert.equal(one!.parameter, first);
+  assert.equal(two!.parameter, second);
+  // Questions without a parameter carry none.
+  assert.equal("parameter" in stored.questions[0]!, false);
 });
 
 test("one confident violation refuses and names the question and item", async () => {

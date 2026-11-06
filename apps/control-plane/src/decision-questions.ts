@@ -12,6 +12,7 @@ import {
   DECISION_MAX_QUESTION_ITEMS,
   DECISION_MAX_QUESTIONS,
   DECISION_QUESTION_LABEL_MAX_CHARS,
+  DECISION_QUESTION_PARAMETER_MAX_CHARS,
 } from "@wollipog/protocol";
 
 /**
@@ -83,7 +84,7 @@ export class DecisionQuestionError extends Error {
 
 const IDENTIFIER = /^[a-z][a-z0-9_]{0,47}$/;
 const ITEM_ID = /^[A-Za-z0-9][A-Za-z0-9._/#:-]{0,79}$/;
-const PARAMETER_MAX_CHARS = 200;
+const PARAMETER_MAX_CHARS = DECISION_QUESTION_PARAMETER_MAX_CHARS;
 
 function oneLine(value: string): string {
   return value.replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").trim();
@@ -363,6 +364,8 @@ export function deriveTypedVerdict(
     questionId: instance.questionId,
     label: instance.label,
     text: instance.text,
+    // The label may be shortened; the audit keeps the complete parameter the model was asked about.
+    ...(instance.parameter !== undefined ? { parameter: instance.parameter } : {}),
     answer: decisionAnswerType(instance.answer),
     ...(instance.items ? { items: instance.items.map((item) => ({ ...item })) } : {}),
   }));

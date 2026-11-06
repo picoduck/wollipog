@@ -131,7 +131,8 @@ The server derives the verdict (`deriveTypedVerdict`) with the kind's fixed `con
   rule's one person-owned request.
 
 The reason is the server's sentence, never the model's prose. The occurrence's `typed_answers`
-column records the threshold, each question as asked (with its items), each answer with its
+column records the threshold, each question as asked (with its items, and a parameterized question's
+complete parameter, since its display label may be shortened), each answer with its
 confidence, evidence and assessment, and the deciding answer; `DecisionOccurrenceView.typedAnswers`
 projects it, and Campaign Status shows it as a checklist. Records from before typed questions keep
 their single-verdict form. Item labels and parameters are stored there for display, like

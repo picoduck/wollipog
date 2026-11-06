@@ -16,7 +16,9 @@ const VERBS: Record<DecisionAnswerStanding, string> = { satisfies: "Satisfies", 
 export function decisionAnswerClaim(question: DecisionQuestionView, answer: DecisionAnswerView, threshold: number): string {
   const item = answer.itemId === undefined ? null : question.items?.find((candidate) => candidate.id === answer.itemId);
   const verb = VERBS[decisionAnswerStanding(answer, threshold)];
-  return `${item ? `${item.label} ` : ""}${verb} '${question.label}'`;
+  // A parameterized question names its complete parameter: a shortened label could make two
+  // different constraints read alike.
+  return `${item ? `${item.label} ` : ""}${verb} '${question.parameter ?? question.label}'`;
 }
 
 /** The answer's value in words, as the question allowed it. */

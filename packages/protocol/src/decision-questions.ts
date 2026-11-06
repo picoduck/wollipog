@@ -35,6 +35,9 @@ export interface DecisionQuestionView {
   label: string;
   /** The question text the model saw, without its quoted parameter. */
   text: string;
+  /** A parameterized question's complete quoted parameter (at most DECISION_QUESTION_PARAMETER_MAX_CHARS),
+   * exactly as the model saw it; `label` may be a shortened form of it. */
+  parameter?: string;
   answer: DecisionAnswerType;
   /** Present for a per-item question: every item it asked one answer for, in order. */
   items?: DecisionQuestionItemView[];
@@ -76,3 +79,5 @@ export const DECISION_MAX_ANSWERS = 60;
 export const DECISION_EVIDENCE_MAX_CHARS = 160;
 /** Longest question or item label. */
 export const DECISION_QUESTION_LABEL_MAX_CHARS = 120;
+/** Longest parameter a parameterized question quotes; the audit keeps it whole. */
+export const DECISION_QUESTION_PARAMETER_MAX_CHARS = 200;
