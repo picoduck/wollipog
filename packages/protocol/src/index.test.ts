@@ -120,7 +120,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 308);
+  assert.equal(PROTOCOL_VERSION, 310);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -358,8 +358,8 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 308", () => {
-  assert.equal(PROTOCOL_VERSION, 308);
+test("PROTOCOL_VERSION is 310", () => {
+  assert.equal(PROTOCOL_VERSION, 310);
   // Only a v308 runner sends a structured scope proposal, and only to a v308 control plane (#4282).
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.campaignScopeProposals, 308);
   // Only a v307 runner is sent a typed-question Decision call's larger schema and output (#4283).
@@ -384,6 +384,9 @@ test("PROTOCOL_VERSION is 308", () => {
   // Selection floors read issue facts from a v291 runner (#4103).
   assert.equal(runnerSupportsProtocol(290, "campaignIssueFacts"), false);
   assert.equal(runnerSupportsProtocol(291, "campaignIssueFacts"), true);
+  // Campaign control metadata is ordered by its own revision on a v310 runner (#3363).
+  assert.equal(runnerSupportsProtocol(309, "campaignControlRevision"), false);
+  assert.equal(runnerSupportsProtocol(310, "campaignControlRevision"), true);
   // A regular session's Location switch needs a v287 runner and control plane (#4138), and
   // Switch and Continue of the live session a v289 runner.
   assert.equal(runnerSupportsProtocol(286, "sessionLocationSwitch"), false);

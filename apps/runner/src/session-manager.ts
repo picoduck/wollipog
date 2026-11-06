@@ -7,6 +7,7 @@ import { campaignOperationEvidenceCurrent } from "./campaign-operation-evidence.
 import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
 import { type BackgroundFollowUpView, CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, isTerminal } from "@wollipog/protocol";
 import { CampaignIssueScopeRefusal, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
+import { launchOrchestratorMeta, nextCampaignControl, validControlRevision } from "./campaign-control-order.js";
 import { boundedIssueNumbers, campaignRepositoryLocation, parseFullControlAutomaticResponse, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
 import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
@@ -747,7 +748,7 @@ interface ActiveSession {
   codexPackageSandboxed?: boolean;
   /** Immutable package-denial snapshot from this exact native provider launch. */
   codexPackageReadOnlyPaths?: readonly string[];
-  orchestratorLaunchPolicy?: Pick<import("@wollipog/protocol").OrchestratorLaunchPolicy, "issueNumbers" | "issueScope" | "control">;
+  orchestratorLaunchPolicy?: Pick<import("@wollipog/protocol").OrchestratorLaunchPolicy, "issueNumbers" | "issueScope" | "control" | "controlRevision">;
   projectMemoryKey?: string;
   projectMemoryFailureKey?: string;
   sessionId: string;
@@ -7162,7 +7163,7 @@ export class SessionManager {
         driver: spec.driver ?? "acp",
         context,
         config: spec.config ?? {},
-        orchestrator: (() => { const saved = this.store.readMeta(spec.sessionId)?.orchestrator; return (saved?.issueScope?.revision ?? 0) > (spec.orchestrator?.issueScope?.revision ?? 0) ? saved : spec.orchestrator ?? saved; })(),
+        orchestrator: launchOrchestratorMeta(this.store.readMeta(spec.sessionId)?.orchestrator, spec.orchestrator),
         executionTarget: spec.executionTarget ?? this.store.readMeta(spec.sessionId)?.executionTarget,
       });
     } catch (error) {
@@ -7418,8 +7419,7 @@ export class SessionManager {
             retiringProviderRunners: this.fenceRunnersWithThisProcess(prior.retiringProviderRunners, { context, executionTarget }) } : {}),
       projectMemory: spec.projectMemory ?? prior?.projectMemory,
       artifactUploads: spec.artifactUploads ?? prior?.artifactUploads ?? "manual",
-      orchestrator: this.withAppliedIssueGrant(spec.sessionId,
-        (prior?.orchestrator?.issueScope?.revision ?? 0) > (spec.orchestrator?.issueScope?.revision ?? 0) ? prior?.orchestrator : spec.orchestrator ?? prior?.orchestrator),
+      orchestrator: this.withAppliedIssueGrant(spec.sessionId, launchOrchestratorMeta(prior?.orchestrator, spec.orchestrator)),
       ...(spec.uiEvidenceReviewer ? { uiEvidenceReviewer: { reviewId: spec.uiEvidenceReviewer.reviewId } } : {}),
       ...(spec.review ? { review: {
         ...spec.review, checkout: repoPath, launchOwner: this.lockOwner,
@@ -20101,17 +20101,34 @@ export class SessionManager {
       }
       let control = message.control;
       if (control && (!validCampaignControl(control) || control.mode === "full_control" && control.boundary.repository.toLowerCase() !== repository)) return { ...base, ok: false, error: "Scope authority boundary is invalid or in another repository" };
+      if (!validControlRevision(message.controlRevision) || message.controlRevision !== undefined && control === undefined) {
+        return { ...base, ok: false, error: "Invalid authoritative control revision" };
+      }
       // A human scope revision intentionally invalidates older standing authorization, but
       // scope removal must still persist. Disable the stale runner diagnostic contract;
       // the server independently retains its boundary and evaluates it as human-required.
       if (control?.mode === "full_control" && control.boundary.issueScopeRevision !== scope.revision) control = { mode: "custom" };
-      const updated = this.store.patchMeta(message.sessionId, { orchestrator: { ...fresh.orchestrator, issueNumbers: [...scope.issueNumbers], issueScope: scope,
-        ...(control === undefined ? {} : { control }) } });
+      // Control has its own order (#3363): within one scope revision a delayed update can carry
+      // an older control than the runner already holds, and must not roll it back.
+      const ordered = nextCampaignControl(fresh.orchestrator, { control, controlRevision: message.controlRevision });
+      const { control: _heldControl, controlRevision: _heldRevision, ...orchestrator } = fresh.orchestrator;
+      const updated = this.store.patchMeta(message.sessionId, { orchestrator: { ...orchestrator, issueNumbers: [...scope.issueNumbers], issueScope: scope,
+        ...(ordered.control === undefined ? {} : { control: ordered.control }),
+        ...(ordered.controlRevision === undefined ? {} : { controlRevision: ordered.controlRevision }) } });
       if (!updated) return { ...base, ok: false, error: "Could not persist campaign scope" };
       // The Claude auto-approval closure reads this exact object on each ask. Update it in place
       // so removals apply to the current process, as well as the next restart.
-      if (live) { live.issueNumbers = [...scope.issueNumbers]; live.issueScope = scope; if (control !== undefined) live.control = control; }
-      this.log(JSON.stringify({ event: "campaign_issue_scope_synchronized", sessionId: message.sessionId, revision: scope.revision }));
+      if (live) {
+        live.issueNumbers = [...scope.issueNumbers]; live.issueScope = scope;
+        if (ordered.control !== undefined) live.control = ordered.control;
+        if (ordered.controlRevision !== undefined) live.controlRevision = ordered.controlRevision;
+      }
+      if (ordered.outcome === "kept_newer") {
+        this.log(JSON.stringify({ event: "campaign_control_update_ignored", sessionId: message.sessionId, revision: scope.revision,
+          controlRevision: message.controlRevision ?? null, heldControlRevision: ordered.controlRevision ?? null }));
+      }
+      this.log(JSON.stringify({ event: "campaign_issue_scope_synchronized", sessionId: message.sessionId, revision: scope.revision,
+        controlRevision: ordered.controlRevision ?? null }));
       return { ...base, ok: true, repository, revision: scope.revision };
     } catch (error) {
       return { ...base, ok: false, error: error instanceof CampaignIssueScopeRefusal ? error.message

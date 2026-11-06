@@ -36,7 +36,7 @@ import { acknowledgementRepairFrame } from "./claude-cost-repair.js";
 import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
-import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignControlForRunner } from "./campaign-authority.js";
+import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignControlForRunner, campaignControlRevisionForRunner } from "./campaign-authority.js";
 import { genericRequestScreenData, implementationQuestionScreenData, ownerDecisionScreenData, screenCredentialRequest, type CredentialScreenSurface } from "./credential-screen.js";
 import { DECISION_TOTAL_BOUND_MS, DecisionRuntime, hubDecisionTransport, type DecisionOutcome } from "./decision-runtime.js";
 import { DecisionModelSettings } from "./decision-model-settings.js";
@@ -5542,7 +5542,9 @@ export class SessionsService {
         ...orchestratorPolicy.execution,
         ...(orchestratorIssueNumbers.length || orchestratorPolicy.issueScope ? { issueNumbers: orchestratorPolicy.issueNumbers ?? orchestratorIssueNumbers } : {}),
         ...(orchestratorPolicy.issueScope ? { issueScope: orchestratorPolicy.issueScope } : {}),
-        ...(orchestratorPolicy.control ? { control: campaignControlForRunner(orchestratorPolicy.control, runner.protocolVersion) } : {}),
+        ...(orchestratorPolicy.control ? { control: campaignControlForRunner(orchestratorPolicy.control, runner.protocolVersion),
+          // A nested Orchestrator's control is its controller's, at that controller's revision (#3363).
+          ...(parentSessionId ? campaignControlRevisionForRunner(campaignController?.parentControlPolicy?.revision, runner.protocolVersion) : {}) } : {}),
       } } : {}),
       acpSessionContext,
       ...(creationContext?.review ? { review: creationContext.review.policy } : {}),
@@ -5896,7 +5898,9 @@ export class SessionsService {
         const boundary = (repaired.orchestratorPolicy!.control as Extract<CampaignControl, { mode: "full_control" }>).boundary;
         this.log.info(JSON.stringify({ event: "campaign_boundary_restored_from_scope_approval", sessionId: root.id,
           boundaryRevision: boundary.revision, issueScopeRevision: boundary.issueScopeRevision, revokedDecisions: revoked.length }));
-        for (const member of scopeParticipants(this.db, repaired)) this.hub.sessionChangedById(member.id);
+        // The restored boundary reaches each runner's copy now (#3363), and every member's view.
+        void this.synchronizeCampaignIssueScope(root.id);
+        for (const id of [root.id, ...this.db.campaignDescendantIds(root.id)]) this.hub.sessionChangedById(id);
         // From the campaign as it read before the repair, so the decisions it revoked are seen leaving.
         this.publishCampaignAttentionTransition(root);
         return null;
@@ -8994,6 +8998,7 @@ export class SessionsService {
           ...(session.orchestratorPolicy.issueNumbers?.length
             ? { issueNumbers: session.orchestratorPolicy.issueNumbers }
             : {}),
+          ...this.orderedRunnerControl(sessionId, this.db.getRunner(session.runnerId)?.protocolVersion),
         } }
         : {}),
       acpSessionContext: this.db.getAcpSessionContext(sessionId),
@@ -10429,9 +10434,11 @@ export class SessionsService {
         proposal.mode === "full_control" ? derivedLimits : undefined,
         proposal.mode === "full_control" ? launchDisclosure : undefined)) return fail("campaign authority revision changed; refresh and retry", 409);
     } catch (error) { return fail((error as Error).message, 409); }
-    // The runner holds the scope it enforces issue writes against; each issue operation also
-    // synchronizes again before it acts.
-    if (mintedScope) void this.synchronizeCampaignIssueScope(sessionId);
+    // The runner holds the scope it enforces issue writes against, and a diagnostic copy of this
+    // control: every change synchronizes both now, at the new policy revision (#3363), rather than
+    // waiting for a later scope edit or restart. Each issue operation also synchronizes again
+    // before it acts.
+    void this.synchronizeCampaignIssueScope(sessionId);
     for (const id of this.db.campaignBudgets.members(sessionId)) this.syncCampaignAllocation(id);
     this.recoverCampaignReviewJobs(session.runnerId);
     if (this.db.campaignBudgets.view(sessionId)?.state !== "active") this.enforceCampaignBudget(sessionId, now);
@@ -10453,7 +10460,8 @@ export class SessionsService {
     this.log.info(JSON.stringify({ event: "campaign_control_changed", sessionId,
       mode: control.mode, policyRevision: expectedRevision + 1, authorizedByUserId: principal.userId,
       revokedOccurrences: outstanding.length }));
-    this.hub.sessionChangedById(sessionId);
+    // Every member's view shows the campaign's control, not only the root's (#3363).
+    for (const id of [sessionId, ...this.db.campaignDescendantIds(sessionId)]) this.hub.sessionChangedById(id);
     return ok(this.db.getSession(sessionId)!);
   }
 
@@ -10495,6 +10503,8 @@ export class SessionsService {
     }
     this.log.info(JSON.stringify({ event: "campaign_follow_up_limit_changed", sessionId, acceptedFollowUps: limit,
       policyRevision: request.expectedRevision + 1, authorizedByUserId: principal.userId, revokedDecisions: result.revoked.length }));
+    // The re-minted boundary reaches each runner's copy now (#3363).
+    void this.synchronizeCampaignIssueScope(sessionId);
     for (const id of [sessionId, ...this.db.campaignDescendantIds(sessionId)]) this.hub.sessionChangedById(id);
     // From the campaign as it read before the change, so the decisions it revoked are seen leaving.
     this.publishCampaignAttentionTransition(session);
@@ -12503,18 +12513,42 @@ export class SessionsService {
     return created;
   }
 
+  /** A relaunch's copy of its campaign control (#3363): the campaign root's current control, with
+   * the root's policy revision that names it, so the runner orders it against any update still in
+   * flight. A pre-v310 runner keeps today's relaunch, which carries no control. */
+  private orderedRunnerControl(sessionId: string, protocolVersion: number | null | undefined): { control?: CampaignControl; controlRevision?: number } {
+    if (!runnerSupportsProtocol(protocolVersion, "campaignControlRevision")) return {};
+    const rootId = this.db.resolvedCampaignSessionId(sessionId) ?? sessionId;
+    const control = this.db.sessionOrchestratorPolicy(rootId)?.control;
+    const ordering = campaignControlRevisionForRunner(this.db.parentControlPolicy(rootId)?.revision, protocolVersion);
+    return control && ordering.controlRevision !== undefined
+      ? { control: campaignControlForRunner(control, protocolVersion), ...ordering } : {};
+  }
+
   async synchronizeCampaignIssueScope(sessionId: string): Promise<boolean> {
     const root = this.db.getSession(sessionId);
     const scope = root?.orchestratorPolicy?.issueScope;
     if (!root || !scope) return true;
     let synchronized = true;
-    for (const member of scopeParticipants(this.db, root)) {
+    // Read together, before the first send: the campaign's control and the policy revision that
+    // names it, so a runner can order it against a synchronization that overtakes this one. Each
+    // participant gets the root's current control, as its campaign projection reads it; a nested
+    // Orchestrator's stored policy keeps the snapshot it launched with (#3363).
+    const control = root.orchestratorPolicy?.control;
+    const controlRevision = root.parentControlPolicy?.revision;
+    const participants = scopeParticipants(this.db, root);
+    for (const member of participants) {
       try {
         const requestId = `issue_scope_sync_${randomUUID()}`;
+        const protocolVersion = this.db.getRunner(member.runnerId)?.protocolVersion;
+        // A pre-v310 runner keeps today's synchronization: its member's own stored control.
+        const ordered = runnerSupportsProtocol(protocolVersion, "campaignControlRevision");
+        const sent = ordered ? control : member.orchestratorPolicy?.control;
         const result = await this.hub.requestFromRunner(member.runnerId, requestId,
           { type: "campaign_issue_scope", operation: "synchronize", requestId, sessionId: member.id, scope,
-            ...(member.orchestratorPolicy?.control === undefined ? {} : {
-              control: campaignControlForRunner(member.orchestratorPolicy.control, this.db.getRunner(member.runnerId)?.protocolVersion) }) }, 30_000);
+            ...(sent === undefined ? {} : {
+              control: campaignControlForRunner(sent, protocolVersion),
+              ...campaignControlRevisionForRunner(controlRevision, protocolVersion) }) }, 30_000);
         if (result.type !== "campaign_issue_scope_result" || !result.ok || result.sessionId !== member.id || result.revision !== scope.revision) synchronized = false;
       } catch { synchronized = false; }
     }
@@ -13952,7 +13986,9 @@ export class SessionsService {
         entryPoint: "scope_resolution", authority, boundaryRevision: snapshot.issueAdmission?.boundaryRevision, lineage: snapshot.lineage?.kind ?? "removal",
         revision: snapshot.expectedRevision + 1, additions: snapshot.additions.length, removals: snapshot.removals.length }));
       void this.synchronizeCampaignIssueScope(childSessionId);
-      for (const member of scopeParticipants(this.db, this.db.getSession(childSessionId)!)) this.hub.sessionChangedById(member.id);
+      // Every child's view reads the committed scope, including ordinary children that are not
+      // scope participants and may work on an issue this change revoked (#3363).
+      for (const id of [childSessionId, ...this.db.campaignDescendantIds(childSessionId)]) this.hub.sessionChangedById(id);
       // From the campaign as it read before this approval, so the decisions it revoked are seen
       // leaving and reach the Orchestrator with their reason (#3916).
       this.publishCampaignAttentionTransition(currentParent);
