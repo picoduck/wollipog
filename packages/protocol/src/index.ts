@@ -1001,6 +1001,12 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      check judges. A v318 runner sends it only to a v318 control plane; older dashboards show the
 //      launch repository for an issue that names another. (This change first claimed 316, which no
 //      released version uses.)
+// 320: an Orchestrator's scope proposal names every repository the owner's first message limits the
+//      work to (#4117). `proposal.repositoryNames` replaces `repositoryName`, which a v318 or v319
+//      runner still sends and reads as a one-entry list; a record with one name reads the same way.
+//      Admitting the initial scope re-mints the boundary without the other repositories, and their
+//      Locations show as available in Campaign Status. A v320 runner sends one name to a v318 or v319
+//      control plane, and refuses several. Older dashboards don't show available Locations.
 // 321: issue closure through a Location (#4119). A `github_issue_closure` message may name a
 //      `location`: the runner inspects or closes the issue in that Location's own path, with its
 //      own forge login, instead of in an Orchestrator session's checkout, refuses an origin other
@@ -1009,7 +1015,7 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      control plane has rechecked the campaign's authority. A closure in a campaign
 //      repository other than the launch one needs such a Location's runner at v321;
 //      an older runner is never sent it, and a runner refuses `repository` on an older control
-//      plane, which would ignore it. (319 and 320 are claimed by open pull requests.)
+//      plane, which would ignore it.
 export const PROTOCOL_VERSION = 321;
 
 export * from "./campaign-authority.js";
@@ -1616,6 +1622,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   campaignRepositoryAddition: 317,
   /** v318 reads a Location's issue facts for a repository-qualified scope proposal (#4118). */
   repositoryQualifiedProposals: 318,
+  /** v320 reads `proposal.repositoryNames` and narrows a campaign's boundary to them (#4117). */
+  campaignRepositoryLimits: 320,
 } as const;
 
 /* ========================================================================== */
@@ -3195,6 +3203,8 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   launchDisclosure?: import("./campaign-control-launch.js").CampaignLaunchDisclosure;
   /** Locations other people added mid-campaign, waiting for the owner's Include in Campaign (#4117). */
   pendingLocations?: import("./project-location-inspection.js").CampaignPendingLocation[];
+  /** Locations of repositories the owner's first message left out (#4117): they don't join. */
+  availableLocations?: import("./project-location-inspection.js").CampaignAvailableLocation[];
   /** The Locations that joined the boundary after launch, newest last, bounded (#4117). */
   locationJoins?: import("./project-location-inspection.js").CampaignLocationJoin[];
   /** A Custom campaign's repositories (#4117): its own Location's repository first, then those its

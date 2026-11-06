@@ -43,7 +43,7 @@ import {
   validProviderHomeLaunchRefusal, validProviderHomeWait, validWorktreeSwitch,
 } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
-import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignDispatchScopeRefusal, campaignBoundaryCurrent, campaignIssueInScope, campaignLaunchRepository, campaignScopeRepositories, remintCampaignBoundary } from "./campaign-authority.js";
+import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignDispatchScopeRefusal, campaignBoundaryCurrent, campaignIssueInScope, campaignLaunchRepository, campaignRepositoryLimits, campaignScopeRepositories, remintCampaignBoundary } from "./campaign-authority.js";
 import { campaignBoundaryRepositoryAt, campaignLocationRepository } from "./campaign-repository-boundary.js";
 import { genericRequestScreenData, storedCredentialScreenFact } from "./credential-screen.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
@@ -325,6 +325,7 @@ import {
   SPAWN_APPROVAL_REQUEST_ID_PREFIX,
   TERMINAL_STATUSES,
   campaignRepositoryLocation,
+  scopeProposalRepositoryLimits,
   type WorkspaceRemovalBlocker,
   type WorkspaceSource,
 } from "@wollipog/protocol";
@@ -17573,6 +17574,8 @@ export class ControlPlaneDb {
         }) })),
       excludedLocations: structuredClone(policy.excludedLocations ?? []),
       pendingLocations: structuredClone((policy.pendingLocations ?? []).filter((item) => current.has(item.locationId))),
+      availableLocations: structuredClone((policy.availableLocations ?? []).filter((item) => current.has(item.locationId))),
+      ...(campaignRepositoryLimits(policy).length ? { repositoryLimits: campaignRepositoryLimits(policy) } : {}),
       joins: structuredClone(policy.locationJoins ?? []),
     };
   }
@@ -17584,9 +17587,12 @@ export class ControlPlaneDb {
       if (!policy) continue;
       const excluded = (policy.excludedLocations ?? []).filter((item) => item.locationId !== locationId);
       const pending = (policy.pendingLocations ?? []).filter((item) => item.locationId !== locationId);
-      if (excluded.length === (policy.excludedLocations ?? []).length && pending.length === (policy.pendingLocations ?? []).length) continue;
+      const available = (policy.availableLocations ?? []).filter((item) => item.locationId !== locationId);
+      if (excluded.length === (policy.excludedLocations ?? []).length && pending.length === (policy.pendingLocations ?? []).length &&
+          available.length === (policy.availableLocations ?? []).length) continue;
       if (excluded.length) policy.excludedLocations = excluded; else delete policy.excludedLocations;
       if (pending.length) policy.pendingLocations = pending; else delete policy.pendingLocations;
+      if (available.length) policy.availableLocations = available; else delete policy.availableLocations;
       this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(policy), now, root.id);
     }
   }
@@ -17889,6 +17895,7 @@ export class ControlPlaneDb {
         policy.pendingLocations = (policy.pendingLocations ?? []).filter((item) => item.locationId !== join.locationId);
         if (!policy.excludedLocations.length) delete policy.excludedLocations;
         if (!policy.pendingLocations.length) delete policy.pendingLocations;
+        widenCampaignRepositoryLimit(policy, join);
         this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(policy), now, rootId);
         finishAddition(0);
         this.db.exec("COMMIT");
@@ -17906,8 +17913,15 @@ export class ControlPlaneDb {
       // A Location keeps one state: whatever this update says replaces what was recorded before.
       const excluded = [...(policy.excludedLocations ?? []).filter((item) => !touched.has(item.locationId)), ...update.excluded];
       const pending = [...(policy.pendingLocations ?? []).filter((item) => !touched.has(item.locationId)), ...update.pending];
+      // While the owner's first message limits the campaign (#4117), a Location of a repository with
+      // no entry is available but doesn't join, however it got here: an addition, a reconnect or
+      // Include in Campaign. Only an approved repository addition gives that repository an entry.
+      const limited = campaignRepositoryLimits(policy).length > 0 && !consumed;
+      const leftOut = limited ? update.joins.filter((join) => !control.boundary.repositories!.some((entry) => entry.repository.toLowerCase() === join.repository.toLowerCase())) : [];
+      const available = [...(policy.availableLocations ?? []).filter((item) => !touched.has(item.locationId)),
+        ...leftOut.map((join) => ({ locationId: join.locationId, name: join.name, repository: join.repository.toLowerCase() }))];
       let revision = control.boundary.revision;
-      const joins = update.joins.filter((join) => !control.boundary.repositories!.some((entry) => entry.locationIds.includes(join.locationId)));
+      const joins = update.joins.filter((join) => !leftOut.includes(join) && !control.boundary.repositories!.some((entry) => entry.locationIds.includes(join.locationId)));
       let revoked: WorkflowDecisionView[] = [];
       if (joins.length) {
         const order = new Map((this.getProject(this.getSession(rootId)?.projectId ?? "")?.locations ?? []).map((location, index) => [location.id, index]));
@@ -17955,6 +17969,8 @@ export class ControlPlaneDb {
       if (!joins.length) finishAddition(revision);
       if (excluded.length) policy.excludedLocations = excluded.slice(-CAMPAIGN_BOUNDARY_LOCATIONS_MAX); else delete policy.excludedLocations;
       if (pending.length) policy.pendingLocations = pending.slice(-CAMPAIGN_BOUNDARY_LOCATIONS_MAX); else delete policy.pendingLocations;
+      if (available.length) policy.availableLocations = available.slice(-CAMPAIGN_BOUNDARY_LOCATIONS_MAX); else delete policy.availableLocations;
+      if (consumed) widenCampaignRepositoryLimit(policy, update.joins[0]!);
       this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(policy), now, rootId);
       this.db.exec("COMMIT");
       return { ok: true, revision, joined: joins.length > 0, revoked };
@@ -18077,12 +18093,29 @@ export class ControlPlaneDb {
       // A Human's approval is the authority for the scope it establishes (#2940): under Full Control
       // the boundary is re-minted from that Human in this transaction, so the campaign never holds a
       // scope its boundary does not name. A boundary stale for any other reason is not extended.
-      const reminted = !agentSessionId && boundary && this.boundaryTrailsHumanScope(root.id, policy)
-        ? remintCampaignBoundary(boundaryWithScopedEpics(boundary, scope.issueNumbers), scope, userId, now) : null;
+      // An initial scope limited to named repositories narrows the boundary (#4117), whoever admitted
+      // it, and nothing is dispatched before it. The launch entry stays first: the root runs there
+      // and the boundary requires it. Narrowing only removes entries, and any other repository's
+      // Locations show as available. A boundary that can't be re-minted applies nothing.
+      const firstScope = policy.firstMessageScope;
+      const admitsInitial = firstScope?.state === "established" && firstScope.grant?.status === "proposal" && !firstScope.initialScope;
+      const limits = admitsInitial ? scopeProposalRepositoryLimits(snapshot.scopeProposal) : [];
+      const entries = boundary?.repositories;
+      const kept = limits.length && entries ? entries.filter((entry, index) => index === 0 || limits.includes(entry.repository.toLowerCase())) : null;
+      const narrowed = Boolean(kept && entries && kept.length !== entries.length);
+      if (narrowed && after.some((issue) => !kept!.some((entry) => entry.repository.toLowerCase() === issue.repository))) { this.db.exec("ROLLBACK"); return null; }
+      const leftOut = narrowed ? entries!.filter((entry) => !kept!.includes(entry)).flatMap((entry) => entry.locationIds.flatMap((locationId) => {
+        // A Location no longer in the campaign's Project is never read live: its name isn't this campaign's to show.
+        const location = this.getProjectLocation(locationId);
+        return location && location.projectId === root.projectId ? [{ locationId, name: location.name, repository: entry.repository.toLowerCase() }] : [];
+      })) : [];
+      const reminted = boundary && (agentSessionId ? narrowed : this.boundaryTrailsHumanScope(root.id, policy))
+        ? remintCampaignBoundary(boundaryWithScopedEpics(narrowed ? { ...boundary, repositories: kept! } : boundary, scope.issueNumbers), scope, userId, now) : null;
+      if (narrowed && reminted?.mode !== "full_control") { this.db.exec("ROLLBACK"); return null; }
       // The owner approving the proposal a failed or uncertain scope grant routed to them (#4102)
       // also sets the derived issue limit that grant could not.
-      const grown = reminted?.mode === "full_control" ? proposalMaxIssues(policy, snapshot, reminted.boundary, after.length) ??
-        grantReviewMaxIssues(policy, snapshot, reminted.boundary, after.length) : undefined;
+      const grown = reminted?.mode !== "full_control" ? undefined : agentSessionId ? agentGrown
+        : proposalMaxIssues(policy, snapshot, reminted.boundary, after.length) ?? grantReviewMaxIssues(policy, snapshot, reminted.boundary, after.length);
       if (grown !== undefined && reminted?.mode === "full_control") reminted.boundary.issueAuthority!.maxIssues = grown;
       // The owner approving an Orchestrator's proposal (#4282) also withholds the operations it says
       // the message withholds: narrowing only. An approval that cannot re-mint the boundary applies nothing.
@@ -18121,7 +18154,8 @@ export class ControlPlaneDb {
         if (id === root.id && first?.state === "established" && first.grant?.status === "proposal" && !first.initialScope) {
           first.initialScope = { admittedAt: now, occurrenceId, requestedCount: snapshot.scopeProposal?.requestedCount ?? null,
             constraints: [...snapshot.scopeProposal?.constraints ?? []], withheldOperations: [...withheld],
-            ...(snapshot.scopeProposal?.repositoryConstraint?.repository ? { repositoryLimit: snapshot.scopeProposal.repositoryConstraint.repository } : {}) };
+            ...(limits.length ? { repositoryLimits: limits } : {}) };
+          if (leftOut.length) memberPolicy.availableLocations = leftOut.slice(-CAMPAIGN_BOUNDARY_LOCATIONS_MAX);
         }
         memberPolicy.issueNumbers = [...memberScope.issueNumbers];
         memberPolicy.issueScope = memberScope;
@@ -18147,7 +18181,7 @@ export class ControlPlaneDb {
       }
       const affected = new Set(snapshot.affectedDecisions);
       const revoked = this.authorityBoundWorkflowDecisionsForController(root.id)
-        .filter((stale) => (!agentSessionId && boundary !== null) || affected.has(stale.occurrenceId));
+        .filter((stale) => (!agentSessionId && boundary !== null) || narrowed || affected.has(stale.occurrenceId));
       for (const stale of revoked) {
         this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
         this.retireWorkflowDecisionResume(stale.occurrenceId, now);
@@ -21266,7 +21300,9 @@ export class ControlPlaneDb {
      * a revoke, or an authorization without one, drops it so no stale record outlives its boundary. */
     launchDisclosure?: import("@wollipog/protocol").CampaignLaunchDisclosure,
     /** A reviewed enable's excluded Project Locations (#4117), replacing any earlier list. */
-    excludedLocations?: import("@wollipog/protocol").CampaignExcludedLocation[]): boolean {
+    excludedLocations?: import("@wollipog/protocol").CampaignExcludedLocation[],
+    /** With them, the Locations a first-message limit leaves out of that enable, replacing any earlier list. */
+    availableLocations?: import("@wollipog/protocol").CampaignAvailableLocation[]): boolean {
     const campaign = this.sessionOrchestratorPolicy(id);
     const policy = this.parentControlPolicy(id);
     if (!campaign || !policy || policy.revision !== expectedRevision || !validCampaignControl(control) ||
@@ -21310,6 +21346,7 @@ export class ControlPlaneDb {
       const stillWaiting = new Set(pending.map((item) => item.locationId));
       const excluded = excludedLocations.filter((item) => !stillWaiting.has(item.locationId));
       if (excluded.length) campaign.excludedLocations = structuredClone(excluded); else delete campaign.excludedLocations;
+      if (availableLocations?.length) campaign.availableLocations = structuredClone(availableLocations); else delete campaign.availableLocations;
     }
     this.db.exec("BEGIN");
     try {
@@ -34970,6 +35007,30 @@ function validPendingLocations(value: unknown): boolean {
     value.every((item) => locationRecord(item, ["locationId", "name", "reason"])?.reason === "added_by_other");
 }
 
+function validAvailableLocations(value: unknown): boolean {
+  return Array.isArray(value) && value.length <= CAMPAIGN_BOUNDARY_LOCATIONS_MAX && value.every((item) => {
+    const repository = locationRecord(item, ["locationId", "name", "repository"])?.repository;
+    return typeof repository === "string" && campaignRepositoryLocation(repository) !== null;
+  });
+}
+
+/** The owner approved adding a repository a first-message limit left out (#4117), so the limit now
+ * holds it. Its other available Locations then wait for Include in Campaign: the approval named one
+ * Location, and nobody has reviewed the rest. */
+function widenCampaignRepositoryLimit(policy: OrchestratorCampaignPolicy, join: { locationId: string; repository: string }): void {
+  const first = policy.firstMessageScope;
+  const limits = campaignRepositoryLimits(policy);
+  if (first?.state !== "established" || !first.initialScope || !limits.length) return;
+  const repository = join.repository.toLowerCase();
+  const { repositoryLimit: _single, ...initial } = first.initialScope;
+  first.initialScope = { ...initial, repositoryLimits: [...new Set([...limits, repository])] };
+  const moved = (policy.availableLocations ?? []).filter((item) => item.repository === repository && item.locationId !== join.locationId);
+  const available = (policy.availableLocations ?? []).filter((item) => item.repository !== repository);
+  if (available.length) policy.availableLocations = available; else delete policy.availableLocations;
+  const pending = [...policy.pendingLocations ?? [], ...moved.map((item) => ({ locationId: item.locationId, name: item.name, reason: "added_by_other" as const }))];
+  if (pending.length) policy.pendingLocations = pending.slice(-CAMPAIGN_BOUNDARY_LOCATIONS_MAX);
+}
+
 function validLocationJoins(value: unknown): boolean {
   return Array.isArray(value) && value.length <= CAMPAIGN_LOCATION_JOINS_MAX && value.every((item) => {
     const entry = locationRecord(item, ["locationId", "name", "repository", "revision", "at", "source"]);
@@ -35087,6 +35148,7 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
     delete value.launchDisclosure;
   }
   if (value.pendingLocations !== undefined && !validPendingLocations(value.pendingLocations)) delete value.pendingLocations;
+  if (value.availableLocations !== undefined && !validAvailableLocations(value.availableLocations)) delete value.availableLocations;
   if (value.locationJoins !== undefined && !validLocationJoins(value.locationJoins)) delete value.locationJoins;
   if (value.repositories !== undefined && (value.control?.mode === "full_control" || !validCampaignRepositoryList(value.repositories))) delete value.repositories;
   const validSources = new Set([

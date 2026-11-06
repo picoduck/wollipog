@@ -364,6 +364,8 @@ test("PROTOCOL_VERSION is 321", () => {
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.locationIssueClosure, 321);
   assert.equal(runnerSupportsProtocol(RUNNER_CAPABILITY_MIN_PROTOCOL.locationIssueClosure - 1, "locationIssueClosure"), false);
   assert.equal(runnerSupportsProtocol(RUNNER_CAPABILITY_MIN_PROTOCOL.locationIssueClosure, "locationIssueClosure"), true);
+  // A control plane reads a proposal's repository list from v320 (#4117).
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryLimits, 320);
   // Another repository's proposed issues are read through a v318 Location's runner (#4118).
   assert.equal(runnerSupportsProtocol(317, "repositoryQualifiedProposals"), false);
   assert.equal(runnerSupportsProtocol(318, "repositoryQualifiedProposals"), true);

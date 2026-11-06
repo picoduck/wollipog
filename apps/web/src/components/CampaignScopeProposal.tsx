@@ -1,6 +1,6 @@
 import React, { useId } from "react";
-import type { CampaignScopeCheckView, CampaignScopeProposal, CampaignScopeProposalView, FullControlScopeGrant,
-  ScopeProposalCheck as ScopeProposalCheckName } from "@wollipog/protocol";
+import { scopeProposalRepositoryConstraints, type CampaignScopeCheckView, type CampaignScopeProposal, type CampaignScopeProposalView, type FullControlScopeGrant,
+  type ScopeProposalCheck as ScopeProposalCheckName } from "@wollipog/protocol";
 import { DECISION_FAILURE_LABELS } from "./CampaignDecisionModelChecks.js";
 import { DecisionAnswerChecklist } from "./DecisionAnswerChecklist.js";
 import { Notice } from "./Notice.js";
@@ -26,7 +26,8 @@ const CHECKS: Partial<Record<ScopeProposalCheckName, string>> = {
   later_named_issues: "issues it says you named but proposes only now",
   constraints: "constraints it read",
   withheld_operations: "operations it withholds",
-  repository_limit: "the repository it says you limited the work to",
+  repository_limit: "the repositories it says you limited the work to",
+  repository_mentioned: "a repository your message names, with no limit stated",
 };
 
 /** How a proposal was checked: the floors alone, the Decision Model's constraint check, or the
@@ -41,7 +42,7 @@ function checkedBy(proposal: CampaignScopeProposal): string {
   }
   switch (proposal.ownerCause) {
     case "proposal_unstructured": return "Deterministic checks, then your approval: the Orchestrator's machine can't send a structured proposal.";
-    case "repository_name_unresolved": return "Deterministic checks, then your approval: the repository your message names decides nothing, so no model was asked.";
+    case "repository_name_unresolved": return "Deterministic checks, then your approval: a repository your message names matches nothing or several, so no repository limit applies and no model was asked.";
     case "constraint_check_uncertain": return `Deterministic checks, then the Decision Model couldn't confirm ${list}, so it needs your approval.`;
     case "constraint_check_failed": return `Deterministic checks, then the Decision Model's check of ${list} failed, so it needs your approval.`;
     default: return `Deterministic checks, then your approval: it includes ${list}, which no Decision Model checked.`;
@@ -78,6 +79,7 @@ export function ScopeProposalCheck({ check }: { check: CampaignScopeCheckView })
  * Orchestrator chose it and why, the count, constraints and withheld operations it read, and its
  * rationale. Ranking is the Orchestrator's call; nothing here judges it. */
 export function ScopeProposalFacts({ repository, proposal, explanation }: { repository: string; proposal: CampaignScopeProposal; explanation: string }) {
+  const repositoryNames = scopeProposalRepositoryConstraints(proposal);
   return <>
     <dl className="facts">
       <div><dt>Scope</dt><dd>{proposal.initial ? "Initial Scope" : "Addition"}</dd></div>
@@ -87,8 +89,8 @@ export function ScopeProposalFacts({ repository, proposal, explanation }: { repo
         {issue.rationale ? <>: {issue.rationale}</> : null}
       </li>)}</ul> : "None: the Orchestrator found nothing in your message that needs issue scope."}</dd></div>
       <div><dt>Count You Asked For</dt><dd>{proposal.requestedCount ?? "None Stated"}</dd></div>
-      {proposal.repositoryConstraint && <div><dt>Repository You Named</dt><dd>{proposal.repositoryConstraint.name}: {proposal.repositoryConstraint.repository ??
-        "matches no repository in this campaign, or more than one"}</dd></div>}
+      {repositoryNames.length > 0 && <div><dt>{repositoryNames.length > 1 ? "Repositories You Named" : "Repository You Named"}</dt><dd>{repositoryNames.map((item) =>
+        <div key={item.name}>{item.name}: {item.repository ?? "matches no repository in this campaign, or more than one"}</div>)}</dd></div>}
       <div><dt>Constraints It Read</dt><dd>{proposal.constraints.length ? proposal.constraints.join("; ") : "None"}</dd></div>
       <div><dt>Withheld Operations</dt><dd>{proposal.withheldOperations.length ? proposal.withheldOperations.map(operationLabel).join(", ") : "None"}</dd></div>
       <div><dt>Rationale</dt><dd>{explanation}</dd></div>

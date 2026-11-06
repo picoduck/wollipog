@@ -508,6 +508,25 @@ const projectionFor = (rev: number) => campaignProjection(
         ...(included ? [{ locationId: "loc_shared", name: "Shared Docs", repository: "picoduck/shared-docs", revision: 7, at: NOW, source: "owner_included" as const }] : []),
       ],
     } } : {}),
+    // `repositories=limited`: the owner's first message limited the campaign to two of its Project's
+    // repositories, so another's Locations are available but don't join (#4117).
+    ...(params.get("repositories") === "limited" ? { repositoryBoundary: {
+      revision: 7,
+      repositories: [
+        { repository: "picoduck/wollipog", locations: [
+          { locationId: "loc_laptop", name: "Wollipog on Laptop", availability: "available" as const, isDefault: true }] },
+        { repository: "picoduck/dev-box-setup", locations: [
+          { locationId: "loc_setup", name: "Dev Box Setup", availability: "available" as const, isDefault: false }] },
+      ],
+      excludedLocations: [],
+      pendingLocations: [],
+      availableLocations: [
+        { locationId: "loc_docs", name: "Shared Docs", repository: "picoduck/shared-docs" },
+        { locationId: "loc_docs_desk", name: "Shared Docs on Desk", repository: "picoduck/shared-docs" },
+      ],
+      repositoryLimits: ["picoduck/wollipog", "picoduck/dev-box-setup"],
+      joins: [],
+    } } : {}),
     // `repositories=custom`: a Custom campaign's list, extended by an approved repository addition;
     // it has no authority boundary, so no revision (#4117).
     ...(params.get("repositories") === "custom" ? { repositoryBoundary: {
@@ -852,8 +871,8 @@ const SCOPE_PROPOSALS_ACROSS_REPOSITORIES: import("@wollipog/protocol").Campaign
   occurrenceId: "wd_scope_3", createdAt: NOW - 60_000, outcome: "waiting_for_owner",
   explanation: "You named team/repo#123 and team/api#123. I chose the worst open API bug by priority label.",
   proposal: { initial: true, messageDigest: "a".repeat(64), requestedCount: null, constraints: [], withheldOperations: [],
-    repositoryConstraint: { name: "the service repo", repository: null }, checks: ["chosen_issues", "repository_name_unresolved"], route: "owner",
-    ownerCause: "repository_name_unresolved", ownerMessage: "Fix team/repo#123 and team/api#123, then the worst open bug in the service repo.",
+    repositoryConstraints: [{ name: "the service repo", repository: null }, { name: "team/api", repository: "team/api" }], checks: ["chosen_issues", "repository_name_unresolved"], route: "owner",
+    ownerCause: "repository_name_unresolved", ownerMessage: "Fix team/repo#123 and team/api#123, then the worst open bug in the service repo or team/api, and nothing else.",
     issues: [
       { number: 123, origin: "owner_named", rationale: "You named it.", title: "Composer Epic" },
       { repository: "team/api", number: 123, origin: "owner_named", rationale: "You named it, in the API repository.", title: "Token Refresh Races" },

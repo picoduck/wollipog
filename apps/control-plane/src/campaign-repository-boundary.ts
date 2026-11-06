@@ -1,6 +1,6 @@
 import {
   CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_BOUNDARY_REPOSITORIES_MAX, PROJECT_LOCATION_INSPECTION_FAILURES, campaignBoundaryRepositories,
-  type CampaignBoundaryRepository, type CampaignExcludedLocation, type ProjectLocationInspection, type ProjectLocationView, type SessionView,
+  type CampaignAvailableLocation, type CampaignBoundaryRepository, type CampaignExcludedLocation, type ProjectLocationInspection, type ProjectLocationView, type SessionView,
 } from "@wollipog/protocol";
 
 /** The repository whose listed Location a runner and workspace are, lower-cased, or null: an active
@@ -51,17 +51,22 @@ export interface CampaignProjectLocation { id: string; name: string }
  * authorized those repositories, so an inspection can add to them but never take one away. A carried
  * Location that can't be read now stays where it is, rather than being listed as excluded, and a
  * repository that lost every Location keeps its entry. The size bounds reserve room for them, so a
- * newly verified Location is the one left out when the boundary is full. */
+ * newly verified Location is the one left out when the boundary is full.
+ *
+ * `limits` is what the owner's first message limited an existing campaign to: an enable inspects the
+ * whole Project, but a verified Location of another repository is available and doesn't join. */
 export function launchBoundaryRepositories(input: {
   launchRepository: string;
   launchLocationId: string | null;
   locations: readonly CampaignProjectLocation[];
   inspections: ReadonlyMap<string, ProjectLocationInspection>;
   carried?: readonly CampaignBoundaryRepository[] | undefined;
-}): { repositories: CampaignBoundaryRepository[]; excluded: CampaignExcludedLocation[] } {
+  limits?: readonly string[] | undefined;
+}): { repositories: CampaignBoundaryRepository[]; excluded: CampaignExcludedLocation[]; available: CampaignAvailableLocation[] } {
   const launch = input.launchRepository.toLowerCase();
   const entries = new Map<string, CampaignBoundaryRepository>([[launch, { repository: launch, locationIds: [] }]]);
   const excluded: CampaignExcludedLocation[] = [];
+  const available: CampaignAvailableLocation[] = [];
   const placed = new Set<string>();
   const carriedEntries = input.carried ?? [];
   const heldRepositories = new Set(carriedEntries.map((entry) => entry.repository.toLowerCase()));
@@ -80,6 +85,11 @@ export function launchBoundaryRepositories(input: {
       })();
     if (!inspection.ok) {
       excluded.push({ locationId: location.id, name: location.name, failure: inspection.failure, reason: inspection.reason });
+      continue;
+    }
+    if (input.limits?.length && inspection.repository !== launch && !heldRepositories.has(inspection.repository) &&
+        !input.limits.includes(inspection.repository)) {
+      available.push({ locationId: location.id, name: location.name, repository: inspection.repository });
       continue;
     }
     const entry = entries.get(inspection.repository);
@@ -105,5 +115,6 @@ export function launchBoundaryRepositories(input: {
       placed.add(id);
     }
   }
-  return { repositories: [...entries.values()], excluded: excluded.filter((item) => !placed.has(item.locationId)) };
+  return { repositories: [...entries.values()], excluded: excluded.filter((item) => !placed.has(item.locationId)),
+    available: available.filter((item) => !placed.has(item.locationId)) };
 }
