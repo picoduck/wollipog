@@ -99,6 +99,32 @@ for (const [label, viewport] of [["1440", { width: 1440, height: 1500 }], ["390"
   });
 }
 
+// Typed questions (#4283): each check's answers read as a short checklist beside the verdict the
+// server derived from them.
+for (const [label, viewport] of [["1440", { width: 1440, height: 1900 }], ["390", { width: 390, height: 2600 }]] as const) {
+  test(`a typed check's answers read as a checklist beside its verdict (${label}px)`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&selection=1&typed=1");
+    const section = page.getByRole("region", { name: "Decision Model Checks" });
+    const items = section.locator(".campaign-screen-item");
+    await expect(items).toHaveCount(3);
+    const answers = (index: number) => items.nth(index).getByRole("list", { name: "Answers" }).getByRole("listitem");
+    await expect(answers(0)).toHaveCount(5);
+    await expect(items.nth(1)).toContainText("Issue 140 violates 'Skip Security'.");
+    await expect(answers(1)).toHaveText([
+      /^Satisfies 'Count Matches'Answered yes with 96% confidence\./u,
+      /^Issue 140 Satisfies 'UI Only'/u,
+      /^Issue 140 Violates 'Skip Security'Answered violates with 92% confidence; this answer decided the verdict\. It is labeled security\.$/u,
+    ]);
+    await expect(answers(2).nth(1)).toContainText("Issue 141 Unsure About 'UI Only'");
+    await expect(answers(2).nth(1)).toContainText("55% confidence; this answer decided the verdict");
+    await section.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath(`typed-answers-${label}.png`) });
+    const geometry = await section.evaluate((element) => ({ clientWidth: element.clientWidth, scrollWidth: element.scrollWidth }));
+    expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
+  });
+}
+
 for (const [label, viewport] of [["1440", { width: 1440, height: 900 }], ["390", { width: 390, height: 844 }]] as const) {
   test(`a Custom campaign's epic seed reads beside the other checks (${label}px)`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);

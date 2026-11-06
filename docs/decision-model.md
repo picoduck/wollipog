@@ -98,6 +98,54 @@ ceiling, change a repository or grant an operation; callers enforce that before 
 with `narrowToProposal`. Write a repository floor as "a repository in the campaign's boundary" so it
 holds for single- and multi-repository boundaries.
 
+## Typed Questions (#4283)
+
+A kind may set `typed` instead of returning a verdict. It then lists fixed questions
+(`apps/control-plane/src/decision-questions.ts`), each with:
+
+- a stable `questionId`, a short Title Case `label` and fixed text, which never contains caller data;
+- an answer type: `boolean`, `choice` with allowed values, or an integer `score` with a range;
+- a rule saying which values satisfy the question, which violate it, and which (such as
+  `cannot_tell`) settle nothing;
+- optionally a per-item `subject` ("for each proposed issue") and `parameterized`, which asks the
+  question once per caller parameter (such as each constraint the owner stated, quoted as data).
+
+The caller passes `inputs.questions`: each subject's items (a schema-safe `id` and a display `label`)
+and each parameterized question's parameters. Malformed, missing, unused or oversized question inputs
+throw `DecisionInputError`; a typed decision never asks a partial set. Zero parameters simply ask
+nothing for that question, so a caller with nothing checkable should not call at all.
+
+All of a decision's questions go in one call with one output schema (`typedOutputSchema`): exactly
+one property per question, each answer exactly `value`, `confidence` (0 to 1) and `evidence` (at
+most 160 characters), and a per-item question exactly one entry per listed item. There is no verdict
+property. The same schema goes to Claude Code's `--json-schema` and Codex's `outputSchema`. Output
+with an added or missing question, an extra field, a verdict, a value outside the allowed answers,
+or a missing or repeated item is `invalid_output`, retried like any other, and never read leniently.
+
+The server derives the verdict (`deriveTypedVerdict`) with the kind's fixed `confidenceThreshold`:
+
+- **refuse** when any answer is a violation at or above the threshold, naming the first such
+  question and item, for example "Issue 4120 violates 'Skip Security'.";
+- **admit** when every answer is satisfied at or above the threshold;
+- otherwise **uncertain**, naming the first answer that could not admit, which takes the failure
+  rule's one person-owned request.
+
+The reason is the server's sentence, never the model's prose. The occurrence's `typed_answers`
+column records the threshold, each question as asked (with its items, and a parameterized question's
+complete parameter, since its display label may be shortened), each answer with its
+confidence, evidence and assessment, and the deciding answer; `DecisionOccurrenceView.typedAnswers`
+projects it, and Campaign Status shows it as a checklist. Records from before typed questions keep
+their single-verdict form. Item labels and parameters are stored there for display, like
+`campaign_selection_proposals`; the other inputs are still kept only as digests.
+
+A typed call goes only to a v307 runner (`typedDecisionQuestions`), which accepts its larger schema
+(`DECISION_SCHEMA_MAX_CHARS`) and output (`DECISION_OUTPUT_MAX_BYTES`). With an older runner the
+occurrence records one non-transient `runner_incapable` attempt and takes the person route.
+
+No production kind is typed yet: the scope constraint check (#4282) and the migration of the
+credential screen, follow-up relatedness and closure-reason kinds come next. The optional dedicated
+decisions provider is deferred.
+
 ## The Question and Credential Screen (`credential_screen`, #4104)
 
 `apps/control-plane/src/credential-screen.ts` screens Full Control question and tool text that the
