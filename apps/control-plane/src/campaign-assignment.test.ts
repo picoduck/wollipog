@@ -64,6 +64,8 @@ test("Full Control describes the exact boundary and effective owners without cre
   assert.match(text, /request_owner_decision for a gate with no typed category/);
   assert.match(text, /Never end a turn with such a gate only in prose/);
   assert.match(text, /merge-group CI passes and the forge reports actual MERGED state/);
+  // #2940: the first report is the root Orchestrator's (its preset carries it), never a child's task.
+  assert.doesNotMatch(text, /first report/i);
 });
 
 test("campaigns use review sessions without asking for admission, including without the native adapter", () => {
