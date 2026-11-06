@@ -773,10 +773,13 @@ const SCOPE_CHECK_ANSWERS: import("@wollipog/protocol").DecisionTypedAnswersView
  * `unsure` leaves whether it asks for #123 below the threshold, so the check is uncertain. */
 function seedCheckAnswers(unsure: boolean): import("@wollipog/protocol").DecisionTypedAnswersView {
   const choice = (values: string[]) => ({ type: "choice" as const, values });
+  // A parameterized question's label is its parameter: the issue reference and title (issue data,
+  // not UI copy), as the server renders it.
+  const named = "team/repo#123 Composer Epic";
   const questions = [
     { questionId: "count_consistent", label: "Count Matches Your Message", text: "Does the proposal's count agree with the owner's message?",
       answer: choice(["consistent", "inconsistent", "cannot_tell"]) },
-    { questionId: "named_asked_for__1", label: "team/repo#123 Composer Epic", parameter: "team/repo#123 Composer Epic",
+    { questionId: "named_asked_for__1", label: named, parameter: named,
       text: "Does the owner's message ask the campaign to work on the issue quoted below?", answer: choice(["asked_for", "only_mentioned", "cannot_tell"]) },
     { questionId: "constraints_complete", label: "Every Stated Constraint Listed", text: "Does the proposal list every stated constraint?",
       answer: choice(["complete", "missing_constraint", "cannot_tell"]) },
