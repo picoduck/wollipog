@@ -227,7 +227,7 @@ export function backgroundJobRowSentence(
   deliveries: readonly BackgroundDeliveryView[] = [],
 ): string {
   const ago = (timestamp: number | undefined) => formatRecordedRelativeTime(timestamp, now);
-  if (state === "running" || state === "stalled") return `Started ${ago(job.registeredAt)}`;
+  if (state === "running") return `Started ${ago(job.registeredAt)}`;
   if (!finishedStates.has(state)) return `Last seen ${ago(job.lastObservedAt)}`;
   if (job.assistantResultPersistedAt != null) return `Result returned ${ago(job.assistantResultPersistedAt)}`;
   if (job.continuationMissingResultAt != null) return "Result never arrived";

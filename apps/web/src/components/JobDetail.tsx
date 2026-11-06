@@ -135,11 +135,11 @@ export function JobDetail({
     );
   }
   const inventorySupported = runnerSupportsProtocol(runnerProtocolVersion, "managedBackgroundInventory");
-  const state = backgroundJobCurrentState(job, session.backgroundWorkState, runnerOnline, inventorySupported, now);
+  const state = backgroundJobCurrentState(job, session.backgroundWorkState, runnerOnline, inventorySupported);
   const label = backgroundJobLabel(job);
   const counts = backgroundJobGroupCounts(group, session.backgroundJobsTruncated === true);
   const unfinishedSiblings = Math.max(0, counts.total - counts.finished - (job.terminalStatus ? 0 : 1));
-  const running = state === "running" || state === "stalled";
+  const running = state === "running";
   const end = job.terminalObservedAt ?? (running ? now : job.lastObservedAt);
   const duration = formatDuration(Math.max(0, end - job.registeredAt));
   const notification = backgroundNotificationStage(group.deliveries);
