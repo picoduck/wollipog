@@ -10,7 +10,7 @@ import { CampaignIssueScopeRefusal, inspectCampaignIssueScope, inspectCampaignPu
 import { launchOrchestratorMeta, nextCampaignControl, validControlRevision } from "./campaign-control-order.js";
 import { boundedIssueNumbers, campaignBoundaryRepository, campaignRepositoryLocation, parseFullControlAutomaticResponse, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
-import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
+import type { GithubIssueClosureLocation, GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
 import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage, GitLabMergeClosuresMessage, GitLabMergeClosuresResultMessage, ForgeDecisionActionMessage, ForgeDecisionActionResultMessage } from "@wollipog/protocol";
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
 import { executeBranchDeletion, executePullRequestEnqueue, observePullRequestMerge } from "./forge-decision-action.js";
@@ -129,7 +129,7 @@ import {
   type SessionWorktreeSwitchView,
 } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, realpathSync, writeSync } from "node:fs";
 import { mkdir, realpath, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { validLocationSwitchBranch, type SessionLocationSwitchMessage } from "@wollipog/protocol";
@@ -958,6 +958,19 @@ function canResumeSession(meta: SessionMeta): boolean {
 }
 
 /** Keep nonblocking questions while authentication owns the visible approval barrier. */
+/** A closure that threw. Execution throws only before its mutation fence: a mutation failure is an
+ * `uncertain` result. Provider output is never surfaced, only these fixed sentences. */
+function issueClosureFailure(
+  base: { type: "github_issue_closure_result"; requestId: string; sessionId: string },
+  error: unknown,
+): GithubIssueClosureResultMessage {
+  return error instanceof IssueClosureInspectionError
+    ? { ...base, ok: false, failure: error.failure, error: error.message,
+        ...(error.deliveryVerificationFailure ? { deliveryVerificationFailure: error.deliveryVerificationFailure } : {}) }
+    : { ...base, ok: false, failure: "evidence_unavailable",
+      error: "Issue inspection failed; verify gh or glab authentication and complete conflict evidence" };
+}
+
 function pendingAsyncQuestions(pending: PendingApproval | null | undefined): PendingApproval | null {
   return pendingRequests(pending)
     .filter((request) => request.kind === "question" && request.async)
@@ -20209,6 +20222,7 @@ export class SessionManager {
     options: { agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
   ): Promise<GithubIssueClosureResultMessage> {
     const base = { type: "github_issue_closure_result" as const, requestId: message.requestId, sessionId: message.sessionId };
+    if (message.location) return this.githubIssueClosureAtLocation(message, message.location, base);
     const meta = this.store.readMeta(message.sessionId);
     if (!meta?.orchestrator || !meta.repoPath) {
       return { ...base, ok: false, failure: "runner_failed", error: "Issue closure requires a runner-local Orchestrator repository" };
@@ -20264,12 +20278,68 @@ export class SessionManager {
         occurrenceId: message.occurrenceId, outcome: result.outcome, ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
       return { ...base, ok: true, result };
     } catch (error) {
-      // Execution throws only before its mutation fence: a mutation failure is an `uncertain` result.
-      return error instanceof IssueClosureInspectionError
-        ? { ...base, ok: false, failure: error.failure, error: error.message,
-            ...(error.deliveryVerificationFailure ? { deliveryVerificationFailure: error.deliveryVerificationFailure } : {}) }
-        : { ...base, ok: false, failure: "evidence_unavailable",
-          error: "Issue inspection failed; verify gh or glab authentication and complete conflict evidence" };
+      return issueClosureFailure(base, error);
+    }
+  }
+
+  /** A closure in another campaign repository (#4119): in the Location the control plane resolved,
+   * with this runner's own forge login. The Orchestrator session lives on another runner, so this
+   * one holds no copy of its scope or boundary: the control plane rechecks both immediately before
+   * it consumes the approval and dispatches here. What this runner fences itself is what only it can
+   * see: the checkout's origin, the forge digest, and one durable attempt per occurrence. */
+  private async githubIssueClosureAtLocation(
+    message: GithubIssueClosureMessage,
+    location: GithubIssueClosureLocation,
+    base: { type: "github_issue_closure_result"; requestId: string; sessionId: string },
+  ): Promise<GithubIssueClosureResultMessage> {
+    // Frames are not validated on the wire.
+    if (typeof location.workspacePath !== "string" || !location.workspacePath.trim() || location.workspacePath.includes("\0") ||
+        typeof location.repository !== "string" || !location.repository) {
+      return { ...base, ok: false, failure: "runner_failed", error: "Issue closure requires the Location's path on this runner" };
+    }
+    const repository = location.repository.toLowerCase();
+    let cwd: string;
+    try {
+      cwd = await realpath(location.workspacePath);
+    } catch {
+      return { ...base, ok: false, failure: "runner_failed", error: "Issue closure requires the Location's path on this runner" };
+    }
+    const run = issueClosureRun({ kind: "native" }, cwd);
+    try {
+      if (message.operation === "inspect") {
+        const inspection = await inspectGithubIssueClosure(message.issue, run, message.deliveryPullRequests, message.epicMembers === true);
+        if (inspection.repository.toLowerCase() !== repository) return { ...base, ok: false, failure: "repository_changed", error: "The Location's repository differs from the one this closure names" };
+        return { ...base, ok: true, inspection };
+      }
+      if (message.snapshot.repository.toLowerCase() !== repository) return { ...base, ok: false, failure: "repository_changed", error: "Closure repository differs from the Location's" };
+      const digest = createHash("sha256").update(JSON.stringify(message.snapshot)).digest("hex");
+      const result = await executeGithubIssueClosure(message.snapshot, run, () => this.beginLocationIssueClosure(message.occurrenceId, digest));
+      this.log(JSON.stringify({ event: "github_issue_closure_result", sessionId: message.sessionId, workspaceId: location.workspaceId,
+        occurrenceId: message.occurrenceId, outcome: result.outcome, ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
+      return { ...base, ok: true, result };
+    } catch (error) {
+      return issueClosureFailure(base, error);
+    }
+  }
+
+  /** The durable fence before a Location's closure mutates anything (#4119): one record per occurrence,
+   * created exclusively and flushed, so a replay or a restart can never close through it twice. */
+  private beginLocationIssueClosure(occurrenceId: string, digest: string): boolean {
+    const directory = join(this.stateDir, "location-issue-closures");
+    try {
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      const fd = openSync(join(directory, `${createHash("sha256").update(occurrenceId).digest("hex")}.attempt`), "wx", 0o600);
+      try {
+        writeSync(fd, `${digest}\n`);
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      const parent = openSync(directory, "r");
+      try { fsyncSync(parent); } finally { closeSync(parent); }
+      return true;
+    } catch {
+      return false;
     }
   }
 

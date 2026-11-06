@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import childProcess, { type ChildProcess, type ExecFileException, type ExecFileOptions } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -154,6 +154,55 @@ for (const change of ["unchanged", "custom", "revision", "operation", "reason", 
     });
   });
 }
+
+test("a closure at a Location runs in that path on this runner with no session of its own, and fences one durable attempt (#4119)", async (t) => {
+  const f = fixture(t);
+  const location = { workspaceId: "api", workspacePath: f.root, repository: "Example/Project" };
+  const attempts = join(f.store().rootPath(), ".runner-data", "location-issue-closures");
+  const inspect = (at = location) => f.manager().githubIssueClosure({ type: "github_issue_closure", operation: "inspect", requestId: "inspect", sessionId: "s_on_another_runner", issue, location: at });
+  const execute = (snapshot: GithubIssueClosureSnapshot, occurrenceId = "approved-once") => f.manager().githubIssueClosure({
+    type: "github_issue_closure", operation: "execute", requestId: "execute", sessionId: "s_on_another_runner", occurrenceId, snapshot, location });
+
+  // No Orchestrator session exists here for that id: the control plane holds the campaign's scope.
+  const inspected = await inspect();
+  assert.equal(inspected.ok, true, inspected.error ?? "Expected an inspection");
+  assert.equal(inspected.inspection?.repository, "example/project");
+  assert.ok(f.commands.length > 0 && f.commands.every((command) => command.cwd === realpathSync(f.root)), "every command ran in the Location's own path");
+  const { state: _state, ...evidence } = inspected.inspection!;
+  const snapshot: GithubIssueClosureSnapshot = { ...evidence, category: "issue_closure", reason: "not_planned", explanation: "Retire obsolete work.",
+    evidence: ["Superseded."], activeChildren: [] };
+
+  // An origin other than the Location's repository is refused, before and at execution.
+  f.setOrigin("example/other");
+  const elsewhere = await inspect();
+  assert.deepEqual([elsewhere.ok, elsewhere.failure], [false, "repository_changed"]);
+  f.setOrigin("example/project");
+  const named = await execute({ ...snapshot, repository: "example/other" });
+  assert.deepEqual([named.ok, named.failure], [false, "repository_changed"]);
+  assert.equal(f.mutations().length, 0);
+  assert.equal(existsSync(attempts), false, "nothing was recorded for a closure that never reached its fence");
+
+  // The record is durable before the mutation, and a replay or a restart can't pass it again.
+  const closed = await execute(snapshot);
+  assert.equal(closed.result?.outcome, "closed", closed.error ?? "");
+  const recorded = readdirSync(attempts);
+  assert.equal(recorded.length, 1);
+  assert.equal(readFileSync(join(attempts, recorded[0]!), "utf8").trim(), digest(snapshot));
+  assert.equal(f.mutations().length, 1);
+  f.repository.issue.state = "OPEN";
+  const replay = await execute(snapshot);
+  assert.equal(replay.result?.refusal?.reason, "mutation_fence_unavailable");
+  f.restart();
+  const afterRestart = await execute(snapshot);
+  assert.equal(afterRestart.result?.refusal?.reason, "mutation_fence_unavailable");
+  assert.equal(f.mutations().length, 1);
+
+  // A path this runner doesn't have runs nothing.
+  const before = f.commands.length;
+  const missing = await inspect({ ...location, workspacePath: join(f.root, "missing") });
+  assert.deepEqual([missing.ok, missing.failure], [false, "runner_failed"]);
+  assert.equal(f.commands.length, before);
+});
 
 test("publication inspection through the runner handler binds payload across distinct request IDs", async (t) => {
   const f=fixture(t);

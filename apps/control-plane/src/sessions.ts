@@ -36,7 +36,7 @@ import { acknowledgementRepairFrame } from "./claude-cost-repair.js";
 import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
-import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignControlForRunner, campaignControlRevisionForRunner, campaignLaunchRepository, campaignScopeRepositories, carriedCampaignRepositories } from "./campaign-authority.js";
+import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignClosureIssueHeld, campaignControlForRunner, campaignControlRevisionForRunner, campaignLaunchRepository, campaignOtherRepository, campaignScopeRepositories, carriedCampaignRepositories } from "./campaign-authority.js";
 import { campaignBoundaryRepositoryAt } from "./campaign-repository-boundary.js";
 import { inspectBoundaryPublication, verifyBoundaryPublishedIssue } from "./project-location-inspection.js";
 import { campaignBoundaryRepository } from "@wollipog/protocol";
@@ -83,7 +83,7 @@ import { normalizeCampaignRepositoryAdditionSnapshot } from "./campaign-reposito
 import { INTENDED_CLOSURES_LIMIT, normalizeIntendedClosures, prMergeClosureMismatch, unscopedClosureRefusal, validClosingReferenceCheck } from "./pr-merge-closures.js";
 import { allReportedChecksRefusal, validPullRequestChecksRead } from "./merge-checks-basis.js";
 import { observeReconciliationSnapshot, reconciliationSnapshotAvailable, correctionFrame, latestReconciliationRepair, normalizeReconciledSnapshot, reconciliationRevision } from "./claude-cost-reconciliation.js";
-import type { GithubIssueClosureRequest, GithubIssueClosureResult, GithubIssueClosureSnapshot, IssueClosureProofGapNotice } from "@wollipog/protocol";
+import type { GithubIssueClosureLocation, GithubIssueClosureRequest, GithubIssueClosureResult, GithubIssueClosureSnapshot, IssueClosureProofGapNotice } from "@wollipog/protocol";
 import { issueClosureDeliveryFailure, issueClosureDeliveryGap, issueClosureProofGapNotice } from "@wollipog/protocol";
 /**
  * Session orchestration: the control-plane brain that turns UI commands into
@@ -13107,11 +13107,30 @@ export class SessionsService {
   }
 
   /** Read the closure's candidate pull requests now; a fact that stays stale still fails the proof. */
-  private async refreshClosureForge(sessionId: string, issue: number): Promise<void> {
+  private async refreshClosureForge(sessionId: string, issue: number, repository: string): Promise<void> {
     const root = this.db.getSession(sessionId);
     if (!root || !issueBoundary(root) || !this.campaignForgeRefresh) return;
-    const refs = closureCandidateRefs(this.db, root, issue);
+    const refs = closureCandidateRefs(this.db, root, issue, repository);
     if (refs.length) await this.campaignForgeRefresh(sessionId, refs).catch(() => undefined);
+  }
+
+  /** Where a closure of this repository's issue runs (#4119): the launch repository's stays in the
+   * root's own checkout; another's runs in the first of that repository's Locations that is in the
+   * campaign's Project, online, and on a runner that closes issues through a Location, with that
+   * runner's own forge login. Null when none is, so nothing is ever sent to a runner that can't. */
+  private closureTarget(root: SessionView, repository: string | undefined): { runnerId: string; location?: GithubIssueClosureLocation } | null {
+    const other = campaignOtherRepository(root, repository);
+    if (!other) return { runnerId: root.runnerId };
+    const entry = campaignScopeRepositories(root).find((candidate) => candidate.repository === other);
+    for (const id of entry?.locationIds ?? []) {
+      const location = this.db.getProjectLocation(id);
+      if (!location || location.availability === "runner_removed" || !root.projectId || location.projectId !== root.projectId ||
+          !this.hub.isRunnerOnline(location.runnerId) ||
+          !runnerSupportsProtocol(this.db.getRunner(location.runnerId)?.protocolVersion, "locationIssueClosure")) continue;
+      const workspacePath = this.db.getWorkspacePath(location.runnerId, location.workspaceId);
+      if (workspacePath) return { runnerId: location.runnerId, location: { workspaceId: location.workspaceId, workspacePath, repository: other } };
+    }
+    return null;
   }
 
   /** The runner's authoritative read of every excluded pull request, past the observer's cache and
@@ -13134,11 +13153,12 @@ export class SessionsService {
    * they would prove the closure, its delivery verified at the same digest and member read. `false`
    * for an issue without members, or a runner whose forge has no member read (GitLab), whose
    * ordinary snapshot stands; null when the members could not be read. */
-  private async inspectEpicClosure(sessionId: string, runnerId: string, base: GithubIssueClosureSnapshot): Promise<GithubIssueClosureSnapshot | false | null> {
+  private async inspectEpicClosure(sessionId: string, target: { runnerId: string; location?: GithubIssueClosureLocation }, base: GithubIssueClosureSnapshot): Promise<GithubIssueClosureSnapshot | false | null> {
     let verificationFailure: GithubIssueClosureSnapshot["deliveryVerificationFailure"];
     const inspect = async (deliveryPullRequests?: Array<{ number: number; headSha: string }>) => {
       const requestId = `issue_closure_epic_${randomUUID()}`;
-      const result = await this.hub.requestFromRunner(runnerId, requestId, { type: "github_issue_closure", operation: "inspect", requestId, sessionId,
+      const result = await this.hub.requestFromRunner(target.runnerId, requestId, { type: "github_issue_closure", operation: "inspect", requestId, sessionId,
+        ...(target.location ? { location: target.location } : {}),
         issue: base.issue, scopeRevision: base.scopeRevision, epicMembers: true, ...(deliveryPullRequests ? { deliveryPullRequests } : {}) }, 60_000).catch(() => null);
       if (deliveryPullRequests) {
         verificationFailure = !result ? { check: "runner_unavailable" }
@@ -13157,7 +13177,7 @@ export class SessionsService {
     const { state: _state, delivery: _delivery, ...inspection } = read;
     const { delivery: _ordinary, deliveryVerificationFailure: _ordinaryFailure, ...rest } = base;
     let snapshot: GithubIssueClosureSnapshot = { ...rest, ...inspection, epicMembers: members };
-    const delivery = closureDeliveryPullRequests(this.db, this.db.getSession(sessionId)!, base.issue);
+    const delivery = closureDeliveryPullRequests(this.db, this.db.getSession(sessionId)!, base.issue, base.repository);
     if (delivery.length && closureEvidence(this.db, this.db.getSession(sessionId)!, { ...snapshot, delivery })) {
       const verified = await inspect(delivery.map(({ number, headSha }) => ({ number, headSha })));
       if (verified?.forgeDigest === snapshot.forgeDigest && verified.delivery) snapshot = { ...snapshot, delivery: verified.delivery };
@@ -13185,7 +13205,7 @@ export class SessionsService {
     const unsupported = this.capabilityFailure(session.runnerId, "orchestratorIssueClosure", "human-approved issue closure");
     if (unsupported) return unsupported;
     // #3539: closing a GitLab issue needs a runner that reads and closes GitLab issues.
-    const gitlabUnsupported = gitlabIssueCompatibility(this.db, session, session.orchestratorPolicy.issueScope?.repository);
+    const gitlabUnsupported = gitlabIssueCompatibility(this.db, session, campaignOtherRepository(session, typeof request?.repository === "string" ? request.repository : undefined) ?? session.orchestratorPolicy.issueScope?.repository);
     if (gitlabUnsupported) return capabilityFail(gitlabUnsupported);
     if (issueBoundary(session)) {
       const compatibility = scopeCompatibility(this.db, session);
@@ -13196,7 +13216,16 @@ export class SessionsService {
     // apart (#3382), and a scope refusal stops here: no synchronization, inspection or decision.
     const invalidFields = issueClosureRequestInvalidFields(request);
     if (invalidFields.length) return issueClosureRequestInvalid(invalidFields);
-    const scopeRefusal = issueClosureScopeRefusal(this.db, session, request.issue, this.scopeGrantReview(session)?.cause);
+    // #4119: another repository's issue is that repository's. One the campaign has no entry for stays
+    // with a person: nothing here can inspect it, and an owner's approved addition is the way in.
+    const otherRepository = campaignOtherRepository(session, request.repository);
+    if (request.repository !== undefined && !campaignLaunchRepository(session)) return { ok: false, ...repositoryOutsideBoundary(request.repository.toLowerCase()) };
+    if (otherRepository && !campaignScopeRepositories(session).some((entry) => entry.repository === otherRepository)) {
+      this.log.info(JSON.stringify({ event: "campaign_issue_closure_refused", entryPoint: "closure_proposal", sessionId, requestId: request.requestId,
+        issue: request.issue, reason: "repository_outside_boundary", repository: otherRepository }));
+      return { ok: false, ...repositoryOutsideBoundary(otherRepository) };
+    }
+    const scopeRefusal = issueClosureScopeRefusal(this.db, session, request.issue, this.scopeGrantReview(session)?.cause, request.repository);
     if (scopeRefusal) {
       this.log.info(JSON.stringify({ event: "campaign_issue_closure_refused", entryPoint: "closure_proposal", sessionId, requestId: request.requestId,
         issue: request.issue, reason: scopeRefusal.errorDetails.code, scopeRevision: scopeRefusal.errorDetails.scopeRevision, recovery: scopeRefusal.errorDetails.recovery }));
@@ -13206,8 +13235,11 @@ export class SessionsService {
       if (session.orchestratorPolicy.issueScope && !await this.synchronizeCampaignIssueScope(sessionId)) return fail("Campaign scope synchronization is pending; reconnect every participating runner and retry.", 409);
       const requestId = `issue_closure_inspect_${randomUUID()}`;
       const fullBoundary = issueBoundary(session);
-      const inspected = await this.hub.requestFromRunner(session.runnerId, requestId, {
-        type: "github_issue_closure", operation: "inspect", requestId, sessionId, issue: request.issue,
+      const target = this.closureTarget(session, request.repository);
+      if (!target) return fail(`No Location of ${otherRepository} is online on a runner that can close its issues, so no closure was requested. Retry once one is.`, 409);
+      const routed = target.location ? { location: target.location } : {};
+      const inspected = await this.hub.requestFromRunner(target.runnerId, requestId, {
+        type: "github_issue_closure", operation: "inspect", requestId, sessionId, issue: request.issue, ...routed,
         ...(session.orchestratorPolicy.issueScope ? { scopeRevision: session.orchestratorPolicy.issueScope.revision } : {}),
       }, 60_000);
       if (inspected.type !== "github_issue_closure_result" || inspected.sessionId !== sessionId ||
@@ -13215,7 +13247,7 @@ export class SessionsService {
         return fail(inspected.type === "github_issue_closure_result" && inspected.error
           ? inspected.error : "runner could not inspect the issue and its related open pull requests", 409);
       }
-      if (session.orchestratorPolicy.issueScope && inspected.inspection.repository.toLowerCase() !== session.orchestratorPolicy.issueScope.repository) return fail("The runner repository changed from the authorized campaign scope; restore the repository and retry.", 409);
+      if (session.orchestratorPolicy.issueScope && inspected.inspection.repository.toLowerCase() !== (otherRepository ?? session.orchestratorPolicy.issueScope.repository)) return fail("The runner repository changed from the authorized campaign scope; restore the repository and retry.", 409);
       const inspectedGitlab = gitlabIssueCompatibility(this.db, session, inspected.inspection.repository);
       if (inspectedGitlab) return capabilityFail(inspectedGitlab);
       if (inspected.inspection.state === "CLOSED") return ok({ outcome: "already_closed", url: inspected.inspection.url });
@@ -13236,12 +13268,12 @@ export class SessionsService {
         // Inspect normal conflict evidence first. A missing ledger proof or a non-delegated
         // reason must retain the existing human route, never become a rejected human request.
         if (request.reason === "completed") {
-          await this.refreshClosureForge(sessionId, request.issue);
-          const delivery = closureDeliveryPullRequests(this.db, this.db.getSession(sessionId)!, request.issue);
+          await this.refreshClosureForge(sessionId, request.issue, snapshot.repository);
+          const delivery = closureDeliveryPullRequests(this.db, this.db.getSession(sessionId)!, request.issue, snapshot.repository);
           if (delivery.length && closureEvidence(this.db, this.db.getSession(sessionId)!, { ...snapshot, delivery })) {
             const verificationId = `issue_closure_delivery_${randomUUID()}`;
-            const verified = await this.hub.requestFromRunner(session.runnerId, verificationId, {
-              type: "github_issue_closure", operation: "inspect", requestId: verificationId, sessionId, issue: request.issue,
+            const verified = await this.hub.requestFromRunner(target.runnerId, verificationId, {
+              type: "github_issue_closure", operation: "inspect", requestId: verificationId, sessionId, issue: request.issue, ...routed,
               scopeRevision: snapshot.scopeRevision, deliveryPullRequests: delivery.map(({ number, headSha }) => ({ number, headSha })),
             }, 60_000).catch(() => null);
             let failure: GithubIssueClosureSnapshot["deliveryVerificationFailure"];
@@ -13266,8 +13298,8 @@ export class SessionsService {
         // them on the forge; an issue without members keeps the ordinary snapshot, unchanged.
         let membersUnreadable = false;
         if (!proof && epicSourceApplies(this.db, this.db.getSession(sessionId)!, snapshot) &&
-            runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "epicClosureMembers")) {
-          const epic = await this.inspectEpicClosure(sessionId, session.runnerId, snapshot);
+            runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, "epicClosureMembers")) {
+          const epic = await this.inspectEpicClosure(sessionId, target, snapshot);
           if (epic === null) membersUnreadable = true;
           else if (epic) { snapshot = epic; proof = closureEvidence(this.db, this.db.getSession(sessionId)!, snapshot); }
         }
@@ -13342,8 +13374,9 @@ export class SessionsService {
     const session = this.db.getSession(sessionId);
     const snapshot = decision.resourceSnapshot;
     const now = Date.now();
+    const issueRef = { repository: snapshot.repository, number: snapshot.issue };
     if (!session || sessionRole(session) !== "orchestrator" || isTerminal(session.status) ||
-        !session.orchestratorPolicy?.issueNumbers?.includes(snapshot.issue) || !this.closureScopeCurrent(session, snapshot) ||
+        !campaignClosureIssueHeld(session.orchestratorPolicy, issueRef) || !this.closureScopeCurrent(session, snapshot) ||
         this.db.resolvedCampaignSessionId(sessionId) !== sessionId ||
         !this.workflowDecisionAuthorityCurrent(session, session.parentControlPolicy!, decision) || decision.policyRevision !== session.parentControlPolicy?.revision ||
         decision.resourceDigest !== resourceDigest || !decision.resolvedAt || now - decision.resolvedAt > 30 * 60_000 ||
@@ -13357,7 +13390,8 @@ export class SessionsService {
     const gitlabUnsupported = gitlabIssueCompatibility(this.db, session, snapshot.repository);
     if (gitlabUnsupported) return capabilityFail(gitlabUnsupported);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline; no closure was attempted", 409);
-    if (decision.authority === "orchestrator") await this.refreshClosureForge(sessionId, snapshot.issue);
+    if (!this.closureTarget(session, snapshot.repository)) return fail(`No Location of ${snapshot.repository} is online on a runner that can close its issues; no closure was attempted. Retry once one is.`, 409);
+    if (decision.authority === "orchestrator") await this.refreshClosureForge(sessionId, snapshot.issue, snapshot.repository);
     if (decision.authority === "orchestrator" && (!snapshot.issueAdmission || issueEvidenceDigest(closureEvidence(this.db, session, snapshot)) !== snapshot.issueAdmission.evidenceDigest)) return fail("Verified closure delivery or disposition changed; request a new exact closure", 409);
     // Guardrails and governance remain authoritative even though execution is provider-neutral.
     if (this.pendingPolicyAsk(session) || pendingRequests(session.pendingApproval).some((request) => request.kind !== "workflow_decision") ||
@@ -13376,14 +13410,16 @@ export class SessionsService {
       return fail("An excluded closed pull request could not be confirmed still closed and unmerged; request a new exact closure", 409);
     }
     const freshSession = this.db.getSession(sessionId);
-    if (!freshSession || isTerminal(freshSession.status) || !freshSession.orchestratorPolicy?.issueNumbers?.includes(snapshot.issue) ||
-        freshSession.orchestratorPolicy.issueScope?.revision !== synchronizedScopeRevision || !this.closureScopeCurrent(freshSession, snapshot) ||
+    if (!freshSession || isTerminal(freshSession.status) || !campaignClosureIssueHeld(freshSession.orchestratorPolicy, issueRef) ||
+        freshSession.orchestratorPolicy?.issueScope?.revision !== synchronizedScopeRevision || !this.closureScopeCurrent(freshSession, snapshot) ||
         !this.workflowDecisionAuthorityCurrent(freshSession, freshSession.parentControlPolicy!, decision) ||
         auditDigest(issueClosureActiveChildren(this.db, sessionId, { repository: snapshot.repository, number: snapshot.issue })) !== auditDigest(snapshot.activeChildren) ||
         decision.authority === "orchestrator" && (scopeCompatibility(this.db, freshSession) || issueEvidenceDigest(closureEvidence(this.db, freshSession, snapshot)) !== snapshot.issueAdmission?.evidenceDigest)) return fail("Campaign authority, work or delivery changed during synchronization; request renewed exact review.", 409);
     const settled = Date.now();
+    // Read again as the last step before consumption: the Location must still be one of the repository's.
+    const target = this.closureTarget(freshSession, snapshot.repository);
     if (this.db.workflowDecisionByOccurrence(occurrenceId)?.status !== "approved" || settled - decision.resolvedAt > 30 * 60_000 ||
-        decision.policyRevision !== freshSession.parentControlPolicy?.revision || !this.hub.isRunnerOnline(session.runnerId) ||
+        decision.policyRevision !== freshSession.parentControlPolicy?.revision || !this.hub.isRunnerOnline(session.runnerId) || !target ||
         this.pendingPolicyAsk(freshSession) || pendingRequests(freshSession.pendingApproval).some((request) => request.kind !== "workflow_decision") ||
         this.db.listOpenPolicyHookApprovals(sessionId).length || this.gateOnPolicy(sessionId, settled)) {
       return fail("The closure approval, runner or guardrails changed while execution was being prepared; no closure was attempted", 409);
@@ -13403,8 +13439,9 @@ export class SessionsService {
     const dispatched = synchronizedScopeRevision === undefined ? binding : { ...binding, scopeRevision: synchronizedScopeRevision };
     try {
       const requestId = `issue_closure_execute_${randomUUID()}`;
-      const response = await this.hub.requestFromRunner(session.runnerId, requestId, {
+      const response = await this.hub.requestFromRunner(target.runnerId, requestId, {
         type: "github_issue_closure", operation: "execute", requestId, sessionId, occurrenceId, snapshot: dispatched,
+        ...(target.location ? { location: target.location } : {}),
       }, 150_000);
       if (response.type === "github_issue_closure_result" && response.sessionId === sessionId && response.ok &&
           response.result && ["closed", "already_closed", "refused", "uncertain"].includes(response.result.outcome) &&

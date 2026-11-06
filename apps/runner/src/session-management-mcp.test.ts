@@ -3559,6 +3559,8 @@ const NEWER_WOLLIPOG_REFUSALS: ReadonlyArray<{
     error: "Campaign allocations need a newer version of Wollipog. Update Wollipog and try again." },
   { tool: "request_github_issue_closure", args: {}, floor: "orchestratorIssueClosure",
     error: "Human-approved issue closure needs a newer version of Wollipog. Update Wollipog and try again." },
+  { tool: "request_github_issue_closure", args: { repository: "other/repo" }, floor: "locationIssueClosure",
+    error: "Closing an issue in another campaign repository needs a newer version of Wollipog. Update Wollipog and try again." },
   { tool: "record_campaign_plan", args: { items: [] }, floor: "campaignWorkLedger",
     error: "The campaign work ledger needs a newer version of Wollipog. Update Wollipog and try again." },
   { tool: "create_session", args: { runnerId: "r1", agentId: "claude-code", workspaceId: "ws", campaignWorkItemId: "cwi_1" },
