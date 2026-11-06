@@ -2,7 +2,7 @@
 
 This fifth release candidate for Wollipog v0.36.0 includes the previous candidates and changes on main through commit `2e9b5e900fad079835deb41ec916f7149dd7561e` (#4302). The additions below cover changes since v0.36.0-rc.3; see the [previous candidate’s notes](https://github.com/picoduck/wollipog/releases/tag/v0.36.0-rc.3) for earlier v0.36.0 changes.
 
-The rc.4 tag was not published because GitHub retired its Apple Silicon build runner. This candidate uses the supported macOS 15 ARM64 runner and rebuilds the complete signed release inventory.
+The rc.4 tag was not published because GitHub retired its Apple Silicon build runner. This candidate uses the supported macOS 15 ARM64 runner and rebuilds the complete signed release inventory. Its embedded macOS C helpers explicitly target macOS 14.0, with the native build checking their recorded minimum OS before packaging.
 
 ## Install the Prerelease
 

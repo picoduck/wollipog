@@ -23,6 +23,8 @@ from the host. Each target therefore builds on a matching runner.
 | `ubuntu-24.04-arm`| `aarch64-unknown-linux-gnu`  | `.deb`, `.rpm`, `.AppImage` |
 
 Apple Silicon builds use the ARM64 `macos-15` image; Intel builds use `macos-15-intel`.
+The two embedded macOS C helpers explicitly target macOS 14.0; the native build verifies their
+Mach-O minimum OS before embedding them. This helper check does not certify the whole app on an older OS.
 GitHub [retired macOS 14 runners on November 2, 2026](https://github.com/actions/runner-images/issues/13518).
 
 These six triples are the exhaustive supported native release set, not examples. A standalone
