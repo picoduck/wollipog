@@ -48,7 +48,7 @@ import { sessionAgentLabel } from "./agent-options.js";
 import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
 import { unarchiveSession } from "../session-unarchive.js";
 import { writeClipboardText } from "../clipboard.js";
-import { sessionStatusSummary } from "../status-meta.js";
+import { sessionHeaderStatusSummary } from "../session-row-status.js";
 import { SessionStatusButton } from "./SessionStatusButton.js";
 import { SessionTypeIcon } from "./SessionTypeIcon.js";
 import { useBackgroundDeliveryStep } from "./useBackgroundDeliveryStep.js";
@@ -263,7 +263,7 @@ export function SessionHeader({
     ? `${archiveAction}…`
     : archiveAction;
   const signOutOffered = session.driver === "acp" && !terminal && runnerOnline && logoutSupported && providerLogoutSupported;
-  const statusSummary = sessionStatusSummary(session, {
+  const statusSummary = sessionHeaderStatusSummary(session, {
     runnerOnline,
     descendantRequests: childRequests?.count,
     activeWorkers: activeSubagents?.count,

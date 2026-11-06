@@ -27,7 +27,7 @@ Every label below comes from one vocabulary in the web client, `statusMeta(domai
 | Attention | Parent campaign `orchestratorCampaign.pendingRequests.human > 0` | **Needs Your Input** in the Sessions list; **N Child Requests** in the session's status | One or more unresolved descendant requests are explicitly assigned to the human. This is independent of the parent lifecycle. The session bar's Session Status and the session's badges show it as one warning condition, "8 Child Requests" (#2206). |
 | Agent Work | Parent campaign `orchestratorCampaign.pendingRequests.orchestrator > 0` | None; counted in the Requests panel | One or more unresolved descendant requests are assigned to the Orchestrator. This is not human attention, does not enter human notification counts, and has no status of its own: the Requests panel lists them under **Orchestrator Is Handling** (#2206). |
 | Attention | Explicit review-request evidence (reserved; no current producer) | **Review Requested** | Reserved for an authoritative review request. Workflow-column placement is not evidence. |
-| Workflow | `column` | Board column title only | Filing and organization; it does not alter any status dimension. |
+| Workflow | `column` | Board column title only | Filing and organization; it does not alter any status dimension. An at-rest Full Control root whose server-derived column is Review moves by its campaign state instead (#2938): Campaign Active to Running, Campaign Complete and Complete, Needs Cleanup to Done. See the projection rules. |
 | Health | Activity watchdog exceeds ten minutes | **Stalled** | A derived exceptional condition shown alongside lifecycle and attention. |
 | Health | Session runner is offline | **Disconnected** | The authoritative runner connection is unavailable. |
 | Health | History or connection recovery is active | Recovery-specific supporting text | Recovery does not rewrite lifecycle. |
@@ -49,6 +49,13 @@ checks (#2160). No session surface shows a Changes badge.
 
 - Show **Running** only for `status=running`. Counts labeled **Running** use that same predicate; **Queued** and **Starting** have separate counts.
 - Show lifecycle and attention together when both apply, except that an attention label replaces **Awaiting Input** rather than repeating it. Do not replace **Running**, **Awaiting Prompt**, or another lifecycle fact with a workflow-column interpretation.
+- An at-rest Full Control root's campaign state comes from the server (`fullControlCampaignStatus`, or the campaign projection) and is never derived from a column or a clock (#2938):
+  - Its row and Board card show the lifecycle with the campaign badge: **Campaign Active**, **Campaign Complete**, **Complete, Needs Cleanup** or **Campaign Stuck**.
+  - Its session header and the Sessions preview bar show **Campaign Active**, **Campaign Complete** or **Complete, Needs Cleanup** in place of **Awaiting Prompt**, because the person owes such a root no prompt. Beside **Completed**, the campaign state is the secondary.
+  - **Campaign Stuck** needs a person, so the header keeps **Awaiting Prompt** and shows **Campaign Stuck** as the secondary, ahead of **Ready for Review**.
+  - On the Board, a root whose column the server derived as Review moves to Running while its campaign is Active, and to Done once it is Complete or Complete, Needs Cleanup.
+  - Campaign Stuck, Waiting for You, the older Blocked and Complete with Handoffs, a Custom campaign and any descendant keep the server's column and header. So do a failed or stopped root, a request or human-owned campaign request, a pending Stop, a fired reminder, and a column outside Review that the person filed by hand. (A summary row does not say whether Review was filed by hand or derived, so a root filed in Review still moves.)
+  - A control plane that sends no campaign status keeps today's column and header.
 - Keep compact visible labels and accessible names on the same Title Case terminology. Descriptions and notifications use sentence case.
 - Unknown lifecycle values use **Status Unavailable**. An undifferentiated legacy input state uses **Input Required**. Missing Git or background fields produce no affirmative claim.
 - Refreshes, reconnects, and session transitions replace the relevant dimension independently; they must not synthesize a change in another dimension.
