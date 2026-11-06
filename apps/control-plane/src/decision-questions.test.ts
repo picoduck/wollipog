@@ -389,6 +389,7 @@ test("malformed or oversized question inputs never ask a partial set of question
 test("a typed kind's own definition is checked: distinct verdicts, valid rules, no free fields", () => {
   assert.doesNotThrow(() => assertDecisionKind(DEFINITION));
   assert.throws(() => assertDecisionKind({ ...DEFINITION, fields: { extra: { type: "boolean" } } }));
+  assert.throws(() => assertDecisionKind({ ...DEFINITION, instructions: "Answer `admit`, `refuse` or `uncertain`." }));
   assert.throws(() => assertDecisionKind({ ...DEFINITION, verdicts: ["admit", "refuse", "approve", "uncertain"] }));
   assert.throws(() => assertDecisionKind({ ...DEFINITION, typed: { ...TYPED, confidenceThreshold: 0 } }));
   assert.throws(() => assertDecisionKind({ ...DEFINITION, typed: { ...TYPED, questions: [

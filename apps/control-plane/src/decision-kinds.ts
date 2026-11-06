@@ -248,6 +248,10 @@ export function assertDecisionKind(definition: DecisionKindDefinition): void {
   if (!definition.verdicts.includes("uncertain")) throw new Error(`${definition.kind}: every kind needs \`uncertain\``);
   if (!definition.typed) return;
   assertTypedDefinition(definition.kind, definition.typed);
+  // A typed kind's model answers questions; instructions asking it for a verdict would contradict the schema.
+  if (!definition.instructions.includes(TYPED_DATA_RULES) || definition.instructions.includes(DATA_RULES)) {
+    throw new Error(`${definition.kind}: a typed kind's instructions carry TYPED_DATA_RULES and never the verdict rules`);
+  }
   const derived = [definition.typed.verdicts.admit, definition.typed.verdicts.refuse, "uncertain"];
   if (definition.fields || definition.verdicts.length !== 3 || derived.some((verdict) => !definition.verdicts.includes(verdict))) {
     throw new Error(`${definition.kind}: a typed kind's verdicts are its derived ones and it has no free fields`);

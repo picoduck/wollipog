@@ -5697,6 +5697,12 @@ body.shell-dock-dragging * {
 .decision-answer[data-standing="satisfies"] .decision-answer-icon { color: var(--positive-text); }
 .decision-answer[data-standing="violates"] .decision-answer-icon { color: var(--danger-text); }
 .decision-answer[data-standing="unsure"] .decision-answer-icon { color: var(--warning-on-tint); }
+/* The claim's words carry the standing; in forced colors each icon follows them. */
+@media (forced-colors: active) {
+  .decision-answer[data-standing="satisfies"] .decision-answer-icon,
+  .decision-answer[data-standing="violates"] .decision-answer-icon,
+  .decision-answer[data-standing="unsure"] .decision-answer-icon { color: inherit; }
+}
 .decision-answer-claim { color: var(--text); }
 .campaign-screen-actions {
   display: flex;
