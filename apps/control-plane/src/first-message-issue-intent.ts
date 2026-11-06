@@ -78,13 +78,16 @@ export function firstMessageTargetEpics(text: string, repository: string, scope:
   return epics.size > MAX_TARGET_EPICS ? [] : [...epics].sort((a, b) => a - b);
 }
 
-const DIGIT_RANGE = new RegExp(String.raw`(?<![\w./#\-–—])#?([1-9][0-9]{0,15})${SEPARATOR}#?([1-9][0-9]{0,15})(?![\w\-–—]|\.\.)`, "giu");
+// A bare-digit range right after the word "issue" or "issues" ("issue 1201 through 1207"), on one
+// line; a chain ("issues 1-3-5") is no range. `#`-written ranges are `RANGE`'s, a qualified one
+// ("other/repo#3-#5") never matches here, and a year span ("2020-2025") names no issue.
+const DIGIT_RANGE = new RegExp(String.raw`\bissues?[^\S\r\n]+([1-9][0-9]{0,15})${SEPARATOR}#?([1-9][0-9]{0,15})(?![\w\-–—]|\.\.|${SEPARATOR}#?[0-9])`, "giu");
 
-/** The members of every range a message writes between two digit strings, with or without `#`
- * ("issue 1201 through 1207", "#3-#5"), each range under 100 issues and all of them within 100
- * (#4282). It is a floor for a Custom campaign's first-message seed only: a number a proposal says
- * the person named must be written in the message or inside such a range, and the constraint check
- * still decides whether the message asks for it. It never adds a number to anything by itself. */
+/** The members of every bare-digit range a message writes after "issue" or "issues" ("issue 1201
+ * through 1207"), each range under 100 issues and all of them within 100 (#4282). It is a floor for
+ * a Custom campaign's first-message seed only, as the reading allowed: a number a proposal says the
+ * person named must be written in the message or inside such a range, and the constraint check still
+ * decides whether the message asks for it. It never adds a number to anything by itself. */
 export function digitRangeMembers(text: string): number[] {
   const members = new Set<number>();
   for (const match of text.matchAll(DIGIT_RANGE)) {
