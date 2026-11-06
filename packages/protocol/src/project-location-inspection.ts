@@ -67,5 +67,5 @@ export interface CampaignRepositoryBoundaryView {
 }
 
 export type ProjectLocationInspection =
-  | { ok: true; location: VerifiedProjectLocation }
+  | { ok: true; location: VerifiedProjectLocation; issueFacts?: import("./index.js").CampaignIssueFacts[] }
   | { ok: false; locationId: string; failure: ProjectLocationInspectionFailure; reason: string };

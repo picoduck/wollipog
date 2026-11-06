@@ -5,11 +5,37 @@ import {
 } from "@wollipog/protocol";
 import { MAX_MESSAGE_ISSUES } from "./first-message-issue-intent.js";
 
-/** The repositories a scope grant may name: every repository in the campaign's boundary. Today a
- * boundary names one; a multi-repository boundary (#4118) lists each of its repositories here, and
- * every floor below already resolves names against the whole list. */
-export function boundaryRepositories(boundary: Pick<CampaignAuthorityBoundary, "repository">): string[] {
-  return [boundary.repository.toLowerCase()];
+/** Every repository in the campaign's boundary, the launch repository first (#4118). */
+export function boundaryRepositories(boundary: Pick<CampaignAuthorityBoundary, "repository" | "repositories">): string[] {
+  const launch = boundary.repository.toLowerCase();
+  return [launch, ...(boundary.repositories ?? []).map((entry) => entry.repository.toLowerCase()).filter((repository) => repository !== launch)];
+}
+
+/** The one boundary repository an owner's name for it means (#4118): its full name, its name without
+ * the owner, or the name of one of its Locations, each compared exactly and ignoring case, after
+ * dropping a leading "the" and a trailing "repo" or "repository". Null when the name matches no
+ * repository or several, so it decides nothing. */
+export function resolveRepositoryName(name: string, entries: ReadonlyArray<{ repository: string; locationNames?: readonly string[] }>): string | null {
+  const simplify = (value: string) => value.trim().toLowerCase().replace(/^the\s+/u, "").replace(/\s+(?:repo|repository)$/u, "").trim();
+  const wanted = simplify(name);
+  if (!wanted) return null;
+  const matches = entries.filter((entry) => {
+    const repository = entry.repository.toLowerCase();
+    return wanted === repository || wanted === repository.slice(repository.lastIndexOf("/") + 1) ||
+      (entry.locationNames ?? []).some((location) => simplify(location) === wanted);
+  });
+  return matches.length === 1 ? matches[0]!.repository.toLowerCase() : null;
+}
+
+/** Whether the message's own words contain the name the Orchestrator says it used, as whole words,
+ * ignoring case and runs of spaces: "api" is not in "rapidly". A floor: a name the owner never wrote
+ * can't limit, or stand for, anything. Whether the message limits the work to it is the check's. */
+export function repositoryNameInMessage(text: string, name: string): boolean {
+  const flat = (value: string) => value.toLowerCase().replace(/\s+/gu, " ").trim();
+  const wanted = flat(name);
+  if (!wanted) return false;
+  const escaped = wanted.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return new RegExp(`(?<![\\p{L}\\p{N}_-])${escaped}(?![\\p{L}\\p{N}_-])`, "u").test(flat(text));
 }
 
 /** The repository a name the model returned resolves to: an empty name is the boundary's only
@@ -37,17 +63,34 @@ export function writtenAsDigits(text: string, n: number): boolean {
   return digitOccurrences(text, n).length > 0;
 }
 
+/** The repository that qualifies a number written at `at`, lowercased, or null when it stands alone. */
+function qualifyingRepository(text: string, at: number): string | null {
+  const before = text.slice(Math.max(0, at - 300), at);
+  const qualified = /([\w.-]+\/[\w.-]+)#$/u.exec(before) ??
+    /https?:\/\/(?:www\.)?github\.com\/([\w.-]+\/[\w.-]+)\/(?:issues|pull)\/$/iu.exec(before) ??
+    /https?:\/\/([^\s/?#@]+\/[^\s?#]+?)\/-\/(?:issues|merge_requests)\/$/iu.exec(before);
+  return qualified ? qualified[1]!.toLowerCase() : null;
+}
+
 /** Whether every place the message writes `n` qualifies it with a repository outside the boundary:
  * `other/repo#n`, or an issue or pull request URL of another repository. A floor only: it can drop a
  * number the model returned unqualified, never add one. */
 export function onlyOtherRepositories(text: string, n: number, repositories: readonly string[]): boolean {
   const occurrences = digitOccurrences(text, n);
   return occurrences.length > 0 && occurrences.every((at) => {
-    const before = text.slice(Math.max(0, at - 300), at);
-    const qualified = /([\w.-]+\/[\w.-]+)#$/u.exec(before) ??
-      /https?:\/\/(?:www\.)?github\.com\/([\w.-]+\/[\w.-]+)\/(?:issues|pull)\/$/iu.exec(before) ??
-      /https?:\/\/([^\s/?#@]+\/[^\s?#]+?)\/-\/(?:issues|merge_requests)\/$/iu.exec(before);
-    return Boolean(qualified && !repositories.includes(qualified[1]!.toLowerCase()));
+    const qualified = qualifyingRepository(text, at);
+    return qualified !== null && !repositories.includes(qualified);
+  });
+}
+
+/** Whether the message writes `n` for `repository` (#4118): qualified by it (`owner/api#40` or the
+ * issue's URL), or, for the launch repository only, standing alone, since a bare number means the
+ * launch repository. The same number qualified by another repository is that repository's issue. */
+export function writtenForRepository(text: string, n: number, repository: string, launch: string): boolean {
+  const wanted = repository.toLowerCase();
+  return digitOccurrences(text, n).some((at) => {
+    const qualified = qualifyingRepository(text, at);
+    return qualified === null ? wanted === launch.toLowerCase() : qualified === wanted;
   });
 }
 

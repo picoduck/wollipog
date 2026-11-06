@@ -96,6 +96,9 @@ export interface CampaignLaunchInspectionMessage {
   /** Resolved by authorized session preparation, never browser or agent input. */
   workspacePath?: string;
   issueNumbers: number[];
+  /** Also report each of `issueNumbers` as `issueFacts` (#4118): sent only to a runner with
+   * `locationIssueFacts`, and an older one refuses it as invalid. */
+  facts?: true;
 }
 
 export const CAMPAIGN_LAUNCH_INSPECTION_ERRORS = {
@@ -123,6 +126,8 @@ export interface CampaignLaunchInspectionResult {
   repository?: string;
   issueNumbers?: number[];
   digest?: string;
+  /** Each requested number's bounded facts, with a pull request reported rather than refused. */
+  issueFacts?: import("./index.js").CampaignIssueFacts[];
   error?: string;
   failure?: CampaignLaunchInspectionFailure;
   /** Set when the inspection stopped because its request was cancelled. Never admits a launch. */

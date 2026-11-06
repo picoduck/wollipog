@@ -36,7 +36,8 @@ export async function inspectCampaignLaunch(
   };
   let failure: CampaignLaunchInspectionFailure = "invalid_request";
   try {
-    if (Object.keys(message).some((key) => !["type", "requestId", "workspaceId", "workspacePath", "issueNumbers"].includes(key)) ||
+    if (Object.keys(message).some((key) => !["type", "requestId", "workspaceId", "workspacePath", "issueNumbers", "facts"].includes(key)) ||
+        (message.facts !== undefined && message.facts !== true) ||
         typeof message.requestId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(message.requestId) ||
         typeof message.workspaceId !== "string" || !message.workspaceId || message.workspaceId.length > 256 ||
         (message.workspacePath !== undefined && (typeof message.workspacePath !== "string" || !message.workspacePath.trim() || message.workspacePath.includes("\0"))) ||
@@ -57,13 +58,16 @@ export async function inspectCampaignLaunch(
     if (!githubSlug(origin) && !gitlabIssueOrigin(origin)) throw new Error("unsupported origin");
     failure = "issue_read_failed";
     const issueNumbers = [...message.issueNumbers].sort((a, b) => a - b);
-    const { repository, candidates } = await inspectCampaignIssueScope((command, args) =>
-      command === "git" && args[0] === "remote" ? Promise.resolve(origin) : owned(cwd, command, args), undefined, issueNumbers);
-    if (JSON.stringify(candidates.map((c) => c.issue.number).sort((a, b) => a - b)) !== JSON.stringify(issueNumbers)) throw new Error("issue mismatch");
+    const { repository, candidates, issueFacts } = await inspectCampaignIssueScope((command, args) =>
+      command === "git" && args[0] === "remote" ? Promise.resolve(origin) : owned(cwd, command, args), undefined, issueNumbers, undefined, message.facts === true);
+    // A facts read reports a pull request rather than refusing it, so it is the list that must match.
+    const read = message.facts ? (issueFacts ?? []).map((fact) => fact.number) : candidates.map((c) => c.issue.number);
+    if (JSON.stringify([...read].sort((a, b) => a - b)) !== JSON.stringify(issueNumbers)) throw new Error("issue mismatch");
     if (signal.aborted) throw new InspectionCancelled();
-    // No origin URL, issue body/title, local path, command output or environment leaves this helper.
+    // No origin URL, local path, command output or environment leaves this helper; issue text only
+    // as the bounded, untrusted facts a caller asked for.
     const digest = createHash("sha256").update(JSON.stringify([cwd, repository, head, issueNumbers])).digest("hex");
-    return { ...base, ok: true, repository, issueNumbers, digest };
+    return { ...base, ok: true, repository, issueNumbers, digest, ...(message.facts ? { issueFacts: issueFacts! } : {}) };
   } catch {
     if (signal.aborted) return { ...base, ok: false, cancelled: true, error: "Inspection was cancelled before it completed; no launch was admitted." };
     return { ...base, ok: false, failure, error: CAMPAIGN_LAUNCH_INSPECTION_ERRORS[failure] };

@@ -5,7 +5,7 @@ import {
   FULL_CONTROL_DECLINED_NOTE, fullControlStandingHumanRequired,
   CAMPAIGN_EVIDENCE_PROVIDER_DISCLOSURE_REVISION, CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE,
   CAMPAIGN_SESSION_ARTIFACT_DISCLOSURE_REVISION, campaignSessionArtifactDestinationId, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE,
-  type CampaignAuthorityBoundary, type CampaignAuthorityOperation, type CampaignBoundaryRepository, type CampaignBudgetAuthority, type FullControlDerivedLimits, type OrchestratorCampaignPolicy, type CampaignLaunchCapability, type CampaignLaunchPreflight,
+  type CampaignAuthorityBoundary, type CampaignAuthorityOperation, type CampaignBoundaryRepository, type CampaignBudgetAuthority, type CampaignIssueRef, type FullControlDerivedLimits, type OrchestratorCampaignPolicy, type CampaignLaunchCapability, type CampaignLaunchPreflight,
   type CampaignLaunchProposal, type CampaignLaunchInspectionResult, type ChildSessionDefaults,
   type OrchestratorCampaignBudgetDefault,
   type CreateSessionRequest, type FullControlEnableRequest, type FullControlLaunchOverrides, type FullControlLaunchRequest,
@@ -120,6 +120,18 @@ export function firstMessageLaunch(request: Pick<FullControlLaunchRequest, "task
  * each one is an issue of the repository before it enters the scope. */
 export function issueReferencesInMessage(text: string, repository: string): number[] {
   return [...new Set(issueReferenceSpans(text, repository).map((r) => r.number))].sort((a, b) => a - b).slice(0, MAX_MESSAGE_ISSUES);
+}
+
+/** The same for every boundary repository, as refs (#4118). A bare `#N` is the launch repository's, so
+ * another repository's references are only the ones the message qualifies with it. */
+export function issueReferencesAcrossRepositories(text: string, launch: string, repositories: readonly string[]): CampaignIssueRef[] {
+  const refs = issueReferencesInMessage(text, launch).map((number) => ({ repository: launch.toLowerCase(), number }));
+  for (const repository of repositories) {
+    if (repository.toLowerCase() === launch.toLowerCase()) continue;
+    const qualified = issueReferenceSpans(text, repository).filter((span) => text[span.start] !== "#");
+    for (const number of new Set(qualified.map((span) => span.number))) refs.push({ repository: repository.toLowerCase(), number });
+  }
+  return refs.slice(0, MAX_MESSAGE_ISSUES);
 }
 
 /** The boundary objective a first message states: its text on one line (the boundary refuses
