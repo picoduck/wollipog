@@ -50,7 +50,8 @@ export interface CampaignProjectLocation { id: string; name: string }
  * `carried` is what an existing campaign already holds when it is enabled again: the owner already
  * authorized those repositories, so an inspection can add to them but never take one away. A carried
  * Location that can't be read now stays where it is, rather than being listed as excluded, and a
- * repository that lost every Location keeps its entry. */
+ * repository that lost every Location keeps its entry. The size bounds reserve room for them, so a
+ * newly verified Location is the one left out when the boundary is full. */
 export function launchBoundaryRepositories(input: {
   launchRepository: string;
   launchLocationId: string | null;
@@ -61,7 +62,13 @@ export function launchBoundaryRepositories(input: {
   const launch = input.launchRepository.toLowerCase();
   const entries = new Map<string, CampaignBoundaryRepository>([[launch, { repository: launch, locationIds: [] }]]);
   const excluded: CampaignExcludedLocation[] = [];
-  let locationCount = 0;
+  const placed = new Set<string>();
+  const carriedEntries = input.carried ?? [];
+  const heldRepositories = new Set(carriedEntries.map((entry) => entry.repository.toLowerCase()));
+  const heldLocations = new Set(carriedEntries.flatMap((entry) => entry.locationIds));
+  // What the campaign holds that isn't placed yet keeps its room in the boundary.
+  const reservedRepositories = () => [...heldRepositories].filter((name) => !entries.has(name)).length;
+  const reservedLocations = () => [...heldLocations].filter((id) => !placed.has(id)).length;
   for (const location of input.locations) {
     const inspection = location.id === input.launchLocationId
       ? { ok: true as const, repository: launch }
@@ -76,29 +83,27 @@ export function launchBoundaryRepositories(input: {
       continue;
     }
     const entry = entries.get(inspection.repository);
-    if ((!entry && entries.size >= CAMPAIGN_BOUNDARY_REPOSITORIES_MAX) || locationCount >= CAMPAIGN_BOUNDARY_LOCATIONS_MAX) {
+    const noRepository = !entry && !heldRepositories.has(inspection.repository) &&
+      entries.size + reservedRepositories() >= CAMPAIGN_BOUNDARY_REPOSITORIES_MAX;
+    const noLocation = !heldLocations.has(location.id) && placed.size + reservedLocations() >= CAMPAIGN_BOUNDARY_LOCATIONS_MAX;
+    if (noRepository || noLocation) {
       excluded.push({ locationId: location.id, name: location.name, failure: "read_failed", reason: PROJECT_LOCATION_INSPECTION_FAILURES.read_failed });
       continue;
     }
     if (entry) entry.locationIds.push(location.id);
     else entries.set(inspection.repository, { repository: inspection.repository, locationIds: [location.id] });
-    locationCount += 1;
+    placed.add(location.id);
   }
-  for (const carried of input.carried ?? []) {
+  for (const carried of carriedEntries) {
     const repository = carried.repository.toLowerCase();
-    let entry = entries.get(repository);
-    if (!entry) {
-      if (entries.size >= CAMPAIGN_BOUNDARY_REPOSITORIES_MAX) continue;
-      entry = { repository, locationIds: [] };
-      entries.set(repository, entry);
-    }
+    const entry = entries.get(repository) ?? { repository, locationIds: [] };
+    entries.set(repository, entry);
     for (const id of carried.locationIds) {
       // A Location that verified now, as any repository, is already placed by what it verified as.
-      if ([...entries.values()].some((item) => item.locationIds.includes(id)) || locationCount >= CAMPAIGN_BOUNDARY_LOCATIONS_MAX) continue;
+      if (placed.has(id)) continue;
       entry.locationIds.push(id);
-      locationCount += 1;
+      placed.add(id);
     }
   }
-  const held = new Set([...entries.values()].flatMap((entry) => entry.locationIds));
-  return { repositories: [...entries.values()], excluded: excluded.filter((item) => !held.has(item.locationId)) };
+  return { repositories: [...entries.values()], excluded: excluded.filter((item) => !placed.has(item.locationId)) };
 }

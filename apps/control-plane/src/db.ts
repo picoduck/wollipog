@@ -21295,6 +21295,11 @@ export class ControlPlaneDb {
     if (excludedLocations) {
       if (excludedLocations.length) campaign.excludedLocations = structuredClone(excludedLocations);
       else delete campaign.excludedLocations;
+      // The owner just reviewed every Location of the Project, so none still waits for Include in Campaign.
+      const reviewed = new Set([...excludedLocations.map((item) => item.locationId),
+        ...(control.mode === "full_control" ? control.boundary.repositories ?? [] : []).flatMap((entry) => entry.locationIds)]);
+      const pending = (campaign.pendingLocations ?? []).filter((item) => !reviewed.has(item.locationId));
+      if (pending.length) campaign.pendingLocations = pending; else delete campaign.pendingLocations;
     }
     this.db.exec("BEGIN");
     try {

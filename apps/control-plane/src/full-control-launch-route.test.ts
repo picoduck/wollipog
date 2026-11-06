@@ -4577,6 +4577,60 @@ test("a reviewed enable keeps a repository whose only Location is offline, inste
   } finally { await server.close(); await c.server.close(); f.db.close(); }
 });
 
+test("a reviewed enable settles a Location that was waiting for Include in Campaign (#4117)", async () => {
+  const f = fixture();
+  saveBudget(f, savedBudget);
+  const c = await launchedMultiRepositoryCampaign(f);
+  const { server } = await app(f);
+  try {
+    const other: HumanPrincipal = { ...f.human, userId: "usr_other", actorId: "usr_other" };
+    const third = f.db.addProjectLocation(c.p.project.id, { runnerId: "r2", workspaceId: "c", addedByUserId: other.userId });
+    await c.locations.locationAdded(third.id, other);
+    assert.ok(c.policy().pendingLocations!.some((item) => item.locationId === third.id), "it waits for the owner");
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${c.rootId}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload: {} });
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    assert.ok(reviewed.summary.repositories!.some((entry) => entry.locations.some((location) => location.locationId === third.id)),
+      "the owner reviews it by name before enabling");
+    const enabled = await server.inject({ method: "POST", url: `/api/sessions/${c.rootId}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    assert.ok(c.boundary().repositories!.some((entry) => entry.locationIds.includes(third.id)));
+    assert.equal(c.policy().pendingLocations?.some((item) => item.locationId === third.id) ?? false, false, "no longer waiting");
+    assert.equal(f.db.campaignProjection(c.rootId)!.repositoryBoundary!.pendingLocations.length, 0);
+  } finally { await server.close(); await c.server.close(); f.db.close(); }
+});
+
+test("a waiting Location that a reviewed enable finds offline joins when its runner reconnects, with no Include step (#4117)", async () => {
+  const f = fixture();
+  saveBudget(f, savedBudget);
+  const c = await launchedMultiRepositoryCampaign(f);
+  const { server } = await app(f);
+  try {
+    const other: HumanPrincipal = { ...f.human, userId: "usr_other", actorId: "usr_other" };
+    const third = f.db.addProjectLocation(c.p.project.id, { runnerId: "r2", workspaceId: "c", addedByUserId: other.userId });
+    await c.locations.locationAdded(third.id, other);
+    const online = f.hub.isRunnerOnline;
+    f.hub.isRunnerOnline = (runnerId) => runnerId !== "r2" && online(runnerId);
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${c.rootId}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload: {} });
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    assert.deepEqual(reviewed.summary.excludedLocations!.filter((item) => item.locationId === third.id).map((item) => item.failure), ["runner_offline"],
+      "the owner reviews it as excluded, with its reason");
+    const enabled = await server.inject({ method: "POST", url: `/api/sessions/${c.rootId}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    const view = f.db.campaignProjection(c.rootId)!.repositoryBoundary!;
+    assert.equal(view.pendingLocations.some((item) => item.locationId === third.id), false, "excluded, not waiting for Include");
+    assert.ok(view.excludedLocations.some((item) => item.locationId === third.id));
+    // The machine returns: the excluded Location is inspected again and joins.
+    f.hub.isRunnerOnline = online;
+    await c.locations.runnerReconnected("r2");
+    assert.ok(c.boundary().repositories!.some((entry) => entry.repository === "third/repo" && entry.locationIds.includes(third.id)));
+    assert.equal(f.db.campaignProjection(c.rootId)!.repositoryBoundary!.excludedLocations.some((item) => item.locationId === third.id), false);
+  } finally { await server.close(); await c.server.close(); f.db.close(); }
+});
+
 test("enabling Full Control on an existing campaign builds its boundary from every verified Project Location, as a launch does (#4117)", async () => {
   const f = fixture();
   saveBudget(f, savedBudget);

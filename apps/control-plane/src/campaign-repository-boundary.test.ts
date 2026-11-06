@@ -45,6 +45,44 @@ test("without a launch Location the boundary is the launch repository plus every
   assert.deepEqual(result.repositories, [{ repository: "owner/repo", locationIds: [] }, { repository: "other/repo", locationIds: ["a"] }]);
 });
 
+test("an inspection adds to what a campaign holds and never takes it away (#4117)", () => {
+  const locations = ["launch", "offline", "moved", "new"].map((id) => ({ id, name: id }));
+  const result = launchBoundaryRepositories({ launchRepository: "owner/repo", launchLocationId: "launch", locations,
+    inspections: new Map([["offline", failed("offline", "runner_offline")], ["moved", verified("moved", "moved/repo")], ["new", verified("new", "new/repo")]]),
+    carried: [{ repository: "owner/repo", locationIds: ["launch"] }, { repository: "held/repo", locationIds: ["offline", "gone"] },
+      { repository: "was/repo", locationIds: ["moved"] }, { repository: "empty/repo", locationIds: [] }] });
+  assert.deepEqual(result.repositories, [
+    { repository: "owner/repo", locationIds: ["launch"] },
+    { repository: "moved/repo", locationIds: ["moved"] },
+    { repository: "new/repo", locationIds: ["new"] },
+    { repository: "held/repo", locationIds: ["offline", "gone"] },
+    // A repository whose only Location now verifies elsewhere, or that has none, keeps its entry.
+    { repository: "was/repo", locationIds: [] },
+    { repository: "empty/repo", locationIds: [] },
+  ]);
+  assert.deepEqual(result.excluded, [], "a held Location that can't be read isn't listed as excluded");
+});
+
+test("a full boundary leaves out newly verified Locations, never what the campaign holds (#4117)", () => {
+  // 49 new repositories would fill the 50-repository bound before the held one is placed.
+  const manyRepositories = Array.from({ length: 49 }, (_, i) => ({ id: `r${i}`, name: `r${i}` }));
+  const byRepository = launchBoundaryRepositories({ launchRepository: "owner/root", launchLocationId: null, locations: manyRepositories,
+    inspections: new Map(manyRepositories.map((location, i) => [location.id, verified(location.id, `owner/r${i}`)])),
+    carried: [{ repository: "owner/root", locationIds: [] }, { repository: "owner/held", locationIds: ["offline"] }] });
+  assert.equal(byRepository.repositories.length, 50);
+  assert.deepEqual(byRepository.repositories.find((entry) => entry.repository === "owner/held")?.locationIds, ["offline"]);
+  assert.deepEqual(byRepository.excluded.map((item) => [item.locationId, item.failure]), [["r48", "read_failed"]]);
+  // 100 new Locations would fill the 100-Location bound the same way.
+  const manyLocations = Array.from({ length: 100 }, (_, i) => ({ id: `l${i}`, name: `l${i}` }));
+  const byLocation = launchBoundaryRepositories({ launchRepository: "owner/root", launchLocationId: null, locations: manyLocations,
+    inspections: new Map(manyLocations.map((location) => [location.id, verified(location.id, "owner/root")])),
+    carried: [{ repository: "owner/root", locationIds: ["offline"] }] });
+  const held = byLocation.repositories[0]!.locationIds;
+  assert.equal(held.length, 100);
+  assert.ok(held.includes("offline"));
+  assert.deepEqual(byLocation.excluded.map((item) => item.locationId), ["l99"]);
+});
+
 test("Locations past the boundary's bounds are excluded rather than silently dropped (#4117)", () => {
   const locations = Array.from({ length: 102 }, (_, n) => ({ id: `l${n}`, name: `l${n}` }));
   const result = launchBoundaryRepositories({ launchRepository: "owner/repo", launchLocationId: "l0", locations,
