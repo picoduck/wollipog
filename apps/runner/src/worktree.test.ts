@@ -482,6 +482,74 @@ test("native worktrees live under the external runner data root and clean up", {
   }
 });
 
+/** A primary checkout on `main` whose remote has since moved ahead by `ahead` commits. */
+function primaryBehindRemote(root: string, ahead = 2): { repo: string; remote: string; staleHead: string; remoteTip: string } {
+  const { repo, remote } = initRepoWithOrigin(root);
+  execFileSync("git", ["-C", remote, "symbolic-ref", "HEAD", "refs/heads/main"]);
+  const staleHead = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const upstream = join(root, "upstream");
+  execFileSync("git", ["clone", "-q", remote, upstream]);
+  execFileSync("git", ["-C", upstream, "config", "user.email", "test@example.com"]);
+  execFileSync("git", ["-C", upstream, "config", "user.name", "Test"]);
+  for (let index = 0; index < ahead; index++) {
+    writeFileSync(join(upstream, `upstream-${index}.txt`), `upstream change ${index}\n`);
+    execFileSync("git", ["-C", upstream, "add", "-A"]);
+    execFileSync("git", ["-C", upstream, "commit", "-q", "-m", `upstream ${index}`]);
+  }
+  execFileSync("git", ["-C", upstream, "push", "-q", "origin", "main"]);
+  const remoteTip = execFileSync("git", ["-C", upstream, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  return { repo, remote, staleHead, remoteTip };
+}
+
+test("a session worktree starts at the fetched remote default when the primary checkout is behind it", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wt-stale-primary-"));
+  const dataDir = join(root, "runner-data");
+  try {
+    const { repo, staleHead, remoteTip } = primaryBehindRemote(root);
+    const handle = await createWorktree(repo, "s_stale_primary", { dataDir });
+    assert.equal(handle.created, true);
+    assert.equal(handle.baseRef, "origin/main");
+    assert.equal(execFileSync("git", ["-C", handle.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), remoteTip);
+    // The primary checkout itself is left exactly where it was.
+    assert.equal(execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), staleHead);
+    assert.equal(execFileSync("git", ["-C", repo, "status", "--porcelain"], { encoding: "utf8" }).trim(), "");
+    // Fast-forwarding to the remote, as an agent's first turn would, adds nothing to its turn diff.
+    const firstTurnBase = await captureWorktreeTree(handle.path);
+    execFileSync("git", ["-C", handle.path, "merge", "--ff-only", "-q", "origin/main"]);
+    writeFileSync(join(handle.path, "own-change.txt"), "the agent's own work\n");
+    const firstTurnEnd = await captureWorktreeTree(handle.path);
+    const changed = execFileSync("git", ["-C", handle.path, "diff", "--name-only", firstTurnBase, firstTurnEnd], { encoding: "utf8" });
+    assert.deepEqual(changed.trim().split("\n"), ["own-change.txt"]);
+    await removeWorktree(repo, handle, { dataDir });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a session worktree keeps the primary checkout's HEAD when it is not merely behind the remote", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wt-diverged-primary-"));
+  const dataDir = join(root, "runner-data");
+  try {
+    const { repo } = primaryBehindRemote(root);
+    // A local commit the remote lacks makes HEAD a deliberate starting point, not a stale one.
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-q", "-m", "local work"]);
+    const localHead = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const handle = await createWorktree(repo, "s_diverged_primary", { dataDir });
+    assert.equal(handle.baseRef, undefined);
+    assert.equal(execFileSync("git", ["-C", handle.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), localHead);
+    await removeWorktree(repo, handle, { dataDir });
+
+    // An unreachable remote falls back to HEAD instead of failing the session's launch.
+    execFileSync("git", ["-C", repo, "remote", "set-url", "origin", join(root, "missing.git")]);
+    const offline = await createWorktree(repo, "s_offline_primary", { dataDir });
+    assert.equal(offline.baseRef, undefined);
+    assert.equal(execFileSync("git", ["-C", offline.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), localHead);
+    await removeWorktree(repo, offline, { dataDir });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("forced cleanup refuses a replacement at a persisted worktree path", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-wt-cleanup-identity-"));
   const repo = join(root, "repo");
