@@ -46,6 +46,23 @@ test("the scope check asks only checkable questions, never about priority, impor
   assert.deepEqual(definition.dataFields, ["proposal", "issues", "campaign"]);
 });
 
+test("a repository limit the server resolved reaches the check as settled, so stating it there leaves nothing missing (#4118)", () => {
+  const complete = SCOPE_CHECK_TYPED.questions.find((question) => question.questionId === "constraints_complete")!;
+  assert.match(complete.text, /or a repository\)\?/u, "a repository limit stated nowhere is still missing");
+  assert.match(complete.text, /`proposal\.repositoryConstraint` names it/u);
+  assert.match(DECISION_KINDS.scope_check.instructions, /`proposal\.repositoryConstraint`, when present, is a repository limit the server already settled/u);
+  const limited = proposal({ constraints: ["open"], repositoryConstraint: { name: "r2 a", repository: "owner/api" },
+    issues: [{ repository: "owner/api", number: 91, origin: "orchestrator_chosen", rationale: "Open bug.", title: "Bug 91" }] });
+  const inputs = scopeCheckInputs("Fix the top open bug in r2 a.", limited, "Ranked by label.", [{ ...fact(91), repository: "owner/api" }], CAMPAIGN)!;
+  assert.deepEqual(JSON.parse(inputs.data!.proposal!).repositoryConstraint, { name: "r2 a", repository: "owner/api" }, "a Location's name can't be resolved from the message alone");
+  assert.equal(JSON.parse(inputs.data!.issues!)[0].repository, "owner/api");
+  // Unlimited proposals read and key as they did.
+  assert.equal(JSON.parse(scopeCheckInputs(MESSAGE, proposal(), "Ranked.", FACTS, CAMPAIGN)!.data!.proposal!).repositoryConstraint, undefined);
+  assert.notEqual(scopeCheckKey("root", 2, 3, limited), scopeCheckKey("root", 2, 3, { ...limited, repositoryConstraint: undefined }), "the limit is part of what was checked");
+  assert.equal(scopeCheckKey("root", 2, 3, limited), scopeCheckKey("root", 2, 3, { ...limited, repositoryConstraint: { name: "the api repo", repository: "owner/api" } }),
+    "another name for the same repository buys no second verdict");
+});
+
 test("the questions are parameterized per owner-named issue and per chosen issue and constraint, naming both", () => {
   const mixed = proposal({ issues: [{ number: 12, origin: "owner_named", rationale: "Named.", title: "Crash" },
     { number: 93, origin: "orchestrator_chosen", rationale: "UI bug.", title: "Bug 93" }] });

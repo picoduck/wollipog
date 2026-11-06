@@ -76,6 +76,7 @@ function inputsWith(ownerMessage: string, proposal: CampaignScopeProposal, expla
       proposal: JSON.stringify({
         issues: proposal.issues.map((issue) => ({ ...(issue.repository ? { repository: issue.repository } : {}), number: issue.number, origin: issue.origin, rationale: issue.rationale })),
         requestedCount: proposal.requestedCount, constraints: proposal.constraints, withheldOperations: proposal.withheldOperations,
+        ...(proposal.repositoryConstraint ? { repositoryConstraint: proposal.repositoryConstraint } : {}),
         rationale: explanation,
       }),
       issues: JSON.stringify(facts.map((fact) => ({ ...(fact.repository ? { repository: fact.repository } : {}), number: fact.number, title: fact.title, state: fact.state, labels: fact.labels,
@@ -142,11 +143,13 @@ const normalized = (value: string) => oneLine(value).toLowerCase();
  * reworded rationale joins the recorded occurrence and returns its verdict, its owner request or its
  * admission: rewording never buys a second verdict. */
 export function scopeCheckKey(rootId: string, boundaryRevision: number, revision: number,
-  proposal: Pick<CampaignScopeProposal, "issues" | "requestedCount" | "constraints" | "withheldOperations">): string {
+  proposal: Pick<CampaignScopeProposal, "issues" | "requestedCount" | "constraints" | "withheldOperations" | "repositoryConstraint">): string {
   const subject = sha256(JSON.stringify({
     issues: [...proposal.issues].map((issue) => [issueKey(issue), issue.origin]).sort((a, b) => byIssueKey(a[0] as number | string, b[0] as number | string)),
     requestedCount: proposal.requestedCount, constraints: [...new Set(proposal.constraints.map(normalized))].sort(),
     withheldOperations: [...new Set(proposal.withheldOperations)].sort(),
+    // The limit the check reads, by what it resolved to; left out when absent, so older keys still join.
+    ...(proposal.repositoryConstraint ? { repository: proposal.repositoryConstraint.repository } : {}),
   })).slice(0, 32);
   return `${scopeCheckAdditionsPrefix(rootId, boundaryRevision, revision, proposal.issues.map(issueKey))}${subject}`;
 }

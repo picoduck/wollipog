@@ -726,7 +726,10 @@ let scopeGrantFixture: import("@wollipog/protocol").FullControlScopeGrant | null
 } : params.get("scope") === "grant-failed" ? {
   version: 1, status: "failed", occurrenceId: "dec_fixture", target: SCOPE_GRANT_TARGET, failureClass: "provider_overloaded", namedIssues: [],
   ceilings: launchCeilings(1),
-} : params.get("scope") === "proposal" || params.get("scope") === "proposal-waiting" || params.get("scope") === "proposal-repositories" ? {
+} : params.get("scope") === "proposal-repositories" ? {
+  // A boundary of two repositories (#4118).
+  version: 1, status: "proposal", namedIssues: [], ceilings: { ...launchCeilings(9), repositories: ["team/repo", "team/api"] },
+} : params.get("scope") === "proposal" || params.get("scope") === "proposal-waiting" ? {
   // The Orchestrator proposes the scope (#4282): the server read nothing from the message.
   version: 1, status: "proposal", namedIssues: [], ceilings: launchCeilings(9),
 } : params.get("scope") === "grant-uncertain" ? {
@@ -929,7 +932,8 @@ const client = {
     // The Orchestrator's proposals (#4282): one waiting for the owner, after an earlier one it replaced.
     ...(params.get("scope") === "proposal" ? { issueNumbers: [], scopeProposals: SCOPE_PROPOSALS } : {}),
     ...(params.get("scope") === "proposal-waiting" ? { issueNumbers: [], scopeProposals: [] } : {}),
-    ...(params.get("scope") === "proposal-repositories" ? { issueNumbers: [], scopeProposals: SCOPE_PROPOSALS_ACROSS_REPOSITORIES } : {}),
+    ...(params.get("scope") === "proposal-repositories" ? { issueNumbers: [], scopeProposals: SCOPE_PROPOSALS_ACROSS_REPOSITORIES, repositories: [
+      { repository: "team/repo", issueNumbers: [], state: "verified" as const }, { repository: "team/api", issueNumbers: [], state: "verified" as const }] } : {}),
     // `activity=…` (#4146): the authorized scope covers every work item, so nothing reads as outside it.
     ...(activityScenario ? { repository: "picoduck/wollipog", revision: 1, canPropose: false, outsideScope: [], candidates: [],
       issueNumbers: [...new Set(items.flatMap((item) => item.issue ? [item.issue.number] : []))] } : {}),

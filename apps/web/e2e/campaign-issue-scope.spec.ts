@@ -236,6 +236,9 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
     const section = page.getByRole("region", { name: "Scope Proposal" });
     const latest = section.getByRole("article", { name: "Latest Proposal" });
     const row = (term: string) => latest.locator("dl.facts > div").filter({ has: page.getByRole("term").getByText(term, { exact: true }) }).locator("dd");
+    const heading = section.locator("dl.facts > div").filter({ has: page.getByRole("term").getByText("Repositories", { exact: true }) }).locator("dd");
+    await expect(heading).toHaveText("team/repo, team/api");
+    await expect(page.getByRole("region", { name: "Authorized Issue Scope" }).getByRole("term").getByText("Repositories", { exact: true })).toBeVisible();
     await expect(row("Issues").getByRole("listitem")).toHaveCount(3);
     await expect(row("Issues")).toContainText("team/repo#123 Composer Epic");
     await expect(row("Issues")).toContainText("team/api#123 Token Refresh Races");
@@ -243,7 +246,8 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
     await expect(row("Repository You Named")).toHaveText("the service repo: matches no repository in this campaign, or more than one");
     const geometry = await section.evaluate((element) => ({ client: element.clientWidth, scroll: element.scrollWidth }));
     expect(geometry.scroll).toBeLessThanOrEqual(geometry.client + 1);
-    await section.scrollIntoViewIfNeeded();
+    // Tall enough to show the whole panel, so the screenshot is complete evidence at each width.
+    await page.setViewportSize({ width: viewport.width, height: 1700 });
     await page.screenshot({ path: `playwright-report/scope-proposal-repositories-${viewport.width}.png`, fullPage: true });
   });
 }
