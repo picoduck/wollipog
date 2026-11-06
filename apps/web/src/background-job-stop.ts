@@ -1,5 +1,4 @@
 import {
-  BACKGROUND_JOB_STALL_MS,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type BackgroundDeliveryView,
@@ -38,19 +37,25 @@ export function backgroundJobStopAvailability(
 /** A job's current state, as a key of the shared job vocabulary (`statusMeta("job", …)`). */
 export type BackgroundJobCurrentState =
   | "running"
-  | "stalled"
   | "completed"
   | "failed"
   | "killed"
   | "lost"
   | "unverified";
 
+/**
+ * A job's liveness contract (#4249): the connected runner still lists it and the session's
+ * aggregate work is current, so it is Running however long it has run. A job the runner stops
+ * listing without a terminal status is Unverified, and one a runner restart orphaned is Lost: the
+ * concrete states for a broken contract. Managed jobs declare no deadline, so elapsed time is never
+ * one; the control plane's one-hour mark (`stalledSince`) only stops such a job from counting as a
+ * campaign child's wait, and is not shown as Stalled.
+ */
 export function backgroundJobCurrentState(
   job: ManagedBackgroundJobView,
   backgroundWorkState: BackgroundWorkState | undefined,
   runnerOnline: boolean,
   inventorySupported: boolean,
-  now?: number,
 ): BackgroundJobCurrentState {
   if (job.terminalStatus === "completed") return "completed";
   if (job.terminalStatus === "failed") return "failed";
@@ -59,17 +64,12 @@ export function backgroundJobCurrentState(
   const aggregateCurrent = backgroundWorkState === "running" ||
     backgroundWorkState === "continuation_pending";
   if (!(aggregateCurrent && inventorySupported && runnerOnline && job.sourcePresent)) return "unverified";
-  // A job the runner still lists with no terminal status past the bound is reported, not declared
-  // ended (#1651). The control plane marks it on read; the clock keeps the label current between
-  // broadcasts.
-  const stalled = job.stalledSince != null ||
-    (now != null && now - job.registeredAt >= BACKGROUND_JOB_STALL_MS);
-  return stalled ? "stalled" : "running";
+  return "running";
 }
 
 /** Only a job the runner still lists as running can be stopped; any other state has nothing to end. */
 export function stoppableJobState(state: BackgroundJobCurrentState): boolean {
-  return state === "running" || state === "stalled";
+  return state === "running";
 }
 
 /** A job's kind, the first part of its name: "Shell Job", "Monitor Job", "Background Job". */

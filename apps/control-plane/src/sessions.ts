@@ -17,6 +17,7 @@ import { campaignBehaviorSources, campaignBehaviorValues, changedCampaignBehavio
   parseCampaignBehaviorRequest } from "./campaign-behavior.js";
 import { agentHarnessIdentityKey } from "@wollipog/protocol";
 import { configuredReview, ReviewSettingsError } from "./review-settings.js";
+import { parseSessionWaitReport } from "./session-waits.js";
 import { isSessionLaunchFailureCode, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import { mintCampaignEvidenceAuthority, campaignEvidenceDisclosuresCurrent, type EvidenceAuthorityProposal, type EvidenceAuthorityDisclosures } from "./evidence-authority.js";
 import { campaignRepositoryLocation, supportsPacedVideoReviewPeer } from "@wollipog/protocol";
@@ -60,12 +61,12 @@ import type { ForgeReadResult } from "./campaign-forge-observations.js";
 import {
   REVIEW_FULL_REASON_LIMIT, REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
   compactReviewFinding, REVIEW_ROUND_REFUSALS, type ReviewLaunchPolicy, type ReviewSessionRequest, type ReviewSessionUpdate, type ReviewSessionView, type ReviewSessionsPage,
-  type PullRequestWatchOutcome, type PullRequestWatchUpdate, type PullRequestWatchView,
+  type PullRequestWatchOutcome, type PullRequestWatchUpdate, type PullRequestWatchView, type SessionWaitView,
 } from "@wollipog/protocol";
 import { SESSION_REVIEW_JOB_ID_PATTERN, type SessionReviewJobArtifacts, type SessionReviewJobRequest, type SessionReviewJobView, type SessionReviewJobsPage,
   type SessionReviewJobUpdate } from "@wollipog/protocol";
 import { normalizeCampaignIssueScopeSnapshot, titleFromPrompt, type CampaignIssueScopeRequest, type CampaignIssueScopeView, type CampaignIssueScopeSnapshot } from "@wollipog/protocol";
-import { normalizeIssueClosureSnapshot, issueClosureActiveChildren, issueClosureFailureRefusal, issueClosureResultRefusal } from "./github-issue-closure.js";
+import { normalizeIssueClosureSnapshot, issueClosureActiveChildren, issueClosureBindingSnapshot, issueClosureChildren, issueClosureFailureRefusal, issueClosureResultRefusal } from "./github-issue-closure.js";
 import { normalizeAutomationCreationSnapshot } from "./automation-creation-snapshot.js";
 import { normalizeLocationSwitchSnapshot } from "./location-switch-snapshot.js";
 import { INTENDED_CLOSURES_LIMIT, normalizeIntendedClosures, prMergeClosureMismatch, unscopedClosureRefusal, validClosingReferenceCheck } from "./pr-merge-closures.js";
@@ -429,6 +430,9 @@ export interface RunnerAttentionBatch {
 /** At most this many live runtime snapshots share one durable commit (#2601). The same bound as a
  * registration step (#2125): the event loop yields between runs, never inside one. */
 export const RUNTIME_UPDATE_RUN_LIMIT = 32;
+
+/** The lifecycles inside a turn, where a tool call such as a wait can be in progress (#1280). */
+const SESSION_WAIT_BUSY_STATUSES: ReadonlySet<SessionStatus> = new Set<SessionStatus>(["running", "input_required"]);
 
 /** What a runtime snapshot's publication needs once its update has committed. */
 interface CommittedRuntimeUpdate {
@@ -924,7 +928,7 @@ function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): strin
  * person. A question genuinely reworded is a different question. */
 function ownerKeptTargets(category: WorkflowDecisionCategory, resourceKey: string, snapshot: WorkflowDecisionResourceSnapshot): string[] {
   const text = (value: string) => value.normalize("NFKC").toLowerCase().replace(/\s+/gu, " ").trim();
-  const targets = [`key:${category}:${resourceKey}`, `content:${category}:${auditDigest(snapshot)}`];
+  const targets = [`key:${category}:${resourceKey}`, `content:${category}:${workflowDecisionResourceDigest(snapshot)}`];
   switch (snapshot.category) {
     case "implementation_question":
     case "owner_decision":
@@ -2021,6 +2025,12 @@ export function workflowRunCapabilityError(
 export function auditDigest(value: unknown): string | undefined {
   if (value == null) return undefined;
   return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
+}
+
+/** A workflow decision's resource digest: its whole snapshot, except an issue closure's excluded
+ * children, which are read-only information outside the binding (#3237). */
+function workflowDecisionResourceDigest(snapshot: WorkflowDecisionResourceSnapshot): string {
+  return auditDigest(snapshot.category === "issue_closure" ? issueClosureBindingSnapshot(snapshot) : snapshot)!;
 }
 
 function boundedProviderCorrelationId(value: unknown): value is string {
@@ -10992,6 +11002,64 @@ export class SessionsService {
     return ok({ watch: this.db.pullRequestWatches.view(watchId)! });
   }
 
+  /**
+   * A session's own report of a `wait_session` or `wait_pull_request` call (#1280, #4249): when it
+   * starts, after successful polls, and when it ends. Only a session in a turn can be inside a tool
+   * call, so an idle or finished session's report is refused; a wait_session report must name a
+   * session the caller may read, exactly as the wait's own polls must.
+   */
+  reportSessionWait(callerSessionId: string, request: unknown,
+    canAccess: (id: string) => boolean = () => true): ServiceResult<{ waits: SessionWaitView[] }> {
+    const status = this.db.sessionStatusOnly(callerSessionId);
+    if (status === null || !canAccess(callerSessionId)) return fail("session not found", 404);
+    const report = parseSessionWaitReport(request);
+    if (typeof report === "string") return fail(report, 400);
+    const now = Date.now();
+    if (report.state === "active") {
+      if (!SESSION_WAIT_BUSY_STATUSES.has(status)) return fail("only a session in a turn can report a wait in progress", 409);
+      if (report.target.kind === "session" &&
+          (report.target.sessionId === callerSessionId || !canAccess(report.target.sessionId) ||
+            this.db.sessionStatusOnly(report.target.sessionId) === null)) {
+        return fail("watched session not found", 404);
+      }
+    }
+    const target = report.target;
+    const applied = this.db.sessionWaits.report(callerSessionId, report, now,
+      () => target.kind === "session" && this.db.isSessionDescendant(callerSessionId, target.sessionId));
+    if ("error" in applied) return fail(applied.error, applied.status);
+    if (applied.changed) this.sessionWaitsChanged([callerSessionId]);
+    return ok({ waits: this.db.sessionWaits.views(callerSessionId) ?? [] });
+  }
+
+  /** Re-decide every tracked wait (the 5-second sweep), and forget the waits of any session that
+   * left its turn without reporting their end. Broadcasts each session whose waits changed. */
+  maintainSessionWaits(now: number): void {
+    const cleared: string[] = [];
+    for (const sessionId of this.db.sessionWaits.sessionIds()) {
+      const status = this.db.sessionStatusOnly(sessionId);
+      if (status === null || !SESSION_WAIT_BUSY_STATUSES.has(status)) {
+        this.db.sessionWaits.clear(sessionId);
+        if (status !== null) cleared.push(sessionId);
+      }
+    }
+    this.sessionWaitsChanged([...cleared, ...this.db.sessionWaits.sweep(now)]);
+  }
+
+  /** A session's lifecycle changed: a turn that ended takes every wait inside it along. */
+  sessionWaitLifecycleChanged(sessionId: string): void {
+    if (!this.db.sessionWaits.has(sessionId)) return;
+    const status = this.db.sessionStatusOnly(sessionId);
+    if (status !== null && SESSION_WAIT_BUSY_STATUSES.has(status)) return;
+    this.db.sessionWaits.clear(sessionId);
+    if (status !== null) this.sessionWaitsChanged([sessionId]);
+  }
+
+  private sessionWaitsChanged(sessionIds: readonly string[]): void {
+    if (!sessionIds.length) return;
+    this.db.derivedSessionStateChanged();
+    for (const sessionId of new Set(sessionIds)) this.hub.sessionChangedById(sessionId);
+  }
+
   /** The runner's report of a watch's end: the first one counts, and owes the session its wake. */
   onPullRequestWatchUpdate(runnerId: string, update: PullRequestWatchUpdate): void {
     const now = Date.now();
@@ -11432,7 +11500,7 @@ export class SessionsService {
             previous.controllingSessionId !== controller.session.id ||
             previous.policyRevision !== controller.policy.revision ||
             (priorVideo?.originalRequestSha256 !== auditDigest(normalized.data) &&
-              previous.resourceDigest !== auditDigest(normalized.data))) {
+              previous.resourceDigest !== workflowDecisionResourceDigest(normalized.data))) {
           return fail("requestId was already used for different workflow decision content", 409);
         }
         if (previous.status === "pending") this.restorePendingWorkflowDecisionCards(sessionId);
@@ -12334,12 +12402,13 @@ export class SessionsService {
       if (inspected.inspection.state === "CLOSED") return ok({ outcome: "already_closed", url: inspected.inspection.url });
       if (inspected.inspection.state !== "OPEN") return fail("runner returned invalid issue state", 409);
       const { state: _state, ...inspection } = inspected.inspection;
+      const children = issueClosureChildren(this.db, sessionId, { repository: inspection.repository, number: request.issue });
       let snapshot: GithubIssueClosureSnapshot = { ...inspection, category: "issue_closure", reason: request.reason,
         ...(session.orchestratorPolicy.issueScope ? { scopeRevision: session.orchestratorPolicy.issueScope.revision } : {}),
         explanation: request.explanation, evidence: request.evidence,
         ...(request.comment === undefined ? {} : { comment: request.comment }),
         ...(request.dispositionRecommendationId === undefined ? {} : { dispositionRecommendationId: request.dispositionRecommendationId }),
-        activeChildren: issueClosureActiveChildren(this.db, sessionId, { repository: inspection.repository, number: request.issue }) };
+        activeChildren: children.active, excludedChildren: children.excluded };
       const resourceKey = `issue_closure:${inspection.repository.toLowerCase()}#${request.issue}`;
       // Whoever reviews this request sees why the last executed approval was refused (#4059).
       const previousRefusal = this.db.latestIssueClosureRefusal(sessionId, resourceKey);
@@ -12510,7 +12579,9 @@ export class SessionsService {
     // carried across scope changes that left its issue alone (#3915) is dispatched at that revision,
     // which the checks above proved is still current and still names its authority; the runner's
     // own scope, issue, bounded-authority and mutation-fence checks then apply unchanged.
-    const dispatched = synchronizedScopeRevision === undefined ? snapshot : { ...snapshot, scopeRevision: synchronizedScopeRevision };
+    // The runner receives only the binding: the excluded children are for the approver (#3237).
+    const binding = issueClosureBindingSnapshot(snapshot);
+    const dispatched = synchronizedScopeRevision === undefined ? binding : { ...binding, scopeRevision: synchronizedScopeRevision };
     try {
       const requestId = `issue_closure_execute_${randomUUID()}`;
       const response = await this.hub.requestFromRunner(session.runnerId, requestId, {
@@ -12797,7 +12868,7 @@ export class SessionsService {
       retired = guarded.retire;
     }
     const now = Date.now();
-    const resourceDigest = auditDigest(normalized.data)!;
+    const resourceDigest = workflowDecisionResourceDigest(normalized.data);
     const created = this.db.createWorkflowDecision({
       requestId: request.requestId,
       occurrenceId: `workflow_${randomUUID().replace(/-/gu, "")}`,
@@ -13593,7 +13664,7 @@ export class SessionsService {
     const supplied = normalizeWorkflowDecisionSnapshot(request?.resourceSnapshot, Boolean(video));
     const original = video ? normalizeWorkflowDecisionSnapshot(request?.resourceSnapshot) : null;
     const matchesStored = supplied.ok && supplied.data &&
-      supplied.data.category === decision.category && auditDigest(supplied.data) === decision.resourceDigest;
+      supplied.data.category === decision.category && workflowDecisionResourceDigest(supplied.data) === decision.resourceDigest;
     const matchesOriginal = video && original?.ok && original.data?.category === "ui_evidence_approval" &&
       auditDigest(original.data) === video.originalRequestSha256;
     if (!matchesStored && !matchesOriginal && !supplied.ok && !original?.ok) {

@@ -919,7 +919,13 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      server's one automatic repair of idle leftovers. Dashboards below 297 receive
 //      `complete_needs_cleanup` as `complete_with_handoffs` (below 275 as `waiting_human`) and
 //      `stuck` as `blocked`. (292-294 are claimed by open pull requests.)
-export const PROTOCOL_VERSION = 297;
+// 298: tracked waits (#1280, #4249). A runner's Wollipog MCP server reports each `wait_session`
+//      and `wait_pull_request` call through POST /api/sessions/:id/waits (start, successful polls,
+//      end), and the control plane projects `SessionView.waits`, classified under the liveness
+//      contract in session-waits.ts. An older control plane refuses the report and the runner
+//      stops reporting that call; an older dashboard ignores the field and shows the lifecycle.
+//      (292, 300, 301 and 302 are claimed by open pull requests.)
+export const PROTOCOL_VERSION = 298;
 
 export * from "./campaign-authority.js";
 export * from "./workflow-decision-owner-rule.js";
@@ -928,6 +934,8 @@ export * from "./gitlab-closing-references.js";
 export * from "./issue-closure-refusal.js";
 import type { GithubIssueClosureRefusal, GithubIssueClosureRefusalReason } from "./issue-closure-refusal.js";
 export * from "./issue-closure-delivery-gap.js";
+export * from "./issue-closure-excluded-children.js";
+import type { IssueClosureExcludedChild } from "./issue-closure-excluded-children.js";
 import type { DeliveryVerificationFailure, IssueClosureDeliveryGap, IssueClosureEpicMembers } from "./issue-closure-delivery-gap.js";
 export * from "./campaign-issue-publication.js";
 export * from "./campaign-evidence-authority.js";
@@ -937,6 +945,7 @@ export * from "./campaign-review-job.js";
 export * from "./session-review-job.js";
 export * from "./review-session.js";
 export * from "./pull-request-watch.js";
+export * from "./session-waits.js";
 export * from "./workspace-removal.js";
 export * from "./forge-decision-action.js";
 export * from "./campaign-activity.js";
@@ -5632,6 +5641,10 @@ export interface GithubIssueClosureSnapshot extends Omit<GithubIssueClosureInspe
   evidence: string[];
   comment?: string;
   activeChildren: Array<{ sessionId: string; title: string; assignmentDigest: string }>;
+  /** Server-derived (#3237): the live campaign children the ledger proves unrelated, so left out of
+   * `activeChildren`, each with the ledger facts that excluded it. Read-only: it stays outside the
+   * resource digest and is not sent to the runner. A snapshot from an earlier release omits it. */
+  excludedChildren?: IssueClosureExcludedChild[];
   issueAdmission?: CampaignIssueAdmission;
   dispositionRecommendationId?: string;
   /** Server-derived (#4059): the latest earlier closure of this issue by this Orchestrator that was
@@ -8128,7 +8141,9 @@ export interface ManagedBackgroundJobView {
   endedBy?: ManagedBackgroundJobEnd;
   /** Set once a job the runner still lists has gone `BACKGROUND_JOB_STALL_MS` without a terminal
    * status (#1651). It is a report, not proof that the job ended: Wollipog cannot tell a monitor
-   * that never fires from one still waiting. */
+   * that never fires from one still waiting. Past it the job no longer counts as a campaign child's
+   * wait; dashboards from #4249 on still show the job Running, since elapsed time breaks no
+   * liveness contract (older ones label it Stalled). */
   stalledSince?: number;
 }
 
@@ -8866,6 +8881,10 @@ export interface SessionView {
   /** v272: the merge-queue watch this session is parked on, or the latest one whose wake is still
    * owed or was lost (#4071). Omitted otherwise and by older control planes. */
   pullRequestWatch?: import("./pull-request-watch.js").PullRequestWatchView;
+  /** v298: the `wait_session` and `wait_pull_request` calls in progress on this session, oldest
+   * first, each classified Healthy or Stalled by the control plane (#1280, #4249). Omitted when
+   * there are none and by older control planes. */
+  waits?: import("./session-waits.js").SessionWaitView[];
   /** Submission stays fenced until the runner confirms the committed role. */
   roleConversion?: SessionRoleConversionView;
   /** Resolved campaign behavior and authority snapshot. Present only for Orchestrator sessions

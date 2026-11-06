@@ -683,14 +683,20 @@ test("a closed pull request returns closed", async () => {
 test("transient GitHub failures retry on the same pace; others fail at once", async () => {
   const fake = fakeGh([failed("error connecting to api.github.com"), ok({ errors: [{ type: "RATE_LIMITED", message: "slow down" }] }),
     ok(pr({}, [run(AGGREGATOR, "SUCCESS")]))]);
-  const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fake.gh, ...clock() });
+  let observations = 0;
+  const result = await waitForPullRequest({ repository: "o/r", number: 7 },
+    { gh: fake.gh, ...clock(), onObservation: () => { observations++; } });
   assert.ok(result.ok);
   assert.equal(result.summary.outcome, "checks_passed");
+  assert.equal(observations, 1, "only the complete observation is a progress signal (#1280), never a failed read");
 
   const stuck = fakeGh([failed("error connecting to api.github.com")]);
-  const gaveUp = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 3_600_000 }, { gh: stuck.gh, ...clock() });
+  observations = 0;
+  const gaveUp = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 3_600_000 },
+    { gh: stuck.gh, ...clock(), onObservation: () => { observations++; } });
   assert.equal(gaveUp.ok, false);
   assert.equal(stuck.graphqlCalls(), 4);
+  assert.equal(observations, 0, "retried failures report no progress");
 
   const unauthenticated = await waitForPullRequest({ repository: "o/r", number: 7 },
     { gh: fakeGh([failed("To get started with GitHub CLI, please run:  gh auth login", 4)]).gh, ...clock() });
