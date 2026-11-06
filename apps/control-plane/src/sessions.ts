@@ -66,7 +66,7 @@ import {
 import { SESSION_REVIEW_JOB_ID_PATTERN, type SessionReviewJobArtifacts, type SessionReviewJobRequest, type SessionReviewJobView, type SessionReviewJobsPage,
   type SessionReviewJobUpdate } from "@wollipog/protocol";
 import { normalizeCampaignIssueScopeSnapshot, titleFromPrompt, type CampaignIssueScopeRequest, type CampaignIssueScopeView, type CampaignIssueScopeSnapshot } from "@wollipog/protocol";
-import { normalizeIssueClosureSnapshot, issueClosureActiveChildren, issueClosureFailureRefusal, issueClosureResultRefusal } from "./github-issue-closure.js";
+import { normalizeIssueClosureSnapshot, issueClosureActiveChildren, issueClosureBindingSnapshot, issueClosureChildren, issueClosureFailureRefusal, issueClosureResultRefusal } from "./github-issue-closure.js";
 import { normalizeAutomationCreationSnapshot } from "./automation-creation-snapshot.js";
 import { normalizeLocationSwitchSnapshot } from "./location-switch-snapshot.js";
 import { INTENDED_CLOSURES_LIMIT, normalizeIntendedClosures, prMergeClosureMismatch, unscopedClosureRefusal, validClosingReferenceCheck } from "./pr-merge-closures.js";
@@ -928,7 +928,7 @@ function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): strin
  * person. A question genuinely reworded is a different question. */
 function ownerKeptTargets(category: WorkflowDecisionCategory, resourceKey: string, snapshot: WorkflowDecisionResourceSnapshot): string[] {
   const text = (value: string) => value.normalize("NFKC").toLowerCase().replace(/\s+/gu, " ").trim();
-  const targets = [`key:${category}:${resourceKey}`, `content:${category}:${auditDigest(snapshot)}`];
+  const targets = [`key:${category}:${resourceKey}`, `content:${category}:${workflowDecisionResourceDigest(snapshot)}`];
   switch (snapshot.category) {
     case "implementation_question":
     case "owner_decision":
@@ -2025,6 +2025,12 @@ export function workflowRunCapabilityError(
 export function auditDigest(value: unknown): string | undefined {
   if (value == null) return undefined;
   return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
+}
+
+/** A workflow decision's resource digest: its whole snapshot, except an issue closure's excluded
+ * children, which are read-only information outside the binding (#3237). */
+function workflowDecisionResourceDigest(snapshot: WorkflowDecisionResourceSnapshot): string {
+  return auditDigest(snapshot.category === "issue_closure" ? issueClosureBindingSnapshot(snapshot) : snapshot)!;
 }
 
 function boundedProviderCorrelationId(value: unknown): value is string {
@@ -11504,7 +11510,7 @@ export class SessionsService {
             previous.controllingSessionId !== controller.session.id ||
             previous.policyRevision !== controller.policy.revision ||
             (priorVideo?.originalRequestSha256 !== auditDigest(normalized.data) &&
-              previous.resourceDigest !== auditDigest(normalized.data))) {
+              previous.resourceDigest !== workflowDecisionResourceDigest(normalized.data))) {
           return fail("requestId was already used for different workflow decision content", 409);
         }
         if (previous.status === "pending") this.restorePendingWorkflowDecisionCards(sessionId);
@@ -12430,12 +12436,13 @@ export class SessionsService {
       if (inspected.inspection.state === "CLOSED") return ok({ outcome: "already_closed", url: inspected.inspection.url });
       if (inspected.inspection.state !== "OPEN") return fail("runner returned invalid issue state", 409);
       const { state: _state, ...inspection } = inspected.inspection;
+      const children = issueClosureChildren(this.db, sessionId, { repository: inspection.repository, number: request.issue });
       let snapshot: GithubIssueClosureSnapshot = { ...inspection, category: "issue_closure", reason: request.reason,
         ...(session.orchestratorPolicy.issueScope ? { scopeRevision: session.orchestratorPolicy.issueScope.revision } : {}),
         explanation: request.explanation, evidence: request.evidence,
         ...(request.comment === undefined ? {} : { comment: request.comment }),
         ...(request.dispositionRecommendationId === undefined ? {} : { dispositionRecommendationId: request.dispositionRecommendationId }),
-        activeChildren: issueClosureActiveChildren(this.db, sessionId, { repository: inspection.repository, number: request.issue }) };
+        activeChildren: children.active, excludedChildren: children.excluded };
       const resourceKey = `issue_closure:${inspection.repository.toLowerCase()}#${request.issue}`;
       // Whoever reviews this request sees why the last executed approval was refused (#4059).
       const previousRefusal = this.db.latestIssueClosureRefusal(sessionId, resourceKey);
@@ -12606,7 +12613,9 @@ export class SessionsService {
     // carried across scope changes that left its issue alone (#3915) is dispatched at that revision,
     // which the checks above proved is still current and still names its authority; the runner's
     // own scope, issue, bounded-authority and mutation-fence checks then apply unchanged.
-    const dispatched = synchronizedScopeRevision === undefined ? snapshot : { ...snapshot, scopeRevision: synchronizedScopeRevision };
+    // The runner receives only the binding: the excluded children are for the approver (#3237).
+    const binding = issueClosureBindingSnapshot(snapshot);
+    const dispatched = synchronizedScopeRevision === undefined ? binding : { ...binding, scopeRevision: synchronizedScopeRevision };
     try {
       const requestId = `issue_closure_execute_${randomUUID()}`;
       const response = await this.hub.requestFromRunner(session.runnerId, requestId, {
@@ -12893,7 +12902,7 @@ export class SessionsService {
       retired = guarded.retire;
     }
     const now = Date.now();
-    const resourceDigest = auditDigest(normalized.data)!;
+    const resourceDigest = workflowDecisionResourceDigest(normalized.data);
     const created = this.db.createWorkflowDecision({
       requestId: request.requestId,
       occurrenceId: `workflow_${randomUUID().replace(/-/gu, "")}`,
@@ -13691,7 +13700,7 @@ export class SessionsService {
     const supplied = normalizeWorkflowDecisionSnapshot(request?.resourceSnapshot, Boolean(video));
     const original = video ? normalizeWorkflowDecisionSnapshot(request?.resourceSnapshot) : null;
     const matchesStored = supplied.ok && supplied.data &&
-      supplied.data.category === decision.category && auditDigest(supplied.data) === decision.resourceDigest;
+      supplied.data.category === decision.category && workflowDecisionResourceDigest(supplied.data) === decision.resourceDigest;
     const matchesOriginal = video && original?.ok && original.data?.category === "ui_evidence_approval" &&
       auditDigest(original.data) === video.originalRequestSha256;
     if (!matchesStored && !matchesOriginal && !supplied.ok && !original?.ok) {

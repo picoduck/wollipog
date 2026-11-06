@@ -55,12 +55,13 @@ import {
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
   WORKSPACE_REFERENCE_MIME_TYPE,
   githubIssueClosureRefusal,
+  issueClosureExclusionReasonText,
   pendingRequests,
   projectSessionEventPayloadForProtocol,
 } from "@wollipog/protocol";
 import { dispatch as dispatchManagerTool } from "../../runner/src/session-management-mcp.js";
 import { ControlPlaneDb, campaignRequestToken } from "./db.js";
-import { WITHHELD_RUNNER_ERROR } from "./github-issue-closure.js";
+import { WITHHELD_RUNNER_ERROR, issueClosureBindingSnapshot, issueClosureChildren, normalizeIssueClosureSnapshot } from "./github-issue-closure.js";
 import { scopeView } from "./campaign-issue-scope.js";
 import { CAMPAIGN_WORK_LEDGER_SCHEMA } from "./campaign-work-ledger-store.js";
 import { applyClaudeReconciliation, previewClaudeReconciliation, observeReconciliationRevision } from "./claude-cost-reconciliation.js";
@@ -29645,6 +29646,130 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
       }
     } finally { db.close(); }
   }
+});
+
+test("an issue closure records the children it excludes and why, outside its binding (#3237)", async () => {
+  // `excluded_only` changes only the excluded side after approval; the others move a child across.
+  for (const mode of ["excluded_only", "excluded_to_bound", "bound_to_excluded"] as const) {
+    const { db, svc, hub, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
+    try {
+      const plan = svc.recordCampaignPlan(parent.id, { items: [
+        { key: "issue", issue: { repository: "picoduck/wollipog", number: 1440 } },
+        { key: "other", issue: { repository: "picoduck/wollipog", number: 1441 } },
+        { key: "unrelated" },
+      ], planComplete: true });
+      assert.ok(plan.ok && plan.data, plan.error);
+      const [issueItem, otherItem, unrelatedItem] = plan.data.items.map((item) => item.workItemId);
+      const assign = (workItemId: string, childSessionId: string) =>
+        assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId, childSessionId }).ok);
+      const echo = (id: string, prompt: string) => db.appendEvent(id, { kind: "user_message", text: prompt }, Date.now());
+      const launch = (prompt: string, echoed = true) => {
+        const id = spawn(parent.id, prompt);
+        if (echoed) echo(id, prompt);
+        return id;
+      };
+      const related = launch("Deliver the first item");
+      assign(issueItem!, related);
+      const unrelated = launch("Deliver issue 1441.");
+      assign(otherItem!, unrelated);
+      // A child whose launch prompt is not yet recorded stays bound, however the ledger attributes it.
+      const unechoed = mode === "bound_to_excluded" ? launch("Deliver the unrelated item", false) : null;
+      if (unechoed) assign(unrelatedItem!, unechoed);
+      db.setSessionTitle(unrelated, "Fix <b>Other</b> Issue", Date.now(), "user");
+
+      const dispatched: Array<Record<string, unknown>> = [];
+      hub.requestHandler = (message) => {
+        if (message.type !== "github_issue_closure") throw new Error("unexpected runner command");
+        if (message.operation === "inspect") return { type: "github_issue_closure_result", requestId: message.requestId,
+          sessionId: parent.id, ok: true, inspection: { repository: "picoduck/wollipog", issue: message.issue, title: "Merged work",
+            url: `https://github.com/picoduck/wollipog/issues/${message.issue}`, state: "OPEN",
+            forgeDigest: "a".repeat(64), openPullRequests: [] } };
+        dispatched.push(message.snapshot as unknown as Record<string, unknown>);
+        return { type: "github_issue_closure_result", requestId: message.requestId, sessionId: parent.id,
+          ok: true, result: { outcome: "closed", completedAt: Date.now() } };
+      };
+      const request = () => svc.requestGithubIssueClosure(parent.id, { requestId: "closure-1440", issue: 1440,
+        reason: "completed", explanation: "The work merged.", evidence: ["Merged in the campaign."] });
+      const requested = await request();
+      assert.ok(requested.ok && requested.data?.decision, `${mode}: ${requested.error}`);
+      const decision = requested.data.decision;
+      const snapshot = decision.resourceSnapshot;
+      assert.ok(snapshot.category === "issue_closure");
+      const ids = (children: Array<{ sessionId: string }>) => children.map((child) => child.sessionId).sort();
+      // One bound and one excluded child, each with its session id and title; the reason is ledger facts.
+      assert.deepEqual(ids(snapshot.activeChildren), (unechoed ? [related, unechoed] : [related]).sort());
+      assert.deepEqual(snapshot.excludedChildren, [{ sessionId: unrelated, title: "Fix <b>Other</b> Issue",
+        reason: { attemptedIssues: [{ repository: "picoduck/wollipog", number: 1441 }], attemptedIssueCount: 1,
+          attemptedWithoutIssue: 0, linkedWorkItems: 0 } }]);
+      assert.equal(issueClosureExclusionReasonText(snapshot.excludedChildren![0]!.reason, snapshot.repository),
+        "Every work-item attempt is on #1441, which has never tracked this issue and has no follow-up links.");
+      // The excluded list stays outside the resource digest: the digest is the snapshot without it.
+      const { excludedChildren: _excluded, ...binding } = snapshot;
+      assert.equal(decision.resourceDigest, createHash("sha256").update(JSON.stringify(binding)).digest("hex"));
+
+      if (mode === "excluded_only") {
+        // Another child the ledger proves unrelated joins the excluded side, and the excluded child
+        // works. Neither changes the binding: the same request replays the same occurrence.
+        const another = launch("Deliver the unrelated item");
+        assign(unrelatedItem!, another);
+        db.stageSessionPromptCommand({ commandId: `prompt-${unrelated}`, sessionId: unrelated, runnerId: RUNNER_ID,
+          payloadJson: JSON.stringify({ text: "Continue." }), payloadSha256: "c".repeat(64), expiresAt: Date.now() + 60_000, now: Date.now() });
+        const fresh = issueClosureChildren(db, parent.id, { repository: "picoduck/wollipog", number: 1440 });
+        assert.deepEqual(ids(fresh.excluded), [unrelated, another].sort());
+        assert.deepEqual(fresh.excluded.find((child) => child.sessionId === another)!.reason, { attemptedIssues: [], attemptedIssueCount: 0, attemptedWithoutIssue: 1, linkedWorkItems: 0 });
+        assert.deepEqual(fresh.active, snapshot.activeChildren);
+        const replay = await request();
+        assert.ok(replay.ok, replay.error);
+        assert.equal(replay.data?.decision?.occurrenceId, decision.occurrenceId);
+      }
+      assert.ok(svc.approve(parent.id, decision.occurrenceId, "approve", { kind: "human", id: "reviewer" }).ok);
+      if (mode === "excluded_to_bound") assign(issueItem!, unrelated);
+      if (mode === "bound_to_excluded") echo(unechoed!, "Deliver the unrelated item");
+      if (mode !== "excluded_only") {
+        // Crossing between the sets changes the bound list, so the approval can't hide the move.
+        const fresh = issueClosureChildren(db, parent.id, { repository: "picoduck/wollipog", number: 1440 });
+        assert.notDeepEqual(fresh.active, snapshot.activeChildren);
+        assert.deepEqual(ids(fresh.excluded), mode === "excluded_to_bound" ? [] : [unrelated, unechoed!].sort());
+      }
+
+      const result = await svc.executeGithubIssueClosure(parent.id, decision.occurrenceId, decision.resourceDigest);
+      if (mode === "excluded_only") {
+        assert.ok(result.ok && result.data, result.error);
+        assert.equal(result.data.issueClosureResult?.outcome, "closed");
+        // The runner receives only the binding.
+        assert.equal(dispatched.length, 1);
+        assert.ok(!("excludedChildren" in dispatched[0]!));
+        assert.deepEqual(dispatched[0]!.activeChildren, snapshot.activeChildren);
+      } else {
+        assert.equal(result.status, 409, `${mode}: a child crossed between the bound and excluded sets`);
+        assert.equal(db.workflowDecisionByOccurrence(decision.occurrenceId)?.status, "revoked");
+        assert.equal(dispatched.length, 0);
+      }
+    } finally { db.close(); }
+  }
+});
+
+test("an issue-closure snapshot keeps its excluded children canonical and old snapshots unchanged (#3237)", () => {
+  const base = { category: "issue_closure", repository: "picoduck/wollipog", issue: 1440, title: "Merged work",
+    url: "https://github.com/picoduck/wollipog/issues/1440", forgeDigest: "a".repeat(64), reason: "completed",
+    explanation: "The work merged.", evidence: ["Merged."], openPullRequests: [],
+    activeChildren: [{ sessionId: "bound", title: "Bound", assignmentDigest: "b".repeat(64) }] };
+  const reason = { attemptedIssues: [{ repository: "picoduck/wollipog", number: 1441 }], attemptedIssueCount: 1, attemptedWithoutIssue: 0, linkedWorkItems: 0 };
+  // An earlier release's snapshot has no field and keeps the digest it was approved under.
+  const old = normalizeIssueClosureSnapshot(structuredClone(base));
+  assert.ok(old && !("excludedChildren" in old));
+  assert.deepEqual(issueClosureBindingSnapshot(old), old);
+  const recorded = normalizeIssueClosureSnapshot({ ...structuredClone(base), excludedChildren: [{ sessionId: "excluded", title: "Other", reason, extra: 1 }] });
+  assert.deepEqual(recorded?.excludedChildren, [{ sessionId: "excluded", title: "Other", reason }]);
+  assert.deepEqual(issueClosureBindingSnapshot(recorded!), old);
+  for (const excludedChildren of [
+    [{ sessionId: "bound", title: "Bound", reason }],
+    [{ sessionId: "excluded", title: "Other", reason }, { sessionId: "excluded", title: "Again", reason }],
+    [{ sessionId: "excluded", title: "Other", reason: { ...reason, attemptedIssueCount: 0 } }],
+    [{ sessionId: "excluded", title: "Other", reason: { ...reason, linkedWorkItems: -1 } }],
+    [{ sessionId: "excluded", title: "Other" }],
+    "none",
+  ]) assert.equal(normalizeIssueClosureSnapshot({ ...structuredClone(base), excludedChildren }), null, JSON.stringify(excludedChildren));
 });
 
 test("child creation records the named campaign work item before the launch is sent (#3106)", async () => {
