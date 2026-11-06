@@ -54,7 +54,18 @@ import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-t
 import { MINUTE, campaignProjection, forgeObservation, itemDetail, itemSummary, knownCost, workSummary } from "./campaign-status-fixtures.js";
 import "../styles.css";
 import { campaignRecoveryFixture } from "./campaign-recovery-fixtures.js";
-import { campaignDecisionsFixture, TYPED_ADMITTED, TYPED_REFUSED, TYPED_UNCERTAIN } from "./decision-model-fixtures.js";
+import {
+  campaignDecisionsFixture,
+  TYPED_ADMITTED,
+  TYPED_CLOSURE_MISFIT,
+  TYPED_REFUSED,
+  TYPED_RELATED,
+  TYPED_SCREEN_ASK,
+  TYPED_SCREEN_DISCUSSES,
+  TYPED_SCREEN_UNCERTAIN,
+  TYPED_UNCERTAIN,
+  TYPED_UNRELATED,
+} from "./decision-model-fixtures.js";
 import type { DecisionTypedAnswersView } from "@wollipog/protocol";
 
 declare global {
@@ -715,10 +726,34 @@ let scopeGrantFixture: import("@wollipog/protocol").FullControlScopeGrant | null
 } : params.get("scope") === "grant-failed" ? {
   version: 1, status: "failed", occurrenceId: "dec_fixture", target: SCOPE_GRANT_TARGET, failureClass: "provider_overloaded", namedIssues: [],
   ceilings: launchCeilings(1),
+} : params.get("scope") === "proposal" || params.get("scope") === "proposal-waiting" ? {
+  // The Orchestrator proposes the scope (#4282): the server read nothing from the message.
+  version: 1, status: "proposal", namedIssues: [], ceilings: launchCeilings(9),
 } : params.get("scope") === "grant-uncertain" ? {
   version: 1, status: "uncertain", occurrenceId: "dec_fixture", target: SCOPE_GRANT_TARGET, namedIssues: [],
   reason: "The message doesn't say whether #12 is a request or background.", ceilings: launchCeilings(1),
 } : null;
+
+const SCOPE_PROPOSALS: import("@wollipog/protocol").CampaignScopeProposalView[] = [{
+  occurrenceId: "wd_scope_2", createdAt: NOW - 60_000, outcome: "waiting_for_owner",
+  explanation: "You named #123 and #124. For the rest I ranked open UI issues by priority label, then by age.",
+  proposal: { initial: true, messageDigest: "a".repeat(64), requestedCount: 5, constraints: ["open", "UI only"], withheldOperations: ["pr_merge"],
+    checks: ["chosen_issues", "requested_count", "constraints", "withheld_operations"], route: "owner", ownerCause: "constraint_check_unavailable",
+    ownerMessage: "Fix #123 and #124, then the 5 highest-priority open UI issues. Don't merge anything yet.",
+    issues: [
+      { number: 123, origin: "owner_named", rationale: "You named it first.", title: "Composer Epic" },
+      { number: 124, origin: "owner_named", rationale: "You named it second.", title: "Member Work" },
+      { number: 131, origin: "orchestrator_chosen", rationale: "Open, UI, priority:high, oldest.", title: "Sidebar Collapses on Resize" },
+      { number: 140, origin: "orchestrator_chosen", rationale: "Open, UI, priority:high.", title: "Badge Contrast in Light Theme" },
+      { number: 152, origin: "orchestrator_chosen", rationale: "Open, UI, priority:medium, most reactions.", title: "Composer Hint Overlaps Send" },
+    ] },
+}, {
+  occurrenceId: "wd_scope_1", createdAt: NOW - 120_000, outcome: "replaced",
+  explanation: "You named #123 and #124.",
+  proposal: { initial: true, messageDigest: "a".repeat(64), requestedCount: null, constraints: [], withheldOperations: [], checks: [], route: "admitted",
+    issues: [{ number: 123, origin: "owner_named", rationale: "You named it.", title: "Composer Epic" },
+      { number: 124, origin: "owner_named", rationale: "You named it.", title: "Member Work" }] },
+}];
 
 const scopeRequirement = params.get("scope") === "outdated-runner" ? campaignIssueScopeChangesRequirement(207)
   : params.get("scope") === "issue-limits" ? campaignIssueLimitsRequirement(216) : null;
@@ -786,16 +821,25 @@ let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["dec
         { repository: "team/repo", number: 141, title: "Sidebar badges overlap on narrow screens" }] } },
 ] : [];
 
-// `typed=1` with `selection=1` (#4283): the same reviews as typed questions, each with its answers
-// and the reason the server derived from them.
+// `typed=1` (#4283): the same checks as typed questions, each with its answers and the reason the
+// server derived from them: the selection reviews with `selection=1`, and the migrated credential
+// screen, follow-up relatedness and closure-reason kinds with `screen=1` or `checks=1`. A failed
+// check has no answers, so it reads as before.
 if (params.get("typed") === "1") {
+  const admitted = "Every answer is satisfied with at least 80% confidence.";
   const typed: Record<string, { typedAnswers: DecisionTypedAnswersView; reason: string }> = {
-    sel_admitted: { typedAnswers: TYPED_ADMITTED, reason: "Every answer is satisfied with at least 80% confidence." },
+    sel_admitted: { typedAnswers: TYPED_ADMITTED, reason: admitted },
     sel_refused: { typedAnswers: TYPED_REFUSED, reason: "Issue 140 violates 'Skip Security'." },
     sel_uncertain: { typedAnswers: TYPED_UNCERTAIN, reason: "Issue 141 on 'UI Only' is below the 80% confidence threshold." },
+    dec_keys: { typedAnswers: TYPED_SCREEN_DISCUSSES, reason: admitted },
+    dec_token: { typedAnswers: TYPED_SCREEN_ASK, reason: "The answer violates 'No Credential Handed Over'." },
+    dec_owner: { typedAnswers: TYPED_SCREEN_UNCERTAIN, reason: "The answer on 'No Sign-In Performed' is below the 80% confidence threshold." },
+    rel_related: { typedAnswers: TYPED_RELATED, reason: admitted },
+    rel_unrelated: { typedAnswers: TYPED_UNRELATED, reason: "The answer violates 'Related to the Requested Work'." },
+    why_misfit: { typedAnswers: TYPED_CLOSURE_MISFIT, reason: "The answer violates 'Evidence Supports the Reason'." },
   };
   screenDecisions = screenDecisions.map((decision) => typed[decision.occurrenceId]
-    ? { ...decision, promptVersion: "scope_review.v2", ...typed[decision.occurrenceId] } : decision);
+    ? { ...decision, promptVersion: `${decision.kind}.v2`, ...typed[decision.occurrenceId] } : decision);
 }
 
 const client = {
@@ -829,6 +873,9 @@ const client = {
     // count, and the failure route.
     ...(scopeGrantFixture ? { issueNumbers: scopeGrantFixture.namedIssues, revision: 2, outsideScope: [], candidates: [],
       ...(params.get("scope") === "grant" ? { contextIssueNumbers: [126] } : {}), scopeGrant: scopeGrantFixture, policyRevision: revision } : {}),
+    // The Orchestrator's proposals (#4282): one waiting for the owner, after an earlier one it replaced.
+    ...(params.get("scope") === "proposal" ? { issueNumbers: [], scopeProposals: SCOPE_PROPOSALS } : {}),
+    ...(params.get("scope") === "proposal-waiting" ? { issueNumbers: [], scopeProposals: [] } : {}),
     // `activity=…` (#4146): the authorized scope covers every work item, so nothing reads as outside it.
     ...(activityScenario ? { repository: "picoduck/wollipog", revision: 1, canPropose: false, outsideScope: [], candidates: [],
       issueNumbers: [...new Set(items.flatMap((item) => item.issue ? [item.issue.number] : []))] } : {}),

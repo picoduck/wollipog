@@ -36,7 +36,7 @@ import { acknowledgementRepairFrame } from "./claude-cost-repair.js";
 import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
-import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignControlForRunner, campaignLaunchRepository, campaignScopeRepositories } from "./campaign-authority.js";
+import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignControlForRunner, campaignControlRevisionForRunner, campaignLaunchRepository, campaignScopeRepositories } from "./campaign-authority.js";
 import { genericRequestScreenData, implementationQuestionScreenData, ownerDecisionScreenData, screenCredentialRequest, type CredentialScreenSurface } from "./credential-screen.js";
 import { DECISION_TOTAL_BOUND_MS, DecisionRuntime, hubDecisionTransport, type DecisionOutcome } from "./decision-runtime.js";
 import { DecisionModelSettings } from "./decision-model-settings.js";
@@ -44,6 +44,9 @@ import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, credentialFormFloor, type CredentialScreenFact, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, fullControlAutomaticResponse, type CampaignAuthorityEvaluation, type FullControlAutomaticResponse, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
 import { firstMessageTargetEpics } from "./first-message-issue-intent.js";
+import { onlyOtherRepositories, proposalMaxIssues } from "./scope-grant.js";
+import { normalizeScopeProposalInput, scopeProposalAgentQuestions, scopeProposalAnswer, scopeProposalChecks, scopeProposalOfRequest,
+  type CampaignScopeProposal, type ScopeProposalCheck } from "@wollipog/protocol";
 import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, ownerReviewMaxIssues, scopeGrantCandidates, writtenAsDigits,
   type ScopeGrantFields } from "./scope-grant.js";
 import { recordUnfinishedDecision, runCampaignCheck, type CampaignCheckOutcome } from "./campaign-decision-checks.js";
@@ -52,7 +55,7 @@ import { scopeGrantDigest, scopeReviewInputDigest, scopeReviewInputs, scopeRevie
 import { boundedIssueNumbers, validCampaignIssueFacts, type CampaignIssueFacts, type CampaignScopeGrantReview, type CampaignScopeOwnerReview, type DecisionErrorClass, type FullControlScopeGrant } from "@wollipog/protocol";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
-  everyOutstandingScopeDecision, participantScope, participantScopeRefusal, repositoryOutsideBoundary, scopeRequestOutsideBoundary } from "./campaign-issue-scope.js";
+  everyOutstandingScopeDecision, campaignAwaitsInitialScope, campaignScopeIsProposed, participantScope, participantScopeRefusal, repositoryOutsideBoundary, scopeRequestOutsideBoundary } from "./campaign-issue-scope.js";
 import { boundedDecisionString, issueClosureRequestInvalid, issueClosureRequestInvalidFields, issueClosureScopeRefusal } from "./issue-closure-request-refusal.js";
 import { needsCampaignIssueScopeSeed, readingNamesIssues, seedEpicCandidate } from "./campaign-issue-scope-seed.js";
 import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
@@ -63,7 +66,7 @@ import {
   REVIEW_FULL_REASON_LIMIT, REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
   compactReviewFinding, REVIEW_ROUND_REFUSALS, type ReviewLaunchPolicy, type ReviewSessionRequest, type ReviewSessionUpdate, type ReviewSessionView, type ReviewSessionsPage,
   type PullRequestWatchOutcome, type PullRequestWatchUpdate, type PullRequestWatchView, type SessionWaitView,
-  campaignScopeForRepository, campaignScopeChangeGroups, campaignScopeChangeResult, campaignScopeHolds, type CampaignIssueScopeRepositoryView,
+  campaignScopeForRepository, campaignScopeChangeGroups, campaignScopeChangeResult, campaignScopeHolds, campaignScopeIssues, type CampaignIssueScopeRepositoryView,
 } from "@wollipog/protocol";
 import { SESSION_REVIEW_JOB_ID_PATTERN, type SessionReviewJobArtifacts, type SessionReviewJobRequest, type SessionReviewJobView, type SessionReviewJobsPage,
   type SessionReviewJobUpdate } from "@wollipog/protocol";
@@ -519,6 +522,13 @@ function boundedCampaignEventText(text: string): string {
  * or a staged automation launch) and a first prompt from anyone other than the campaign's owner never
  * grant issues: a reading that names some is left with the owner. */
 type FirstMessageAuthor = "launch_request" | "owner" | "unattributed" | "other";
+
+/** Why a Full Control campaign's child creation waits (#4282): its initial scope is the
+ * Orchestrator's to propose first. */
+const INITIAL_SCOPE_REQUIRED = "Propose this campaign's initial issue scope before delegating work: call " +
+  "request_campaign_issue_scope_change with the issues as additions and a proposal stating, for each, whether the owner named it " +
+  "or you chose it and why, the count the owner asked for, the constraints you read and any operations the message withholds. " +
+  "Nothing is dispatched until it is admitted. A task that needs no issues proposes none.";
 
 function issueScopeSeedKey(rootId: string, messageDigest: string): string {
   return `scope_grant:issue_scope_seed:${rootId}:${messageDigest}`;
@@ -5332,6 +5342,10 @@ export class SessionsService {
       }
       return fail("Confirm the epic's authorized issue scope in Campaign Status before delegating work. Use get_campaign_issue_scope and request_campaign_issue_scope_change, then wait for human approval.", 409);
     }
+    // A Full Control campaign dispatches nothing before its initial scope is admitted (#4282).
+    if (scopeController && campaignAwaitsInitialScope(scopeController)) {
+      return { ok: false, status: 409, error: INITIAL_SCOPE_REQUIRED, errorDetails: { code: "initial_scope_not_admitted" } };
+    }
     const controllerScope = campaignController?.orchestratorPolicy?.issueScope;
     const inheritedIssueScope = participantIssueScope ?? (controllerScope ? campaignScopeForRepository(controllerScope, controllerScope.repository) : undefined) ??
       snapshotSpec?.orchestrator?.issueScope;
@@ -5543,7 +5557,9 @@ export class SessionsService {
         ...orchestratorPolicy.execution,
         ...(orchestratorIssueNumbers.length || orchestratorPolicy.issueScope ? { issueNumbers: orchestratorPolicy.issueNumbers ?? orchestratorIssueNumbers } : {}),
         ...(orchestratorPolicy.issueScope ? { issueScope: campaignScopeForRepository(orchestratorPolicy.issueScope, orchestratorPolicy.issueScope.repository) } : {}),
-        ...(orchestratorPolicy.control ? { control: campaignControlForRunner(orchestratorPolicy.control, runner.protocolVersion) } : {}),
+        ...(orchestratorPolicy.control ? { control: campaignControlForRunner(orchestratorPolicy.control, runner.protocolVersion),
+          // A nested Orchestrator's control is its controller's, at that controller's revision (#3363).
+          ...(parentSessionId ? campaignControlRevisionForRunner(campaignController?.parentControlPolicy?.revision, runner.protocolVersion) : {}) } : {}),
       } } : {}),
       acpSessionContext,
       ...(creationContext?.review ? { review: creationContext.review.policy } : {}),
@@ -5897,7 +5913,9 @@ export class SessionsService {
         const boundary = (repaired.orchestratorPolicy!.control as Extract<CampaignControl, { mode: "full_control" }>).boundary;
         this.log.info(JSON.stringify({ event: "campaign_boundary_restored_from_scope_approval", sessionId: root.id,
           boundaryRevision: boundary.revision, issueScopeRevision: boundary.issueScopeRevision, revokedDecisions: revoked.length }));
-        for (const member of scopeParticipants(this.db, repaired)) this.hub.sessionChangedById(member.id);
+        // The restored boundary reaches each runner's copy now (#3363), and every member's view.
+        void this.synchronizeCampaignIssueScope(root.id);
+        for (const id of [root.id, ...this.db.campaignDescendantIds(root.id)]) this.hub.sessionChangedById(id);
         // From the campaign as it read before the repair, so the decisions it revoked are seen leaving.
         this.publishCampaignAttentionTransition(root);
         return null;
@@ -5912,11 +5930,10 @@ export class SessionsService {
   }
 
   /** The owner's first message establishes the Full Control boundary the launch left task-only:
-   * the message is the objective, and the issue references it asks the campaign to act on (#3920)
-   * that the runner verifies as issues become the scope. Its other verified references are recorded
-   * as context for Campaign Status, with no authority. Scope and boundary commit as
-   * the next revisions, bound to the message digest, and reach the runner before the message does,
-   * so the Orchestrator's first turn already runs inside them. Only the Human who authorized the
+   * the message is the objective, and the scope starts empty for the Orchestrator to propose
+   * (#4282); the server reads no issue, count or operation from the text. Scope and boundary commit
+   * as the next revisions, bound to the message digest, and reach the runner before the message
+   * does, so the Orchestrator's first turn already runs inside them. Only the Human who authorized the
    * launch can do this; any other message is refused until then, so agent-authored text can never
    * establish or widen the scope. A message that is not delivered reopens the wait. */
   private async deliverFirstFullControlMessage(
@@ -5939,25 +5956,9 @@ export class SessionsService {
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
     const repository = control.boundary.repository.toLowerCase();
     const messageDigest = firstMessageDigest(text);
-    // The Decision Model reads only the exact message into a typed scope grant (#4102). Its exact
-    // references are a fast path only: the runner starts verifying them while the model reads, and
-    // they grant nothing the model's answer does not name.
-    const exact = issueReferencesInMessage(text, repository);
-    const exactVerified = exact.length ? this.verifiedMessageIssues(session, repository, exact) : Promise.resolve([] as number[]);
-    const outcome = await this.decideScopeGrant(session, text, messageDigest);
-    const fastVerified = await exactVerified;
-    // A failed or uncertain grant grants nothing and shows nothing: no reference parsed from the
-    // text stands in for it. The Orchestrator's proposal then goes to the owner.
-    const candidates = outcome?.outcome === "verdict" ? scopeGrantCandidates(text, outcome.fields as unknown as ScopeGrantFields, control.boundary) : null;
-    const references = candidates ? [...new Set([...candidates.explicit, ...candidates.context])].sort((a, b) => a - b) : [];
-    const unverified = references.filter((n) => !exact.includes(n));
-    const verified = new Set([...fastVerified, ...unverified.length ? await this.verifiedMessageIssues(session, repository, unverified) : []]);
-    const issueNumbers = (candidates?.explicit ?? []).filter((n) => verified.has(n));
-    // A derived Maximum Issues leaves room for the verified members of target epics the message
-    // names (#4061), so the Orchestrator can add them by epic lineage; an explicit one never grows.
-    const epics = candidates && policy.firstMessageScope?.state === "pending" && policy.firstMessageScope.derivedLimits?.maxIssues
-      ? firstMessageTargetEpics(text, repository, issueNumbers) : [];
-    const epicMembers = epics.length ? await this.verifiedEpicMembers(session, repository, epics) : [];
+    // The Orchestrator reads the owner's message and proposes the scope (#4282): the server extracts
+    // nothing from it. The campaign starts with an empty scope and the launch's ceilings, and nothing
+    // is dispatched until the Orchestrator's initial proposal is admitted (`campaignAwaitsInitialScope`).
     const current = this.db.getSession(sessionId);
     const revision = current?.parentControlPolicy?.revision ?? 0;
     const scope = current?.orchestratorPolicy?.issueScope;
@@ -5970,23 +5971,16 @@ export class SessionsService {
     const now = Date.now();
     // The durable prompt command the message is admitted as: its exact identity, chosen up front.
     const deliveryId = `first_message_${randomUUID()}`;
-    const scoped = firstMessageIssues(currentControl.boundary, issueNumbers, pending.derivedLimits);
-    // Context also keeps a requested issue an explicit Maximum Issues left out, so the owner sees it.
-    const contextIssueNumbers = [...issueNumbers.filter((n) => !scoped.includes(n)),
-      ...(candidates?.context ?? []).filter((n) => verified.has(n) && !scoped.includes(n))].sort((a, b) => a - b);
-    const selection = candidates ? grantSelection(candidates.selection, scoped.length, currentControl.boundary, pending.derivedLimits) : undefined;
-    const operations = grantOperations(currentControl.boundary.operations, candidates?.operations ?? null);
+    const scoped: number[] = [];
+    const contextIssueNumbers: number[] = [];
     const nextScope: CampaignIssueScope = { repository: scope.repository, issueNumbers: scoped, revision: scope.revision + 1,
       authorizedByUserId: principal.userId, authorizedAt: now };
     const nextControl: CampaignControl = { mode: "full_control", boundary: firstMessageBoundary(currentControl.boundary,
       current.orchestratorPolicy!.behavior.followUps, scoped, firstMessageObjective(text), revision + 1, nextScope.revision, now,
-      pending.derivedLimits, epicMembers, { selectionCount: selection?.count ?? 0, operations }) };
-    const grant = this.firstMessageGrant(outcome, nextControl.boundary, currentControl.boundary, {
-      scoped, selection, pendingDerived: pending.derivedLimits?.maxIssues === true,
-      dropped: [...candidates?.dropped ?? [],
-        ...(candidates?.explicit ?? []).filter((n) => !verified.has(n)).map((number) => ({ repository, number, reason: "not_an_issue" as const })),
-        ...issueNumbers.filter((n) => !scoped.includes(n)).map((number) => ({ repository, number, reason: "over_ceiling" as const }))],
-    });
+      pending.derivedLimits) };
+    const grant: FullControlScopeGrant = { version: 1, status: "proposal", namedIssues: [], ceilings: {
+      repositories: boundaryRepositories(nextControl.boundary), maxIssues: nextControl.boundary.issueAuthority?.maxIssues ?? 0,
+      maxIssuesSource: pending.derivedLimits?.maxIssues === true ? "derived" : "explicit", operations: [...nextControl.boundary.operations] } };
     let established: boolean;
     try {
       established = this.db.establishFirstMessageScope(sessionId, { control: nextControl, scope: nextScope, contextIssueNumbers,
@@ -5994,11 +5988,7 @@ export class SessionsService {
     } catch (error) { return fail((error as Error).message, 409); }
     if (!established) return fail("This campaign's authorization changed; send the message again.", 409);
     this.log.info(JSON.stringify({ event: "full_control_first_message_scope", sessionId, policyRevision: revision + 1,
-      scopeRevision: nextScope.revision, grant: grant.status, decisionOccurrenceId: grant.occurrenceId ?? null,
-      failureClass: grant.failureClass ?? null, referencedIssues: references.length, scopedIssues: scoped.length,
-      contextIssues: contextIssueNumbers.length, droppedIssues: grant.dropped?.length ?? 0, selectionCount: selection?.count ?? 0,
-      selectionDefaulted: selection?.defaulted ?? false, removedOperations: grant.ceilings.removedOperations?.length ?? 0,
-      targetEpics: epics.length, epicMembers: epicMembers.length, messageDigest }));
+      scopeRevision: nextScope.revision, grant: grant.status, messageDigest }));
     // A runner that misses this keeps its older revision, which authorizes no issue write; every
     // issue operation synchronizes again before it acts.
     await this.synchronizeCampaignIssueScope(sessionId);
@@ -6062,34 +6052,6 @@ export class SessionsService {
     // Only a fresh root waits for its owner's first message. A campaign with any history is
     // established at once, task-only without trusted issues, and its retained work runs under it.
     return { repository, issueNumbers, firstMessage: issueNumbers.length === 0 && !this.db.sessionHasConversationHistory(sessionId) };
-  }
-
-  /** The Decision Model's reading of the owner's exact first message (#4102): one audited
-   * `scope_grant` occurrence on the campaign runner's own harness under Automatic, within the
-   * runtime's time bound and retry budget. No tools, no repository and no issue content reach it.
-   * Its typed, person-owned request exists only once the Orchestrator proposes a scope, so routing
-   * creates none here (`proposeCampaignIssueScope` creates it and links it to the occurrence). Null
-   * when the call cannot be made at all (no organization, or inputs the runtime refuses), which the
-   * caller treats as a failure. */
-  private async decideScopeGrant(session: SessionView, text: string, messageDigest: string): Promise<DecisionOutcome | null> {
-    const organizationId = this.db.sessionScope(session.id)?.organizationId;
-    if (!organizationId) return null;
-    try {
-      return await this.decisionRuntime.decide({
-        organizationId,
-        kind: "scope_grant",
-        campaignSessionId: session.id,
-        // One occurrence per message at this policy revision: a resent message after an undelivered
-        // one is a new revision and gets a fresh reading.
-        occurrenceKey: `scope_grant:${session.id}:${session.parentControlPolicy?.revision ?? 0}:${messageDigest}`,
-        automaticHarness: session.agentId ? { runnerId: session.runnerId, agentId: session.agentId, driver: session.driver } : null,
-        inputs: { ownerMessage: text, data: {} },
-        routeToHuman: () => null,
-      });
-    } catch (error) {
-      this.log.warn(JSON.stringify({ event: "full_control_scope_grant_unavailable", sessionId: session.id, error: (error as Error).message.slice(0, 200) }));
-      return null;
-    }
   }
 
   /** The epic seed a person's message would start, when it is the first message of a Custom campaign
@@ -6335,31 +6297,6 @@ export class SessionsService {
     } catch { return null; }
   }
 
-  /** The stored scope grant (#4102): what the floors kept of a verdict, or the failure route's
-   * empty grant, with the ceilings of the boundary the first message establishes. */
-  private firstMessageGrant(outcome: DecisionOutcome | null, next: CampaignAuthorityBoundary, launch: CampaignAuthorityBoundary, facts: {
-    scoped: number[]; selection: FullControlScopeGrant["selection"]; pendingDerived: boolean; dropped: NonNullable<FullControlScopeGrant["dropped"]>;
-  }): FullControlScopeGrant {
-    const occurrence = outcome ? this.db.getDecisionOccurrence(outcome.occurrenceId) : null;
-    const removed = launch.operations.filter((operation) => !next.operations.includes(operation));
-    const ceilings: FullControlScopeGrant["ceilings"] = {
-      repositories: boundaryRepositories(next),
-      maxIssues: next.issueAuthority?.maxIssues ?? 0,
-      maxIssuesSource: facts.pendingDerived ? "derived" : "explicit",
-      operations: [...next.operations],
-      ...(removed.length ? { removedOperations: removed } : {}),
-    };
-    const common = { version: 1 as const, ...(outcome ? { occurrenceId: outcome.occurrenceId } : {}),
-      ...(occurrence?.target ? { target: occurrence.target } : {}) };
-    if (outcome?.outcome === "verdict") {
-      return { ...common, status: "granted", reason: outcome.reason, namedIssues: [...facts.scoped],
-        ...(facts.dropped.length ? { dropped: facts.dropped } : {}), ...(facts.selection ? { selection: facts.selection } : {}), ceilings };
-    }
-    const failureClass: DecisionErrorClass | undefined = outcome ? outcome.failureClass : "configuration";
-    return { ...common, status: outcome?.cause === "uncertain" ? "uncertain" : "failed",
-      ...(outcome?.reason ? { reason: outcome.reason } : {}), ...(failureClass ? { failureClass } : {}), namedIssues: [], ceilings };
-  }
-
   /** Why an Orchestrator's issue additions without lineage are the owner's one typed approval
    * (#4102), or undefined when they are not and the ordinary lineage rules apply: the first
    * message's grant failed or was uncertain, or the grant asked the campaign to select issues. */
@@ -6367,7 +6304,8 @@ export class SessionsService {
     const first = root.orchestratorPolicy?.firstMessageScope;
     const grant = first && first.state !== "pending" ? first.grant : undefined;
     const control = root.orchestratorPolicy?.control;
-    if (!first || first.state === "pending" || !grant || control?.mode !== "full_control") return undefined;
+    // Under the propose-then-check flow (#4282) the Orchestrator's proposal takes its own route.
+    if (!first || first.state === "pending" || !grant || grant.status === "proposal" || control?.mode !== "full_control") return undefined;
     const base = { ownerMessage: control.boundary.objective, messageDigest: first.messageDigest,
       ...(grant.occurrenceId ? { grantOccurrenceId: grant.occurrenceId } : {}) };
     if (grant.status !== "granted") {
@@ -9078,6 +9016,7 @@ export class SessionsService {
           ...(session.orchestratorPolicy.issueNumbers?.length
             ? { issueNumbers: session.orchestratorPolicy.issueNumbers }
             : {}),
+          ...this.orderedRunnerControl(sessionId, this.db.getRunner(session.runnerId)?.protocolVersion),
         } }
         : {}),
       acpSessionContext: this.db.getAcpSessionContext(sessionId),
@@ -10513,9 +10452,11 @@ export class SessionsService {
         proposal.mode === "full_control" ? derivedLimits : undefined,
         proposal.mode === "full_control" ? launchDisclosure : undefined)) return fail("campaign authority revision changed; refresh and retry", 409);
     } catch (error) { return fail((error as Error).message, 409); }
-    // The runner holds the scope it enforces issue writes against; each issue operation also
-    // synchronizes again before it acts.
-    if (mintedScope) void this.synchronizeCampaignIssueScope(sessionId);
+    // The runner holds the scope it enforces issue writes against, and a diagnostic copy of this
+    // control: every change synchronizes both now, at the new policy revision (#3363), rather than
+    // waiting for a later scope edit or restart. Each issue operation also synchronizes again
+    // before it acts.
+    void this.synchronizeCampaignIssueScope(sessionId);
     for (const id of this.db.campaignBudgets.members(sessionId)) this.syncCampaignAllocation(id);
     this.recoverCampaignReviewJobs(session.runnerId);
     if (this.db.campaignBudgets.view(sessionId)?.state !== "active") this.enforceCampaignBudget(sessionId, now);
@@ -10537,7 +10478,8 @@ export class SessionsService {
     this.log.info(JSON.stringify({ event: "campaign_control_changed", sessionId,
       mode: control.mode, policyRevision: expectedRevision + 1, authorizedByUserId: principal.userId,
       revokedOccurrences: outstanding.length }));
-    this.hub.sessionChangedById(sessionId);
+    // Every member's view shows the campaign's control, not only the root's (#3363).
+    for (const id of [sessionId, ...this.db.campaignDescendantIds(sessionId)]) this.hub.sessionChangedById(id);
     return ok(this.db.getSession(sessionId)!);
   }
 
@@ -10579,6 +10521,8 @@ export class SessionsService {
     }
     this.log.info(JSON.stringify({ event: "campaign_follow_up_limit_changed", sessionId, acceptedFollowUps: limit,
       policyRevision: request.expectedRevision + 1, authorizedByUserId: principal.userId, revokedDecisions: result.revoked.length }));
+    // The re-minted boundary reaches each runner's copy now (#3363).
+    void this.synchronizeCampaignIssueScope(sessionId);
     for (const id of [sessionId, ...this.db.campaignDescendantIds(sessionId)]) this.hub.sessionChangedById(id);
     // From the campaign as it read before the change, so the decisions it revoked are seen leaving.
     this.publishCampaignAttentionTransition(session);
@@ -12002,6 +11946,14 @@ export class SessionsService {
       const refusal = repositoryOutsideBoundary(late.repository.toLowerCase());
       return { ok: false, status: refusal.status, error: refusal.error, errorDetails: refusal.errorDetails };
     }
+    // Under the propose-then-check flow (#4282) the Orchestrator's own additions take its proposal
+    // route, and so does its initial proposal even when it adds nothing. Epic and follow-up lineage
+    // keep their own rules.
+    if (!human && campaignScopeIsProposed(root) && Array.isArray(request?.additions) &&
+        (request.lineage === undefined || request.lineage?.kind === "selection") &&
+        (request.additions.length > 0 || campaignAwaitsInitialScope(root))) {
+      return this.proposeOrchestratorScope(root, view.data.repository, request, canAccess);
+    }
     // Issues the Orchestrator chose to fill the owner's selection take their own route (#4103). A
     // proposal without lineage takes it too, so a runner that predates the lineage still can.
     const selection = human ? undefined : this.scopeGrantReview(root);
@@ -12218,6 +12170,169 @@ export class SessionsService {
       return `The forge could not verify every proposed change in ${repository} through its Location. Nothing changed; check that Location's repository and gh or glab access, then retry.`;
     }
     return null;
+  }
+
+  /**
+   * The Orchestrator's own scope proposal under the propose-then-check flow (#4282). The Orchestrator
+   * read the owner's first message and states, for each issue, whether the owner named it or it chose
+   * it, and why, with the count, constraints and withheld operations it read. Ranking criteria are its
+   * call; nothing here judges them. Deterministic floors run first, in this order, and the first that
+   * fails refuses the proposal with its fixed code and the issue it names, so the Orchestrator revises:
+   *
+   * 1. additions only, every one in a repository in the campaign's boundary;
+   * 2. every issue marked owner-named is written as a number in the owner's exact message, and not
+   *    only qualified by another repository;
+   * 3. the runner reads each as an issue, not a pull request, and it is open;
+   * 4. none is already in this scope or held by another active campaign;
+   * 5. an explicit Maximum Issues is never exceeded (a derived one grows to fit, never past 100);
+   * 6. no Human Required issue label rule names one of its labels.
+   *
+   * Withheld operations only ever narrow the launch's, so the operations stay a subset of them by
+   * construction. A proposal with nothing checkable beyond owner-named issues is admitted after the
+   * floors with no model call, as an Orchestrator-owned change it applies itself. Anything else needs
+   * the constraint check, which fails closed: the owner gets exactly one approval request for the
+   * proposal, presented as an Owner Question, and proposing the same issues again returns it. An older
+   * runner's unstructured proposal takes that route too. Nothing is parsed from the message's text.
+   */
+  private async proposeOrchestratorScope(root: SessionView, repository: string, request: CampaignIssueScopeRequest,
+    canAccess: (id: string) => boolean): Promise<ServiceResult<WorkflowDecisionView>> {
+    const sessionId = root.id;
+    const boundary = issueBoundary(root);
+    const first = root.orchestratorPolicy?.firstMessageScope;
+    if (!boundary?.issueAuthority || first?.state !== "established") return fail("This campaign has no Full Control issue boundary to propose a scope in.", 409);
+    const initial = !first.initialScope;
+    const log = (outcome: string, extra: Record<string, unknown> = {}) => this.log.info(JSON.stringify({ event: "campaign_issue_admission",
+      entryPoint: "scope_proposal", sessionId, requestId: request.requestId, boundaryRevision: boundary.revision,
+      scopeRevision: request.expectedRevision, lineage: "proposal", initial, outcome, ...extra }));
+    const refuse = (code: CampaignScopeAdmissionFailure, details: Record<string, number> = {}): ServiceResult<WorkflowDecisionView> => {
+      log("refused", { reason: code, ...details });
+      const refusal = CAMPAIGN_SCOPE_ADMISSION_REFUSALS[code];
+      return { ok: false, status: refusal.status, error: refusal.message, errorDetails: { code, ...details } };
+    };
+    const malformed = (detail?: string): ServiceResult<WorkflowDecisionView> => fail("Provide unique repository-qualified additions, a current " +
+      `revision, an explanation and a proposal${detail ? ` (${detail})` : ""}. A proposal adds at most 100 issues.`, 400);
+    // Floor 1: additions only, in the campaign's boundary.
+    if (Array.isArray(request.removals) && request.removals.length) return refuse("proposal_additions_only");
+    if (typeof request.explanation !== "string" || !request.explanation.trim() || request.explanation.length > 4000) return malformed("explanation");
+    const repositories = boundaryRepositories(boundary);
+    if (request.additions.some((r) => !r || typeof r.repository !== "string" || !Number.isSafeInteger(r.number))) return malformed();
+    if (request.additions.some((r) => !repositories.includes(r.repository.toLowerCase()) || r.repository.toLowerCase() !== repository.toLowerCase())) {
+      return refuse("repository_outside_boundary");
+    }
+    const additions = request.additions.map((r) => r.number);
+    if (!boundedIssueNumbers(additions)) return malformed();
+    // Only a v308 root runner sends a structured proposal. Anything else, including a proposal an
+    // older runner could not have built, is unstructured: nothing in it can be checked.
+    const structured = request.proposal !== undefined && runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "campaignScopeProposals");
+    const proposal = structured ? normalizeScopeProposalInput(request.proposal, request.additions) : null;
+    if (typeof proposal === "string") return malformed(proposal);
+    // Floor 2: owner-named issues are written in the owner's exact message, the one the server knows
+    // the owner wrote: the transcript's first message when it still matches, else the boundary's record.
+    const exact = this.db.initialUserMessageText(sessionId);
+    const ownerMessage = exact !== null && firstMessageDigest(exact) === first.messageDigest ? exact : boundary.objective;
+    const unnamed = proposal?.issues.find((issue) => issue.origin === "owner_named" &&
+      (!writtenAsDigits(ownerMessage, issue.number) || onlyOtherRepositories(ownerMessage, issue.number, repositories)));
+    if (unnamed) return refuse("owner_named_not_in_message", { issue: unnamed.number });
+    // Floor 3: real, open issues of the campaign repository, read with their facts.
+    let facts: CampaignIssueFacts[] | null = null;
+    const titles = new Map<number, string>();
+    if (additions.length) {
+      try {
+        const requestId = `issue_scope_proposal_${randomUUID()}`;
+        const withFacts = runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "campaignIssueFacts");
+        const response = await this.hub.requestFromRunner(root.runnerId, requestId, { type: "campaign_issue_scope", operation: "inspect", requestId,
+          sessionId, issues: additions, ...(withFacts ? { facts: true as const } : {}) }, 60_000);
+        if (response.type !== "campaign_issue_scope_result" || !response.ok || response.sessionId !== sessionId ||
+            response.repository?.toLowerCase() !== repository.toLowerCase()) return fail("The forge could not verify every proposed addition in the campaign repository.", 409);
+        if (withFacts && Array.isArray(response.issueFacts)) {
+          // A fact out of its bounds, or with labels the runner could not report in full, verifies nothing.
+          facts = additions.map((n) => response.issueFacts!.find((fact) => validCampaignIssueFacts(fact) && fact.number === n))
+            .filter((fact): fact is CampaignIssueFacts => Boolean(fact));
+          if (facts.length !== additions.length) return fail("The forge could not verify every proposed addition in the campaign repository.", 409);
+          const pull = facts.find((fact) => fact.kind !== "issue");
+          if (pull) return refuse("not_an_issue", { issue: pull.number });
+          const closed = facts.find((fact) => fact.state !== "open");
+          if (closed) return refuse("issue_not_open", { issue: closed.number });
+          for (const fact of facts) titles.set(fact.number, fact.title);
+        }
+        for (const candidate of response.candidates ?? []) {
+          if (candidate.issue.repository.toLowerCase() === repository.toLowerCase() && !titles.has(candidate.issue.number)) titles.set(candidate.issue.number, candidate.title);
+        }
+        if (!additions.every((n) => response.candidates?.some((c) => c.issue.number === n && c.issue.repository.toLowerCase() === repository.toLowerCase()))) {
+          return fail("The forge could not verify every proposed addition in the campaign repository.", 409);
+        }
+      } catch { return fail("GitHub issue validation timed out or failed. Try a smaller explicit proposal and verify the runner's GitHub access, then retry.", 409); }
+      // Every proposal is admitted or routed only on verified facts, so the open and Human Required
+      // label floors always run: a runner that can't report them (before campaignIssueFacts) fails
+      // closed, even on the owner route, because the owner's approval checks neither.
+      if (!facts) return fail("The campaign runner could not report the proposed issues' state and labels. Update and reconnect it, then propose again.", 409);
+    }
+    const latest = this.db.getSession(sessionId);
+    const latestBoundary = latest && issueBoundary(latest);
+    if (!latest || !latestBoundary?.issueAuthority || latestBoundary.revision !== boundary.revision ||
+        (latest.orchestratorPolicy?.issueScope?.revision ?? 0) !== request.expectedRevision) return fail("Campaign scope changed during inspection; refresh and propose again.", 409);
+    // Floor 4: not already in this scope, and not held by another active campaign.
+    const before = latest.orchestratorPolicy?.issueNumbers ?? [];
+    const scoped = additions.find((n) => before.includes(n));
+    if (scoped !== undefined) return refuse("already_in_scope", { issue: scoped });
+    const held = additions.find((n) => this.db.issueHeldByOtherCampaign(sessionId, repository, n));
+    if (held !== undefined) return refuse("other_campaign_scope", { issue: held });
+    // What the proposal needs checked beyond the floors; nothing is the no-model fast path.
+    // The fast path also needs every owner-named number written as an issue reference of the campaign
+    // repository, not a bare number such as a count; this only narrows the fast path, never admits.
+    const checks: ScopeProposalCheck[] = proposal ? scopeProposalChecks(proposal, issueReferencesInMessage(ownerMessage, repository))
+      : ["proposal_unstructured"];
+    const route = checks.length ? "owner" as const : "admitted" as const;
+    const issues = proposal?.issues ?? additions.map((number) => ({ number, origin: "orchestrator_chosen" as const, rationale: "" }));
+    const record: CampaignScopeProposal = { initial, messageDigest: first.messageDigest,
+      issues: issues.map((issue) => ({ number: issue.number, origin: issue.origin, rationale: issue.rationale,
+        title: (titles.get(issue.number) ?? "").replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").trim().slice(0, 300) })),
+      requestedCount: proposal?.requestedCount ?? null, constraints: proposal?.constraints ?? [], withheldOperations: proposal?.withheldOperations ?? [],
+      checks, route, ...(route === "owner" ? { ownerCause: structured ? "constraint_check_unavailable" as const : "proposal_unstructured" as const,
+        ownerMessage: boundary.objective.replace(/[\p{Cc}]+/gu, " ").slice(0, 4000) } : {}) };
+    // Floor 5: an explicit Maximum Issues is never exceeded; a derived one grows to fit when applied.
+    // The size counts every repository the scope already holds (#4118).
+    const issueScope = latest.orchestratorPolicy?.issueScope;
+    const scopeSize = (issueScope ? campaignScopeIssues(issueScope).length : before.length) + additions.length;
+    const requested = scopeSize + reservedPublicationSlots(this.db, latest);
+    const limit = this.db.campaignIssueLimit(sessionId,
+      proposalMaxIssues(latest.orchestratorPolicy, { scopeProposal: record }, latestBoundary, scopeSize) ?? latestBoundary.issueAuthority.maxIssues);
+    if (requested > limit) return refuse("capacity_exhausted", { limit, requested });
+    // Floor 6: no Human Required issue label rule.
+    if (facts) {
+      const policies = this.db.listGovernancePolicies();
+      const where = { organizationId: this.db.sessionScope(sessionId)?.organizationId, runnerId: latest.runnerId,
+        workspaceId: latest.workspaceId ?? undefined, agentId: latest.agentId ?? undefined };
+      const labeled = facts.find((fact) => humanRequiredIssueLabel(policies, where, fact.labels) !== null);
+      if (labeled) return refuse("human_required_label", { issue: labeled.number });
+    }
+    const scopeRequest: CampaignIssueScopeRequest = { requestId: request.requestId, expectedRevision: request.expectedRevision,
+      additions: request.additions, removals: [], explanation: request.explanation };
+    if (route === "admitted") {
+      // Admitted by the floors alone: an Orchestrator-owned change bound to this exact proposal.
+      const snapshot = scopeSnapshot(this.db, latest, repository, scopeRequest, { scopeProposal: record,
+        issueAdmission: { boundaryRevision: boundary.revision, evidenceDigest: issueEvidenceDigest({ kind: "scope_proposal_floors", proposal: record }) } });
+      if (!snapshot) return malformed();
+      const created = this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: `campaign_issue_scope:${sessionId}`,
+        resourceSnapshot: snapshot }, canAccess, { trustedIssueScope: true });
+      if (created.ok && created.data) log("admitted", { checks: 0, authority: created.data.authority });
+      return created;
+    }
+    // The owner's one approval. Proposing the same issues again while it is pending returns it,
+    // whatever the rationale now says: it is never decided again behind the owner's back.
+    const pending = this.db.pendingWorkflowDecisionsForController(sessionId).find((d) => {
+      const s = d.resourceSnapshot;
+      return d.sessionId === sessionId && s.category === "campaign_issue_scope" && s.scopeProposal?.route === "owner" &&
+        s.expectedRevision === request.expectedRevision && JSON.stringify(s.additions) === JSON.stringify([...additions].sort((a, b) => a - b));
+    });
+    if (pending) return ok(pending);
+    const snapshot = scopeSnapshot(this.db, latest, repository, scopeRequest, { scopeProposal: record });
+    if (!snapshot) return malformed();
+    // The owner's approval re-authorizes the boundary, so it lists and revokes every outstanding decision (#3915).
+    snapshot.affectedDecisions = everyOutstandingScopeDecision(this.db, sessionId);
+    log("owner_review", { checks, cause: record.ownerCause });
+    return this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: `campaign_issue_scope:${sessionId}`,
+      resourceSnapshot: snapshot }, canAccess, { trustedIssueScope: true });
   }
 
   /**
@@ -12488,19 +12603,43 @@ export class SessionsService {
     return created;
   }
 
+  /** A relaunch's copy of its campaign control (#3363): the campaign root's current control, with
+   * the root's policy revision that names it, so the runner orders it against any update still in
+   * flight. A pre-v310 runner keeps today's relaunch, which carries no control. */
+  private orderedRunnerControl(sessionId: string, protocolVersion: number | null | undefined): { control?: CampaignControl; controlRevision?: number } {
+    if (!runnerSupportsProtocol(protocolVersion, "campaignControlRevision")) return {};
+    const rootId = this.db.resolvedCampaignSessionId(sessionId) ?? sessionId;
+    const control = this.db.sessionOrchestratorPolicy(rootId)?.control;
+    const ordering = campaignControlRevisionForRunner(this.db.parentControlPolicy(rootId)?.revision, protocolVersion);
+    return control && ordering.controlRevision !== undefined
+      ? { control: campaignControlForRunner(control, protocolVersion), ...ordering } : {};
+  }
+
   async synchronizeCampaignIssueScope(sessionId: string): Promise<boolean> {
     const root = this.db.getSession(sessionId);
     const scope = root?.orchestratorPolicy?.issueScope;
     if (!root || !scope) return true;
     let synchronized = true;
-    for (const member of scopeParticipants(this.db, root)) {
+    // Read together, before the first send: the campaign's control and the policy revision that
+    // names it, so a runner can order it against a synchronization that overtakes this one. Each
+    // participant gets the root's current control, as its campaign projection reads it; a nested
+    // Orchestrator's stored policy keeps the snapshot it launched with (#3363).
+    const control = root.orchestratorPolicy?.control;
+    const controlRevision = root.parentControlPolicy?.revision;
+    const participants = scopeParticipants(this.db, root);
+    for (const member of participants) {
       try {
         const requestId = `issue_scope_sync_${randomUUID()}`;
+        const protocolVersion = this.db.getRunner(member.runnerId)?.protocolVersion;
+        // A pre-v310 runner keeps today's synchronization: its member's own stored control.
+        const ordered = runnerSupportsProtocol(protocolVersion, "campaignControlRevision");
+        const sent = ordered ? control : member.orchestratorPolicy?.control;
         // Each runner stores only its own Location repository's part, in the earlier shape (#4118).
         const result = await this.hub.requestFromRunner(member.runnerId, requestId,
           { type: "campaign_issue_scope", operation: "synchronize", requestId, sessionId: member.id, scope: participantScope(this.db, root, member)!,
-            ...(member.orchestratorPolicy?.control === undefined ? {} : {
-              control: campaignControlForRunner(member.orchestratorPolicy.control, this.db.getRunner(member.runnerId)?.protocolVersion) }) }, 30_000);
+            ...(sent === undefined ? {} : {
+              control: campaignControlForRunner(sent, protocolVersion),
+              ...campaignControlRevisionForRunner(controlRevision, protocolVersion) }) }, 30_000);
         if (result.type !== "campaign_issue_scope_result" || !result.ok || result.sessionId !== member.id || result.revision !== scope.revision) synchronized = false;
       } catch { synchronized = false; }
     }
@@ -13250,6 +13389,33 @@ export class SessionsService {
     return ok(this.db.getSession(sessionId)!);
   }
 
+  /**
+   * The owner's answer to the one approval an Orchestrator's scope proposal needs (#4282), presented
+   * as an Owner Question: Approve Scope applies exactly the proposal through the ordinary scope
+   * approval, with every check it makes; Decline Scope, or Dismiss, denies it; an answer in the
+   * owner's own words denies it and delivers those words to the Orchestrator, which revises. Nothing
+   * is ever read from the text: it never approves or changes the proposal. Only the campaign's owner
+   * answers it.
+   */
+  private answerScopeProposal(sessionId: string, card: PendingApproval, answers: Record<string, string | string[]>,
+    action: "submit" | "dismiss", actor: GovernanceActor): ServiceResult<SessionView> {
+    const snapshot = scopeProposalOfRequest(card);
+    const occurrenceId = card.occurrenceId;
+    if (!snapshot || !occurrenceId) return fail("scope proposal not found", 404);
+    if (actor.kind !== "human" || !actor.id || !this.db.campaignOwnerUser(sessionId, actor.id)) {
+      return fail("Only the campaign's owner can answer this scope proposal", 403);
+    }
+    const invalid = validateQuestionAnswers(scopeProposalAgentQuestions(snapshot), answers, action);
+    if (invalid) return fail(`invalid answers: ${invalid}`, 400);
+    const answer = action === "submit" ? scopeProposalAnswer(answers) : { approve: false };
+    if (!answer) return fail("choose Approve Scope or Decline Scope, or type an answer", 400);
+    const resolved = this.resolveWorkflowDecision(sessionId, sessionId, occurrenceId,
+      { outcome: answer.approve ? "approve" : "deny", ...(answer.text ? { childMessage: answer.text } : {}) }, "human", actor, () => true);
+    // A refusal keeps its code (such as other_campaign_scope) so Campaign Status can name the issue.
+    if (!resolved.ok) return { ...failAs<SessionView>(resolved), ...(resolved.errorDetails ? { errorDetails: resolved.errorDetails } : {}) };
+    return ok(this.db.getSession(sessionId)!);
+  }
+
   /** Whether a Full Control request waits for its owner to classify an uncertain or failed screen. */
   private credentialScreenReviewHeld(session: SessionView, request: PendingApproval): boolean {
     return this.credentialScreenHold(session, request) === "credential_screen_review";
@@ -13837,7 +14003,8 @@ export class SessionsService {
         removals: changeGroups.flatMap((group) => group.removals.map((number) => ({ repository: group.repository, number }))), explanation: snapshot.explanation,
         ...(snapshot.lineage === undefined ? {} : { lineage: snapshot.lineage }) };
       const scopeSize = campaignScopeChangeResult(snapshot).length;
-      const latest = scopeSnapshot(this.db, currentChild, snapshot.repository, request);
+      const latest = scopeSnapshot(this.db, currentChild, snapshot.repository, request, snapshot.scopeProposal
+        ? { scopeProposal: snapshot.scopeProposal, ...(snapshot.issueAdmission ? { issueAdmission: snapshot.issueAdmission } : {}) } : {});
       if (latest && snapshot.issueAdmission) latest.issueAdmission = snapshot.issueAdmission;
       if (latest && snapshot.verifiedPublications) latest.verifiedPublications = snapshot.verifiedPublications;
       if (latest && snapshot.grantReview) latest.grantReview = snapshot.grantReview;
@@ -13849,11 +14016,14 @@ export class SessionsService {
       if (snapshot.verifiedPublications?.some((p) => this.db.admittedCampaignPublicationIssue(childSessionId, p.publicationOccurrenceId) !== null)) return fail("Publication lineage was already admitted; refresh the scope proposal", 409);
       const boundary = issueBoundary(currentChild);
       const reserved = reservedPublicationSlots(this.db, currentChild, snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined);
+      // An admitted Orchestrator proposal grows a derived Maximum Issues to fit (#4282); nothing else does here.
+      const proposedMax = boundary ? proposalMaxIssues(currentChild.orchestratorPolicy, snapshot, boundary, scopeSize) : undefined;
       if (authority === "orchestrator" && (!boundary || scopeSize + reserved >
-          this.db.campaignIssueLimit(childSessionId, boundary.issueAuthority!.maxIssues))) return fail("Scope capacity or its human boundary changed before resolution", 409);
-      // A selection the Orchestrator applies must still hold no issue another active campaign took
-      // since its review (#4103); nothing awaits between this check and the approval below.
-      const taken = authority === "orchestrator" && snapshot.lineage?.kind === "selection"
+          this.db.campaignIssueLimit(childSessionId, proposedMax ?? boundary.issueAuthority!.maxIssues))) return fail("Scope capacity or its human boundary changed before resolution", 409);
+      // A selection the Orchestrator applies, and any Orchestrator proposal (#4282), whether the floors
+      // admitted it or its owner approves it, must still hold no issue another active campaign took
+      // since its floors ran; nothing awaits between this check and the approval below.
+      const taken = (authority === "orchestrator" && snapshot.lineage?.kind === "selection") || snapshot.scopeProposal !== undefined
         ? snapshot.additions.find((n) => this.db.issueHeldByOtherCampaign(childSessionId, snapshot.repository, n)) : undefined;
       if (taken !== undefined) {
         this.revokeWorkflowDecision(decision, { reason: "approval_refused_stale", triggeredBy: actor });
@@ -13875,8 +14045,8 @@ export class SessionsService {
       }
       // The owner approving a failed or uncertain grant's proposal sets the derived limit it could not (#4102).
       const maxIssues = authority === "human" && control?.mode === "full_control"
-        ? raised ?? grantReviewMaxIssues(currentChild.orchestratorPolicy, snapshot, control.boundary,
-          scopeSize) ?? control.boundary.issueAuthority?.maxIssues
+        ? raised ?? proposalMaxIssues(currentChild.orchestratorPolicy, snapshot, control.boundary, scopeSize) ??
+          grantReviewMaxIssues(currentChild.orchestratorPolicy, snapshot, control.boundary, scopeSize) ?? control.boundary.issueAuthority?.maxIssues
         : undefined;
       const limit = maxIssues === undefined ? undefined : this.db.campaignIssueLimit(childSessionId, maxIssues);
       const held = limit === undefined ? 0 : this.db.unsettledPublicationSlots(childSessionId, scopeSettlements(snapshot));
@@ -13908,7 +14078,9 @@ export class SessionsService {
         entryPoint: "scope_resolution", authority, boundaryRevision: snapshot.issueAdmission?.boundaryRevision, lineage: snapshot.lineage?.kind ?? "removal",
         revision: snapshot.expectedRevision + 1, additions: snapshot.additions.length, removals: snapshot.removals.length }));
       void this.synchronizeCampaignIssueScope(childSessionId);
-      for (const member of scopeParticipants(this.db, this.db.getSession(childSessionId)!)) this.hub.sessionChangedById(member.id);
+      // Every child's view reads the committed scope, including ordinary children that are not
+      // scope participants and may work on an issue this change revoked (#3363).
+      for (const id of [childSessionId, ...this.db.campaignDescendantIds(childSessionId)]) this.hub.sessionChangedById(id);
       // From the campaign as it read before this approval, so the decisions it revoked are seen
       // leaving and reach the Orchestrator with their reason (#3916).
       this.publishCampaignAttentionTransition(currentParent);
@@ -16967,6 +17139,7 @@ export class SessionsService {
       .find((request) => request.requestId === requestId && isOwnerQuestionRequest(request));
     if (ownerQuestionCard) {
       if (occurrenceId !== undefined && occurrenceId !== ownerQuestionCard.occurrenceId) return fail("question occurrence is stale or missing", 409);
+      if (scopeProposalOfRequest(ownerQuestionCard)) return this.answerScopeProposal(sessionId, ownerQuestionCard, answers, action, actor);
       return this.answerOwnerQuestion(sessionId, ownerQuestionCard.occurrenceId ?? requestId, answers, action, actor);
     }
     // The exec driver never asked questions, so an answer here is to a recovered one, and submitting

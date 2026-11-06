@@ -51,8 +51,9 @@ function scopeReviewInputsWith(ownerMessage: string, grant: FullControlScopeGran
       grant: JSON.stringify({
         repositories: grant.ceilings.repositories,
         namedIssues: grant.namedIssues,
+        // The ranking criteria stay out (#4282): the review checks constraints, never priority.
         selection: grant.selection ? { count: grant.selection.count, defaulted: grant.selection.defaulted,
-          criteria: grant.selection.criteria, constraints: grant.selection.constraints } : null,
+          constraints: grant.selection.constraints } : null,
       }),
       issues: JSON.stringify(facts.map((fact) => ({ number: fact.number, title: fact.title, state: fact.state, labels: fact.labels,
         bodyExcerpt: fact.bodyExcerpt.slice(0, excerpt) }))),

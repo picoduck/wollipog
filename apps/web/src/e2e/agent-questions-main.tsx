@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ownerQuestionAgentQuestions, summarizeQuestionAnswers, type AgentQuestion, type OwnerDecisionSnapshot,
+import { ownerQuestionAgentQuestions, presentOwnerQuestionRequest, scopeProposalAgentQuestions, summarizeQuestionAnswers, type AgentQuestion,
+  type CampaignIssueScopeSnapshot, type CampaignScopeProposal, type OwnerDecisionSnapshot,
   type PendingApproval, type SessionView, type WorkflowDecisionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -214,6 +215,37 @@ const ownerDecision: OwnerDecisionSnapshot = {
 const ownerQuestionSnapshot = { ...ownerDecision, kind: "question" as const };
 const ownerQuestionSet = ownerQuestionAgentQuestions(ownerQuestionSnapshot);
 const ownerRaw = params.get("set") === "owner-raw";
+
+// The owner's one approval of an Orchestrator's scope proposal (#4282). `set=scope-proposal` presents
+// it as the Owner Question it now is; `set=scope-proposal-raw` shows the workflow decision card.
+const scopeProposalSnapshot: CampaignIssueScopeSnapshot & { scopeProposal: CampaignScopeProposal } = {
+  category: "campaign_issue_scope", repository: "picoduck/wollipog", expectedRevision: 2, before: [], additions: [4101, 4131, 4140], removals: [],
+  explanation: "You named #4101. For the other two I ranked open UI bugs by priority label, then by age.",
+  affectedAssignments: [], affectedDecisions: [], activeChildren: [],
+  scopeProposal: { initial: true, messageDigest: "a".repeat(64), requestedCount: 3, constraints: ["open", "UI only"], withheldOperations: ["pr_merge"],
+    checks: ["chosen_issues", "constraints", "withheld_operations"], route: "owner", ownerCause: "constraint_check_unavailable",
+    ownerMessage: "Fix #4101 and the two most important open UI bugs, but don't merge anything yet.",
+    issues: [
+      { number: 4101, origin: "owner_named", rationale: "You named it.", title: "Composer Loses Draft on Reconnect" },
+      { number: 4131, origin: "orchestrator_chosen", rationale: "Open UI bug, priority:high, oldest.", title: "Sidebar Collapses on Resize" },
+      { number: 4140, origin: "orchestrator_chosen", rationale: "Open UI bug, priority:high.", title: "Badge Contrast in Light Theme" },
+    ] },
+};
+const scopeProposalSet = params.get("set") === "scope-proposal";
+const scopeProposalRaw = params.get("set") === "scope-proposal-raw";
+function scopeProposalCard(requestId: string): PendingApproval {
+  const occurrenceId = `${params.get("epoch") ?? "occurrence"}:${requestId}`;
+  return {
+    kind: "workflow_decision", requestId: occurrenceId, occurrenceId, requestedAt: askedAt, title: "Campaign Issue Scope", async: true,
+    options: [{ optionId: "__workflow_approve__", name: "Approve", kind: "allow_once" as const },
+      { optionId: "__workflow_deny__", name: "Deny", kind: "reject_once" as const }],
+    context: { toolName: "Typed Workflow Decision", input: JSON.stringify(scopeProposalSnapshot, null, 2) },
+    workflowDecision: { occurrenceId, requestId, sessionId: "agent-question-session", controllingSessionId: "agent-question-session",
+      resourceKey: "campaign_issue_scope:agent-question-session", category: "campaign_issue_scope", status: "pending", authority: "human", policyRevision: 2,
+      resourceDigest: "digest", createdAt: askedAt, authorityEvaluation: { owner: "human", reason: "protected_request" },
+      resourceSnapshot: scopeProposalSnapshot } as unknown as WorkflowDecisionView,
+  };
+}
 const ownerQuestion = params.get("set") === "owner-question";
 /** The owner decision card as the control plane stores it: an Owner Approval (`owner-raw`), or the
  * Owner Question clients present as a question card (`owner-question`). */
@@ -351,6 +383,8 @@ function Fixture() {
   const [questions, setQuestions] = useState(
     params.get("set") === "owner-question" || ownerRaw
       ? ownerQuestionSet
+      : scopeProposalSet || scopeProposalRaw
+      ? scopeProposalAgentQuestions(scopeProposalSnapshot)
       : params.get("set") === "issue-drafts"
       ? issueDraftQuestions
       : params.get("set") === "long"
@@ -437,7 +471,8 @@ function Fixture() {
     }]),
     ...Array.from({ length: rowsAfter }, (_, index) => transcriptRow(QUESTION_EVENT_ID + 1 + index, index, "Later")),
   ], [dismissed, lastCall, questions, requestId, resolved]);
-  const request = useMemo<PendingApproval | null>(() => resolved ? null : ownerRaw ? ownerRawCard(requestId) : {
+  const request = useMemo<PendingApproval | null>(() => resolved ? null : ownerRaw ? ownerRawCard(requestId)
+    : scopeProposalRaw ? scopeProposalCard(requestId) : scopeProposalSet ? presentOwnerQuestionRequest(scopeProposalCard(requestId)) : {
     kind: "question",
     requestId,
     occurrenceId: `${params.get("epoch") ?? "occurrence"}:${requestId}`,

@@ -189,6 +189,38 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
 }
 
 for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844 }]) {
+  test(`Campaign Status shows the Orchestrator's Scope Proposal with its rationale at ${viewport.width}px (#4282)`, async ({ page }, info) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=proposal");
+    const section = page.getByRole("region", { name: "Scope Proposal" });
+    await expect(section).toBeVisible();
+    await expect(page.getByRole("region", { name: "Scope Grant" })).toHaveCount(0);
+    const latest = section.getByRole("article", { name: "Latest Proposal" });
+    const row = (term: string) => latest.locator("dl.facts > div").filter({ has: page.getByRole("term").getByText(term, { exact: true }) }).locator("dd");
+    await expect(latest.getByRole("heading", { level: 4 })).toContainText("Waiting for You");
+    await expect(row("Scope")).toHaveText("Initial Scope");
+    await expect(row("Count You Asked For")).toHaveText("5");
+    await expect(row("Constraints It Read")).toHaveText("open; UI only");
+    await expect(row("Withheld Operations")).toHaveText("PR Merge");
+    await expect(row("Rationale")).toHaveText("You named #123 and #124. For the rest I ranked open UI issues by priority label, then by age.");
+    await expect(row("Issues").getByText("Named by You", { exact: true })).toHaveCount(2);
+    await expect(row("Issues").getByText("Chosen by Orchestrator", { exact: true })).toHaveCount(3);
+    await expect(row("Checked By")).toContainText("your approval");
+    await expect(section.getByRole("article", { name: "Earlier Proposal 1" }).getByRole("heading", { level: 4 })).toContainText("Replaced");
+    const geometry = await section.evaluate((element) => ({ client: element.clientWidth, scroll: element.scrollWidth }));
+    expect(geometry.scroll).toBeLessThanOrEqual(geometry.client + 1);
+    await section.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: info.outputPath(`scope-proposal-${viewport.width}.png`), fullPage: true });
+
+    // Before the Orchestrator proposes, the section says nothing is dispatched yet.
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=proposal-waiting");
+    const waiting = page.getByRole("region", { name: "Scope Proposal" });
+    await expect(waiting.locator(".notice").filter({ hasText: "Waiting for the Orchestrator's Proposal" })).toContainText("Nothing is dispatched until it is admitted.");
+    await expect(waiting.getByRole("article")).toHaveCount(0);
+  });
+}
+
+for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844 }]) {
   test(`the owner changes a defaulted selection count from the Scope Grant at ${viewport.width}px (#4102)`, async ({ page }, info) => {
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=grant-default");

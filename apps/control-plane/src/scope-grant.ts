@@ -238,3 +238,18 @@ export function grantSelection(selection: ScopeGrantCandidates["selection"], sco
     criteria: selection.criteria.slice(0, 300), constraints: selection.constraints.slice(0, 10).map((c) => c.slice(0, 200)),
   };
 }
+
+/** The Maximum Issues an applied Orchestrator scope proposal sets (#4282) when the launch derived the
+ * limit: the scope it establishes plus follow-up room, as a first message naming those issues derived
+ * it before, never below the current limit and never past the 100-issue ceiling. The owner's words
+ * stand behind every such scope: the floors bound owner-named issues to them, and anything else was
+ * the owner's own approval. An explicit Maximum Issues never grows. Undefined when it doesn't apply. */
+export function proposalMaxIssues(policy: Pick<OrchestratorCampaignPolicy, "firstMessageScope"> | undefined,
+  snapshot: Pick<CampaignIssueScopeSnapshot, "scopeProposal">, boundary: CampaignAuthorityBoundary, scopeSize: number): number | undefined {
+  const first = policy?.firstMessageScope;
+  const issues = boundary.issueAuthority;
+  if (!snapshot.scopeProposal || !issues || first?.state !== "established" || first.grant?.status !== "proposal" ||
+      first.derivedLimits?.maxIssues !== true) return undefined;
+  const followUps = boundary.budgetAuthority?.acceptedFollowUps;
+  return Math.min(MAX_MESSAGE_ISSUES, Math.max(issues.maxIssues, followUps === undefined ? MAX_MESSAGE_ISSUES : scopeSize + followUps));
+}

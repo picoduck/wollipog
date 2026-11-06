@@ -7,6 +7,7 @@ import { campaignOperationEvidenceCurrent } from "./campaign-operation-evidence.
 import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
 import { type BackgroundFollowUpView, CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, isTerminal } from "@wollipog/protocol";
 import { CampaignIssueScopeRefusal, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
+import { launchOrchestratorMeta, nextCampaignControl, validControlRevision } from "./campaign-control-order.js";
 import { boundedIssueNumbers, campaignBoundaryRepository, campaignRepositoryLocation, parseFullControlAutomaticResponse, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
 import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
@@ -331,6 +332,7 @@ import {
   type RetainedWorktreeRefRecord,
   type SafeWorktreeDiscardResult,
 } from "./worktree.js";
+import { boundTurnDiff } from "./history-event-bound.js";
 import {
   loadWorktreeSetupConfig,
   resolvedWorktreeSetupEnvironment,
@@ -746,7 +748,7 @@ interface ActiveSession {
   codexPackageSandboxed?: boolean;
   /** Immutable package-denial snapshot from this exact native provider launch. */
   codexPackageReadOnlyPaths?: readonly string[];
-  orchestratorLaunchPolicy?: Pick<import("@wollipog/protocol").OrchestratorLaunchPolicy, "issueNumbers" | "issueScope" | "control">;
+  orchestratorLaunchPolicy?: Pick<import("@wollipog/protocol").OrchestratorLaunchPolicy, "issueNumbers" | "issueScope" | "control" | "controlRevision">;
   projectMemoryKey?: string;
   projectMemoryFailureKey?: string;
   sessionId: string;
@@ -7161,7 +7163,7 @@ export class SessionManager {
         driver: spec.driver ?? "acp",
         context,
         config: spec.config ?? {},
-        orchestrator: (() => { const saved = this.store.readMeta(spec.sessionId)?.orchestrator; return (saved?.issueScope?.revision ?? 0) > (spec.orchestrator?.issueScope?.revision ?? 0) ? saved : spec.orchestrator ?? saved; })(),
+        orchestrator: launchOrchestratorMeta(this.store.readMeta(spec.sessionId)?.orchestrator, spec.orchestrator),
         executionTarget: spec.executionTarget ?? this.store.readMeta(spec.sessionId)?.executionTarget,
       });
     } catch (error) {
@@ -7417,8 +7419,7 @@ export class SessionManager {
             retiringProviderRunners: this.fenceRunnersWithThisProcess(prior.retiringProviderRunners, { context, executionTarget }) } : {}),
       projectMemory: spec.projectMemory ?? prior?.projectMemory,
       artifactUploads: spec.artifactUploads ?? prior?.artifactUploads ?? "manual",
-      orchestrator: this.withAppliedIssueGrant(spec.sessionId,
-        (prior?.orchestrator?.issueScope?.revision ?? 0) > (spec.orchestrator?.issueScope?.revision ?? 0) ? prior?.orchestrator : spec.orchestrator ?? prior?.orchestrator),
+      orchestrator: this.withAppliedIssueGrant(spec.sessionId, launchOrchestratorMeta(prior?.orchestrator, spec.orchestrator)),
       ...(spec.uiEvidenceReviewer ? { uiEvidenceReviewer: { reviewId: spec.uiEvidenceReviewer.reviewId } } : {}),
       ...(spec.review ? { review: {
         ...spec.review, checkout: repoPath, launchOwner: this.lockOwner,
@@ -7714,7 +7715,7 @@ export class SessionManager {
           if (worktreeOwnedByLaunch && worktreeIdentity && !worktreeIdentity.baseCommit) {
             worktreeIdentity = {
               ...worktreeIdentity,
-              baseRef: "HEAD",
+              baseRef: worktree.baseRef ?? "HEAD",
               baseCommit: await worktreeHead(worktree.path, worktreeOptions),
             };
           }
@@ -11869,8 +11870,8 @@ export class SessionManager {
       // Acceptance is not observable until the source-of-truth event crosses its durability fence.
       this.store.flush(sessionId);
       try {
-        this.accrueMeta(sessionId, payload);
-        this.send({ type: "session_event", sessionId, payload, seq: stored.seq, ts: stored.ts });
+        this.accrueMeta(sessionId, stored.payload);
+        this.send({ type: "session_event", sessionId, payload: stored.payload, seq: stored.seq, ts: stored.ts });
       } catch (relayError) {
         this.log(`persisted steering event relay failed for ${sessionId}: ${errText(relayError)}`);
       }
@@ -18782,7 +18783,9 @@ export class SessionManager {
     const worktreeOptions = { context: entry.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash };
     const captured = base ? await captureTurnDiff(entry.worktree.path, base, worktreeOptions) : null;
     const diff = captured?.diff ?? (await worktreeDiff(entry.worktree.path, worktreeOptions));
-    if (diff.trim()) this.emitEvent(sessionId, { kind: "file_edit", path: "worktree", diff });
+    // A turn that pulls in a large upstream range can produce a diff bigger than one history
+    // record may be (#4288). Keep a bounded diff whose summary names the full size and file count.
+    if (diff.trim()) this.emitEvent(sessionId, { kind: "file_edit", path: "worktree", diff: boundTurnDiff(diff) });
     return captured?.tree ?? null;
   }
 
@@ -19691,8 +19694,9 @@ export class SessionManager {
       const stored = this.store.appendEvent(sessionId, identifiedPayload);
       if (!stored) throw new Error("session metadata disappeared before history append");
       try {
-        this.accrueMeta(sessionId, identifiedPayload);
-        this.send({ type: "session_event", sessionId, payload: identifiedPayload, seq: stored.seq, ts: stored.ts });
+        // Relay what was stored: the store may have shortened an oversized record (#4288).
+        this.accrueMeta(sessionId, stored.payload);
+        this.send({ type: "session_event", sessionId, payload: stored.payload, seq: stored.seq, ts: stored.ts });
       } catch (relayError) {
         // The authoritative append already committed. Do not misclassify a best-effort metadata or
         // transport failure as corrupt history, and never throw it through a driver callback; the
@@ -20096,19 +20100,36 @@ export class SessionManager {
         return { ...base, ok: false, error: "Stale or conflicting campaign scope revision" };
       }
       let control = message.control;
-      // A participant in any boundary repository stores its own repository's part (#4118, v309).
+      // A participant in any boundary repository stores its own repository's part (#4118, v313).
       if (control && (!validCampaignControl(control) || control.mode === "full_control" && !campaignBoundaryRepository(control.boundary, repository))) return { ...base, ok: false, error: "Scope authority boundary is invalid or in another repository" };
+      if (!validControlRevision(message.controlRevision) || message.controlRevision !== undefined && control === undefined) {
+        return { ...base, ok: false, error: "Invalid authoritative control revision" };
+      }
       // A human scope revision intentionally invalidates older standing authorization, but
       // scope removal must still persist. Disable the stale runner diagnostic contract;
       // the server independently retains its boundary and evaluates it as human-required.
       if (control?.mode === "full_control" && control.boundary.issueScopeRevision !== scope.revision) control = { mode: "custom" };
-      const updated = this.store.patchMeta(message.sessionId, { orchestrator: { ...fresh.orchestrator, issueNumbers: [...scope.issueNumbers], issueScope: scope,
-        ...(control === undefined ? {} : { control }) } });
+      // Control has its own order (#3363): within one scope revision a delayed update can carry
+      // an older control than the runner already holds, and must not roll it back.
+      const ordered = nextCampaignControl(fresh.orchestrator, { control, controlRevision: message.controlRevision });
+      const { control: _heldControl, controlRevision: _heldRevision, ...orchestrator } = fresh.orchestrator;
+      const updated = this.store.patchMeta(message.sessionId, { orchestrator: { ...orchestrator, issueNumbers: [...scope.issueNumbers], issueScope: scope,
+        ...(ordered.control === undefined ? {} : { control: ordered.control }),
+        ...(ordered.controlRevision === undefined ? {} : { controlRevision: ordered.controlRevision }) } });
       if (!updated) return { ...base, ok: false, error: "Could not persist campaign scope" };
       // The Claude auto-approval closure reads this exact object on each ask. Update it in place
       // so removals apply to the current process, as well as the next restart.
-      if (live) { live.issueNumbers = [...scope.issueNumbers]; live.issueScope = scope; if (control !== undefined) live.control = control; }
-      this.log(JSON.stringify({ event: "campaign_issue_scope_synchronized", sessionId: message.sessionId, revision: scope.revision }));
+      if (live) {
+        live.issueNumbers = [...scope.issueNumbers]; live.issueScope = scope;
+        if (ordered.control !== undefined) live.control = ordered.control;
+        if (ordered.controlRevision !== undefined) live.controlRevision = ordered.controlRevision;
+      }
+      if (ordered.outcome === "kept_newer") {
+        this.log(JSON.stringify({ event: "campaign_control_update_ignored", sessionId: message.sessionId, revision: scope.revision,
+          controlRevision: message.controlRevision ?? null, heldControlRevision: ordered.controlRevision ?? null }));
+      }
+      this.log(JSON.stringify({ event: "campaign_issue_scope_synchronized", sessionId: message.sessionId, revision: scope.revision,
+        controlRevision: ordered.controlRevision ?? null }));
       return { ...base, ok: true, repository, revision: scope.revision };
     } catch (error) {
       return { ...base, ok: false, error: error instanceof CampaignIssueScopeRefusal ? error.message

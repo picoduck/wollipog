@@ -38,6 +38,15 @@ export function campaignControlForRunner(control: CampaignControl, protocolVersi
   return { mode: "full_control", boundary };
 }
 
+/** The authoritative order of the runner's copy of a campaign's control (#3363): the campaign
+ * root's policy revision, which every control change advances, so a runner can refuse a delayed
+ * update within one issue-scope revision. A pre-v310 runner is never sent it and keeps replacing
+ * control with each synchronization, as before. */
+export function campaignControlRevisionForRunner(revision: number | undefined, protocolVersion: number | null | undefined): { controlRevision?: number } {
+  return revision !== undefined && Number.isSafeInteger(revision) && revision >= 0 &&
+    runnerSupportsProtocol(protocolVersion, "campaignControlRevision") ? { controlRevision: revision } : {};
+}
+
 /** The boundary a Human's own approval of an issue scope establishes (#2940): the same grants,
  * naming the scope revision that approval created, authorized by that Human at that time. Evidence
  * authority is that boundary author's own disclosure consent, so it carries over only to the same

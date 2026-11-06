@@ -67,6 +67,8 @@ function harness(options: { scope?: number[]; protocol?: number; full?: boolean;
   if (options.full) {
     assert.ok(svc.setCampaignControl("root", { mode: "full_control", objective: "Implement epic 12", operations: ["campaign_issue_scope", "issue_closure"],
       delegatablePolicyIds: [], issueAuthority: { epics: [12], relatedFollowUps: true, maxIssues: 5, closureReasons: ["completed"] } }, 1, principal).ok);
+    // The control change's own scope synchronization (#3363) is setup, not the request under test.
+    calls.runner.length = 0;
   }
   const create = svc.createWorkflowDecision.bind(svc);
   svc.createWorkflowDecision = ((...args: Parameters<typeof create>) => { calls.decisions++; return create(...args); }) as typeof create;

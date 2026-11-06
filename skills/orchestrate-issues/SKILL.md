@@ -239,18 +239,37 @@ ask the owner to include it, then retry. Custom requires an authenticated human 
 human-established issue boundary, use `lineage: {kind: "epic", epic: <number>}` for verified intended
 members or `{kind: "follow_up", publicationOccurrenceId: <id>}` for an exact authorized publication.
 A publication the boundary's author or a campaign owner approved as a person under the current
-objective also qualifies. When the owner's first message set the scope and its Scope Grant in Campaign
-Status failed or was uncertain, propose the issues you chose without lineage: the proposal goes to the
-owner as one typed approval, so put your rationale in `explanation`. When the grant asked the campaign
-to select issues, propose the open issues you chose with `lineage: {kind: "selection"}`, additions
-only, with your ranking in `explanation`, including any you find mid-run. Deterministic checks refuse
-an issue outside the campaign's repositories, a pull request, a closed issue, one already in scope,
-one another active campaign holds, one past the selection count or Maximum Issues, and one with a
-label a Human Required rule names; choose another issue rather than asking. A proposal that passes
-is reviewed by the Decision Model against the owner's words: an admitted one returns an
-Orchestrator-owned scope change that you resolve and apply yourself; a refused one returns its
-`reason`, so propose a different issue; an uncertain or failed review becomes the owner's one typed
-approval, and proposing the same issues again returns that same request. For any other addition,
+objective also qualifies.
+
+When the owner's first message started a Full Control campaign, you read that message and propose
+its scope; the server reads nothing from it. The campaign starts with an empty scope and dispatches
+nothing until your initial proposal is admitted, so proposing it is your first campaign action, after
+`get_campaign` and the preflight report. Send the issues as `additions` with `proposal`: for each
+issue its `origin`, `owner_named` when its number is in the owner's message or `orchestrator_chosen`,
+and a one-line `rationale`; `requestedCount`, the number the owner asked for or `null`;
+`constraints`, each checkable limit you read ("open", "UI only", "skip anything labeled security");
+and `withheldOperations`, operations the message rules out ("fix but don't merge" withholds
+`pr_merge`). Ranking criteria such as "highest priority" are your call: explain them in each
+rationale and in `explanation`, never as constraints. A task that needs no issues proposes no
+additions. Deterministic checks run first and refuse, naming the issue and condition: an owner-named
+number the message doesn't write, an issue outside the campaign's repositories, a pull request, a
+closed issue, one already in scope, one another active campaign holds, one past an explicit Maximum
+Issues, and one with a label a Human Required rule names; revise and propose again rather than asking.
+A proposal of only owner-named issues that the message writes as issue references (`#12`,
+`owner/repo#12` or the issue's URL), with no constraint, withheld operation or other count, returns
+an Orchestrator-owned scope change that you resolve and apply yourself. Anything else becomes the
+owner's one approval, asked as an Owner Question with your proposal and rationale; proposing the same
+issues again returns that same request, and an answer in the owner's own words declines it and
+reaches you as a prompt. Later additions take the same route.
+
+A campaign whose stored Scope Grant predates this keeps it. When that grant failed or was uncertain,
+propose the issues you chose without lineage: the proposal goes to the owner as one typed approval,
+so put your rationale in `explanation`. When it asked the campaign to select issues, propose the open
+issues you chose with `lineage: {kind: "selection"}`, additions only, with your ranking in
+`explanation`: the same deterministic checks run (and one past the selection count), then the Decision
+Model checks the proposal against the owner's stated constraints, never your ranking; an uncertain or
+failed check becomes the owner's one typed approval, and proposing the same issues again returns that
+same request. For any other addition,
 such as an issue the owner asks for mid-run, propose it without lineage: it becomes the owner's one
 typed approval, stating any Maximum Issues increase it needs, and the returned occurrence tells you
 what to ask the owner to approve in their Inbox or Campaign Status; proposing the same issues again
@@ -267,7 +286,7 @@ Humans can inspect, resolve epic candidates, and request changes in Campaign Sta
 Scope changes preserve conversation and work history. Removals display affected assignments and revoke
 outstanding action decisions; issue closure retains its separate exact decision. Every active
 Orchestrator participant must run in a Location of one of the campaign's repositories, and stores only
-its own repository's issues; one outside the launch repository needs protocol v309. Updates require protocol v208
+its own repository's issues; one outside the launch repository needs protocol v313. Updates require protocol v208
 on the control plane and participating runners; unsupported peers must be updated and reconnected.
 The authoritative revision is persisted on both sides, delivered on reconnect and restart, and checked
 again by closure execution. An offline or unsynchronized runner cannot execute a revised closure.

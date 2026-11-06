@@ -1,8 +1,9 @@
-import { campaignIssueLimitsRequirement, campaignIssueScopeChangesRequirement, campaignRepositoryLocation,
+import { boundedIssueNumbers, campaignIssueLimitsRequirement, campaignIssueScopeChangesRequirement, campaignRepositoryLocation,
   campaignScopeForRepository, campaignScopeIssues, canonicalCampaignIssues,
   gitlabCampaignIssuesRequirement, normalizeCampaignIssueScopeSnapshot, RUNNER_CAPABILITY_MIN_PROTOCOL, runnerCapabilityRequirementError, runnerSupportsProtocol,
   type CampaignIssueRef, type CampaignIssueScope, type CampaignIssueScopeRepositoryView, type RunnerCapabilityRequirementDetails,
-  type CampaignIssueScopeRequest, type CampaignIssueScopeSnapshot, type CampaignIssueScopeView, type SessionView, type WorkflowDecisionView, isTerminal } from "@wollipog/protocol";
+  type CampaignIssueScopeRequest, type CampaignIssueScopeSnapshot, type CampaignIssueScopeView, type CampaignScopeProposalView, type SessionView,
+  type WorkflowDecisionView, isTerminal } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import { issueClosureActiveChildren } from "./github-issue-closure.js";
 import { campaignSeedHoldsDelegation } from "./campaign-issue-scope-seed.js";
@@ -13,7 +14,7 @@ export function scopeParticipants(db: ControlPlaneDb, root: SessionView): Sessio
 }
 
 /** Why an Orchestrator participant cannot hold the campaign's scope (#4118), or null. It must be in
- * a Location of a boundary repository; outside the launch repository its runner needs v309. */
+ * a Location of a boundary repository; outside the launch repository its runner needs v313. */
 export function participantScopeRefusal(db: ControlPlaneDb, root: SessionView, member: Pick<SessionView, "id" | "runnerId" | "workspaceId">):
   { error: string; status: number; capability?: RunnerCapabilityRequirementDetails } | null {
   // The root's own workspace always qualifies, even before the campaign records its repository.
@@ -133,6 +134,7 @@ export function scopeView(db: ControlPlaneDb, root: SessionView, repository: str
     supported: !requirement, ...(requirement ? compatibilityFields(requirement) : {}), canPropose: false,
     ...(context.length ? { contextIssueNumbers: context } : {}),
     ...(scopeGrant ? { scopeGrant, policyRevision: root.parentControlPolicy?.revision ?? 0 } : {}),
+    ...(campaignScopeIsProposed(root) ? { scopeProposals: scopeProposalViews(db, root.id) } : {}),
     ...(unverifiedWork.length ? { unverifiedWork } : {}), outsideScope };
 }
 
@@ -152,8 +154,11 @@ export function scopeRequestOutsideBoundary(root: SessionView, request: Campaign
 
 /** The exact change, grouped by repository (#4118): `repository` is the launch repository, whose
  * numbers stay at the top level, and every other boundary repository the scope holds or the change
- * touches is an `otherRepositories` group. A same-numbered issue in two repositories is two entries. */
-export function scopeSnapshot(db: ControlPlaneDb, root: SessionView, repository: string, request: CampaignIssueScopeRequest): CampaignIssueScopeSnapshot | null {
+ * touches is an `otherRepositories` group. A same-numbered issue in two repositories is two entries.
+ * `proposal`: an Orchestrator's recorded proposal (#4282) with its admission when the floors
+ * admitted it. It is part of the snapshot's validation, since only an initial proposal may add nothing. */
+export function scopeSnapshot(db: ControlPlaneDb, root: SessionView, repository: string, request: CampaignIssueScopeRequest,
+  proposal: Pick<CampaignIssueScopeSnapshot, "scopeProposal" | "issueAdmission"> = {}): CampaignIssueScopeSnapshot | null {
   const launch = repository.toLowerCase();
   const allowed = new Set([launch, ...campaignScopeRepositories(root).map((entry) => entry.repository)]);
   if (!request || typeof request.requestId !== "string" || !request.requestId || request.requestId.length > 256 ||
@@ -199,7 +204,9 @@ export function scopeSnapshot(db: ControlPlaneDb, root: SessionView, repository:
   return normalizeCampaignIssueScopeSnapshot({ category: "campaign_issue_scope", repository: launch, expectedRevision: request.expectedRevision,
     before: own!.before, additions: own!.additions, removals: own!.removals, ...(others.length ? { otherRepositories: others } : {}),
     explanation: request.explanation, affectedAssignments, affectedDecisions, activeChildren,
-    ...(request.lineage === undefined ? {} : { lineage: request.lineage }) });
+    ...(request.lineage === undefined ? {} : { lineage: request.lineage }),
+    ...(proposal.scopeProposal ? { scopeProposal: proposal.scopeProposal } : {}),
+    ...(proposal.issueAdmission ? { issueAdmission: proposal.issueAdmission } : {}) });
 }
 
 /** Every outstanding decision the root controls, other than scope requests. A person deciding a
@@ -230,4 +237,33 @@ function scopeChangeAffectsDecision(db: ControlPlaneDb, rootId: string, reposito
 
 export function campaignNeedsEpicScope(root: SessionView): boolean {
   return campaignSeedHoldsDelegation(root.orchestratorPolicy);
+}
+
+/** Whether a Full Control campaign's scope is the Orchestrator's to propose (#4282): its first
+ * message established a grant of status `proposal`, so the server read nothing from the message. */
+export function campaignScopeIsProposed(root: Pick<SessionView, "orchestratorPolicy">): boolean {
+  const policy = root.orchestratorPolicy;
+  const first = policy?.firstMessageScope;
+  return policy?.control?.mode === "full_control" && first?.state === "established" && first.grant?.status === "proposal";
+}
+
+/** Whether a Full Control campaign still waits for its initial scope (#4282): nothing is dispatched
+ * until the Orchestrator's initial proposal, or any scope change its owner approves, is applied. */
+export function campaignAwaitsInitialScope(root: Pick<SessionView, "orchestratorPolicy">): boolean {
+  const first = root.orchestratorPolicy?.firstMessageScope;
+  return campaignScopeIsProposed(root) && first?.state === "established" && !first.initialScope;
+}
+
+/** The Orchestrator's proposals for Campaign Status (#4282), newest first, each with what it led to. */
+export function scopeProposalViews(db: ControlPlaneDb, rootId: string): CampaignScopeProposalView[] {
+  return db.scopeProposalDecisions(rootId).flatMap((decision) => {
+    const snapshot = decision.resourceSnapshot;
+    if (snapshot.category !== "campaign_issue_scope" || !snapshot.scopeProposal) return [];
+    const owner = snapshot.scopeProposal.route === "owner";
+    const outcome: CampaignScopeProposalView["outcome"] = decision.status === "consumed" ? owner ? "owner_approved" : "applied"
+      : decision.status === "pending" || decision.status === "approved" ? owner ? "waiting_for_owner" : "admitted"
+        : decision.status === "denied" ? "owner_declined" : "replaced";
+    return [{ occurrenceId: decision.occurrenceId, createdAt: decision.createdAt, explanation: snapshot.explanation,
+      proposal: snapshot.scopeProposal, outcome }];
+  });
 }

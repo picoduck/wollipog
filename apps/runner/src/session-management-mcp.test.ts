@@ -3680,3 +3680,25 @@ test("wait_pull_request reads a GitLab merge request through glab, never gh or t
   const bare = await callTool(deps, "wait_pull_request", { pullRequest: "group/sub/project!7" });
   assert.equal(bare.isError, true, "a GitLab project without its host is refused");
 });
+
+test("request_campaign_issue_scope_change sends a structured proposal only to a v308 control plane (#4282)", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 201, body: { occurrenceId: "scope_1", authority: "orchestrator" } }));
+  deps.orchestrator = true;
+  const proposal = { issues: [{ repository: "owner/repo", number: 12, origin: "owner_named", rationale: "The owner names #12." }],
+    requestedCount: null, constraints: [], withheldOperations: [] };
+  const args = { requestId: "scope-1", expectedRevision: 2, explanation: "Fix what the owner named.",
+    additions: [{ repository: "owner/repo", number: 12 }], removals: [], proposal };
+  const listed = await dispatch({ jsonrpc: "2.0", id: 3, method: "tools/list" }, deps);
+  const tool = (listed!.result.tools as Array<{ name: string; inputSchema: { properties: Record<string, { required?: string[] }> } }>)
+    .find((candidate) => candidate.name === "request_campaign_issue_scope_change")!;
+  assert.deepEqual(tool.inputSchema.properties.proposal!.required, ["issues", "requestedCount", "constraints", "withheldOperations"]);
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignScopeProposals;
+  assert.equal((await callTool(deps, "request_campaign_issue_scope_change", args)).isError, undefined);
+  assert.equal(calls.at(-1)!.url, `${CP_URL}/api/sessions/${SELF_ID}/campaign/issue-scope/proposals`);
+  assert.deepEqual(calls.at(-1)!.body, args);
+  // An older control plane reads no proposal: it is left out, and the change is still proposed.
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignScopeProposals - 1;
+  assert.equal((await callTool(deps, "request_campaign_issue_scope_change", args)).isError, undefined);
+  const { proposal: _omitted, ...withoutProposal } = args;
+  assert.deepEqual(calls.at(-1)!.body, withoutProposal);
+});

@@ -127,11 +127,22 @@ async function checkSubject(db: ControlPlaneDb, runtime: DecisionRuntime, input:
   return sibling ? outcomeOf(sibling, input) : outcome;
 }
 
+/** The reason a refusal gives the Orchestrator. A typed occurrence's reason is the server's sentence
+ * naming the deciding question (#4283); the deciding answer's evidence follows it, so the Orchestrator
+ * still sees why, as it saw the single-verdict model's reason. A single-verdict record keeps its own. */
+function refusalReason(occurrence: DecisionOccurrenceRecord): string {
+  const reason = occurrence.reason ?? "";
+  const decisive = occurrence.typedAnswers?.decisive;
+  const answer = decisive && occurrence.typedAnswers!.answers.find((candidate) =>
+    candidate.questionId === decisive.questionId && candidate.itemId === decisive.itemId);
+  return answer ? `${reason} The Decision Model's evidence: ${answer.evidence}` : reason;
+}
+
 function outcomeOf(occurrence: DecisionOccurrenceRecord, input: Pick<CampaignCheckInput, "confirm" | "refuse">): CampaignCheckOutcome {
   const occurrenceId = occurrence.occurrenceId;
   if (occurrence.state === "decided" && occurrence.verdict === input.confirm) return { outcome: "confirmed", occurrenceId };
   if (occurrence.state === "decided" && occurrence.verdict === input.refuse) {
-    return { outcome: "refused", occurrenceId, reason: occurrence.reason ?? "" };
+    return { outcome: "refused", occurrenceId, reason: refusalReason(occurrence) };
   }
   return { outcome: "owner", occurrenceId, cause: occurrence.state === "uncertain" ? "uncertain" : "failed",
     ...(occurrence.failureClass ? { failureClass: occurrence.failureClass as DecisionErrorClass } : {}),

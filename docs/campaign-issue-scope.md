@@ -130,7 +130,7 @@ other revocation, or an approval that was never armed stays terminal.
 
 Protocol v208 capability-gates the complete operation before any update. Every active Orchestrator
 participant must run in a Location of one of the campaign's repositories (#4118); finish or move
-incompatible participants first. A participant outside the launch repository needs a v309 runner.
+incompatible participants first. A participant outside the launch repository needs a v313 runner.
 
 ## Repository-Qualified Scope
 

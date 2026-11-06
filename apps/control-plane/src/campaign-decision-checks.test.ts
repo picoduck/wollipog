@@ -115,7 +115,8 @@ test("follow-up relatedness: an unrelated follow-up is refused back to the Orche
   try {
     const refused = await publish(h, "unrelated", recommend(h, "Add a Dark-Mode Theme"));
     assert.deepEqual([refused.ok, refused.status, refused.errorDetails?.code], [false, 409, "unrelated_follow_up"]);
-    assert.match(refused.error!, /The Decision Model's reason: It starts a dark-mode theme the owner did not ask for\./u);
+    // The typed refusal (#4283) names the deciding question and carries that answer's evidence.
+    assert.match(refused.error!, /The Decision Model's reason: The answer violates 'Related to the Requested Work'\. The Decision Model's evidence: It starts a dark-mode theme the owner did not ask for\./u);
     assert.equal(h.db.workflowDecisionByRequestId("child", "unrelated"), null, "no decision for anyone");
   } finally { h.db.close(); }
 });

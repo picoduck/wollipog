@@ -8,6 +8,7 @@ import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, type CampaignIssueSco
   type RunDecisionMessage, type RunnerMetadata } from "@wollipog/protocol";
 import { campaignSeedHoldsDelegation, campaignSeedSubjectState, needsCampaignIssueScopeSeed, seedEpicCandidate } from "./campaign-issue-scope-seed.js";
 import { firstMessageDigest } from "./campaign-launch-admission.js";
+import { campaignAwaitsInitialScope, campaignScopeIsProposed } from "./campaign-issue-scope.js";
 import { fakeDecisionKind, fakeDecisionRuntime, HEALTHY_VERDICTS, type FakeDecisionStep } from "./credential-screen-test-fixture.js";
 import { ControlPlaneDb, RUNNER_REPORTED_STOP } from "./db.js";
 import { DECISION_MAX_ATTEMPTS } from "./decision-runtime.js";
@@ -124,6 +125,23 @@ test("a healthy reading naming an issue with members seeds it as the epic, and d
     const subject = h.db.campaignDecisionSubject(occurrence!.occurrenceId);
     assert.deepEqual([subject?.surface, subject?.sessionId], ["issue_scope_seed", h.id]);
     assert.equal(h.policy().issueScopeSeed!.occurrenceId, occurrence!.occurrenceId);
+  } finally { h.db.close(); }
+});
+
+test("a Custom campaign keeps today's seed reading: no Orchestrator proposal flow, no initial-scope hold (#4282 defers the Custom seed)", async () => {
+  const h = harness("Orchestrate epic #40 and its child issues.", () => named(40));
+  try {
+    await h.settled();
+    assert.equal(h.occurrences().length, 1, "the Decision Model still reads a Custom campaign's first message");
+    assert.equal(h.policy().issueScopeSeed!.state, "seeded");
+    assert.equal(h.policy().issueScopeProposalEpic, 40);
+    assert.equal(campaignScopeIsProposed(h.db.getSession(h.id)!), false);
+    assert.equal(campaignAwaitsInitialScope(h.db.getSession(h.id)!), false);
+    const held = h.delegate();
+    assert.notEqual(held.errorDetails?.code, "initial_scope_not_admitted");
+    assert.match(held.error!, /Confirm the epic's authorized issue scope/u, "the person's scope approval still holds delegation");
+    const view = await h.svc.campaignIssueScope(h.id);
+    assert.equal(view.data!.scopeProposals, undefined, "Campaign Status shows no Scope Proposal section");
   } finally { h.db.close(); }
 });
 
