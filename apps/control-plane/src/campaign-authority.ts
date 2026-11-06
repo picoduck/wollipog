@@ -46,6 +46,14 @@ export function campaignRepositoryLimits(policy: Pick<OrchestratorCampaignPolicy
   return first?.state === "established" ? initialScopeRepositoryLimits(first.initialScope) : [];
 }
 
+/** Whether a first-message limit leaves this repository out of the campaign's work (#4117). The
+ * launch entry stays in the boundary because the root runs there, but it grants no work: no child is
+ * placed in it, and no gate of its is delegated. */
+export function campaignRepositoryOutsideLimit(policy: Pick<OrchestratorCampaignPolicy, "firstMessageScope"> | null | undefined, repository: string): boolean {
+  const limits = campaignRepositoryLimits(policy);
+  return limits.length > 0 && !limits.includes(repository.toLowerCase());
+}
+
 /** The runner's diagnostic copy of a campaign's control. A pre-v288 runner rejects a boundary with
  * a `repositories` list (#4117), and a pre-v322 one an issue authority with `otherEpics` (#4118), so
  * each receives the boundary without them, which names the same first repository and its epics. The
@@ -246,7 +254,15 @@ export function evaluateCampaignAuthority(
     snapshot?.category === "follow_up_issue_publication" && full && control.boundary.issueAuthority;
   const issueBound = !issueOperation || !full || !control.boundary.issueAuthority || Boolean(snapshot && "issueAdmission" in snapshot &&
     snapshot.issueAdmission?.boundaryRevision === control.boundary.revision && (protocol ?? 0) >= 217 && (controllerProtocol ?? 0) >= 217);
-  if (full && (!campaignBoundaryCurrent({ ...controller, parentControlPolicy: policy }) || !repositoryBound || !pullRequestBound || !issueBound)) {
+  // A repository a first-message limit leaves out grants no work (#4117): none of its gates is
+  // delegated, whoever asks, and a child somehow placed there owns nothing. The root still runs in
+  // the launch Location, so only a request about that repository is refused. Scope has its own
+  // floors, and a repository addition is the owner's already.
+  const gatedRepository = snapshot && "repository" in snapshot && snapshot.category !== "campaign_issue_scope" &&
+    snapshot.category !== "campaign_repository_addition" ? snapshot.repository : null;
+  const outsideLimit = (repository: string | null) => repository !== null && campaignRepositoryOutsideLimit(controller.orchestratorPolicy, repository);
+  const limitBound = !outsideLimit(gatedRepository) && (controller.id === requester.id || !outsideLimit(placeRepository));
+  if (full && (!campaignBoundaryCurrent({ ...controller, parentControlPolicy: policy }) || !repositoryBound || !pullRequestBound || !issueBound || !limitBound)) {
     // A stale boundary authorizes nothing, including the server's own Full Control declines.
     const { requestClass: _requestClass, disposition: _disposition, ...rest } = evaluated;
     return { ...rest, owner: "human", basis: "human_required",

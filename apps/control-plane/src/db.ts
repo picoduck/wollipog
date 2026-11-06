@@ -21299,10 +21299,12 @@ export class ControlPlaneDb {
     /** What this Full Control authorization disclosed (#2940). It replaces any earlier record, and
      * a revoke, or an authorization without one, drops it so no stale record outlives its boundary. */
     launchDisclosure?: import("@wollipog/protocol").CampaignLaunchDisclosure,
-    /** A reviewed enable's excluded Project Locations (#4117), replacing any earlier list. */
+    /** An enable's excluded Project Locations (#4117), replacing any earlier list. */
     excludedLocations?: import("@wollipog/protocol").CampaignExcludedLocation[],
     /** With them, the Locations a first-message limit leaves out of that enable, replacing any earlier list. */
-    availableLocations?: import("@wollipog/protocol").CampaignAvailableLocation[]): boolean {
+    availableLocations?: import("@wollipog/protocol").CampaignAvailableLocation[],
+    /** With them, the Locations that enable left waiting because someone else added them. */
+    pendingLocations?: import("@wollipog/protocol").CampaignPendingLocation[]): boolean {
     const campaign = this.sessionOrchestratorPolicy(id);
     const policy = this.parentControlPolicy(id);
     if (!campaign || !policy || policy.revision !== expectedRevision || !validCampaignControl(control) ||
@@ -21337,12 +21339,15 @@ export class ControlPlaneDb {
       campaign.launchDisclosure = structuredClone(launchDisclosure);
     } else delete campaign.launchDisclosure;
     if (excludedLocations) {
-      // A waiting Location someone else added leaves the wait only once the owner has reviewed the
-      // repository it verified as. One that couldn't be read keeps waiting for Include in Campaign
-      // and isn't recorded as excluded, since an exclusion would join on reconnect with no owner step.
+      // Nobody sees an enable's preflight (the app authorizes its digest), so an enable never admits a
+      // Location its owner didn't add: that one waits for Include in Campaign, and isn't recorded as
+      // excluded, since an exclusion would join on reconnect with no owner step (#4117). A waiting
+      // Location leaves the wait only by being in the boundary already.
       const joined = new Set((control.mode === "full_control" ? control.boundary.repositories ?? [] : []).flatMap((entry) => entry.locationIds));
-      const pending = (campaign.pendingLocations ?? []).filter((item) => !joined.has(item.locationId));
-      if (pending.length) campaign.pendingLocations = pending; else delete campaign.pendingLocations;
+      const waiting = pendingLocations ?? [];
+      const pending = [...(campaign.pendingLocations ?? []).filter((item) => !joined.has(item.locationId) && !waiting.some((other) => other.locationId === item.locationId)),
+        ...waiting.filter((item) => !joined.has(item.locationId))].slice(-CAMPAIGN_BOUNDARY_LOCATIONS_MAX);
+      if (pending.length) campaign.pendingLocations = structuredClone(pending); else delete campaign.pendingLocations;
       const stillWaiting = new Set(pending.map((item) => item.locationId));
       const excluded = excludedLocations.filter((item) => !stillWaiting.has(item.locationId));
       if (excluded.length) campaign.excludedLocations = structuredClone(excluded); else delete campaign.excludedLocations;

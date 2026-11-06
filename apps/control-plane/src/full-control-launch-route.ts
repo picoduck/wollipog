@@ -211,9 +211,11 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
  * `settled()` reads them again once every inspection has finished: one that left the Project or the
  * person's reach meanwhile is left out; one now pointing at another runner, workspace or path is
  * not the Location that was inspected, so it reads as unread; one added meanwhile was never
- * inspected and waits for a later inspection. */
+ * inspected and waits for a later inspection. `onlyAddedBy` is an enable's: nobody sees its preflight,
+ * so a Location that person didn't add is never inspected and is listed as `waiting` instead (#4117). */
 function projectLocationSurvey(db: ControlPlaneDb, hub: Hub, principal: AuthPrincipal, input: {
   projectId: string | null; launchLocationId: string | null; rootProtocolVersion: number | null | undefined; timeoutMs?: number;
+  onlyAddedBy?: string;
 }) {
   const { projectId, launchLocationId } = input;
   const reachable = () => projectId && db.canAccessProject(principal, projectId) &&
@@ -221,7 +223,10 @@ function projectLocationSurvey(db: ControlPlaneDb, hub: Hub, principal: AuthPrin
     ? (db.getProject(projectId)?.locations ?? []).filter((location) => location.availability !== "runner_removed" &&
       (location.id === launchLocationId || db.canAccessWorkspace(principal, location.runnerId, location.workspaceId))) : null;
   const locations = reachable();
-  const others = (locations ?? []).filter((location) => location.id !== launchLocationId);
+  const waits = (location: { id: string }) => input.onlyAddedBy !== undefined && location.id !== launchLocationId &&
+    db.projectLocationAddedBy(location.id) !== input.onlyAddedBy;
+  const known = new Set((locations ?? []).map((location) => location.id));
+  const others = (locations ?? []).filter((location) => location.id !== launchLocationId && !waits(location));
   // What each Location was when its inspection started.
   const inspected = new Map(others.map((location) => [location.id, { runnerId: location.runnerId, workspaceId: location.workspaceId,
     path: db.getWorkspacePath(location.runnerId, location.workspaceId) }]));
@@ -249,9 +254,12 @@ function projectLocationSurvey(db: ControlPlaneDb, hub: Hub, principal: AuthPrin
       }));
       return reads.every(Boolean);
     },
-    settled(): { launchLocationId: string | null; locations: CampaignProjectLocation[]; inspections: Map<string, ProjectLocationInspection> } | null {
+    settled(): { launchLocationId: string | null; locations: CampaignProjectLocation[]; inspections: Map<string, ProjectLocationInspection>; waiting: CampaignProjectLocation[] } | null {
       if (!locations) return null;
-      const now = (reachable() ?? []).filter((location) => location.id === launchLocationId || inspected.has(location.id));
+      const current = reachable() ?? [];
+      // Read again: one re-added by someone else while it was inspected waits too.
+      const waiting = current.filter((location) => known.has(location.id) && waits(location));
+      const now = current.filter((location) => !waits(location) && (location.id === launchLocationId || inspected.has(location.id)));
       for (const location of now) {
         const before = inspected.get(location.id);
         if (before && (before.runnerId !== location.runnerId || before.workspaceId !== location.workspaceId ||
@@ -259,7 +267,8 @@ function projectLocationSurvey(db: ControlPlaneDb, hub: Hub, principal: AuthPrin
           inspections.set(location.id, { ok: false, locationId: location.id, failure: "read_failed", reason: PROJECT_LOCATION_INSPECTION_FAILURES.read_failed });
         }
       }
-      return { launchLocationId, locations: now.map((location) => ({ id: location.id, name: location.name })), inspections };
+      return { launchLocationId, locations: now.map((location) => ({ id: location.id, name: location.name })), inspections,
+        waiting: waiting.map((location) => ({ id: location.id, name: location.name })) };
     },
   };
 }
@@ -322,7 +331,7 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
     const ownProjectId = session.projectId ?? null;
     const ownLocationId = session.projectLocationId ?? null;
     const survey = projectLocationSurvey(db, dependencies.hub, principal, { projectId: ownProjectId, launchLocationId: ownLocationId,
-      rootProtocolVersion: runner.protocolVersion, timeoutMs: dependencies.inspectionTimeoutMs });
+      rootProtocolVersion: runner.protocolVersion, timeoutMs: dependencies.inspectionTimeoutMs, onlyAddedBy: principal.userId });
     const lifetime = new AbortController();
     const onClose = () => { if (!reply.raw.writableFinished) lifetime.abort(); };
     reply.raw.once("close", onClose);
@@ -386,7 +395,7 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
       } } : {}) }, revision, principal, derived ?? undefined, derivedLaunchLimits(body.overrides),
       campaignLaunchDisclosure(preflight, "enable", Date.now()),
       proposal.repositories ? { repositories: proposal.repositories, excludedLocations: preflight.summary.excludedLocations ?? [],
-        availableLocations: preflight.summary.availableLocations ?? [] } : undefined);
+        availableLocations: preflight.summary.availableLocations ?? [], pendingLocations: preflight.summary.pendingLocations ?? [] } : undefined);
     if (!result.ok || !result.data) return reply.code(result.status).send({ error: result.error ?? "Full Control was not enabled" });
     return result.data;
   });

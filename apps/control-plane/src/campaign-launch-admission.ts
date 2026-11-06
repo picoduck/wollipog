@@ -278,7 +278,9 @@ export interface CampaignLaunchFacts {
     /** Enabling on an existing campaign: the repositories it already holds, which it keeps. */
     carried?: CampaignBoundaryRepository[] | undefined;
     /** Enabling on an existing campaign: what the owner's first message limited it to. */
-    limits?: string[] | undefined } | null;
+    limits?: string[] | undefined;
+    /** Enabling on an existing campaign: Locations its owner didn't add, which were not inspected. */
+    waiting?: CampaignProjectLocation[] | undefined } | null;
 }
 
 function canonical(value: unknown): string {
@@ -350,7 +352,7 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   const otherIssuesVerified = !otherIssues.length || Boolean(facts.otherIssuesRead && boundary &&
     runnerSupportsProtocol(runner.protocolVersion, "repositoryQualifiedIssueScope") &&
     otherIssues.every((issue) => issue.repository !== repository && boundary.repositories.some((entry) => entry.repository.toLowerCase() === issue.repository)));
-  const locationName =new Map(facts.projectLocations?.locations.map((location) => [location.id, location.name]) ?? []);
+  const locationName = new Map([...facts.projectLocations?.locations ?? [], ...facts.projectLocations?.waiting ?? []].map((location) => [location.id, location.name]));
 
   const acceptedFollowUps = overrides.budget?.acceptedFollowUps ??
     (behavior.followUps === "execute_approved" ? Math.min(MAX_DERIVED_FOLLOW_UPS, Math.max(1, issueNumbers.length + otherIssues.length)) : 0);
@@ -498,6 +500,7 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
         locations: entry.locationIds.map((locationId) => ({ locationId, name: locationName.get(locationId) ?? "Removed Location" })) })),
       excludedLocations: boundary.excluded,
       ...(boundary.available.length ? { availableLocations: boundary.available } : {}),
+      ...(boundary.pending.length ? { pendingLocations: boundary.pending } : {}),
     } : {}),
     issueNumbers, ...(otherIssues.length ? { otherIssues } : {}), objective,
     root: { agentId: plan.agentId, driver: plan.driver, model: plan.config.model ?? null, effort: plan.config.effort ?? null,

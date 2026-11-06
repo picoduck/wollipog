@@ -24,6 +24,12 @@ route; Revoke is unchanged. Orchestrator defaults save the preferred mode and a 
 campaign budget. Neither grants authority, and older settings APIs refuse saving the mode. With
 no saved campaign budget, the campaign has no limit.
 
+The app runs the launch or enable preflight and authorizes its digest in the same action, so no
+person reads the preflight's repository list. Campaign Status is where they are shown, afterward.
+So an enable never admits a Project Location its owner didn't add, or one with no recorded adder: it
+isn't inspected, and it waits for Include in Campaign (#4117). A launch does build its boundary from
+every verified Project Location, including those, because #4117 adds no step before launch.
+
 The Full Control boundary owns every operation it lists, so the Custom per-decision owners never
 apply under it, whatever their toggles say. Review Round Extensions follow a Parent Control grant,
 and otherwise Full Control owns them only within its per-pull-request cap (#4075 changed #3369).

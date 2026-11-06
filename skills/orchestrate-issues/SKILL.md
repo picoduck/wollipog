@@ -262,7 +262,9 @@ writes `owner/repo#12` or its URL. When the message limits the work to some of t
 repositories, send its own words for each as `repositoryNames` (["the api repo", "web"]): the server
 resolves each by full name, name without the owner, or Location name, and refuses an issue outside
 them, now or in a later addition. Admission removes every other repository from the campaign; one comes
-back only through `request_campaign_repository_addition`, which its owner decides. The constraint check
+back only through `request_campaign_repository_addition`, which its owner decides. If the message names
+only other repositories, the launch repository gets no campaign work: place every child in a named one.
+The constraint check
 judges whether the message really limits the work to them, so never send a repository the message only
 mentions or excludes, and never leave out one it limits the work to. Any name that matches none or
 several decides nothing for the whole list, so the proposal becomes the owner's one approval. Ranking criteria such as "highest priority" are your call: explain them in each
