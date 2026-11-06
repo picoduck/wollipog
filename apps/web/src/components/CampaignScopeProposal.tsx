@@ -62,14 +62,14 @@ function checkVerdict(check: CampaignScopeCheckView): { label: string; tone: Sta
 /** The constraint check's verdict and each typed question with its answer and confidence (#4282). */
 export function ScopeProposalCheck({ check }: { check: CampaignScopeCheckView }) {
   const verdict = checkVerdict(check);
-  return <div>
-    <dl className="facts">
-      <div><dt>Decision Model Verdict</dt><dd><StatusBadge noDot tone={verdict.tone} label={verdict.label} />
-        {check.reason ? <> {check.reason}</> : null}
-        {check.failureClass ? <> {DECISION_FAILURE_LABELS[check.failureClass]}</> : null}</dd></div>
-    </dl>
-    {check.typedAnswers ? <DecisionAnswerChecklist typed={check.typedAnswers} /> : null}
-  </div>;
+  // The same row structure as Decision Model Checks: the checklist sits in the value column of an
+  // Answers row, so the label column stays aligned.
+  return <dl className="facts">
+    <div><dt>Decision Model Verdict</dt><dd><StatusBadge noDot tone={verdict.tone} label={verdict.label} />
+      {check.reason ? <> {check.reason}</> : null}
+      {check.failureClass ? <> {DECISION_FAILURE_LABELS[check.failureClass]}</> : null}</dd></div>
+    {check.typedAnswers ? <div><dt>Answers</dt><dd><DecisionAnswerChecklist typed={check.typedAnswers} /></dd></div> : null}
+  </dl>;
 }
 
 /** The facts of one Orchestrator proposal (#4282): each issue with whether you named it or the

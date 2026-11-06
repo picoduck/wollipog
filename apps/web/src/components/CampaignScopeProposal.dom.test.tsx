@@ -132,6 +132,9 @@ test("a checked proposal shows the Decision Model's verdict and each typed quest
       "Deterministic checks, then the Decision Model confirmed issues the Orchestrator chose, constraints it read and operations it withholds against your message.");
     const verdictRow = (article: Element) => [...article.querySelectorAll("dl.facts > div")].find((row) => row.querySelector("dt")?.textContent === "Decision Model Verdict");
     assert.match(verdictRow(latest!)!.querySelector("dd")!.textContent!, /^Within Your Message Every answer is satisfied/u);
+    // The checklist sits in an Answers row's value column, as in Decision Model Checks.
+    assert.ok(facts(latest!).Answers?.startsWith("Answers count at 80% confidence or more."));
+    assert.equal(latest!.querySelectorAll(":scope > dl.facts > div > dd .decision-answer-list").length, 1);
     assert.deepEqual([...latest!.querySelectorAll(".decision-answer-claim")].map((node) => node.textContent),
       ["Satisfies 'Count Matches Your Message'", "Satisfies 'team/repo#31 Slow sync — open'"]);
     assert.equal(facts(earlier!)["Checked By"],
