@@ -7,7 +7,9 @@ import {
   sessionStatusSummary,
   statusMeta,
   type SessionCondition,
+  type SessionStatusContext,
   type SessionStatusSource,
+  type SessionStatusSummary,
   type StatusMeta,
 } from "./status-meta.js";
 
@@ -67,6 +69,59 @@ function snoozedCondition(session: SessionStatusSource, needs: readonly SessionC
   };
 }
 
+const CAMPAIGN_STUCK_DESCRIPTION = "This Full Control campaign has unfinished work and nothing is scheduled to move it. Campaign Status names what is stuck.";
+const CAMPAIGN_CLEANUP_DESCRIPTION = "This Full Control campaign finished, and some cleanup is left. Campaign Status lists each item and how to settle it.";
+const CAMPAIGN_COMPLETE_DESCRIPTION = "This Full Control campaign finished and the server verified it. Its result is informational.";
+
+/**
+ * A session header's status (#2938): `sessionStatusSummary`, plus the campaign state an at-rest
+ * Full Control root's row and Board card already show, decided by the same server facts.
+ *
+ * - Campaign Active, Campaign Complete and Complete, Needs Cleanup take the place of Awaiting Prompt:
+ *   the person owes such a root no prompt. Beside a Completed root they are the secondary.
+ * - Campaign Stuck needs a person, so Awaiting Prompt stays and Campaign Stuck is the secondary,
+ *   ahead of Ready for Review, as on the row.
+ *
+ * Anything that needs the person, a pending Stop, live work, waits, workers, a lost machine, a
+ * Custom campaign or a descendant leaves the summary as it is.
+ */
+export function sessionHeaderStatusSummary(session: SessionStatusSource, context: SessionStatusContext = {}): SessionStatusSummary {
+  const summary = sessionStatusSummary(session, context);
+  const { primary } = summary;
+  const awaitingPrompt = primary.meta.label === statusMeta("session", "idle").label;
+  const completed = primary.meta.label === statusMeta("session", "completed").label;
+  if (!awaitingPrompt && !completed) return summary;
+  if (session.stopOperation || sessionWorking(session as SessionView) || (context.activeWorkers ?? 0) > 0 ||
+      (session.waits?.length ?? 0) > 0) return summary;
+  if (summary.conditions.some((condition) => condition.kind === "disconnected")) return summary;
+  const needs = summary.conditions.filter((condition) => condition.needsYou);
+  // As on the row: only a result waiting for review may sit beside Campaign Stuck, and any other
+  // secondary (a worktree switch, a passive delivery) keeps the summary as it is.
+  const followUpsOnly = needs.length > 0 && needs.every((condition) => condition.kind === "follow_up");
+  if (awaitingPrompt && (needs.length === 0 ? summary.secondary === null : followUpsOnly) && stuckFullControlCampaign(session)) {
+    const stuck: SessionCondition = { kind: "campaign", meta: statusMeta("session", "campaign_stuck"),
+      description: CAMPAIGN_STUCK_DESCRIPTION, needsYou: true };
+    return { primary, secondary: stuck, more: needs.length, conditions: [stuck, ...summary.conditions] };
+  }
+  if (needs.length > 0 || summary.secondary !== null) return summary;
+  const campaign: SessionCondition | null = cleanupFullControlCampaign(session)
+    ? { kind: "campaign", meta: statusMeta("session", "campaign_needs_cleanup"), description: CAMPAIGN_CLEANUP_DESCRIPTION, needsYou: false }
+    : completedFullControlCampaign(session)
+      ? { kind: "campaign", meta: statusMeta("session", "campaign_complete"), description: CAMPAIGN_COMPLETE_DESCRIPTION, needsYou: false }
+      : activeFullControlCampaign(session)
+        // Readiness the server's facts don't prove is never claimed (#2940), as on the row.
+        ? { kind: "campaign", meta: statusMeta("session", "campaign_active"),
+          description: campaignActiveDescription((session as SessionView).orchestratorCampaign), needsYou: false }
+        : null;
+  if (!campaign) return summary;
+  if (completed) {
+    return { ...summary, secondary: campaign, conditions: [primary, campaign, ...summary.conditions.filter((condition) => condition !== primary)] };
+  }
+  // The lifecycle condition is replaced, so the popover never says the agent waits for a prompt.
+  return { primary: campaign, secondary: null, more: 0,
+    conditions: summary.conditions.map((condition) => condition === primary ? campaign : condition) };
+}
+
 /** Lifecycle stays visible; choose one secondary from requests, recovery and passive context. */
 export function sessionRowStatus(session: SessionStatusSource, context: SessionRowStatusContext = {}): SessionRowStatus {
   const { reminder } = context;
@@ -98,8 +153,7 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
       !sessionWorking(session as SessionView) && stuckFullControlCampaign(session)) {
     stuckOverFollowUp = followUpsOnly;
     secondary = { kind: "lifecycle", meta: statusMeta("session", "campaign_stuck"),
-      description: "This Full Control campaign has unfinished work and nothing is scheduled to move it. Campaign Status names what is stuck.",
-      needsYou: true };
+      description: CAMPAIGN_STUCK_DESCRIPTION, needsYou: true };
   } else if ((!secondary || (secondary.kind === "lifecycle" && secondary.meta.tone !== "danger" && !session.stopOperation)) &&
       needs.length === 0 && reminder?.state !== "fired" &&
       session.attention && sessionFollowUp(session as SessionView, { familyWorking: context.familyWorking }).group === "ready_for_review") {
@@ -109,13 +163,12 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
       !session.stopOperation && needs.length === 0 && reminder?.state !== "fired" && !context.familyWorking &&
       !sessionWorking(session as SessionView) && cleanupFullControlCampaign(session)) {
     secondary = { kind: "lifecycle", meta: statusMeta("session", "campaign_needs_cleanup"),
-      description: "This Full Control campaign finished, and some cleanup is left. Campaign Status lists each item and how to settle it.",
-      needsYou: false };
+      description: CAMPAIGN_CLEANUP_DESCRIPTION, needsYou: false };
   } else if ((!secondary || (secondary.kind === "lifecycle" && secondary.meta.label === statusMeta("session", "completed").label)) &&
       !session.stopOperation && needs.length === 0 && reminder?.state !== "fired" && !context.familyWorking &&
       !sessionWorking(session as SessionView) && completedFullControlCampaign(session)) {
     secondary = { kind: "lifecycle", meta: statusMeta("session", "campaign_complete"),
-      description: "This Full Control campaign finished and the server verified it. Its result is informational.", needsYou: false };
+      description: CAMPAIGN_COMPLETE_DESCRIPTION, needsYou: false };
   } else if ((!secondary || (secondary.kind === "lifecycle" && secondary.meta.label === statusMeta("session", "completed").label)) &&
       !session.stopOperation && needs.length === 0 && reminder?.state !== "fired" && !context.familyWorking &&
       !sessionWorking(session as SessionView) && activeFullControlCampaign(session)) {

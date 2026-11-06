@@ -66,7 +66,10 @@ only as prose:
 - A Full Control root hands an occurrence already filed without the rule to the owner with
   `hand_workflow_decision_to_owner`.
 - For a gate with no typed category, a Full Control root asks the owner with
-  `request_owner_decision`.
+  `request_owner_decision` and `kind: "approval"`.
+- For a design choice, clarification or preference, a Full Control root asks an Owner Question:
+  `request_owner_decision` with `kind: "question"` (protocol v303). The owner answers in their own
+  words, the answer grants nothing, and no scope, boundary or policy change revokes the question.
 - Nobody, child or root, ends a turn with such a gate only in prose.
 
 No campaign grants authentication/sign-in, secret disclosure, persistent grants or provider access

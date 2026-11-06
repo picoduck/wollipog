@@ -84,6 +84,7 @@ import {
   columnForStatus,
   isPolicyApproval,
   isTerminal,
+  isOwnerQuestionSnapshot,
   pendingRequests,
   removePendingRequest,
   sessionHolds,
@@ -17733,7 +17734,7 @@ export class ControlPlaneDb {
           WHERE id=? AND parent_control_policy_revision=?`).run(rootId, expectedRevision).changes) !== 1) {
         return refuse(409, "Campaign authority changed; refresh and try again.");
       }
-      const revoked = this.unconsumedWorkflowDecisionsForController(rootId);
+      const revoked = this.authorityBoundWorkflowDecisionsForController(rootId);
       for (const stale of revoked) {
         this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
         this.retireWorkflowDecisionResume(stale.occurrenceId, now);
@@ -17808,7 +17809,7 @@ export class ControlPlaneDb {
             WHERE id=? AND parent_control_policy_revision=?`).run(rootId, parentControlPolicy.revision).changes) !== 1) {
           return refuse(409, "Campaign authority changed; inspect the Location again.");
         }
-        revoked = this.unconsumedWorkflowDecisionsForController(rootId);
+        revoked = this.authorityBoundWorkflowDecisionsForController(rootId);
         for (const stale of revoked) {
           this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
           this.retireWorkflowDecisionResume(stale.occurrenceId, now);
@@ -17882,7 +17883,7 @@ export class ControlPlaneDb {
           WHERE id=? AND parent_control_policy_revision=?`).run(rootId, expectedRevision).changes) !== 1) {
         return refuse(409, "Campaign authority changed; refresh and try again.");
       }
-      const revoked = this.unconsumedWorkflowDecisionsForController(rootId);
+      const revoked = this.authorityBoundWorkflowDecisionsForController(rootId);
       for (const stale of revoked) {
         this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
         this.retireWorkflowDecisionResume(stale.occurrenceId, now);
@@ -17974,7 +17975,7 @@ export class ControlPlaneDb {
         throw new Error("Scope approval was resolved concurrently");
       }
       const affected = new Set(snapshot.affectedDecisions);
-      const revoked = this.unconsumedWorkflowDecisionsForController(root.id)
+      const revoked = this.authorityBoundWorkflowDecisionsForController(root.id)
         .filter((stale) => (!agentSessionId && boundary !== null) || affected.has(stale.occurrenceId));
       for (const stale of revoked) {
         this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
@@ -18068,7 +18069,7 @@ export class ControlPlaneDb {
           WHERE id=? AND parent_control_policy_revision=?`).run(rootId, (control as Extract<CampaignControl, { mode: "full_control" }>).boundary.revision).changes) !== 1) {
         throw new Error("Campaign authority changed concurrently");
       }
-      const revoked = this.unconsumedWorkflowDecisionsForController(rootId);
+      const revoked = this.authorityBoundWorkflowDecisionsForController(rootId);
       for (const stale of revoked) {
         this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
         this.retireWorkflowDecisionResume(stale.occurrenceId, now);
@@ -21129,7 +21130,7 @@ export class ControlPlaneDb {
       if (Number(changed.changes) !== 1) { this.db.exec("ROLLBACK"); return false; }
       if (control.mode === "full_control" && control.boundary.budgetAuthority) this.campaignBudgets.authorize(id, control.boundary.budgetAuthority);
       else if (this.campaignBudgets.view(id)) this.campaignBudgets.stop(id, "revoked", "Human authorization for campaign allowance was revoked.");
-      for (const decision of this.unconsumedWorkflowDecisionsForController(id)) {
+      for (const decision of this.authorityBoundWorkflowDecisionsForController(id)) {
         this.stmt(`UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?)
           WHERE occurrence_id=? AND status IN ('pending','approved')`).run(now, decision.occurrenceId);
         this.retireWorkflowDecisionResume(decision.occurrenceId, now);
@@ -23348,6 +23349,14 @@ export class ControlPlaneDb {
     ).all(controllingSessionId) as unknown[]).map(workflowDecisionFromRow).filter(
       (decision): decision is WorkflowDecisionView => decision !== null,
     );
+  }
+
+  /** The unconsumed decisions a scope, boundary or policy change revokes: every one bound to the
+   * authority it was evaluated under. An Owner Question (#4270) grants nothing and is bound to no
+   * authority, so it stays pending through every such change. */
+  authorityBoundWorkflowDecisionsForController(controllingSessionId: string): WorkflowDecisionView[] {
+    return this.unconsumedWorkflowDecisionsForController(controllingSessionId)
+      .filter((decision) => !isOwnerQuestionSnapshot(decision.resourceSnapshot));
   }
 
   /**

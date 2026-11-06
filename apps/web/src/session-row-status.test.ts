@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { SessionReminderView, SessionView } from "@wollipog/protocol";
-import { sessionRowStatus } from "./session-row-status.js";
+import { sessionHeaderStatusSummary, sessionRowStatus } from "./session-row-status.js";
 import { sessionStatusSummary } from "./status-meta.js";
 
 const session = (extra: Partial<SessionView> = {}): SessionView =>
@@ -327,4 +327,97 @@ test("family work suppresses review readiness without hiding requests or recover
     ["continuation_pending", "Follow-Up Pending"]] as const) {
     assert.equal(label(sessionRowStatus(session({ attention, backgroundWorkState }))), expected);
   }
+});
+
+test("the header's Campaign Active claims continuing automatically only when the server's facts prove it (#2940)", () => {
+  const attention = { version: 1 as const, humanActions: [], meaningfulAt: 1,
+    result: { revision: "r1", at: 1, owner: "human" as const }, acknowledgedRevision: null };
+  const owners = { implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "orchestrator",
+    follow_up_issue_publication: "orchestrator", ui_evidence_approval: "orchestrator", review_round_extension: "orchestrator" };
+  const control = { mode: "full_control", boundary: { version: 1, revision: 3, issueScopeRevision: 1, repository: "owner/repo",
+    objective: "Deliver", authorizedByUserId: "user", authorizedAt: 1, delegatablePolicyIds: [],
+    operations: ["implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval",
+      "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"],
+    issueAuthority: { epics: [], relatedFollowUps: true, maxIssues: 3, closureReasons: ["completed"] } } };
+  const ready = { status: "active", policyRevision: 3, control, decisionOwners: owners, fullControlHumanRequired: [],
+    uiEvidenceReview: { status: "available", effectiveOwner: "orchestrator" },
+    recovery: { unattendedReady: true, automation: { state: "available" }, automatic: 0, waitingHuman: 0, blocked: 0, records: [], truncated: false } };
+  const describe = (campaign: object) => sessionHeaderStatusSummary(session({ status: "idle", attention,
+    orchestratorCampaign: campaign as unknown as NonNullable<SessionView["orchestratorCampaign"]> })).primary.description;
+  assert.equal(describe(ready), "This Full Control campaign continues automatically. Its intermediate results are informational.");
+  assert.equal(describe({ ...ready, fullControlHumanRequired: ["human_required_rules"] }),
+    "This Full Control campaign continues automatically, except the decisions and limits Campaign Status lists under Full Control. Its intermediate results are informational.");
+  assert.equal(describe({ status: "active", policyRevision: 3, control }),
+    "This Full Control campaign continues automatically where it can; Campaign Status shows anything it still needs from you. Its intermediate results are informational.");
+});
+
+test("an active or complete Full Control root's header shows the campaign state instead of Awaiting Prompt (#2938)", () => {
+  const attention = { version: 1 as const, humanActions: [], meaningfulAt: 1,
+    result: { revision: "r1", at: 1, owner: "human" as const }, acknowledgedRevision: null };
+  const fullControl = { mode: "full_control", boundary: { version: 1, revision: 3, issueScopeRevision: 1, repository: "owner/repo",
+    objective: "Deliver", authorizedByUserId: "user", authorizedAt: 1, operations: [], delegatablePolicyIds: [] } };
+  const campaign = (status: string, control: unknown = fullControl) =>
+    ({ status, policyRevision: 3, control }) as unknown as NonNullable<SessionView["orchestratorCampaign"]>;
+  const root = (status: string, extra: Partial<SessionView> = {}) =>
+    session({ status: "idle", attention, orchestratorCampaign: campaign(status), ...extra });
+  const header = (value: SessionView, context = {}) => {
+    const summary = sessionHeaderStatusSummary(value, context);
+    return [summary.primary.meta.label, summary.secondary?.meta.label ?? null, summary.more];
+  };
+
+  for (const [status, label, tone] of [["active", "Campaign Active", "info"], ["verified_complete", "Campaign Complete", "success"],
+    ["complete_needs_cleanup", "Complete, Needs Cleanup", "info"]] as const) {
+    const summary = sessionHeaderStatusSummary(root(status));
+    assert.deepEqual(header(root(status)), [label, null, 0], status);
+    assert.equal(summary.primary.meta.tone, tone, status);
+    assert.equal(summary.primary.meta.pulse, false, `${status} never reads as running`);
+    // The popover lists the campaign state in place of the lifecycle, so nothing says it waits for a prompt.
+    assert.equal(summary.conditions.some((condition) => condition.meta.label === "Awaiting Prompt"), false, status);
+    assert.deepEqual(summary.conditions.map((condition) => condition.kind).filter((kind) => kind === "lifecycle" || kind === "campaign"), ["campaign"], status);
+    // The header and the root's row read the same campaign state.
+    assert.equal(sessionRowStatus(root(status)).badge?.meta.label, label, status);
+    // A Completed root keeps its lifecycle and shows the campaign state beside it, as its row does.
+    assert.deepEqual(header(root(status, { status: "completed" })), ["Completed", label, 0], `${status}, completed`);
+    // Each popover row has its own identity: the campaign state is never a second lifecycle row.
+    const completedKinds = sessionHeaderStatusSummary(root(status, { status: "completed" })).conditions.map((condition) => condition.kind);
+    assert.equal(new Set(completedKinds).size, completedKinds.length, `${status}, completed`);
+  }
+  // A summary row carries only the server's status and the root's own stored control.
+  assert.deepEqual(header(session({ status: "idle", attention, fullControlCampaignStatus: "active",
+    orchestratorPolicy: { control: fullControl } as unknown as SessionView["orchestratorPolicy"] })), ["Campaign Active", null, 0]);
+
+  // A stuck campaign needs a person: Awaiting Prompt stays and Campaign Stuck leads Ready for Review.
+  const stuck = sessionHeaderStatusSummary(root("stuck"));
+  assert.deepEqual(header(root("stuck")), ["Awaiting Prompt", "Campaign Stuck", 1]);
+  assert.equal(stuck.secondary?.meta.tone, "warning");
+  assert.equal(stuck.secondary?.needsYou, true);
+  assert.deepEqual(stuck.conditions.map((condition) => condition.kind), ["campaign", "lifecycle", "follow_up"],
+    "Campaign Stuck is its own popover row beside the lifecycle");
+  assert.equal(sessionRowStatus(root("stuck")).badge?.meta.label, "Campaign Stuck", "the row agrees");
+  assert.deepEqual(header(root("stuck", { attention: { ...attention, result: null } })), ["Awaiting Prompt", "Campaign Stuck", 0]);
+
+  // Everything else keeps today's header.
+  const question = { requestId: "q", kind: "question" as const, title: "Choose", options: [] };
+  const asked = { pendingApproval: question, attention: { ...attention, humanActions: [{ requestId: "q", rank: 3, requestedAt: 1 }] } };
+  for (const status of ["active", "verified_complete", "complete_needs_cleanup", "stuck"]) {
+    assert.deepEqual(header(root(status, asked)), header(session({ status: "idle", ...asked })), `${status}: a request for the person`);
+    assert.equal(header(root(status, { status: "running" }))[0], "Running", `${status}: a running root`);
+    assert.equal(header(root(status, { status: "failed" }))[0], "Failed", `${status}: a failed root`);
+    assert.equal(header(root(status, { parentSessionId: "parent" }))[0], "Awaiting Prompt", `${status}: a descendant`);
+    assert.equal(header(root(status, { orchestratorCampaign: campaign(status, { mode: "custom" }) }))[0], "Awaiting Prompt", `${status}: Custom`);
+    assert.equal(header(root(status), { runnerOnline: false })[0], "Awaiting Prompt", `${status}: a lost machine`);
+    assert.equal(header(root(status), { activeWorkers: 1 })[0], "Awaiting Prompt", `${status}: live workers`);
+    assert.equal(header(root(status, { backgroundWorkState: "running" }))[0], "Awaiting Prompt", `${status}: background work`);
+    assert.equal(header(root(status, { stopOperation: { status: "stop_pending" } as SessionView["stopOperation"] }))[0], "Stop Pending",
+      `${status}: a pending Stop`);
+  }
+  for (const status of ["waiting_human", "blocked", "complete_with_handoffs"]) {
+    assert.deepEqual(header(root(status)), ["Awaiting Prompt", "Ready for Review", 0], status);
+  }
+  assert.deepEqual(header(root("active", { campaignRequests: { human: 1, orchestrator: 0, humanRequestTokens: [] } })),
+    ["Awaiting Prompt", "1 Child Request", 0], "a human-owned campaign request");
+  // Older control planes send no campaign status: the header reads as it always has.
+  assert.deepEqual(header(session({ status: "idle", attention })), ["Awaiting Prompt", "Ready for Review", 0]);
+  assert.deepEqual(header(session({ status: "idle", attention, orchestratorCampaign: undefined })),
+    [sessionStatusSummary(session({ status: "idle", attention })).primary.meta.label, "Ready for Review", 0]);
 });

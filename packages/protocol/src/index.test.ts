@@ -120,7 +120,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 302);
+  assert.equal(PROTOCOL_VERSION, 303);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -358,8 +358,11 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 302", () => {
-  assert.equal(PROTOCOL_VERSION, 302);
+test("PROTOCOL_VERSION is 303", () => {
+  assert.equal(PROTOCOL_VERSION, 303);
+  // Owner Questions need a v303 control plane and root runner (#4270).
+  assert.equal(runnerSupportsProtocol(302, "ownerQuestions"), false);
+  assert.equal(runnerSupportsProtocol(303, "ownerQuestions"), true);
   // Only a v302 runner takes a granted issue-number delivery to a live Orchestrator (#4269).
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueNumberGrant, 302);
   assert.equal(runnerSupportsProtocol(301, "campaignIssueNumberGrant"), false);

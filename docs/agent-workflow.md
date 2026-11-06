@@ -48,7 +48,9 @@ only as prose (#4137):
   later requests for the same resource stay the owner's. The rule only narrows authority.
 - The root hands any occurrence already filed without the rule to the owner with
   `hand_workflow_decision_to_owner`.
-- For a gate with no typed category, the root uses `request_owner_decision`.
+- For a gate with no typed category, the root uses `request_owner_decision` with `kind: "approval"`.
+- For a design choice, clarification or preference, the root asks an Owner Question:
+  `request_owner_decision` with `kind: "question"`, answered in the owner's own words.
 - Nobody ends a turn with such a gate only in prose.
 
 ## Worktree Bases and Checkout Maintenance
