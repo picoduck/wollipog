@@ -980,14 +980,20 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      one-repository campaigns are unchanged for older runners. (This change first claimed 290,
 //      293, 299, 301, 304, 305 and 309, which no released version uses; 292 and 300 are claimed by
 //      open pull requests.)
-// 314: campaign repository additions (#4117). A campaign root asks its owner to add one Project
+// 315: merges in repositories without required checks (#4119). A GitHub merge preflight may ask
+//      for `checks`; the runner then also reads every check reported for the head, how many
+//      GitHub marks required, and whether its merge state is clean, so the control plane can
+//      verify a `pr_merge` snapshot whose `checksBasis` is `all_reported`. A pre-v315 runner is
+//      never asked, and the basis is refused for it. (This change first claimed 292, which no
+//      released version uses; 314 is claimed by an open pull request.)
+// 317: campaign repository additions (#4117). A campaign root asks its owner to add one Project
 //      Location's repository with request_campaign_repository_addition (`wollipog campaign
 //      repository-addition`); the control plane inspects the Location first and creates a
 //      human-owned `campaign_repository_addition` decision, and the root carries out the exact
 //      approved Location with execute_campaign_repository_addition. Older runners and control
-//      planes refuse the tools by name. (This change first claimed 290, 292, 294 and 300, which no
-//      released version uses.)
-export const PROTOCOL_VERSION = 314;
+//      planes refuse the tools by name. (This change first claimed 290, 292, 294, 300 and 314, which
+//      no released version uses; 316 is claimed by an open pull request.)
+export const PROTOCOL_VERSION = 317;
 
 export * from "./campaign-authority.js";
 export * from "./decision-questions.js";
@@ -1575,6 +1581,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   capacityLockDiagnostics: 137,
   /** v288 validates a Full Control boundary's `repositories` list (#4117). */
   campaignRepositoryBoundary: 288,
+  /** v315 reads a pull request's reported checks in the GitHub merge preflight (#4119). */
+  githubMergeChecksBasis: 315,
   /** v291 reports issue facts (kind, state, labels, assignees) for selection scope (#4103). */
   campaignIssueFacts: 291,
   /** v302 (#4269): a `campaign_issue_scope` `grant_issue_numbers` operation hands the issue numbers a
@@ -1585,8 +1593,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   campaignControlRevision: 310,
   /** v313 synchronizes its own repository's part of a multi-repository issue scope (#4118). */
   repositoryQualifiedIssueScope: 313,
-  /** v314 asks for and carries out a campaign repository addition (#4117). */
-  campaignRepositoryAddition: 314,
+  /** v317 asks for and carries out a campaign repository addition (#4117). */
+  campaignRepositoryAddition: 317,
 } as const;
 
 /* ========================================================================== */
@@ -5460,6 +5468,12 @@ export interface CampaignIssueScopeSeed {
   /** SHA-256 of the exact first message the seed reads. */
   messageDigest: string;
   occurrenceId?: string;
+  /** #4282: a pending seed awaits the Custom Orchestrator's proposal (`proposal: true`), checked
+   * against the person's own message; one without it was a server reading in flight before #4282. */
+  proposal?: true;
+  /** Who wrote the first message, which decides what an admitted proposal may grant (#4259): only
+   * the owner's own launch request or message grants issue numbers. */
+  author?: "launch_request" | "owner" | "other" | "unattributed";
 }
 
 export interface CampaignIssueScope {
@@ -5959,6 +5973,11 @@ export type WorkflowDecisionResourceSnapshot =
        * merge only when these are exactly the issues the forge would close. Absent when it closes
        * none, so earlier digests are unchanged. */
       intendedClosures?: string[];
+      /** GitHub only (v315, #4119): the pull request's repository requires no checks, so
+       * `requiredChecks.checks` lists every check reported for the head instead, each passing,
+       * with GitHub's merge state clean. With no checks at all the merge stays a person's
+       * (`no_checks`). Absent for the required-checks basis, so earlier digests are unchanged. */
+      checksBasis?: "all_reported";
     }
   | {
       /** #3369: more review rounds for one epoch of the requester's review run on this pull
@@ -10619,6 +10638,19 @@ export interface GithubMergePreflightMessage {
   repository: string;
   pullRequest: number;
   headSha: string;
+  /** v315 (#4119): also read the head's checks, for a snapshot whose `checksBasis` is `all_reported`. */
+  checks?: true;
+}
+
+/** v315 (#4119): what GitHub reports for a pull request's head: every check, how many it marks
+ * required, and whether its merge state is clean. */
+export interface PullRequestChecksRead {
+  /** Reported checks GitHub marks required for this pull request. */
+  required: number;
+  /** Every check reported for the head, at most 100, by name. */
+  reported: Array<{ name: string; state: "passed" | "pending" | "failing" }>;
+  /** GitHub's `mergeStateStatus` is `CLEAN`. */
+  clean: boolean;
 }
 
 /** `refusal` is set when `ok` is false: `stale_head` (the pull request is not open at the snapshot's
@@ -10632,6 +10664,8 @@ export interface GithubMergePreflightResultMessage {
   refusal?: "stale_head" | "unavailable";
   reason?: string;
   check?: PullRequestClosingReferenceCheck;
+  /** v315: present when the request asked for `checks` and the read succeeded. */
+  checks?: PullRequestChecksRead;
 }
 
 /** v295 (#3762): before a GitLab `pr_merge` is requested or armed, the child's runner reads the open

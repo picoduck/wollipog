@@ -46,6 +46,8 @@ Record each issue's harness, exact model and effort, whether each was fixed or A
 
 Use `create_session` with `useWorktree: true`, the resolved harness, an advertised worker permission mode (not Orchestrator mode), and the resolved `model` and `effort` in the same call, plus `campaignWorkItemId` naming the child's recorded work item. The CLI equivalent is `wollipog session create ... --model <model> --effort <effort> --work-item <id> --worktree`. Omit a dimension only when it is fixed by policy (the server supplies it) or `not applicable`. Explicit values apply before the initial prompt. Prefer structured tool inputs for task text.
 
+Place each child in a Location of the repository its issue belongs to: pass that Location's runner and workspace. Under Full Control the campaign's boundary lists each verified repository of its Project with its Location ids (`control.boundary.repositories` in `get_campaign`); a child must use one of those Locations, or the root's own, and creation refuses any other machine, folder or ad-hoc path with "Full Control children must use a Location of a repository in the campaign's boundary". A child, and every session it starts, works in exactly one repository: its approvals are checked against its own worktree, and its merge, extra review rounds and branch deletion must name pull requests of that repository. Split a task that spans repositories into one child per repository, or into serial assignments. Repository-specific workflow (check names, merge queue, issue format, contribution gates) comes from the target repository's own instructions, which its child loads from its Location; never apply your own repository's rules to another repository's pull requests.
+
 Read the effective pair back from the creation result or `get_session` and confirm it matches the resolved combination. If it does not, stop that child before it does work, record the mismatch, and report it; do not accept an unverified default. A client and server that do not support explicit effort fail closed; report that blocker rather than retrying without effort.
 
 Inspect the actual creation schema: a runner protocol number alone does not expose an input.
@@ -267,6 +269,20 @@ as an Owner Question with your proposal and rationale; proposing the same issues
 same request, and an answer in the owner's own words declines it and reaches you as a prompt. A
 stated count must be one the message writes, your chosen issues stay within it (3 when none is
 stated), and later additions take the same route within the admitted count.
+
+A Custom campaign's first message gets the same propose-then-check treatment, with the authority it
+always had and no new person step. When the first message writes an issue number, `create_session`
+refuses with `seed_proposal_required` until you propose: call `request_campaign_issue_scope_change`
+with exactly the issues the person's message asks the campaign to work on as `additions`, and a
+`proposal` in which every issue is `owner_named` with a one-line `rationale`, plus the count,
+constraints and withheld operations you read. Never add an issue the message only mentions (as
+background, context, an example or something to avoid), and never one you chose: those go through the
+person's ordinary scope approval. Propose no additions when the message asks for no issue work. The
+server checks every such proposal against the person's own words, the empty one included. When it is
+admitted, one issue with sub-issues or checklist members seeds the epic, which the person still
+approves (or they choose Continue Without an Epic); otherwise the issues become the campaign's issue
+numbers and you delegate. A refusal names the issue and question: revise and propose again. When the
+result says the person now decides, wait for their scope approval without proposing again.
 
 A campaign whose stored Scope Grant predates this keeps it. When that grant failed or was uncertain,
 propose the issues you chose without lineage: the proposal goes to the owner as one typed approval,

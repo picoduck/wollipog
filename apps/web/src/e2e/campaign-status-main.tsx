@@ -788,6 +788,37 @@ const SCOPE_CHECK_ANSWERS: import("@wollipog/protocol").DecisionTypedAnswersView
   return { confidenceThreshold: 0.8, questions, answers, decisive: { questionId: "constraint_met__6" } };
 })();
 
+/** A Custom campaign's first-message proposal check (#4282): the person's message names epic #123.
+ * `unsure` leaves whether it asks for #123 below the threshold, so the check is uncertain. */
+function seedCheckAnswers(unsure: boolean): import("@wollipog/protocol").DecisionTypedAnswersView {
+  const choice = (values: string[]) => ({ type: "choice" as const, values });
+  // A parameterized question's label is its parameter: the issue reference and title (issue data,
+  // not UI copy), as the server renders it.
+  const named = "team/repo#123 Composer Epic";
+  const questions = [
+    { questionId: "count_consistent", label: "Count Matches Your Message", text: "Does the proposal's count agree with the owner's message?",
+      answer: choice(["consistent", "inconsistent", "cannot_tell"]) },
+    { questionId: "named_asked_for__1", label: named, parameter: named,
+      text: "Does the owner's message ask the campaign to work on the issue quoted below?", answer: choice(["asked_for", "only_mentioned", "cannot_tell"]) },
+    { questionId: "constraints_complete", label: "Every Stated Constraint Listed", text: "Does the proposal list every stated constraint?",
+      answer: choice(["complete", "missing_constraint", "cannot_tell"]) },
+    { questionId: "nothing_omitted", label: "No Requested Issue Left Out", text: "Does the proposal add every issue the owner asked for?",
+      answer: choice(["complete", "omits_requested", "cannot_tell"]) },
+    { questionId: "operations_respected", label: "Withheld Operations Respected", text: "Does the proposal withhold every operation the message rules out?",
+      answer: choice(["respected", "not_respected", "cannot_tell"]) },
+  ];
+  const satisfied: Record<string, [string, string]> = { count_consistent: ["consistent", "The message states no count, and none was read."],
+    named_asked_for: ["asked_for", "The person writes \"Orchestrate epic #123 and its child issues\"."],
+    constraints_complete: ["complete", "The message states no filter."], nothing_omitted: ["complete", "#123 is the only issue named."],
+    operations_respected: ["respected", "The message rules out no operation."] };
+  const answers = questions.map((question) => {
+    const doubt = unsure && question.questionId === "named_asked_for__1";
+    const [value, evidence] = doubt ? ["cannot_tell", "The message cites #123 as the earlier attempt, not as work to do."] : satisfied[question.questionId.split("__")[0]!]!;
+    return { questionId: question.questionId, value, confidence: doubt ? 0.55 : 0.94, evidence, assessment: doubt ? "unknown" as const : "satisfied" as const };
+  });
+  return { confidenceThreshold: 0.8, questions, answers, ...(unsure ? { decisive: { questionId: "named_asked_for__1" } } : {}) };
+}
+
 const SCOPE_PROPOSALS: import("@wollipog/protocol").CampaignScopeProposalView[] = [{
   occurrenceId: "wd_scope_2", createdAt: NOW - 60_000, outcome: "waiting_for_owner",
   explanation: "You named #123 and #124. For the rest I ranked open UI issues by priority label, then by age.",
@@ -857,6 +888,18 @@ let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["dec
     { occurrenceId: "seed_failed", kind: "scope_grant" as const, promptVersion: "scope_grant.v1", state: "failed" as const,
       failureClass: "provider_overloaded" as const, inputDigests: {}, attempts: [], usage: decisionUsage, createdAt: NOW - 30_000,
       subject: { sessionId: "s_root", surface: "issue_scope_seed" as const, requestId: "issue_scope_seed:b", seed: "owner" as const } },
+  ] : []),
+  // `seedcheck=1`: the same seed on the check of the Orchestrator's first-message proposal (#4282):
+  // one admitted that seeded the epic, and one uncertain, waiting for the owner.
+  ...(params.get("seedcheck") === "1" ? [
+    { occurrenceId: "seed_check_seeded", kind: "scope_check" as const, promptVersion: "scope_check.v1", state: "decided" as const, verdict: "admit",
+      reason: "Every answer is satisfied with at least 80% confidence.", typedAnswers: seedCheckAnswers(false), inputDigests: {}, attempts: [],
+      usage: decisionUsage, createdAt: NOW - 420_000,
+      subject: { sessionId: "s_root", surface: "issue_scope_seed" as const, requestId: "issue_scope_seed:c", seed: "seeded" as const } },
+    { occurrenceId: "seed_check_uncertain", kind: "scope_check" as const, promptVersion: "scope_check.v1", state: "uncertain" as const,
+      verdict: "uncertain", reason: "The answer on 'team/repo#123 Composer Epic' is below the 80% confidence threshold.",
+      typedAnswers: seedCheckAnswers(true), inputDigests: {}, attempts: [], usage: decisionUsage, createdAt: NOW - 30_000,
+      subject: { sessionId: "s_root", surface: "issue_scope_seed" as const, requestId: "issue_scope_seed:d", seed: "owner" as const } },
   ] : []),
 ] : params.get("selection") === "1" ? [
   // `selection=1`: the Decision Model's reviews of selection proposals (#4103): admitted, refused and

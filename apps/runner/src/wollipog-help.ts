@@ -166,7 +166,7 @@ Commands:
              [--sort queue|activity|elapsed|cost] [--limit <n>] [--cursor <cursor>]
              [--recommendations]                 Read the summary and one page or one item
   repository-addition request --input '<json>'  Ask the owner to add a Project Location's repository
-                                                 (protocol v314+): {requestId, locationId, reason,
+                                                 (protocol v317+): {requestId, locationId, reason,
                                                  work: {kind: follow_up|work_item, id}}
   repository-addition get <occurrence-id>        Read the request and the owner's answer
   repository-addition execute <occurrence-id> --digest <resource-digest>

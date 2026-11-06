@@ -44,6 +44,7 @@ import {
 } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignDispatchScopeRefusal, campaignBoundaryCurrent, campaignIssueInScope, campaignLaunchRepository, campaignScopeRepositories, remintCampaignBoundary } from "./campaign-authority.js";
+import { campaignBoundaryRepositoryAt, campaignLocationRepository } from "./campaign-repository-boundary.js";
 import { genericRequestScreenData, storedCredentialScreenFact } from "./credential-screen.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
 import { grantReviewMaxIssues, ownerReviewMaxIssues, proposalMaxIssues } from "./scope-grant.js";
@@ -3584,23 +3585,28 @@ interface CampaignRequestSummaryRow {
 }
 
 function campaignAuthorityFromRows(
-  controller: Pick<SessionRow, "id" | "driver" | "orchestrator_policy" | "parent_control" | "parent_control_policy" | "parent_control_policy_revision" | "runner_id" | "workspace_id">,
+  controller: Pick<SessionRow, "id" | "driver" | "orchestrator_policy" | "parent_control" | "parent_control_policy" | "parent_control_policy_revision" | "runner_id" | "workspace_id" | "project_id">,
   requester: Pick<SessionView, "id" | "driver"> & { repositoryRoot?: string } & Partial<Pick<SessionView, "runnerId" | "workspaceId">>,
   protocol: number | null | undefined,
   request: PendingApproval,
   controllerProtocol: number | null | undefined = protocol,
   peerContractForSession?: (id: string) => unknown,
+  /** #4119: resolves a requester away from the controller's place to its boundary repository. */
+  locations?: Parameters<typeof campaignBoundaryRepositoryAt>[0],
 ) {
   const policy = orchestratorCampaignPolicyFromJson(controller.orchestrator_policy) ?? undefined;
   const control = policy?.control;
   const peerContracts = control?.mode === "full_control" && control.boundary.evidenceAuthority
     ? { controller: peerContractForSession?.(controller.id), requester: peerContractForSession?.(requester.id) } : undefined;
-  return evaluateCampaignAuthority({ id: controller.id, driver: controller.driver as SessionView["driver"], runnerId: controller.runner_id, workspaceId: controller.workspace_id,
+  const view = { id: controller.id, driver: controller.driver as SessionView["driver"], runnerId: controller.runner_id, workspaceId: controller.workspace_id,
     orchestratorPolicy: policy,
     parentControl: controller.parent_control as ParentControlMode,
     parentControlPolicy: { revision: controller.parent_control_policy_revision,
       decisions: parentControlDecisionPolicyFromJson(controller.parent_control_policy) ?? { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
-  }, requester, protocol, request, undefined, controllerProtocol, peerContracts);
+  };
+  const placed = locations && control?.mode === "full_control"
+    ? { ...requester, boundaryRepository: campaignBoundaryRepositoryAt(locations, { ...view, projectId: controller.project_id }, requester) } : requester;
+  return evaluateCampaignAuthority(view, placed, protocol, request, undefined, controllerProtocol, peerContracts);
 }
 
 /** The content-free identity under which a campaign publishes one pending request. A typed workflow
@@ -3645,6 +3651,7 @@ function addCampaignRequestSummary(
   repositoryRoot?: string,
   currentRequest?: (pending: PendingApproval) => PendingApproval,
   peerContractForSession?: (id: string) => unknown,
+  locations?: Parameters<typeof campaignBoundaryRepositoryAt>[0],
 ): void {
   if (request.type === "typed") {
     if (request.authority !== "human" && request.authority !== "orchestrator") return;
@@ -3657,7 +3664,7 @@ function addCampaignRequestSummary(
   for (const pending of pendingRequests(parseJson<PendingApproval>(request.pending_approval))) {
     if (pending.kind === "workflow_decision") continue;
     const authority = controller ? campaignAuthorityFromRows(controller,
-      { id: request.session_id, driver: request.driver, repositoryRoot, runnerId: request.runner_id ?? undefined, workspaceId: request.workspace_id }, runnerProtocol, currentRequest?.(pending) ?? pending, controllerProtocol, peerContractForSession).owner
+      { id: request.session_id, driver: request.driver, repositoryRoot, runnerId: request.runner_id ?? undefined, workspaceId: request.workspace_id }, runnerProtocol, currentRequest?.(pending) ?? pending, controllerProtocol, peerContractForSession, locations).owner
       : evaluateCampaignAuthority({ id: "controller", driver: request.driver, parentControl: mode },
         { id: request.session_id, driver: request.driver }, runnerProtocol, pending).owner;
     counts[authority]++;
@@ -13150,17 +13157,17 @@ export class ControlPlaneDb {
     // Read only this root's bounded ancestry, not the installation's live/archive inventory.
     const ancestors = this.stmt(`WITH RECURSIVE ancestors AS (
       SELECT session.id,session.parent_session_id,session.session_role,session.permission_mode,
-        session.orchestrator_policy,session.parent_control,session.parent_control_policy,session.parent_control_policy_revision,session.driver,session.runner_id,session.workspace_id,runner.protocol_version AS runner_protocol,1 AS depth
+        session.orchestrator_policy,session.parent_control,session.parent_control_policy,session.parent_control_policy_revision,session.driver,session.runner_id,session.workspace_id,session.project_id,runner.protocol_version AS runner_protocol,1 AS depth
       FROM sessions session JOIN session_ownership ownership ON ownership.session_id=session.id
       LEFT JOIN runners runner ON runner.runner_id=session.runner_id
       WHERE session.id=? AND (? OR session.archived=0) AND ${authorization.sql}
       UNION ALL SELECT parent.id,parent.parent_session_id,parent.session_role,parent.permission_mode,
-        parent.orchestrator_policy,parent.parent_control,parent.parent_control_policy,parent.parent_control_policy_revision,parent.driver,parent.runner_id,parent.workspace_id,parent_runner.protocol_version,ancestor.depth+1
+        parent.orchestrator_policy,parent.parent_control,parent.parent_control_policy,parent.parent_control_policy_revision,parent.driver,parent.runner_id,parent.workspace_id,parent.project_id,parent_runner.protocol_version,ancestor.depth+1
       FROM sessions parent JOIN ancestors ancestor ON parent.id=ancestor.parent_session_id
       LEFT JOIN runners parent_runner ON parent_runner.runner_id=parent.runner_id
       WHERE ancestor.depth<64
     ) SELECT * FROM ancestors ORDER BY depth`).all(sessionId,includeArchived ? 1 : 0,...authorization.params) as unknown as
-      Array<{ runner_protocol: number | null } & Pick<SessionRow,"id" | "parent_session_id" | "session_role" | "permission_mode" | "orchestrator_policy" | "parent_control" | "parent_control_policy" | "parent_control_policy_revision" | "driver" | "runner_id" | "workspace_id">>;
+      Array<{ runner_protocol: number | null } & Pick<SessionRow,"id" | "parent_session_id" | "session_role" | "permission_mode" | "orchestrator_policy" | "parent_control" | "parent_control_policy" | "parent_control_policy_revision" | "driver" | "runner_id" | "workspace_id" | "project_id">>;
     // A missing parent, cycle or truncated chain has no trustworthy campaign boundary.
     if (!ancestors.length || ancestors.at(-1)!.parent_session_id !== null) return undefined;
     const root = ancestors.filter((row) => sessionRole({ role: row.session_role as SessionRole | null,
@@ -13187,7 +13194,7 @@ export class ControlPlaneDb {
       Array<CampaignRequestSummaryRow & { protocol_version: number | null }>;
     for (const request of requests) addCampaignRequestSummary(counts,request,root.parent_control,request.protocol_version,root, root.runner_protocol,
       orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control?.mode === "full_control" ? this.sessionRepositoryRoot(request.session_id) : undefined, (pending) => this.campaignPolicyRequest(request.session_id, orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control, pending),
-      (id) => this.campaignPeerContract(id));
+      (id) => this.campaignPeerContract(id), this);
     counts.humanRequestTokens!.sort();
     return counts;
   }
@@ -13363,7 +13370,7 @@ export class ControlPlaneDb {
         principal?.organizationId ?? null, principal?.organizationId ?? null, userId, userId, userId,
         ...authorization.params,
       ) as Array<{ row_json: string }>).map((row) => JSON.parse(row.row_json) as SessionSummaryRow);
-    const ancestry = this.stmt(`SELECT id,parent_session_id,session_role,permission_mode,orchestrator_policy,parent_control,parent_control_policy,parent_control_policy_revision,driver,runner_id,workspace_id,workspace_path,worktree_path
+    const ancestry = this.stmt(`SELECT id,parent_session_id,session_role,permission_mode,orchestrator_policy,parent_control,parent_control_policy,parent_control_policy_revision,driver,runner_id,workspace_id,workspace_path,worktree_path,project_id
       FROM sessions`).all() as unknown as SessionRow[];
     const context: SessionSummaryContext = {
       rows: new Map(ancestry.map((row) => [row.id,row])),
@@ -13433,7 +13440,7 @@ export class ControlPlaneDb {
         if (!counts) continue;
         const root=context.rows.get(rootId)!;
         addCampaignRequestSummary(counts,request,root.parent_control,context.runnerProtocols.get(request.runner_id!) ?? null,root,context.runnerProtocols.get(root.runner_id) ?? null, orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control?.mode === "full_control" ? this.repositoryRootFromRow(context.rows.get(request.session_id)!) : undefined, (pending) => this.campaignPolicyRequest(request.session_id, orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control, pending),
-          (id) => this.campaignPeerContract(id));
+          (id) => this.campaignPeerContract(id), this);
       }
     }
     for (const counts of context.campaignRequests.values()) counts.humanRequestTokens!.sort();
@@ -17446,11 +17453,14 @@ export class ControlPlaneDb {
   /** Record what a Custom campaign's first message, sent after an empty launch, asks of its epic seed
    * (#4104): `pending` for a reading, or `none`. Compare-and-set: only a campaign with no seed, no
    * scope and no seeded epic gets one, so only its first message ever does. */
-  beginCampaignIssueScopeSeed(id: string, seed: { state: "pending" | "none"; messageDigest: string }, now: number): boolean {
+  beginCampaignIssueScopeSeed(id: string, seed: { state: "pending" | "none"; messageDigest: string } &
+    Pick<import("@wollipog/protocol").CampaignIssueScopeSeed, "proposal" | "author">,
+    now: number): boolean {
     const policy = this.sessionOrchestratorPolicy(id);
     if (!policy || policy.issueScopeSeed || policy.issueScope || policy.issueScopeProposalEpic !== undefined) return false;
     const previous = JSON.stringify(policy);
-    policy.issueScopeSeed = { state: seed.state, messageDigest: seed.messageDigest };
+    policy.issueScopeSeed = { state: seed.state, messageDigest: seed.messageDigest,
+      ...(seed.state === "pending" && seed.proposal ? { proposal: true as const } : {}), ...(seed.author ? { author: seed.author } : {}) };
     return Number(this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=? AND orchestrator_policy=?")
       .run(JSON.stringify(policy), now, id, previous).changes) === 1;
   }
@@ -17466,7 +17476,7 @@ export class ControlPlaneDb {
    * the person's own launch request, the provenance Full Control enable trusts (#2940); a reading of
    * a recorded transcript message is never marked. */
   settleCampaignIssueScopeSeed(id: string, messageDigest: string,
-    next: { state: "seeded"; epic: number; occurrenceId: string }
+    next: { state: "seeded"; epic: number; occurrenceId?: string }
       | { state: "none"; occurrenceId?: string; grant?: { issueNumbers: readonly number[]; launchRequest: boolean } }
       | { state: "owner"; occurrenceId?: string }, now: number,
     from: "pending" | "owner" = "pending"): boolean {
@@ -17484,6 +17494,20 @@ export class ControlPlaneDb {
       if (grant.launchRequest) policy.issueNumbersSource = "human_launch_request";
       else delete policy.issueNumbersSource;
     }
+    return Number(this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=? AND orchestrator_policy=?")
+      .run(JSON.stringify(policy), now, id, previous).changes) === 1;
+  }
+
+  /** Mark a Custom campaign's pending seed as awaiting its Orchestrator's proposal (#4282), recording
+   * who wrote the first message. Compare-and-set on the pending seed of exactly this message. */
+  awaitCampaignIssueScopeSeedProposal(id: string, messageDigest: string,
+    author: NonNullable<import("@wollipog/protocol").CampaignIssueScopeSeed["author"]>, now: number): boolean {
+    const policy = this.sessionOrchestratorPolicy(id);
+    const seed = policy?.issueScopeSeed;
+    if (!policy || policy.issueScope || seed?.state !== "pending" || seed.messageDigest !== messageDigest) return false;
+    if (seed.proposal && seed.author === author) return true;
+    const previous = JSON.stringify(policy);
+    policy.issueScopeSeed = { ...seed, proposal: true, author };
     return Number(this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=? AND orchestrator_policy=?")
       .run(JSON.stringify(policy), now, id, previous).changes) === 1;
   }
@@ -17664,14 +17688,7 @@ export class ControlPlaneDb {
     if (!launch) return null;
     if (this.campaignSharesRepositoryWorkspace(root, member)) return launch;
     if (!member.workspaceId || this.getAdHocWorkspacePath(member.id)) return null;
-    for (const entry of campaignScopeRepositories(root)) {
-      for (const id of entry.locationIds) {
-        const location = this.getProjectLocation(id);
-        if (location && location.availability !== "runner_removed" &&
-            location.runnerId === member.runnerId && location.workspaceId === member.workspaceId) return entry.repository;
-      }
-    }
-    return null;
+    return campaignLocationRepository(this, root, campaignScopeRepositories(root), member);
   }
 
   /** The newest Human decision on admitting this follow-up past the campaign's approval limit (#2940). */
@@ -22421,7 +22438,7 @@ export class ControlPlaneDb {
         const evaluation = campaignAuthorityFromRows(campaign, { id: campaign.id, driver: campaign.driver as SessionView["driver"],
           runnerId: campaign.runner_id, workspaceId: campaign.workspace_id, repositoryRoot: this.sessionRepositoryRoot(campaign.id) },
         this.getRunner(campaign.runner_id)?.protocolVersion, this.campaignPolicyRequest(campaign.id, policy.control, request), undefined,
-          (id) => this.campaignPeerContract(id));
+          (id) => this.campaignPeerContract(id), this);
         if (evaluation.owner === "orchestrator") {
           pendingGenericOrchestrator += 1;
           genericOrchestratorRequests.push({ sessionId: campaign.id, occurrenceId: request.occurrenceId ?? request.requestId });
@@ -22439,7 +22456,7 @@ export class ControlPlaneDb {
       let childHasHumanRequest = childPending.some((decision) => decision.authority === "human");
       for (const request of generic) {
         if (campaignAuthorityFromRows(campaign, { id: child.id, driver: child.driver, runnerId: child.runner_id, workspaceId: child.workspace_id, repositoryRoot: policy.control?.mode === "full_control" ? this.sessionRepositoryRoot(child.id) : undefined }, this.getRunner(child.runner_id)?.protocolVersion, this.campaignPolicyRequest(child.id, policy.control, request), policy.control?.mode === "full_control" ? this.getRunner(campaign.runner_id)?.protocolVersion : undefined,
-          (id) => this.campaignPeerContract(id)).owner === "orchestrator") {
+          (id) => this.campaignPeerContract(id), this).owner === "orchestrator") {
           pendingGenericOrchestrator += 1;
           genericOrchestratorRequests.push({ sessionId: child.id, occurrenceId: request.occurrenceId ?? request.requestId });
           orchestratorRequestTokens.push(campaignRequestToken("generic", child.id, request.occurrenceId ?? request.requestId));
@@ -29045,22 +29062,22 @@ export class ControlPlaneDb {
       };
       return campaignAuthorityFromRows(row, { id: row.id, driver: row.driver as SessionView["driver"], runnerId: row.runner_id, workspaceId: row.workspace_id, repositoryRoot: this.repositoryRootFromRow(row) },
         summary ? summary.runnerProtocols.get(row.runner_id) : this.getRunner(row.runner_id)?.protocolVersion, this.campaignPolicyRequest(row.id, orchestratorCampaignPolicyFromJson(row.orchestrator_policy)?.control, request), undefined,
-        (id) => this.campaignPeerContract(id));
+        (id) => this.campaignPeerContract(id), this);
     }
     if (!row.parent_session_id) return undefined;
     const seen = new Set<string>([row.id]);
     let parentId: string | null = row.parent_session_id;
     let controller: Pick<SessionRow,
-      "id" | "parent_session_id" | "permission_mode" | "session_role" | "orchestrator_policy" | "parent_control" | "parent_control_policy" | "parent_control_policy_revision" | "driver" | "runner_id" | "workspace_id"
+      "id" | "parent_session_id" | "permission_mode" | "session_role" | "orchestrator_policy" | "parent_control" | "parent_control_policy" | "parent_control_policy_revision" | "driver" | "runner_id" | "workspace_id" | "project_id"
     > | null = null;
     for (let depth = 0; parentId && depth < 64 && !seen.has(parentId); depth += 1) {
       seen.add(parentId);
       const parent = (summary ? summary.rows.get(parentId) : this.stmt(
         `SELECT id, parent_session_id, permission_mode, session_role, orchestrator_policy, parent_control,
-                parent_control_policy,parent_control_policy_revision,driver,runner_id,workspace_id
+                parent_control_policy,parent_control_policy_revision,driver,runner_id,workspace_id,project_id
          FROM sessions WHERE id=?`,
       ).get(parentId)) as unknown as Pick<SessionRow,
-        "id" | "parent_session_id" | "permission_mode" | "session_role" | "orchestrator_policy" | "parent_control" | "parent_control_policy" | "parent_control_policy_revision" | "driver" | "runner_id" | "workspace_id"
+        "id" | "parent_session_id" | "permission_mode" | "session_role" | "orchestrator_policy" | "parent_control" | "parent_control_policy" | "parent_control_policy_revision" | "driver" | "runner_id" | "workspace_id" | "project_id"
       > | undefined;
       if (!parent) return undefined;
       if (sessionRole({ role: parent.session_role as SessionRole | null, permissionMode: parent.permission_mode }) === "orchestrator" &&
@@ -29076,7 +29093,7 @@ export class ControlPlaneDb {
     return campaignAuthorityFromRows(controller, { id: row.id, driver: row.driver as SessionView["driver"], runnerId: row.runner_id, workspaceId: row.workspace_id, repositoryRoot: orchestratorCampaignPolicyFromJson(controller.orchestrator_policy)?.control?.mode === "full_control" ? this.repositoryRootFromRow(row) : undefined },
       summary ? summary.runnerProtocols.get(row.runner_id) : this.getRunner(row.runner_id)?.protocolVersion, this.campaignPolicyRequest(row.id, orchestratorCampaignPolicyFromJson(controller.orchestrator_policy)?.control, request),
       summary ? summary.runnerProtocols.get(controller.runner_id) : orchestratorCampaignPolicyFromJson(controller.orchestrator_policy)?.control?.mode === "full_control" ? this.getRunner(controller.runner_id)?.protocolVersion : undefined,
-      (id) => this.campaignPeerContract(id));
+      (id) => this.campaignPeerContract(id), this);
   }
 
   private parentedRequestOwner(row: SessionRow, request: PendingApproval, summary?: SessionSummaryContext): WorkflowDecisionAuthority | undefined {
@@ -35015,6 +35032,8 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
   if (seed !== undefined && !(seed && ["pending", "seeded", "none", "owner"].includes(seed.state as string) &&
       typeof seed.messageDigest === "string" && /^[a-f0-9]{64}$/.test(seed.messageDigest) &&
       (seed.occurrenceId === undefined || typeof seed.occurrenceId === "string") &&
+      (seed.proposal === undefined || seed.proposal === true) &&
+      (seed.author === undefined || ["launch_request", "owner", "other", "unattributed"].includes(seed.author as string)) &&
       (seed.state === "seeded") === (value.issueScopeProposalEpic !== undefined))) return null;
   if (value.issueScope && (typeof value.issueScope.repository !== "string" || !campaignRepositoryLocation(value.issueScope.repository) ||
       !Array.isArray(value.issueScope.issueNumbers) || value.issueScope.issueNumbers.length > 100 ||

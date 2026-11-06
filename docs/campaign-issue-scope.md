@@ -1,35 +1,40 @@
 # Campaign Issue Scope
 
 Campaign issue authority is independent of the campaign work ledger. The issues a Custom campaign's
-first message names keep their finite authorization (`issueNumbers`), but only the Decision Model's
-reading grants them (#4259). An epic a Custom campaign's first message names seeds membership
-proposals, never automatic authorization. An epic campaign cannot create delegated sessions until
-its issue scope is authorized. Custom campaigns require the existing human approval.
+first message names keep their finite authorization (`issueNumbers`), but only the Custom
+Orchestrator's checked proposal grants them (#4259, #4282). An epic a Custom campaign's first message
+names seeds membership proposals, never automatic authorization. An epic campaign cannot create
+delegated sessions until its issue scope is authorized. Custom campaigns require the existing human
+approval.
 
-Both come from the Decision Model, not from a regular expression or grammar (#4104, #4259, see
-[Custom Epic Seed](decision-model.md#custom-epic-seed-issue_scope_seed-4104)). A first message that
-writes a digit string gets a pending seed (`issueScopeSeed`), and delegation waits while it is
-pending. The first message is the launch prompt or, for a campaign launched without one, the
-person's first prompt; any other first message is recorded as `none`, so no later message counts as
-the first. One `scope_grant` reading then decides it:
+Neither comes from a regular expression, a grammar or a server reading of the text (#4104, #4259,
+#4282, see [Custom Epic Seed](decision-model.md#custom-epic-seed-issue_scope_seed-4104)). A first
+message that writes a digit string gets a pending seed (`issueScopeSeed`) awaiting the Orchestrator's
+proposal, and delegation waits while it is pending (`seed_proposal_required`). The first message is
+the launch prompt or, for a campaign launched without one, the person's first prompt; any other first
+message is recorded as `none`, so no later message counts as the first. The Orchestrator proposes the
+issues the message asks for, deterministic floors bind them to the message, and the typed constraint
+check (`scope_check`) against the person's own words then decides it:
 
-| Reading | Seed | Issue Numbers | Delegation |
+| Checked Proposal | Seed | Issue Numbers | Delegation |
 |---|---|---|---|
-| Exactly one named issue, no range or selection, and the runner reads members for it | `seeded`: the issue is `issueScopeProposalEpic`, and the scope inspection starts from its members | None | Waits for the person's scope approval |
-| Named issues or ranges (one issue without members included) that every floor keeps and the runner reads as issues of the campaign repository | `none` | The named issues | Proceeds |
-| No issue named to work on: only context references, or a selection without numbers | `none` | None | Proceeds |
-| Failed, uncertain, a floor dropped anything named, the runner couldn't read a named issue, or the runner can't hold an issue scope | `owner`: no seed | None | Waits for the person's scope approval |
+| Admitted: one issue the runner reads members for | `seeded`: the issue is `issueScopeProposalEpic`, and the scope inspection starts from its members | None | Waits for the person's scope approval |
+| Admitted: issues (one issue without members included), each one the runner reads as an issue of the campaign repository, from a message the owner wrote | `none` | The proposed issues | Proceeds |
+| Admitted: no issues (the message names none to work on) | `none` | None | Proceeds |
+| Refused by a floor or the check | Still `pending`: the Orchestrator revises | None | Waits |
+| Uncertain or failed, a fourth distinct check, an older root runner, or issues from a message the owner didn't write | `owner`: no seed | None | Waits for the person's scope approval |
 
-The model may only narrow or confirm: the floors are the scope grant's (`scopeGrantCandidates`), so a
-number the message doesn't write, a reference to a repository outside the campaign's boundary, or a
-range the message doesn't write as one is dropped, and any drop leaves the whole reading with the
-owner rather than granting part of it.
+The model may only narrow or confirm. The floors run first, with no model call: a number the message
+doesn't write (as digits, inside a `#`-written range, or inside a bare-digit range right after "issue"
+or "issues"), another repository's issue, a pull request or an issue the Orchestrator chose is refused,
+granting no part of the proposal. The check always runs, so an empty proposal or one that adds every
+referenced issue can't skip it.
 
-`createSession` is synchronous and the reading isn't, so a campaign is created with no issue numbers.
-Until the reading settles, delegation waits and every GitHub write on an issue takes the person's
-ordinary approval path. Enabling Full Control waits for a pending reading.
+`createSession` is synchronous and the proposal comes later, so a campaign is created with no issue
+numbers. Until the proposal is admitted, delegation waits and every GitHub write on an issue takes the
+person's ordinary approval path. Enabling Full Control waits for a pending seed.
 
-Once the reading grants issue numbers, the control plane stores them and delivers them to the live
+Once an admitted proposal grants issue numbers, the control plane stores them and delivers them to the live
 Orchestrator (#4269): it sends the campaign's runner a `campaign_issue_scope` `grant_issue_numbers`
 operation naming the campaign session and the granted numbers. The runner sets them on the live
 launch policy, which the Claude Code routine-write classifier reads on each ask, and on the stored
@@ -57,22 +62,22 @@ The delivery can only fill an empty grant with numbers this control plane alread
 Only a message the server knows the campaign's owner wrote grants issues: the owner's create request,
 whose issues carry the launch provenance (`issueNumbersSource: "human_launch_request"`) that Full
 Control enable trusts, or the owner's first prompt after an empty launch, whose issues don't. Any other
-first message is left with the owner when its reading names issues: a first prompt from someone else, a
-staged automation launch, or a recorded transcript message whose author was never stored (a restart or
-a pre-upgrade campaign). A reading of one of those can still seed an epic, which waits for the owner's
-scope approval anyway.
+first message is left with the owner when its admitted proposal names issues: a first prompt from
+someone else, a staged automation launch, or a recorded transcript message whose author was never
+stored (a restart or a pre-upgrade campaign). A proposal for one of those can still seed an epic,
+which waits for the owner's scope approval anyway.
 
-A seed left pending with no reading in flight (a control-plane restart) settles as `owner`, with its
-reading recorded as failed. A message without digits makes no Decision call and grants nothing.
-Existing campaigns keep the issue numbers they already hold.
+A seed awaiting the Orchestrator's proposal survives a control-plane restart: the restarted
+Orchestrator proposes as before. Only a pre-#4282 reading left pending with no reading in flight
+settles as `owner`, with its reading recorded as failed. A message without digits needs no proposal,
+makes no Decision call and grants nothing. Existing campaigns keep the issue numbers they already hold.
 
 A Custom campaign whose first message was recorded before the seed existed has no seed: the build
 before #4216 held it by matching that message against a regular expression on every check, and stored
 nothing. So that it doesn't lose its hold on upgrade (#4258), its recorded first message gets the seed
 it would get now. That happens the first time it tries to delegate, its issue scope is read, or it is
-restarted (#4259, in place of the restart's old issue-list backfill), through the same `scope_grant`
-reading and the same table. Nothing is matched against the text. A later message never counts as the
-first.
+restarted (#4259, in place of the restart's old issue-list backfill), through the same proposal, check
+and table. Nothing is matched against the text. A later message never counts as the first.
 
 Approving a scope needs at least one issue, and a campaign whose message names none would otherwise
 wait forever. So the owner may also release an `owner` seed: **Continue Without an Epic** on its

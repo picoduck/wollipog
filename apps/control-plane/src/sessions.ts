@@ -37,18 +37,18 @@ import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignControlForRunner, campaignControlRevisionForRunner, campaignLaunchRepository, campaignScopeRepositories } from "./campaign-authority.js";
+import { campaignBoundaryRepositoryAt } from "./campaign-repository-boundary.js";
 import { genericRequestScreenData, implementationQuestionScreenData, ownerDecisionScreenData, screenCredentialRequest, type CredentialScreenSurface } from "./credential-screen.js";
 import { DECISION_TOTAL_BOUND_MS, DecisionRuntime, hubDecisionTransport, type DecisionOutcome } from "./decision-runtime.js";
 import { DecisionModelSettings } from "./decision-model-settings.js";
 import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, credentialFormFloor, type CredentialScreenFact, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, fullControlAutomaticResponse, type CampaignAuthorityEvaluation, type FullControlAutomaticResponse, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
-import { firstMessageTargetEpics } from "./first-message-issue-intent.js";
+import { digitRangeMembers, firstMessageTargetEpics } from "./first-message-issue-intent.js";
 import { onlyOtherRepositories, proposalMaxIssues } from "./scope-grant.js";
 import { normalizeScopeProposalInput, scopeProposalAgentQuestions, scopeProposalAnswer, scopeProposalChecks, scopeProposalOfRequest,
   type CampaignScopeProposal, type ScopeProposalCheck, type ScopeProposalOwnerCause } from "@wollipog/protocol";
-import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, ownerReviewMaxIssues, scopeGrantCandidates, writtenAsCount, writtenAsDigits,
-  type ScopeGrantFields } from "./scope-grant.js";
+import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, ownerReviewMaxIssues, writtenAsCount, writtenAsDigits } from "./scope-grant.js";
 import { recordUnfinishedDecision, runCampaignCheck, type CampaignCheckOutcome } from "./campaign-decision-checks.js";
 import { DecisionInputError, type DecisionInputs } from "./decision-kinds.js";
 import { SCOPE_CHECKS_PER_ADDITIONS, scopeCheckAdditionsPrefix, scopeCheckInputDigest, scopeCheckInputs, scopeCheckKey,
@@ -59,7 +59,7 @@ import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
   everyOutstandingScopeDecision, campaignAwaitsInitialScope, campaignScopeIsProposed, participantScope, participantScopeRefusal, repositoryOutsideBoundary, scopeRequestOutsideBoundary } from "./campaign-issue-scope.js";
 import { boundedDecisionString, issueClosureRequestInvalid, issueClosureRequestInvalidFields, issueClosureScopeRefusal } from "./issue-closure-request-refusal.js";
-import { needsCampaignIssueScopeSeed, readingNamesIssues, seedEpicCandidate } from "./campaign-issue-scope-seed.js";
+import { needsCampaignIssueScopeSeed } from "./campaign-issue-scope-seed.js";
 import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, heldCampaignIssues, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, githubIssueClosureRefusal, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure,
   CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, CAMPAIGN_PUBLICATION_CORRECTABLE_FAILURES, type CampaignPullRequestRef } from "@wollipog/protocol";
@@ -78,6 +78,7 @@ import { normalizeAutomationCreationSnapshot } from "./automation-creation-snaps
 import { normalizeLocationSwitchSnapshot } from "./location-switch-snapshot.js";
 import { normalizeCampaignRepositoryAdditionSnapshot } from "./campaign-repository-addition-snapshot.js";
 import { INTENDED_CLOSURES_LIMIT, normalizeIntendedClosures, prMergeClosureMismatch, unscopedClosureRefusal, validClosingReferenceCheck } from "./pr-merge-closures.js";
+import { allReportedChecksRefusal, validPullRequestChecksRead } from "./merge-checks-basis.js";
 import { observeReconciliationSnapshot, reconciliationSnapshotAvailable, correctionFrame, latestReconciliationRepair, normalizeReconciledSnapshot, reconciliationRevision } from "./claude-cost-reconciliation.js";
 import type { GithubIssueClosureRequest, GithubIssueClosureResult, GithubIssueClosureSnapshot, IssueClosureProofGapNotice } from "@wollipog/protocol";
 import { issueClosureDeliveryFailure, issueClosureDeliveryGap, issueClosureProofGapNotice } from "@wollipog/protocol";
@@ -533,8 +534,30 @@ const INITIAL_SCOPE_REQUIRED = "Propose this campaign's initial issue scope befo
   "or you chose it and why, the count the owner asked for, the constraints you read and any operations the message withholds. " +
   "Nothing is dispatched until it is admitted. A task that needs no issues proposes none.";
 
+/** What a Custom campaign's first-message proposal led to (#4282): the epic seeded for the person's
+ * scope approval, the issue numbers granted, nothing to grant, or the owner's decision. */
+export interface CampaignSeedProposalResult {
+  seedProposal: { outcome: "epic_seeded" | "issues_granted" | "nothing_granted" | "owner"; epic?: number; issueNumbers?: number[];
+    checkOccurrenceId?: string };
+  message: string;
+}
+
+/** Why a Custom campaign's child creation waits (#4282): its first message named issues, and the
+ * Orchestrator proposes what they are before any work is delegated. */
+const CUSTOM_SEED_PROPOSAL_REQUIRED = "This campaign's first message names issues: propose what it asks for before delegating " +
+  "work. Call request_campaign_issue_scope_change with the issues the person named as additions and a proposal (each issue's " +
+  "origin owner_named and a rationale, the count and constraints you read). The server checks it against the person's own message: " +
+  "one issue with sub-issues seeds the epic the person then approves; otherwise the named issues become this campaign's issues. " +
+  "Propose no additions when the message asks for no issue work.";
+
 function issueScopeSeedKey(rootId: string, messageDigest: string): string {
   return `scope_grant:issue_scope_seed:${rootId}:${messageDigest}`;
+}
+
+/** The key prefix every constraint check of one Custom seed shares (#4282), whatever it proposes:
+ * the seed's check budget counts all of them, so varying the issues buys no further check. */
+function issueScopeSeedCheckPrefix(rootId: string, messageDigest: string): string {
+  return `scope_check:issue_scope_seed:${rootId}:${messageDigest}:`;
 }
 
 /** The seed a Custom campaign's trimmed first message starts (#4104): `pending` for a reading, or
@@ -1361,10 +1384,16 @@ export function normalizeWorkflowDecisionSnapshot(
       return [{ name: check.name, state: "passed" as const,
         ...(typeof check.url === "string" ? { url: check.url } : {}) }];
     }) : [];
+    // #4119: a GitHub repository without required checks cites every reported check instead; with
+    // none at all the merge is the person's, so an empty list is accepted only on that basis.
+    if (value.checksBasis !== undefined && (gitlab || value.checksBasis !== "all_reported")) {
+      return fail("checksBasis must be all_reported, and applies only to a GitHub merge decision");
+    }
+    const allReported = value.checksBasis === "all_reported";
     if (!repo || !pullRequest || !headSha ||
         (value.reviewResult !== "merge" && value.reviewResult !== "merge_with_acknowledged_risk") ||
         !checks || checks.status !== "passed" || checks.headSha !== headSha || !checked ||
-        !Array.isArray(checks.checks) || checkRows.length !== checks.checks.length || checkRows.length < 1) {
+        !Array.isArray(checks.checks) || checkRows.length !== checks.checks.length || (checkRows.length < 1 && !allReported)) {
       return fail("merge decisions require an exact repository, PR, reviewed head, and passing required checks for that head");
     }
     // #3713: the issues a merge is meant to close; the runner's check compares them with what the
@@ -1382,6 +1411,7 @@ export function normalizeWorkflowDecisionSnapshot(
         headSha, status: "passed", checkedAt: checked, checks: checkRows,
       },
       ...(intendedClosures ? { intendedClosures } : {}),
+      ...(allReported ? { checksBasis: "all_reported" as const } : {}),
       ...(gitlab ? {
         mergeMethod: value.mergeMethod as "merge_train" | "merge",
         squash: value.squash as boolean,
@@ -2351,6 +2381,9 @@ export class SessionsService {
   private decisionRuntime: DecisionRuntime;
   /** Custom epic seeds being read, by campaign root (#4104). */
   private readonly issueScopeSeeds = new Map<string, Promise<void>>();
+  /** Custom roots with a first-message seed proposal being checked (#4282): one at a time, so
+   * concurrent proposals can't each pass the seed's check budget. */
+  private readonly seedProposalsInFlight = new Set<string>();
   /** Generic request screens in flight, by session and occurrence, so a restored card never starts two. */
   private readonly credentialScreensInFlight = new Set<string>();
 
@@ -4340,6 +4373,8 @@ export class SessionsService {
     configs: SessionConfig[],
     request: { title?: string; agentId: string },
     members: Array<{ agentId: string; launch: AgentLaunch }> = [],
+    /** Where every member runs; a Full Control campaign checks it as it checks one child (#4119). */
+    place?: { runnerId: string; workspaceId: string },
   ): ServiceResult<SessionConfig[]> {
     if (!parentSessionId || configs.length === 0) return ok(configs);
     const parent = this.db.getSession(parentSessionId);
@@ -4348,6 +4383,11 @@ export class SessionsService {
     }
     const campaignAuthority = this.orchestratorCampaignController(parent);
     if (campaignAuthority === "refused") return fail(MALFORMED_ANCESTRY_AUTHORITY_REFUSAL, 409);
+    if (campaignAuthority?.orchestratorPolicy?.control?.mode === "full_control") {
+      const misplaced = place ? this.campaignPlacementRefusal(campaignAuthority, parent, place)
+        : "Full Control children must use a Location of a repository in the campaign's boundary";
+      if (misplaced) return fail(misplaced, 409);
+    }
     const campaignPolicy = campaignAuthority?.orchestratorPolicy;
     const campaignBehavior = campaignPolicy?.behavior;
     const reserved = { ...this.db.childSessionAllocations(parentSessionId) };
@@ -4441,8 +4481,10 @@ export class SessionsService {
       JSON.stringify(context.evidenceAuthority) !== JSON.stringify(control.boundary.evidenceAuthority) ||
       !scope || !scope.issueNumbers.includes(context.issue) || scope.revision !== context.issueScopeRevision ||
       !rootAudience || !childAudience || !this.db.scopeAudienceContainedWithMembership(rootAudience, childAudience) ||
-      request.runnerId !== root.runnerId || request.workspaceId !== root.workspaceId || request.workspacePath ||
-      request.agentId !== target.agentId || target.runnerId !== root.runnerId ||
+      // The peer runs in a Location of the child's own boundary repository (#4119).
+      request.workspacePath || !campaignBoundaryRepositoryAt(this.db, root, request) ||
+      campaignBoundaryRepositoryAt(this.db, root, request) !== campaignBoundaryRepositoryAt(this.db, root, child) ||
+      request.agentId !== target.agentId || target.runnerId !== request.runnerId ||
       this.db.getRunner(root.runnerId)?.protocolVersion !== context.controllerProtocolVersion ||
       this.db.getRunner(child.runnerId)?.protocolVersion !== context.childProtocolVersion ||
       this.db.getRunner(target.runnerId)?.protocolVersion !== target.runnerProtocolVersion ||
@@ -4491,7 +4533,7 @@ export class SessionsService {
       this.workflowDecisionRelationship(root.id, child.id) &&
       (decision.status !== "pending" || !this.workflowDecisionChildEnded(child)) &&
       (owner === "human" ? Boolean(root.parentControlPolicy) && this.workflowDecisionAuthorityCurrent(root, root.parentControlPolicy!, decision) :
-        evaluateCampaignAuthority(root, child, this.db.getRunner(child.runnerId)?.protocolVersion,
+        evaluateCampaignAuthority(root, this.campaignPlaced(root, child), this.db.getRunner(child.runnerId)?.protocolVersion,
           decision.resourceSnapshot, root.parentControlPolicy, this.db.getRunner(root.runnerId)?.protocolVersion,
           this.campaignPeerContracts(root, child.id)).owner === owner);
   }
@@ -4767,9 +4809,8 @@ export class SessionsService {
       if (!preflight.supported || !campaignBoundaryCurrent(campaignController)) {
         return campaignRefusalFail(preflight.requirement ?? preflight.reason ?? "campaign authority boundary is stale");
       }
-      if (req.runnerId !== campaignController.runnerId || req.workspaceId !== campaignController.workspaceId || req.workspacePath) {
-        return fail("Full Control children must use the campaign's repository workspace and runner", 409);
-      }
+      const misplaced = this.campaignPlacementRefusal(campaignController, parentSession, req);
+      if (misplaced) return fail(misplaced, 409);
     }
     if (launch.driver === "pi") {
       const unsupported = this.capabilityFailure(req.runnerId, "piHarness", "Pi RPC sessions");
@@ -5352,7 +5393,11 @@ export class SessionsService {
       const unsupported = scopeCompatibility(this.db, scopeController);
       if (unsupported) return capabilityFail(unsupported);
       this.settleInterruptedIssueScopeSeed(scopeController);
-      if (this.db.getSession(scopeController.id)?.orchestratorPolicy?.issueScopeSeed?.state === "pending") {
+      const seed = this.db.getSession(scopeController.id)?.orchestratorPolicy?.issueScopeSeed;
+      if (seed?.state === "pending" && seed.proposal) {
+        return { ok: false, status: 409, error: CUSTOM_SEED_PROPOSAL_REQUIRED, errorDetails: { code: "seed_proposal_required" } };
+      }
+      if (seed?.state === "pending") {
         return fail("The Decision Model is still reading this campaign's first message for the epic to seed its issue scope. Retry delegating in a moment.", 409);
       }
       return fail("Confirm the epic's authorized issue scope in Campaign Status before delegating work. Use get_campaign_issue_scope and request_campaign_issue_scope_change, then wait for human approval.", 409);
@@ -6117,14 +6162,48 @@ export class SessionsService {
     return text ? { text, seed: customCampaignIssueScopeSeed(text) } : null;
   }
 
-  /** Start reading a Custom campaign's first message for its epic seed and issues (#4104, #4259),
-   * once per root. `author` decides what the reading may grant (`FirstMessageAuthor`). */
+  /**
+   * A Custom campaign's first message needs its epic seed and issues (#4104, #4259). Since #4282 the
+   * server reads nothing from it: the pending seed waits for the Custom Orchestrator's proposal
+   * (`proposeCampaignSeedScope`), checked against this exact message, and records who wrote it, which
+   * decides what an admitted proposal may grant (`FirstMessageAuthor`). Delegation waits meanwhile.
+   * A root runner that can't send a structured proposal, or run the typed constraint check, takes
+   * today's person route at once: the seed is the owner's, who approves a scope or continues without
+   * an epic.
+   */
   private startCampaignIssueScopeSeed(rootId: string, text: string, author: FirstMessageAuthor): void {
-    if (this.issueScopeSeeds.has(rootId)) return;
-    const run = this.seedCampaignIssueScope(rootId, text, author).catch((error: unknown) => {
-      this.log.warn(JSON.stringify({ event: "campaign_issue_scope_seed_failed", sessionId: rootId, error: String((error as Error)?.message ?? error).slice(0, 200) }));
-    }).finally(() => this.issueScopeSeeds.delete(rootId));
-    this.issueScopeSeeds.set(rootId, run);
+    const root = this.db.getSession(rootId);
+    const seed = root?.orchestratorPolicy?.issueScopeSeed;
+    if (!root || seed?.state !== "pending" || firstMessageDigest(text) !== seed.messageDigest) return;
+    const protocolVersion = this.db.getRunner(root.runnerId)?.protocolVersion;
+    if (!runnerSupportsProtocol(protocolVersion, "campaignScopeProposals") || !runnerSupportsProtocol(protocolVersion, "typedDecisionQuestions")) {
+      this.seedToOwner(root, seed.messageDigest, "runner_incapable");
+      return;
+    }
+    if (this.db.awaitCampaignIssueScopeSeedProposal(rootId, seed.messageDigest, author, Date.now())) this.hub.sessionChangedById(rootId);
+  }
+
+  /** Make a Custom campaign's pending seed the owner's (#4104, #4282): an audited failed occurrence
+   * on the epic-seed surface, so Campaign Status shows it and the owner can approve a scope or
+   * continue without an epic. `occurrenceId` names a check that already settled instead. */
+  private seedToOwner(root: SessionView, messageDigest: string, failureClass: "runner_incapable" | "configuration" | "provider_failed",
+    occurrenceId?: string): void {
+    const now = Date.now();
+    const organizationId = this.db.sessionScope(root.id)?.organizationId;
+    let recorded = occurrenceId;
+    if (!recorded && organizationId) {
+      recorded = recordUnfinishedDecision(this.db, { kind: "scope_check", organizationId, campaignSessionId: root.id,
+        occurrenceKey: `${issueScopeSeedKey(root.id, messageDigest)}:owner`, inputs: { data: {} } },
+      failureClass === "runner_incapable" ? "configuration" : failureClass, now);
+    }
+    if (recorded) {
+      this.db.recordCampaignDecisionSubject({ occurrenceId: recorded, campaignSessionId: root.id, sessionId: root.id, surface: "issue_scope_seed",
+        requestId: `issue_scope_seed:${messageDigest}` }, now);
+    }
+    if (this.db.settleCampaignIssueScopeSeed(root.id, messageDigest, { state: "owner", ...(recorded ? { occurrenceId: recorded } : {}) }, now)) {
+      this.log.info(JSON.stringify({ event: "campaign_issue_scope_seed_owner", sessionId: root.id, cause: failureClass }));
+      this.hub.sessionChangedById(root.id);
+    }
   }
 
   /** Resolves once a root's in-flight epic seed has settled, at once when none is running. */
@@ -6136,7 +6215,10 @@ export class SessionsService {
    * the owner's, like a failed reading. Never re-read from text another way. */
   private settleInterruptedIssueScopeSeed(root: SessionView): void {
     const seed = root.orchestratorPolicy?.issueScopeSeed;
-    if (seed?.state !== "pending" || this.issueScopeSeeds.has(root.id)) return;
+    // A seed awaiting the Orchestrator's proposal (#4282) was never a reading in flight: a restart
+    // leaves it waiting, and the restarted Orchestrator proposes. Only a pre-#4282 reading interrupted
+    // mid-flight is the owner's.
+    if (seed?.state !== "pending" || seed.proposal || this.issueScopeSeeds.has(root.id)) return;
     // The interrupted reading is recorded as failed (joining its occurrence when it had one), so
     // Campaign Status shows it and its owner can continue without an epic.
     const organizationId = this.db.sessionScope(root.id)?.organizationId;
@@ -6154,95 +6236,190 @@ export class SessionsService {
   }
 
   /**
-   * A Custom campaign's first-message reading (#4104, #4259), replacing the `initialCampaignEpic` and
-   * `orchestratorIssueNumbersFromInitialPrompt` grammars. The Decision Model reads the person's first
-   * message as a scope grant, with the same floors as Full Control's (`scopeGrantCandidates`).
+   * A Custom campaign's first-message scope on propose-then-check (#4282), with the authority the
+   * server reading had (#4104, #4259) and no new person step. The Custom root proposes the issues the
+   * person's own first message names (`proposal`, every issue `owner_named`), then:
    *
-   * - When it names exactly one issue, and nothing else to work on, the runner reads that issue: one
-   *   with sub-issues or checklist members is the seeded epic, held for the person's scope approval.
-   * - Otherwise the issues it names, once the floors keep all of them and the runner reads each as an
-   *   issue of the campaign repository, become the campaign's issue numbers.
-   * - A failed or uncertain reading, a floor that drops what the model named, or an issue the runner
-   *   can't read leaves the seed with the owner: delegation waits for the person to approve a scope
-   *   or continue without one, and no issue numbers are granted.
+   * 1. floors, no model: additions only, in the campaign repository; every number written in the
+   *    person's exact message (as digits, or inside a range it writes) and not only another
+   *    repository's; each one an issue the runner reads in the campaign repository;
+   * 2. the typed constraint check (`scope_check`) against that message, always, as the server reading
+   *    always ran: an empty proposal and one that adds every referenced issue are checked too, so
+   *    the Orchestrator alone never decides that a number is only background or that no epic is named;
+   * 3. an admit grants exactly what the reading granted: one issue with sub-issues or checklist
+   *    members is the seeded epic, which still waits for the person's scope approval or Continue
+   *    Without an Epic; otherwise the issues become the campaign's issue numbers with no person step,
+   *    when the owner wrote the message, and are handed to the live Orchestrator. A proposal of no
+   *    issues needs nothing: the seed is `none`.
    *
-   * `author` decides what it may grant (`FirstMessageAuthor`): only the owner's own create request
-   * carries the provenance Full Control enable trusts, and a first prompt from anyone other than the
-   * campaign's owner grants no issue at all.
+   * A refusal (a floor, or the check's) names why and the seed stays pending while the Orchestrator
+   * revises, with at most three distinct checks per seed whatever each proposes, and one proposal
+   * checked at a time; past them, and on an uncertain or failed check, an
+   * unstructured proposal, or a message the server can't confirm, the seed is the owner's (today's
+   * person route). Nothing is parsed from the text. Null when this path doesn't apply, so the
+   * ordinary Custom scope route handles the request.
    */
-  private async seedCampaignIssueScope(rootId: string, text: string, author: FirstMessageAuthor): Promise<void> {
-    const root = this.db.getSession(rootId);
-    const pending = root?.orchestratorPolicy?.issueScopeSeed;
-    if (!root || pending?.state !== "pending") return;
-    const messageDigest = pending.messageDigest;
-    const settle = (next: Parameters<ControlPlaneDb["settleCampaignIssueScopeSeed"]>[2]) => {
-      if (this.db.settleCampaignIssueScopeSeed(rootId, messageDigest, next, Date.now())) this.hub.sessionChangedById(rootId);
-    };
-    const organizationId = this.db.sessionScope(rootId)?.organizationId;
-    if (!organizationId || firstMessageDigest(text) !== messageDigest) return settle({ state: "owner" });
-    const occurrenceKey = issueScopeSeedKey(rootId, messageDigest);
-    const inputs = { ownerMessage: text, data: {} };
-    let outcome: DecisionOutcome | null = null;
-    let occurrenceId: string;
+  async proposeCampaignSeedScope(sessionId: string, request: CampaignIssueScopeRequest): Promise<ServiceResult<CampaignSeedProposalResult> | null> {
+    if (this.seedProposalsInFlight.has(sessionId)) {
+      const seed = this.db.getSession(sessionId)?.orchestratorPolicy?.issueScopeSeed;
+      return seed?.state === "pending" && seed.proposal ? { ok: false, status: 409, error: "A first-message proposal is already being checked. Wait for its result.",
+        errorDetails: { code: "seed_proposal_in_flight" } } : null;
+    }
+    this.seedProposalsInFlight.add(sessionId);
     try {
-      outcome = await this.decisionRuntime.decide({
-        organizationId, kind: "scope_grant", campaignSessionId: rootId, occurrenceKey,
-        automaticHarness: root.agentId ? { runnerId: root.runnerId, agentId: root.agentId, driver: root.driver } : null,
-        inputs, routeToHuman: () => null,
-      });
-      occurrenceId = outcome.occurrenceId;
-    } catch (error) {
-      // A message too large for one call is never read in part, and a reading the runtime can't
-      // finish is recorded as failed: either way the person approves the scope.
-      occurrenceId = recordUnfinishedDecision(this.db, { kind: "scope_grant", organizationId, campaignSessionId: rootId, occurrenceKey, inputs },
-        error instanceof DecisionInputError ? "configuration" : "provider_failed", Date.now());
+      return await this.proposeCampaignSeedScopeOnce(sessionId, request);
+    } finally {
+      this.seedProposalsInFlight.delete(sessionId);
     }
-    this.db.recordCampaignDecisionSubject({ occurrenceId, campaignSessionId: rootId, sessionId: rootId, surface: "issue_scope_seed",
-      requestId: `issue_scope_seed:${messageDigest}` }, Date.now());
-    if (outcome?.outcome !== "verdict") return settle({ state: "owner", occurrenceId });
-    const fields = outcome.fields as unknown as ScopeGrantFields;
-    // Context references and a selection without numbers name no issue to work on: nothing to grant.
-    if (!readingNamesIssues(fields)) return settle({ state: "none", occurrenceId });
-    // The floor that needs no runner runs first: a number the message never writes is not read at all.
-    const named = [...fields.explicit.map((ref) => ref.number), ...fields.ranges.flatMap((range) => [range.first, range.last])];
-    if (named.some((n) => !writtenAsDigits(text, n))) return settle({ state: "owner", occurrenceId });
-    const epic = seedEpicCandidate(fields);
-    let repository: string;
-    if (epic !== null) {
-      const inspected = await this.inspectSeedEpic(root, epic);
-      if (!inspected) return settle({ state: "owner", occurrenceId });
-      if (inspected.members.length) {
-        const kept = scopeGrantCandidates(text, fields, { repository: inspected.repository }).explicit;
-        return settle(kept.length === 1 && kept[0] === epic ? { state: "seeded", epic, occurrenceId } : { state: "owner", occurrenceId });
+  }
+
+  private async proposeCampaignSeedScopeOnce(sessionId: string, request: CampaignIssueScopeRequest): Promise<ServiceResult<CampaignSeedProposalResult> | null> {
+    const root = this.db.getSession(sessionId);
+    const policy = root?.orchestratorPolicy;
+    const seed = policy?.issueScopeSeed;
+    if (!root || !policy || root.parentSessionId || policy.control?.mode === "full_control" || policy.issueScope ||
+        seed?.state !== "pending" || !seed.proposal || !request || typeof request !== "object" || request.lineage !== undefined) return null;
+    const messageDigest = seed.messageDigest;
+    const log = (outcome: string, extra: Record<string, unknown> = {}) => this.log.info(JSON.stringify({ event: "campaign_seed_proposal",
+      sessionId, requestId: typeof request.requestId === "string" ? request.requestId.slice(0, 256) : null, outcome, ...extra }));
+    const refused = (code: string, message: string, details: Record<string, unknown> = {}): ServiceResult<CampaignSeedProposalResult> => {
+      log("refused", { reason: code, ...details });
+      return { ok: false, status: 409, error: message, errorDetails: { code, ...details } };
+    };
+    const owner = (cause: "runner_incapable" | "configuration" | "provider_failed", message: string, occurrenceId?: string): ServiceResult<CampaignSeedProposalResult> => {
+      this.seedToOwner(root, messageDigest, cause, occurrenceId);
+      log("owner", { cause, ...(occurrenceId ? { checkOccurrenceId: occurrenceId } : {}) });
+      return ok({ seedProposal: { outcome: "owner", ...(occurrenceId ? { checkOccurrenceId: occurrenceId } : {}) }, message });
+    };
+    const ownerMessage = "The person now decides this campaign's first-message scope in Campaign Status: they approve a scope or continue " +
+      "without an epic. Wait for it; don't propose again.";
+    // Only a structured proposal from a root runner that can send one is checked; anything else is the owner's.
+    const protocolVersion = this.db.getRunner(root.runnerId)?.protocolVersion;
+    if (request.proposal === undefined || !runnerSupportsProtocol(protocolVersion, "campaignScopeProposals") ||
+        !runnerSupportsProtocol(protocolVersion, "typedDecisionQuestions")) return owner("runner_incapable", ownerMessage);
+    if (!Array.isArray(request.additions) || request.additions.some((r) => !r || typeof r.repository !== "string" || !Number.isSafeInteger(r.number)) ||
+        !boundedIssueNumbers(request.additions.map((r) => r.number)) || typeof request.explanation !== "string" || !request.explanation.trim() ||
+        request.explanation.length > 4000) return { ok: false, status: 400, error: "Provide unique repository-qualified additions, an explanation and a proposal." };
+    if (Array.isArray(request.removals) && request.removals.length) return refused("proposal_additions_only", CAMPAIGN_SCOPE_ADMISSION_REFUSALS.proposal_additions_only.message);
+    const proposal = normalizeScopeProposalInput(request.proposal, request.additions);
+    if (typeof proposal === "string") return { ok: false, status: 400, error: `Provide a well-formed proposal (${proposal}).` };
+    // The seed grants only what the person named, as the reading did: an issue the Orchestrator chose
+    // is the person's ordinary scope approval, never a first-message grant.
+    const chosen = proposal.issues.find((issue) => issue.origin !== "owner_named");
+    if (chosen) return refused("seed_owner_named_only", "A Custom campaign's first-message proposal adds only issues the person's message names " +
+      "(origin owner_named). Propose an issue you chose through the person's scope approval instead.", { issue: chosen.number });
+    // Only the exact message the server recorded for this seed is checked against.
+    const text = this.db.initialUserMessageText(sessionId)?.trim() ?? null;
+    if (text === null || firstMessageDigest(text) !== messageDigest) return owner("configuration", ownerMessage);
+    const organizationId = this.db.sessionScope(sessionId)?.organizationId;
+    if (!organizationId) return owner("configuration", ownerMessage);
+    // Floor: the campaign repository, read from its checkout.
+    const numbers = proposal.issues.map((issue) => issue.number);
+    const single = numbers.length === 1 ? numbers[0]! : null;
+    const repository = await this.inspectCampaignRepository(root);
+    if (!repository) return refused("repository_unverified", "The runner couldn't read the campaign repository from its checkout. Check its GitHub access, then propose again.");
+    if (proposal.issues.some((issue) => issue.repository.toLowerCase() !== repository)) {
+      return refused("repository_outside_boundary", "Every proposed issue must be in the campaign repository.");
+    }
+    // Floor: every number is written in the person's exact message, or inside a range it writes
+    // ("#3-#5", or "issue 1201 through 1207" as the reading allowed), and not only as another
+    // repository's.
+    const references = issueReferencesInMessage(text, repository);
+    const ranges = digitRangeMembers(text);
+    const unwritten = numbers.find((n) => (!writtenAsDigits(text, n) && !references.includes(n) && !ranges.includes(n)) ||
+      onlyOtherRepositories(text, n, [repository]));
+    if (unwritten !== undefined) return refused("owner_named_not_in_message", CAMPAIGN_SCOPE_ADMISSION_REFUSALS.owner_named_not_in_message.message, { issue: unwritten });
+    // Floor: each one an issue the runner reads in the campaign repository. One issue alone is read
+    // for its members first: with any, it is the epic candidate.
+    const epicRead = single !== null ? await this.inspectSeedEpic(root, single) : null;
+    if (epicRead && epicRead.repository !== repository) return refused("repository_unverified", "The runner read the issue in another repository.");
+    if (numbers.length && !epicRead?.members.length) {
+      const verified = await this.verifiedMessageIssues(root, repository, numbers);
+      if (verified.length !== numbers.length) {
+        return refused("not_an_issue", "The runner couldn't read every proposed number as an issue of the campaign repository.",
+          { issue: numbers.find((n) => !verified.includes(n))! });
       }
-      repository = inspected.repository;
-    } else {
-      const inspected = await this.inspectCampaignRepository(root);
-      if (!inspected) return settle({ state: "owner", occurrenceId });
-      repository = inspected;
+      // An issue whose members couldn't be read (the sub-issue read failed, a member was
+      // inaccessible, or the epic exceeds the bounded inspection) may still be an epic: never grant
+      // it as an issue number. As with the reading, its scope is the person's (review round 1).
+      if (single !== null && !epicRead) return owner("configuration", ownerMessage);
     }
-    // The issues the reading names (#4259), under the same floors as Full Control's grant. The model
-    // may only narrow or confirm: a floor that drops anything it named, a reference the runner can't
-    // read as an issue of the campaign repository, or a runner that can't hold an issue scope leaves
-    // the whole reading with the owner rather than granting part of it.
-    if (gitlabIssueCompatibility(this.db, root, repository)) return settle({ state: "owner", occurrenceId });
-    const candidates = scopeGrantCandidates(text, fields, { repository });
-    if (candidates.dropped.length) return settle({ state: "owner", occurrenceId });
-    if (!candidates.explicit.length) return settle({ state: "none", occurrenceId });
-    if (!runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "orchestratorIssueScope")) {
-      return settle({ state: "owner", occurrenceId });
+    // The constraint check always runs, as the server reading always did: the message writes a
+    // number, so whether it asks for that issue, only mentions it, or names an epic the proposal
+    // leaves out is the check's to answer, never the Orchestrator's alone (an empty proposal too).
+    const checks = [...scopeProposalChecks(proposal, references),
+      ...(numbers.some((n) => !writtenAsDigits(text, n)) ? ["unreferenced_named_issues" as const] : [])];
+    const base: CampaignScopeProposal = { initial: true, messageDigest, requestedCount: proposal.requestedCount, constraints: proposal.constraints,
+      withheldOperations: proposal.withheldOperations, checks: [...new Set(checks)], route: "admitted",
+      issues: proposal.issues.map((issue) => ({ number: issue.number, origin: issue.origin, rationale: issue.rationale, title: "" })) };
+    const facts = numbers.length ? await this.seedIssueFacts(root, repository, numbers) : [];
+    if (!facts) return owner("configuration", ownerMessage);
+    // At most three distinct checks per seed, whatever each proposes; a repeat joins its recorded check.
+    const seedPrefix = issueScopeSeedCheckPrefix(sessionId, messageDigest);
+    const key = `${seedPrefix}${scopeCheckKey(sessionId, 0, 0, base)}`;
+    const earlier = this.db.decisionOccurrencesByKeyPrefix(sessionId, seedPrefix, SCOPE_CHECKS_PER_ADDITIONS + 1);
+    if (!earlier.some((recorded) => recorded.occurrenceKey === key) && earlier.length >= SCOPE_CHECKS_PER_ADDITIONS) {
+      return owner("configuration", ownerMessage);
     }
-    // Issue-write authority is the owner's to grant: only a message the server knows the owner wrote
-    // grants issues. A first prompt someone else wrote, a staged automation launch, or a recorded
-    // transcript message whose author was never stored names issues the owner decides on instead.
-    if (author !== "launch_request" && author !== "owner") return settle({ state: "owner", occurrenceId });
-    const verified = await this.verifiedMessageIssues(root, repository, candidates.explicit);
-    if (verified.length !== candidates.explicit.length) return settle({ state: "owner", occurrenceId });
-    const grant = { issueNumbers: verified, launchRequest: author === "launch_request" };
-    if (!this.db.settleCampaignIssueScopeSeed(rootId, messageDigest, { state: "none", occurrenceId, grant }, Date.now())) return;
-    this.hub.sessionChangedById(rootId);
-    // The Orchestrator launched before the reading settled: hand it the numbers now (#4269).
-    await this.deliverGrantedCampaignIssueNumbers(rootId, rootId, verified);
+    const check = await this.scopeProposalCheck(root, organizationId, key,
+      scopeCheckInputs(text, { ...base, issues: base.issues.map((issue) => ({ ...issue, title: facts.find((fact) => fact.number === issue.number)?.title ?? "" })) },
+        request.explanation, facts, { repository, operations: [], inScope: [] }));
+    this.db.recordCampaignDecisionSubject({ occurrenceId: check.occurrenceId, campaignSessionId: sessionId, sessionId, surface: "issue_scope_seed",
+      requestId: `issue_scope_seed:${messageDigest}` }, Date.now());
+    if (check.state === "decided" && check.verdict === "refuse") {
+      return refused("constraint_check_refused", `${CAMPAIGN_SCOPE_ADMISSION_REFUSALS.constraint_check_refused.message}${check.reason ? ` ${check.reason}` : ""}`,
+        { occurrenceId: check.occurrenceId, ...(check.reason ? { reason: check.reason } : {}) });
+    }
+    if (check.state !== "decided" || check.verdict !== "admit") {
+      return owner(check.state === "uncertain" ? "configuration" : "provider_failed", ownerMessage, check.occurrenceId);
+    }
+    const checkOccurrenceId = check.occurrenceId;
+    const occurrence = { occurrenceId: checkOccurrenceId };
+    // A proposal of no issues: the message asks for no issue work, so nothing waits.
+    if (!numbers.length) {
+      if (this.db.settleCampaignIssueScopeSeed(sessionId, messageDigest, { state: "none", ...occurrence }, Date.now())) this.hub.sessionChangedById(sessionId);
+      log("none", occurrence);
+      return ok({ seedProposal: { outcome: "nothing_granted", ...(checkOccurrenceId ? { checkOccurrenceId } : {}) },
+        message: "Nothing to grant: the campaign delegates without an epic or issue numbers." });
+    }
+    // One issue with members is the seeded epic, which still waits for the person's scope approval.
+    if (single !== null && epicRead?.members.length) {
+      if (!this.db.settleCampaignIssueScopeSeed(sessionId, messageDigest, { state: "seeded", epic: single, ...occurrence }, Date.now())) {
+        return { ok: false, status: 409, error: "This campaign's first-message seed changed concurrently; read it again." };
+      }
+      this.hub.sessionChangedById(sessionId);
+      log("seeded", { epic: single, ...occurrence });
+      return ok({ seedProposal: { outcome: "epic_seeded", epic: single, ...(checkOccurrenceId ? { checkOccurrenceId } : {}) },
+        message: "The epic is seeded. The person approves its issue scope in Campaign Status before work is delegated." });
+    }
+    // Issue numbers: only from a message the server knows the owner wrote, on a runner that can hold
+    // them, in a repository the campaign can scope. Anything else is the owner's, as with the reading.
+    if (gitlabIssueCompatibility(this.db, root, repository) || !runnerSupportsProtocol(protocolVersion, "orchestratorIssueScope") ||
+        (seed.author !== "launch_request" && seed.author !== "owner")) return owner("configuration", ownerMessage, checkOccurrenceId);
+    const grant = { issueNumbers: [...numbers].sort((a, b) => a - b), launchRequest: seed.author === "launch_request" };
+    if (!this.db.settleCampaignIssueScopeSeed(sessionId, messageDigest, { state: "none", ...occurrence, grant }, Date.now())) {
+      return { ok: false, status: 409, error: "This campaign's first-message seed changed concurrently; read it again." };
+    }
+    this.hub.sessionChangedById(sessionId);
+    log("granted", { issues: grant.issueNumbers.length, ...occurrence });
+    // The Orchestrator launched before the proposal: hand it the numbers now (#4269).
+    await this.deliverGrantedCampaignIssueNumbers(sessionId, sessionId, grant.issueNumbers);
+    return ok({ seedProposal: { outcome: "issues_granted", issueNumbers: grant.issueNumbers, ...(checkOccurrenceId ? { checkOccurrenceId } : {}) },
+      message: "The issues are this campaign's issue numbers. Delegate the work." });
+  }
+
+  /** The proposed issues' facts for the constraint check, or null when the runner can't report them. */
+  private async seedIssueFacts(root: SessionView, repository: string, numbers: number[]): Promise<CampaignIssueFacts[] | null> {
+    if (!runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "campaignIssueFacts")) return null;
+    const requestId = `issue_scope_seed_facts_${randomUUID()}`;
+    try {
+      const response = await this.hub.requestFromRunner(root.runnerId, requestId, { type: "campaign_issue_scope", operation: "inspect", requestId,
+        sessionId: root.id, issues: numbers, facts: true }, 60_000);
+      if (response.type !== "campaign_issue_scope_result" || !response.ok || response.sessionId !== root.id ||
+          response.repository?.toLowerCase() !== repository || !Array.isArray(response.issueFacts)) return null;
+      const facts = numbers.map((n) => response.issueFacts!.find((fact) => validCampaignIssueFacts(fact) && fact.number === n));
+      return facts.every(Boolean) ? facts as CampaignIssueFacts[] : null;
+    } catch { return null; }
   }
 
   /**
@@ -10216,9 +10393,39 @@ export class SessionsService {
     const repositoryRoot = controller.orchestratorPolicy?.control?.mode === "full_control" && request.context?.operation
       ? this.db.sessionRepositoryRoot(requester.id) : undefined;
     const workspaceId = requester.workspaceId ?? (controller.orchestratorPolicy?.control?.mode === "full_control" ? this.db.getSession(requester.id)?.workspaceId : undefined);
-    return evaluateCampaignAuthority(controller, { ...requester, workspaceId, repositoryRoot: repositoryRoot ?? undefined }, this.db.getRunner(requester.runnerId)?.protocolVersion, this.db.campaignPolicyRequest(requester.id, controller.orchestratorPolicy?.control, request), controller.parentControlPolicy,
+    return evaluateCampaignAuthority(controller, this.campaignPlaced(controller, { ...requester, workspaceId, repositoryRoot: repositoryRoot ?? undefined }), this.db.getRunner(requester.runnerId)?.protocolVersion, this.db.campaignPolicyRequest(requester.id, controller.orchestratorPolicy?.control, request), controller.parentControlPolicy,
       controller.orchestratorPolicy?.control?.mode === "full_control" ? this.db.getRunner(controller.runnerId)?.protocolVersion : undefined,
       this.campaignPeerContracts(controller, requester.id));
+  }
+
+  /** Why a Full Control campaign refuses a new child at this place (#4119), or null. It must use a
+   * Location of a boundary repository, and a child of a child stays in its parent's repository, so
+   * each session works in exactly one. An ad-hoc path is never a Location. Sessions, runs and
+   * workflows all apply it. */
+  private campaignPlacementRefusal(root: SessionView, parent: SessionView | null,
+    place: { runnerId: string; workspaceId?: string | null; workspacePath?: string }): string | null {
+    if (root.orchestratorPolicy?.control?.mode !== "full_control") return null;
+    const repository = place.workspacePath ? null : campaignBoundaryRepositoryAt(this.db, root, place);
+    const parentRepository = parent && parent.id !== root.id ? campaignBoundaryRepositoryAt(this.db, root, parent) : repository;
+    return repository && parentRepository === repository ? null
+      : "Full Control children must use a Location of a repository in the campaign's boundary";
+  }
+
+  /** A campaign participant runs in a Location of a boundary repository, and in the same one as the
+   * campaign session it serves (#4119): its parent, unless that parent is the root, which serves
+   * every repository. */
+  private campaignServesOwnRepository(root: SessionView, session: SessionView): boolean {
+    const repository = campaignBoundaryRepositoryAt(this.db, root, session);
+    if (!repository) return false;
+    const parent = session.parentSessionId && session.parentSessionId !== root.id ? this.db.getSession(session.parentSessionId) : null;
+    return !parent || campaignBoundaryRepositoryAt(this.db, root, parent) === repository;
+  }
+
+  /** The requester with the boundary repository whose Location it runs in (#4119), for campaign
+   * authority. Resolved from its own runner and workspace, never from anything it sent. */
+  private campaignPlaced<T extends { runnerId?: string; workspaceId?: string | null }>(controller: SessionView, requester: T):
+    T & { boundaryRepository: string | null } {
+    return { ...requester, boundaryRepository: campaignBoundaryRepositoryAt(this.db, controller, requester) };
   }
 
   /** Synchronous provider requests park the root model. Settle only eligible exact occurrences
@@ -10609,7 +10816,7 @@ export class SessionsService {
     const control = root?.orchestratorPolicy?.control;
     if (!root || !member || control?.mode !== "full_control" || !control.boundary.budgetAuthority || !campaignBoundaryCurrent(root) ||
         !this.db.campaignBudgets.active(member.id) || isTerminal(member.status) || hasBlockingPendingRequest(member.pendingApproval) ||
-        member.runnerId !== root.runnerId || member.workspaceId !== root.workspaceId) return fail("review worker is not an active admitted participant in the current campaign boundary", 409);
+        !this.campaignServesOwnRepository(root, member)) return fail("review worker is not an active admitted participant in the current campaign boundary", 409);
     const accountingError = this.campaignBudgetConfigError(member);
     if (accountingError) return campaignRefusalFail(accountingError);
     const error = this.db.campaignBudgets.admissionError(worker.sessionId);
@@ -11407,7 +11614,7 @@ export class SessionsService {
     const preflight = campaignAuthorityPreflight(control, driver, this.db.getRunner(session.runnerId)?.protocolVersion,
       this.pacedVideoInstallationContract(session.runnerId, session.agentId));
     if (!preflight.supported) return preflight.requirement ?? preflight.reason ?? "campaign allowance requires supported accounting peers";
-    if (session.runnerId !== controller.runnerId || session.workspaceId !== controller.workspaceId) return "campaign allowance requires the original runner and workspace";
+    if (!this.campaignServesOwnRepository(controller, session)) return "campaign allowance requires a Location of the same boundary repository as the session it serves";
     if (view.state !== "active") return view.reason ?? "campaign allowance unavailable";
     if(view.authority.controlledReview) {
       const capability=this.db.getRunner(controller.runnerId)?.runtime?.campaignReview;
@@ -13139,6 +13346,12 @@ export class SessionsService {
     const gitlab = snapshot.mergeMethod !== undefined;
     const forge = gitlab ? "GitLab" : "GitHub";
     const runner = this.db.getRunner(child.runnerId);
+    // #4119: only a runner that reads the head's checks can support the all-reported basis.
+    const allReported = snapshot.checksBasis === "all_reported";
+    if (allReported && !runnerSupportsProtocol(runner?.protocolVersion, "githubMergeChecksBasis")) {
+      return { ok: false, revoke: false, message: runnerCapabilityRequirementError(runner?.protocolVersion, "githubMergeChecksBasis",
+        "merges in repositories without required checks").error };
+    }
     if (!runner || !runnerSupportsProtocol(runner.protocolVersion,
       gitlab ? "gitlabMergeClosingReferences" : "githubMergeClosingReferences")) return { ok: true };
     const unreadable = (reason: string) => ({ ok: false as const, revoke: false,
@@ -13149,7 +13362,7 @@ export class SessionsService {
     try {
       answer = await this.hub.requestFromRunner(child.runnerId, requestId, {
         type, requestId, sessionId: child.id, repository: snapshot.repository,
-        pullRequest: snapshot.pullRequest, headSha: snapshot.headSha,
+        pullRequest: snapshot.pullRequest, headSha: snapshot.headSha, ...(allReported ? { checks: true as const } : {}),
       }, gitlab ? GITLAB_MERGE_CLOSURES_TIMEOUT_MS : GITHUB_MERGE_PREFLIGHT_TIMEOUT_MS);
     } catch {
       return unreadable("the runner did not answer.");
@@ -13165,7 +13378,14 @@ export class SessionsService {
     const check = validClosingReferenceCheck(result.check, gitlab ? snapshot.repository : undefined);
     if (!check) return unreadable("the runner's answer was incomplete.");
     const mismatch = prMergeClosureMismatch(snapshot.intendedClosures ?? [], check.closures, gitlab ? "gitlab" : "github");
-    return mismatch ? { ok: false, revoke: true, message: mismatch } : { ok: true, check };
+    if (mismatch) return { ok: false, revoke: true, message: mismatch };
+    if (allReported) {
+      const checks = validPullRequestChecksRead((result as Partial<GithubMergePreflightResultMessage>).checks);
+      if (!checks) return unreadable("the runner's answer was incomplete.");
+      const refused = allReportedChecksRefusal(snapshot, checks);
+      if (refused) return { ok: false, ...refused };
+    }
+    return { ok: true, check };
   }
 
   createWorkflowDecision(
@@ -13276,7 +13496,7 @@ export class SessionsService {
     let authority = evaluated.effectiveOwner;
     const screenedQuestion = category === "implementation_question" &&
       controller.session.orchestratorPolicy?.control?.mode === "full_control";
-    const authorityEvaluation = evaluateCampaignAuthority(controller.session, child,
+    const authorityEvaluation = evaluateCampaignAuthority(controller.session, this.campaignPlaced(controller.session, child),
       this.db.getRunner(child.runnerId)?.protocolVersion, normalized.data, controller.policy,
       this.db.getRunner(controller.session.runnerId)?.protocolVersion, this.campaignPeerContracts(controller.session, child.id),
       this.reviewExtensionCap(child.id, normalized.data),
@@ -14059,7 +14279,7 @@ export class SessionsService {
       return fail("Only the campaign's owner can decide a decision the owner kept", 403);
     }
     if (authority === "orchestrator" && parentSessionId === childSessionId &&
-        evaluateCampaignAuthority(currentParent, currentChild, this.db.getRunner(currentChild.runnerId)?.protocolVersion,
+        evaluateCampaignAuthority(currentParent, this.campaignPlaced(currentParent, currentChild), this.db.getRunner(currentChild.runnerId)?.protocolVersion,
           decision.resourceSnapshot, currentPolicy, this.db.getRunner(currentParent.runnerId)?.protocolVersion,
           this.campaignPeerContracts(currentParent, currentChild.id)).basis !== "standing_authorization") {
       return fail("a root request requires standing human campaign authorization", 403);
@@ -15352,7 +15572,7 @@ export class SessionsService {
     // Full Control never routes evidence to the Human (#2940). The Orchestrator keeps a decision it
     // cannot fully inspect only while the current boundary gives it UI Evidence Approval.
     const requester = this.db.getSession(childSessionId);
-    const owner = requester ? evaluateCampaignAuthority(controller, requester,
+    const owner = requester ? evaluateCampaignAuthority(controller, this.campaignPlaced(controller, requester),
       this.db.getRunner(requester.runnerId)?.protocolVersion, snapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
       this.campaignPeerContracts(controller, requester.id)).owner : "human";
     return owner === "orchestrator" ? { effectiveOwner: "orchestrator", limitation: direct.fallback } : direct;
@@ -15367,7 +15587,7 @@ export class SessionsService {
     snapshot: WorkflowDecisionResourceSnapshot,
   ): WorkflowDecisionAuthority {
     const requester = this.db.getSession(childSessionId);
-    return requester ? evaluateCampaignAuthority(controller, requester,
+    return requester ? evaluateCampaignAuthority(controller, this.campaignPlaced(controller, requester),
       this.db.getRunner(requester.runnerId)?.protocolVersion, snapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
       this.campaignPeerContracts(controller, requester.id), this.reviewExtensionCap(requester.id, snapshot)).owner : "human";
   }
@@ -15531,7 +15751,7 @@ export class SessionsService {
     if (!options.recordingCompletedMerge && decision.status === "approved" && requester && decision.resourceSnapshot.category === "pr_merge" &&
         this.mergeReviewEvidenceRefusal(requester, decision.resourceSnapshot)) return false;
     if (decision.authorityEvaluation?.boundaryRevision !== undefined && (!requester ||
-        evaluateCampaignAuthority(controller, requester, this.db.getRunner(requester.runnerId)?.protocolVersion,
+        evaluateCampaignAuthority(controller, this.campaignPlaced(controller, requester), this.db.getRunner(requester.runnerId)?.protocolVersion,
           decision.resourceSnapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
           this.campaignPeerContracts(controller, requester.id)).boundaryRevision !== decision.authorityEvaluation.boundaryRevision ||
         !campaignBoundaryCurrent(controller))) return false;
@@ -18885,6 +19105,7 @@ export class SessionsService {
       members.map(() => ({ ...memberConfig })),
       spawnRequest,
       members,
+      { runnerId: req.runnerId, workspaceId: req.workspaceId },
     );
     if (!admitted.ok || !admitted.data) return failAs(admitted);
 
@@ -19948,6 +20169,7 @@ export class SessionsService {
       resolved.map(() => ({ ...memberConfig })),
       spawnRequest,
       resolved,
+      { runnerId: req.runnerId, workspaceId: req.workspaceId },
     );
     if (!admitted.ok || !admitted.data) return failAs(admitted);
 
