@@ -82,6 +82,8 @@ export interface MergeRequestWaitDeps {
   sleep?: (milliseconds: number) => Promise<void>;
   signal?: AbortSignal;
   readGraceMs?: number;
+  /** Called after each successful observation: the wait's progress signal (#1280). */
+  onObservation?: () => void;
 }
 
 export type MergeRequestWaitResult =
@@ -293,6 +295,7 @@ export async function waitForMergeRequest(input: MergeRequestWaitInput, deps: Me
     transientFailures = 0;
     const seen = result.value;
     last = seen;
+    deps.onObservation?.();
 
     if (seen.state === "merged") return { ok: true, summary: summarize("merged", seen) };
     if (seen.state === "closed") return { ok: true, summary: summarize("closed", seen) };

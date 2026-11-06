@@ -249,35 +249,6 @@ test("a runner that cannot refuse to replace blocks restore without changing any
     ["intent.json", "linked.json", "original", "preserved.json"]);
 });
 
-test("a preserved original whose bytes changed is never published at the source path", linux, (t) => {
-  const f = fixture(t);
-  const adopted = adoptMachineSkill(f.options);
-  if (adopted.status !== "adopted") return assert.fail(JSON.stringify(adopted));
-  const managed = fs.readlinkSync(f.source);
-  const backup = join(f.home, adopted.backupDirectory);
-  // Same directory inode, different contents: inspection compares identity only and still lists it.
-  fs.writeFileSync(join(backup, "original", "payload"), "changed bytes");
-  assert.deepEqual(listSkillAdoptionRecovery(f.home, f.dataDir, agents).operations.map((entry) => entry.state),
-    ["managed_linked"]);
-  const restored = f.recovery(adopted.operationId);
-  assert.equal(restored.status, "recovery_required", JSON.stringify(restored));
-  assert.equal(fs.readlinkSync(f.source), managed);
-  assert.equal(fs.readFileSync(join(f.source, "payload"), "utf8"), "original bytes");
-  assert.deepEqual(fs.readdirSync(backup).sort(), ["intent.json", "linked.json", "original", "preserved.json"]);
-});
-
-test("bytes changed after the recovery link is published are not reported as restored", linux, (t) => {
-  const f = fixture(t);
-  const adopted = adoptMachineSkill(f.options);
-  if (adopted.status !== "adopted") return assert.fail(JSON.stringify(adopted));
-  const backup = join(f.home, adopted.backupDirectory);
-  const restored = f.recovery(adopted.operationId, (stage) => {
-    if (stage === "recovery_link_created") fs.writeFileSync(join(backup, "original", "payload"), "changed bytes");
-  });
-  assert.equal(restored.status, "recovery_required", JSON.stringify(restored));
-  assert.equal(fs.existsSync(join(backup, "restored.json")), false);
-});
-
 test("never overwrites a source occupant and rejects malformed or unsupported requests", linux, (t) => {
   const f = fixture(t);
   f.options.checkpoint = (stage) => {

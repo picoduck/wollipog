@@ -32,6 +32,7 @@ import type { OrchestratorCampaignBehavior, OrchestratorCampaignBehaviorKey } fr
 import { ReviewSessions, type NewReviewSession } from "./review-sessions.js";
 import { DelegatedImageReviews, type NewDelegatedImageReview } from "./delegated-image-reviews.js";
 import { PullRequestWatches } from "./pull-request-watches.js";
+import { SessionWaits } from "./session-waits.js";
 import { ReviewSettingsStore, type ReviewPolicyCapture } from "./review-settings.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
@@ -5952,19 +5953,28 @@ export class ControlPlaneDb {
   readonly reviewSessions: ReviewSessions;
   readonly delegatedImageReviews: DelegatedImageReviews;
   readonly pullRequestWatches: PullRequestWatches;
+  /** The wait_session and wait_pull_request calls in progress (#1280, #4249). In memory: only the
+   * owning control plane receives their reports. */
+  readonly sessionWaits = new SessionWaits((targetSessionId) => this.sessionStatusOnly(targetSessionId));
+
+  /** A session's lifecycle status alone, without building its view; null when it does not exist. */
+  sessionStatusOnly(sessionId: string): SessionStatus | null {
+    return (this.stmt("SELECT status FROM sessions WHERE id=?").get(sessionId) as { status: SessionStatus } | undefined)?.status ?? null;
+  }
   readonly reviewSettings: ReviewSettingsStore;
   /** A review session's immutable kind and what it reviews (#3368); for a session that requested
    * reviews, their summary (#3369); nothing else for ordinary sessions. Also the merge-queue watch
-   * a session is parked on (#4071). */
+   * a session is parked on (#4071), and its tracked waits (#1280). */
   private reviewSessionProjection(sessionId: string):
-    Pick<SessionView, "kind" | "review" | "reviewRuns" | "reviewPolicy" | "pullRequestWatch"> {
+    Pick<SessionView, "kind" | "review" | "reviewRuns" | "reviewPolicy" | "pullRequestWatch" | "waits"> {
     const review = this.reviewSessions.link(sessionId);
     if (review) return { kind: "review", review };
     const reviewRuns = this.reviewSessions.summaryFor(sessionId);
     const reviewPolicy = this.reviewSettings.sessionPolicy(sessionId);
     const pullRequestWatch = this.pullRequestWatches.visibleFor(sessionId);
+    const waits = this.sessionWaits.views(sessionId);
     return { ...(reviewRuns ? { reviewRuns } : {}), ...(reviewPolicy ? { reviewPolicy } : {}),
-      ...(pullRequestWatch ? { pullRequestWatch } : {}) };
+      ...(pullRequestWatch ? { pullRequestWatch } : {}), ...(waits ? { waits } : {}) };
   }
 
   private constructor(

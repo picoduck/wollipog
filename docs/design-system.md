@@ -809,6 +809,13 @@ extending the settled one-bar session chrome app-wide.
   add Ready for Review; reminders and family context can supply a row's secondary condition.
   Disconnected explains that the last reported lifecycle may be stale and suppresses progress pulses.
   Transcript silence never establishes a session failure or a Stalled status.
+  Deliberate waits are secondary conditions (#1280, #4249): Waiting on Children, Waiting on
+  Session or Waiting on Pull Request (info) while a `wait_session` or `wait_pull_request` call keeps
+  its liveness contract, ahead of background work; Waiting on Merge Queue (info) or Merge Queue
+  Wake Pending (neutral) for a parked merge-queue watch. Wait Stalled and Merge Queue Watch Lost
+  (warning) appear only when the control plane reports the contract broken, rank with recovery
+  conditions, and are never requests, so they add to no count. A Stalled wait outranks a healthy
+  one, so one healthy wait never hides another that is stuck.
 - It opens the Session Status popover (§9.2, 340px; a bottom sheet on phones): the title, then one
   row per condition with its badge, one sentence and the action that resolves it where one exists
   (Review Request, Answer, Sign In…, Open for Background Work, Open Agents, Open Requests). Result
@@ -2426,7 +2433,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Outbound event delivery (`outbound_delivery`, the Deliveries table's Result, inline) | Delivered: success · the failure in words ("HTTP 500", "Connection Refused", "Timed Out"): danger · Sending: info (pulse) · Pending, Dropped: neutral |
 | Tool call | Running: info · Completed: success (inline, no pill) · Failed: danger |
 | Session family rollup chip | Needs Your Input (or "N Awaiting Input") when a child waits on the user: warning. Ready for Review: review (purple). Otherwise neutral. Input takes priority over review. |
-| Subagent / background job | Queued, Canceled: neutral · Running: info (pulse) · Stalled: warning (still listed by its runner with no result past the stall bound) · Completed: success · Failed: danger · Unverified: neutral, hollow dot (its runner is offline) · Lost: danger (replaces Orphaned) · Result Missing: warning (finished, but the result never arrived) |
+| Subagent / background job | Queued, Canceled: neutral · Running: info (pulse; however long a job its runner still lists has run, #4249) · Completed: success · Failed: danger · Unverified: neutral, hollow dot (its runner is offline) · Lost: danger (replaces Orphaned) · Result Missing: warning (finished, but the result never arrived) |
 | Background Work turn group (`jobGroup`, the group's inline badge, #2858) | Waiting for 1 Job, Waiting for N Jobs: info · N of M Finished: neutral · Returning Result: info · Result Returned: success (inline) · Result Missing: warning · Missing Result Acknowledged: neutral · Unverified: neutral, hollow dot |
 | Session header, background work | "Background Work Lost": danger (was "Background Work Orphaned") |
 | Delivery receipt | Delivered: success (inline, no pill) · Delivery Failed: danger |
