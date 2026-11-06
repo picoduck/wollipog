@@ -133,6 +133,18 @@ export function epicChecklistMembers(body: string, repository: string): number[]
   return [...members].sort((a, b) => a - b);
 }
 
+/** A proposal adds issues only, and lists exactly each repository's additions: an issue with no
+ * `repository` is the launch repository's, and one that names it is a separate entry (#4118). */
+function proposalMatchesAdditions(proposal: CampaignScopeProposal, launch: string, additions: readonly number[], removals: readonly number[],
+  others: readonly CampaignIssueScopeRepositoryChange[]): boolean {
+  if (removals.length || others.some((group) => group.removals.length)) return false;
+  const listed = (repository: string) => proposal.issues.filter((issue) => (issue.repository ?? launch) === repository).map((issue) => issue.number).sort((a, b) => a - b);
+  const groups = [{ repository: launch, additions }, ...others];
+  return proposal.issues.every((issue) => groups.some((group) => group.repository === (issue.repository ?? launch))) &&
+    proposal.issues.every((issue) => issue.repository !== launch) &&
+    groups.every((group) => JSON.stringify(listed(group.repository)) === JSON.stringify([...group.additions].sort((a, b) => a - b)));
+}
+
 export function normalizeCampaignIssueScopeSnapshot(input: Record<string, unknown>): CampaignIssueScopeSnapshot | null {
   if (!validIssueAdmission(input.issueAdmission) || !validIssueLineage(input.lineage) || !validScopeGrantReview(input.grantReview) ||
       !validSelectionReview(input.selectionReview) || !validScopeOwnerReview(input.ownerReview) || !validScopeProposal(input.scopeProposal)) return null;
@@ -173,9 +185,8 @@ export function normalizeCampaignIssueScopeSnapshot(input: Record<string, unknow
       !boundedIssueNumbers(input.before) || !boundedIssueNumbers(input.additions) || !boundedIssueNumbers(input.removals) ||
       // Only an initial proposal may admit no issues: it opens dispatch for work that needs none.
       (!input.additions.length && !input.removals.length && !changes && !proposal?.initial) ||
-      // A proposal's issues are the launch repository's additions, until proposals name repositories.
-      (proposal && (changes || input.removals.length || proposal.issues.length !== input.additions.length ||
-        proposal.issues.some((issue) => !(input.additions as number[]).includes(issue.number)))) ||
+      // A proposal's issues are exactly the additions, each in its own repository (#4118).
+      (proposal && !proposalMatchesAdditions(proposal, launch, input.additions as number[], input.removals as number[], others)) ||
       input.before.length + input.additions.length - input.removals.length + after > CAMPAIGN_ISSUE_SCOPE_MAX ||
       typeof input.explanation !== "string" || !input.explanation.trim() || input.explanation.length > 4000 ||
       !Array.isArray(input.affectedAssignments) || input.affectedAssignments.length > 100 ||

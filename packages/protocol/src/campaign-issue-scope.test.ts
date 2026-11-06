@@ -6,6 +6,25 @@ import {
 } from "./campaign-issue-scope.js";
 import type { CampaignIssueScope } from "./index.js";
 
+test("a proposal's issues are exactly each repository's additions, with a launch issue left bare (#4118, #4282)", () => {
+  const issue = (number: number, repository?: string) => ({ ...(repository ? { repository } : {}), number, origin: "owner_named", rationale: "Named", title: "" });
+  const snapshot = (issues: ReturnType<typeof issue>[], other: Record<string, unknown> = { repository: "owner/api", before: [], additions: [40], removals: [] }, additions = [12]) =>
+    normalizeCampaignIssueScopeSnapshot({ category: "campaign_issue_scope", repository: "owner/app", expectedRevision: 1, before: [], additions, removals: [],
+      otherRepositories: [other], explanation: "Reasons", affectedAssignments: [], affectedDecisions: [], activeChildren: [],
+      scopeProposal: { initial: true, messageDigest: "a".repeat(64), issues, requestedCount: null, constraints: [], withheldOperations: [], checks: [], route: "owner",
+        ownerCause: "constraint_check_unavailable", ownerMessage: "Fix them." } });
+  assert.deepEqual(snapshot([issue(12), issue(40, "owner/api")])!.scopeProposal!.issues.map((i) => [i.repository, i.number]), [[undefined, 12], ["owner/api", 40]]);
+  // The same numbers in the wrong repositories, a missing one, an extra one, an unknown repository and a removal are all refused.
+  assert.equal(snapshot([issue(40), issue(12, "owner/api")]), null);
+  assert.equal(snapshot([issue(12)]), null);
+  assert.equal(snapshot([issue(12), issue(40, "owner/api"), issue(41, "owner/api")]), null);
+  assert.equal(snapshot([issue(12), issue(40, "owner/web")]), null);
+  assert.equal(snapshot([issue(12, "owner/app"), issue(40, "owner/api")]), null, "a launch issue stays bare");
+  assert.equal(snapshot([issue(12)], { repository: "owner/api", before: [40], additions: [], removals: [40] }), null, "a proposal adds issues only");
+  assert.equal(snapshot([issue(12)], { repository: "owner/api", before: [40], additions: [], removals: [] })!.otherRepositories![0]!.before[0], 40,
+    "another repository the scope merely holds is fine");
+});
+
 test("GitLab epic checklists accept #N and same-project issue URLs only (#3539)", () => {
   assert.deepEqual(epicChecklistMembers(`Goal: #99.
 ## Units

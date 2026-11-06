@@ -23,8 +23,10 @@ export interface ScopeCheckCampaign {
   repository: string;
   /** The operations the boundary grants now. */
   operations: readonly CampaignAuthorityOperation[];
-  /** Issues already in scope. */
+  /** Issues already in scope in `repository`. */
   inScope: readonly number[];
+  /** Issues already in scope in the campaign's other repositories (#4118). */
+  otherInScope?: ReadonlyArray<{ repository: string; number: number }>;
   /** The admitted initial scope, for a later addition. */
   admitted?: FullControlInitialScope;
 }
@@ -45,39 +47,49 @@ function issueLabel(repository: string, number: number, title: string, room: num
  * Every parameter fits the framework's bound with the constraint whole: the issue's title shortens
  * first, then goes, and when even the bare reference and the whole constraint can't fit, the result
  * is null, so the proposal is never checked against part of a constraint and goes to the owner. */
-export function scopeCheckParameters(repository: string, proposal: Pick<CampaignScopeProposal, "issues" | "constraints">): Record<string, string[]> | null {
+export function scopeCheckParameters(repository: string, proposal: Pick<CampaignScopeProposal, "issues" | "constraints" | "repositoryConstraint">): Record<string, string[]> | null {
   const max = DECISION_QUESTION_PARAMETER_MAX_CHARS;
   const named = proposal.issues.filter((issue) => issue.origin === "owner_named")
-    .map((issue) => issueLabel(repository, issue.number, issue.title, max));
+    .map((issue) => issueLabel(issue.repository ?? repository, issue.number, issue.title, max));
   const chosen = proposal.issues.filter((issue) => issue.origin === "orchestrator_chosen");
   const pairs: string[] = [];
   for (const issue of chosen) {
+    const home = issue.repository ?? repository;
     for (const constraint of proposal.constraints) {
       const suffix = ` — ${oneLine(constraint)}`;
-      const reference = `${repository}#${issue.number}`;
+      const reference = `${home}#${issue.number}`;
       if (reference.length + suffix.length > max) return null;
-      pairs.push(`${issueLabel(repository, issue.number, issue.title, max - suffix.length)}${suffix}`);
+      pairs.push(`${issueLabel(home, issue.number, issue.title, max - suffix.length)}${suffix}`);
     }
   }
-  return { ...(named.length ? { named_asked_for: named } : {}), ...(pairs.length ? { constraint_met: pairs } : {}) };
+  // A repository limit is the agent's claim about the owner's words, so the check judges it (#4118).
+  const limit = proposal.repositoryConstraint?.repository ? `${oneLine(proposal.repositoryConstraint.name)} — ${proposal.repositoryConstraint.repository}` : null;
+  if (limit && limit.length > max) return null;
+  return { ...(named.length ? { named_asked_for: named } : {}), ...(pairs.length ? { constraint_met: pairs } : {}), ...(limit ? { repository_limit: [limit] } : {}) };
 }
 
-function inputsWith(ownerMessage: string, proposal: CampaignScopeProposal, explanation: string, facts: readonly CampaignIssueFacts[],
+/** An issue's facts, with `repository` when it is outside the campaign's launch repository (#4118). */
+export type ScopeCheckIssueFacts = CampaignIssueFacts & { repository?: string };
+
+function inputsWith(ownerMessage: string, proposal: CampaignScopeProposal, explanation: string, facts: readonly ScopeCheckIssueFacts[],
   campaign: ScopeCheckCampaign, excerpt: number, parameters: Record<string, string[]>): DecisionInputs {
   return {
     ownerMessage,
     data: {
       proposal: JSON.stringify({
-        issues: proposal.issues.map((issue) => ({ number: issue.number, origin: issue.origin, rationale: issue.rationale })),
+        issues: proposal.issues.map((issue) => ({ ...(issue.repository ? { repository: issue.repository } : {}), number: issue.number, origin: issue.origin, rationale: issue.rationale })),
         requestedCount: proposal.requestedCount, constraints: proposal.constraints, withheldOperations: proposal.withheldOperations,
+        ...(proposal.repositoryConstraint ? { repositoryConstraint: proposal.repositoryConstraint } : {}),
         rationale: explanation,
       }),
-      issues: JSON.stringify(facts.map((fact) => ({ number: fact.number, title: fact.title, state: fact.state, labels: fact.labels,
+      issues: JSON.stringify(facts.map((fact) => ({ ...(fact.repository ? { repository: fact.repository } : {}), number: fact.number, title: fact.title, state: fact.state, labels: fact.labels,
         bodyExcerpt: fact.bodyExcerpt.slice(0, excerpt) }))),
       campaign: JSON.stringify({
         repository: campaign.repository, operations: campaign.operations, inScope: campaign.inScope,
+        ...(campaign.otherInScope?.length ? { otherInScope: campaign.otherInScope } : {}),
         ...(campaign.admitted ? { admitted: { requestedCount: campaign.admitted.requestedCount, constraints: campaign.admitted.constraints,
-          withheldOperations: campaign.admitted.withheldOperations } } : {}),
+          withheldOperations: campaign.admitted.withheldOperations,
+          ...(campaign.admitted.repositoryLimit ? { repositoryLimit: campaign.admitted.repositoryLimit } : {}) } } : {}),
       }),
     },
     questions: { parameters },
@@ -87,7 +99,7 @@ function inputsWith(ownerMessage: string, proposal: CampaignScopeProposal, expla
 /** The check's inputs, or null when even issue facts without body excerpts, or the questions, cannot
  * fit one Decision call: such a proposal is never checked in part, so it is the owner's. */
 export function scopeCheckInputs(ownerMessage: string, proposal: CampaignScopeProposal, explanation: string,
-  facts: readonly CampaignIssueFacts[], campaign: ScopeCheckCampaign): DecisionInputs | null {
+  facts: readonly ScopeCheckIssueFacts[], campaign: ScopeCheckCampaign): DecisionInputs | null {
   // A constraint too long to ask whole beside the issue's reference is never asked in part.
   const parameters = scopeCheckParameters(campaign.repository, proposal);
   if (!parameters) return null;
@@ -115,9 +127,15 @@ export function scopeCheckInputDigest(inputs: DecisionInputs): string | null {
  * times; after that it is the owner's, so rewording a proposal can never shop for an admit. */
 export const SCOPE_CHECKS_PER_ADDITIONS = 3;
 
+/** An issue's identity in a check's key: a launch issue's number, and `owner/repo#n` for another
+ * repository's (#4118), so a launch-only proposal keeps the key it always had. */
+const issueKey = (issue: { repository?: string; number: number }): number | string => issue.repository ? `${issue.repository}#${issue.number}` : issue.number;
+const byIssueKey = (a: number | string, b: number | string) => typeof a === "number" && typeof b === "number" ? a - b :
+  typeof a === "number" ? -1 : typeof b === "number" ? 1 : a < b ? -1 : a > b ? 1 : 0;
+
 /** The key prefix every check of these additions at this boundary and scope revision shares. */
-export function scopeCheckAdditionsPrefix(rootId: string, boundaryRevision: number, revision: number, additions: readonly number[]): string {
-  const subject = sha256(JSON.stringify([...additions].sort((a, b) => a - b))).slice(0, 24);
+export function scopeCheckAdditionsPrefix(rootId: string, boundaryRevision: number, revision: number, additions: ReadonlyArray<number | string>): string {
+  const subject = sha256(JSON.stringify([...additions].sort(byIssueKey))).slice(0, 24);
   return `scope_check:${rootId}:${boundaryRevision}:${revision}:${subject}:`;
 }
 
@@ -129,13 +147,15 @@ const normalized = (value: string) => oneLine(value).toLowerCase();
  * reworded rationale joins the recorded occurrence and returns its verdict, its owner request or its
  * admission: rewording never buys a second verdict. */
 export function scopeCheckKey(rootId: string, boundaryRevision: number, revision: number,
-  proposal: Pick<CampaignScopeProposal, "issues" | "requestedCount" | "constraints" | "withheldOperations">): string {
+  proposal: Pick<CampaignScopeProposal, "issues" | "requestedCount" | "constraints" | "withheldOperations" | "repositoryConstraint">): string {
   const subject = sha256(JSON.stringify({
-    issues: [...proposal.issues].map((issue) => [issue.number, issue.origin]).sort((a, b) => (a[0] as number) - (b[0] as number)),
+    issues: [...proposal.issues].map((issue) => [issueKey(issue), issue.origin]).sort((a, b) => byIssueKey(a[0] as number | string, b[0] as number | string)),
     requestedCount: proposal.requestedCount, constraints: [...new Set(proposal.constraints.map(normalized))].sort(),
     withheldOperations: [...new Set(proposal.withheldOperations)].sort(),
+    // The limit the check reads, by what it resolved to; left out when absent, so older keys still join.
+    ...(proposal.repositoryConstraint ? { repository: proposal.repositoryConstraint.repository } : {}),
   })).slice(0, 32);
-  return `${scopeCheckAdditionsPrefix(rootId, boundaryRevision, revision, proposal.issues.map((issue) => issue.number))}${subject}`;
+  return `${scopeCheckAdditionsPrefix(rootId, boundaryRevision, revision, proposal.issues.map(issueKey))}${subject}`;
 }
 
 /** The count a proposal's chosen issues may not exceed (#4282, as #4102). A later addition is bound

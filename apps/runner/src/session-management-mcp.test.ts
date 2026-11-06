@@ -3728,4 +3728,17 @@ test("request_campaign_issue_scope_change sends a structured proposal only to a 
   assert.equal((await callTool(deps, "request_campaign_issue_scope_change", args)).isError, undefined);
   const { proposal: _omitted, ...withoutProposal } = args;
   assert.deepEqual(calls.at(-1)!.body, withoutProposal);
+  // A repository name is never dropped: leaving it out would widen what the owner limited (#4118).
+  const named = { ...args, proposal: { ...proposal, repositoryName: "the api repo" } };
+  const before = calls.length;
+  for (const version of [RUNNER_CAPABILITY_MIN_PROTOCOL.campaignScopeProposals - 1, RUNNER_CAPABILITY_MIN_PROTOCOL.repositoryQualifiedProposals - 1]) {
+    deps.controlPlaneProtocolVersion = version;
+    const refused = await callTool(deps, "request_campaign_issue_scope_change", named);
+    assert.equal(refused.isError, true);
+    assert.match(JSON.stringify(refused), /repositoryName/u);
+  }
+  assert.equal(calls.filter((call) => call.url.endsWith("/campaign/issue-scope/proposals")).length, calls.slice(0, before).filter((call) => call.url.endsWith("/campaign/issue-scope/proposals")).length);
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.repositoryQualifiedProposals;
+  assert.equal((await callTool(deps, "request_campaign_issue_scope_change", named)).isError, undefined);
+  assert.deepEqual(calls.at(-1)!.body, named);
 });

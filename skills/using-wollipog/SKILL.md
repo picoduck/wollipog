@@ -880,7 +880,14 @@ issue its `origin`, `owner_named` when its number is in the owner's message or `
 and a one-line `rationale`; `requestedCount`, the number the owner asked for or `null`;
 `constraints`, each checkable limit you read ("open", "UI only", "skip anything labeled security");
 and `withheldOperations`, operations the message rules out ("fix but don't merge" withholds
-`pr_merge`). Ranking criteria such as "highest priority" are your call: explain them in each
+`pr_merge`). A proposal may add issues in any of the campaign's repositories. A bare `#12` means the
+launch repository, so an issue in another repository counts as `owner_named` only when the message
+writes `owner/repo#12` or its URL. When the message limits the work to one repository, send its own
+words as `repositoryName` ("the api repo"): the server resolves it by full name, name without the
+owner, or Location name, and refuses an issue outside that repository, now or in a later addition.
+The constraint check judges whether the message really limits the work to it, so never send a
+repository the message only mentions or excludes. A name that matches none or several decides
+nothing, so the proposal becomes the owner's one approval. Ranking criteria such as "highest priority" are your call: explain them in each
 rationale and in `explanation`, never as constraints. A task that needs no issues proposes no
 additions. Deterministic checks run first and refuse, naming the issue and condition: an owner-named
 number the message doesn't write, an issue outside the campaign's repositories, a pull request, a
