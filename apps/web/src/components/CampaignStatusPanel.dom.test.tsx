@@ -3,16 +3,19 @@ import { after, before, beforeEach, test } from "node:test";
 import React, { act, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type {
-  CampaignForgeRefreshResponse,
-  CampaignWorkItemDetail,
-  CampaignWorkItemSummary,
-  CampaignWorkItemsPage,
-  CampaignWorkSummary,
-  ControlPlaneToUi,
-  DescendantRequestView,
-  SessionView,
-  UiSnapshotMessage,
+import {
+  CAMPAIGN_AUTOMATION_HOLD_REASONS,
+  type CampaignForgeRefreshResponse,
+  type CampaignRecoveryRecord,
+  type OrchestratorCampaignProjection,
+  type CampaignWorkItemDetail,
+  type CampaignWorkItemSummary,
+  type CampaignWorkItemsPage,
+  type CampaignWorkSummary,
+  type ControlPlaneToUi,
+  type DescendantRequestView,
+  type SessionView,
+  type UiSnapshotMessage,
 } from "@wollipog/protocol";
 import { api, ApiError, createApiClient, type ApiClient } from "../api.js";
 import { API_REQUEST_DEADLINE_MS, createBrowserApiTransport } from "../api-transport.js";
@@ -1599,5 +1602,110 @@ test("a decision an owner rule kept is waiting for you with the rule's source an
     assert.ok(section.querySelector("button[aria-label='Open Request: Merge picoduck/wollipog#9']"));
   } finally {
     await panel.dispose();
+  }
+});
+
+/** A recovery projection whose automation is held with `automation`, plus any records. */
+function heldRecovery(automation: NonNullable<OrchestratorCampaignProjection["recovery"]>["automation"],
+  records: CampaignRecoveryRecord[] = []): OrchestratorCampaignProjection["recovery"] {
+  return { unattendedReady: false, automation, automatic: 0, waitingHuman: records.filter((r) => r.state === "waiting_human").length,
+    blocked: records.filter((r) => r.state === "blocked").length, truncated: false, records };
+}
+
+/** The recovery automation notice, by its title, or null. */
+function automationNotice(container: HTMLElement): { title: string; tone: string | null; role: string | null } | null {
+  const notice = [...container.querySelectorAll<HTMLElement>(".notice")].find((candidate) =>
+    /^(No Recovery Needed|Authorized Recovery Unavailable)/u.test(candidate.querySelector(".notice-title")?.textContent ?? ""));
+  if (!notice) return null;
+  return { title: notice.querySelector(".notice-title")!.textContent!, tone: notice.className.match(/\bt-(neutral|warning|info|success|danger)\b/u)?.[1] ?? null,
+    role: notice.getAttribute("role") };
+}
+
+test("a finished campaign's recovery hold raises no warning, even with an older server's reason (#3361)", async () => {
+  for (const status of ["verified_complete", "complete_needs_cleanup"] as const) {
+    const { client } = fakeClient(() => ({ revision: 1, items: [], nextCursor: null }), {});
+    const root = session({
+      orchestratorCampaign: campaignProjection(workSummary(), {
+        status,
+        recovery: heldRecovery({ state: "lifecycle_held", reason: CAMPAIGN_AUTOMATION_HOLD_REASONS.complete }),
+        ...(status === "complete_needs_cleanup" ? { cleanup: { total: 1, items: [
+          { kind: "merged_branch" as const, sessionId: "s_child", repository: "picoduck/wollipog", pullRequest: 7, branch: "agent/s_child",
+            state: "pending" as const, reason: "The merged branch is still on the remote.",
+            action: { kind: "command" as const, command: "gh api -X DELETE 'repos/picoduck/wollipog/git/refs/heads/agent/s_child'" } },
+        ] } } : {}),
+      }),
+    });
+    const panel = await mount({ initial: root, client });
+    try {
+      await act(async () => panel.state.show("campaign"));
+      await settle();
+      const text = panel.container.textContent ?? "";
+      assert.equal(automationNotice(panel.container), null, `${status}: nothing is left to recover`);
+      assert.doesNotMatch(text, /Authorized Recovery Unavailable|no unfinished original scoped recovery obligation/u);
+      if (status === "complete_needs_cleanup") {
+        assert.match(text, /The merged branch is still on the remote\./u, "the owed cleanup still lists its action");
+      }
+    } finally {
+      await panel.dispose();
+    }
+  }
+});
+
+test("nothing left to recover reads as neutral while the owner's decisions stay open and actionable (#3361)", async () => {
+  harnessRequests.descendants = [pendingRequest("s_root", "occ_owner"), pendingRequest("s_child", "occ_ask")];
+  const ask: CampaignRecoveryRecord = { id: "rec_ask", action: "answer_request", reason: "missing_human_information", state: "waiting_human",
+    resource: { kind: "request", sessionId: "s_child", occurrenceId: "occ_ask" }, effectiveOwner: "human", policyRevision: 1,
+    attempts: 0, maxAttempts: 4, attemptedRecovery: [], requiredInput: "answer_existing_request",
+    explanation: "The existing request requires information that the campaign cannot infer within its authority.", createdAt: NOW, updatedAt: NOW };
+  const { client } = fakeClient(() => ({ revision: 1, items: [], nextCursor: null }), {});
+  const root = session({
+    orchestratorCampaign: campaignProjection(workSummary(), {
+      status: "waiting_human",
+      ownerDecisions: { total: 1, items: [{ occurrenceId: "occ_owner", sessionId: "s_root", category: "owner_decision",
+        summary: "Which release channel should the fix ship on?", handedOff: false, createdAt: NOW }] },
+      recovery: heldRecovery({ state: "lifecycle_held", reason: CAMPAIGN_AUTOMATION_HOLD_REASONS.complete }, [ask]),
+    }),
+  });
+  const panel = await mount({ initial: root, client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    assert.deepEqual(automationNotice(panel.container), { title: "No Recovery Needed", tone: "neutral", role: "status" });
+    const text = panel.container.textContent ?? "";
+    assert.match(text, /The campaign has no unfinished original scoped recovery obligation\./u);
+    assert.doesNotMatch(text, /Authorized Recovery Unavailable/u);
+    // The person's own questions are untouched: Waiting for You and the recovery record still ask.
+    assert.match(text, /Waiting for You/u);
+    assert.match(text, /Human Input Required/u);
+    await click(panel.container.querySelector<HTMLButtonElement>("button[aria-label='Open Request: Which release channel should the fix ship on?']")!);
+    assert.equal(harnessRequests.selected.at(-1), JSON.stringify(["s_root", "occ_owner"]));
+    assert.equal(panel.state.mode, "requests");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("a genuine recovery blocker keeps its warning on an unfinished campaign (#3361)", async () => {
+  const cases = [
+    { status: "stuck" as const, automation: { state: "lifecycle_held" as const, reason: CAMPAIGN_AUTOMATION_HOLD_REASONS.recoveryHeld } },
+    { status: "stuck" as const, automation: { state: "lifecycle_held" as const, reason: CAMPAIGN_AUTOMATION_HOLD_REASONS.complete } },
+    { status: "waiting_human" as const, automation: { state: "lifecycle_held" as const, reason: CAMPAIGN_AUTOMATION_HOLD_REASONS.lifecycle } },
+    { status: "active" as const, automation: { state: "unsupported_capability" as const, reason: "The current provider cannot enforce authorized recovery." } },
+    { status: "active" as const, automation: { state: "authority_unavailable" as const, reason: "The current authority boundary is unavailable; recovery cannot enlarge it." } },
+  ];
+  for (const { status, automation } of cases) {
+    const { client } = fakeClient(() => ({ revision: 1, items: [], nextCursor: null }), {});
+    const root = session({ orchestratorCampaign: campaignProjection(workSummary(), { status, recovery: heldRecovery(automation) }) });
+    const panel = await mount({ initial: root, client });
+    try {
+      await act(async () => panel.state.show("campaign"));
+      await settle();
+      assert.deepEqual(automationNotice(panel.container), { title: "Authorized Recovery Unavailable", tone: "warning", role: null },
+        `${status} ${automation.state}`);
+      assert.ok(panel.container.textContent?.includes(automation.reason), "the server's reason explains the hold");
+      assert.doesNotMatch(panel.container.textContent ?? "", /No Recovery Needed/u);
+    } finally {
+      await panel.dispose();
+    }
   }
 });
