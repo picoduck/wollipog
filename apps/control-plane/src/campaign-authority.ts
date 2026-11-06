@@ -28,6 +28,16 @@ export function authorizeFullControl(
   return validCampaignControl(control) ? structuredClone(control) : null;
 }
 
+/** The repositories a campaign already has, which a new Full Control authorization keeps (#4117):
+ * its current boundary's list, or the list a Custom campaign grew through approved additions. Only
+ * a list led by the scope's own repository carries over; anything else reads as no list, so the
+ * authorization keeps today's single-repository boundary. */
+export function carriedCampaignRepositories(session: SessionView, scopeRepository: string): CampaignBoundaryRepository[] | undefined {
+  const policy = session.orchestratorPolicy;
+  const list = policy?.control?.mode === "full_control" ? policy.control.boundary.repositories : policy?.repositories;
+  return list?.length && list[0]!.repository.toLowerCase() === scopeRepository.toLowerCase() ? structuredClone(list) : undefined;
+}
+
 /** The runner's diagnostic copy of a campaign's control. A pre-v288 runner rejects a boundary with
  * a `repositories` list (#4117), and a pre-v319 one an issue authority with `otherEpics` (#4118), so
  * each receives the boundary without them, which names the same first repository and its epics. The

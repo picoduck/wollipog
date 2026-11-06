@@ -5,7 +5,7 @@ import {
   FULL_CONTROL_DECLINED_NOTE, fullControlStandingHumanRequired,
   CAMPAIGN_EVIDENCE_PROVIDER_DISCLOSURE_REVISION, CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE,
   CAMPAIGN_SESSION_ARTIFACT_DISCLOSURE_REVISION, campaignSessionArtifactDestinationId, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE,
-  type CampaignAuthorityBoundary, type CampaignAuthorityOperation, type CampaignBudgetAuthority, type CampaignIssueRef, type FullControlDerivedLimits, type OrchestratorCampaignPolicy, type CampaignLaunchCapability, type CampaignLaunchPreflight,
+  type CampaignAuthorityBoundary, type CampaignAuthorityOperation, type CampaignBoundaryRepository, type CampaignBudgetAuthority, type CampaignIssueRef, type FullControlDerivedLimits, type OrchestratorCampaignPolicy, type CampaignLaunchCapability, type CampaignLaunchPreflight,
   type CampaignLaunchProposal, type CampaignLaunchInspectionResult, type ChildSessionDefaults,
   type OrchestratorCampaignBudgetDefault,
   type CreateSessionRequest, type FullControlEnableRequest, type FullControlLaunchOverrides, type FullControlLaunchRequest,
@@ -274,7 +274,9 @@ export interface CampaignLaunchFacts {
   /** A launch in a Project (#4117): its active Locations in Project order and each one's own
    * inspection. The launch Location is verified by `inspection`, never by this map. */
   projectLocations?: { launchLocationId: string | null; locations: CampaignProjectLocation[];
-    inspections: ReadonlyMap<string, ProjectLocationInspection> } | null;
+    inspections: ReadonlyMap<string, ProjectLocationInspection>;
+    /** Enabling on an existing campaign: the repositories it already holds, which it keeps. */
+    carried?: CampaignBoundaryRepository[] | undefined } | null;
 }
 
 function canonical(value: unknown): string {
@@ -335,8 +337,8 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
       canonical(inspection.issueNumbers) === canonical(issueNumbers);
   const repository = verified ? (campaignScope?.repository ?? inspection!.repository!).toLowerCase() : null;
   // Only a v288 root runner validates a boundary with a repository list; older roots keep today's
-  // single-repository boundary.
-  const boundary = repository && !campaignScope && facts.projectLocations &&
+  // single-repository boundary. A launch and an enable both pass their Project's Locations.
+  const boundary = repository && facts.projectLocations &&
     runnerSupportsProtocol(runner.protocolVersion, "campaignRepositoryBoundary")
     ? launchBoundaryRepositories({ launchRepository: repository, ...facts.projectLocations }) : null;
   // Issues the launch names in the Project's other repositories (#4118): each read through a Location
@@ -490,7 +492,8 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
     repository,
     ...(boundary ? {
       repositories: boundary.repositories.map((entry) => ({ repository: entry.repository,
-        locations: entry.locationIds.map((locationId) => ({ locationId, name: locationName.get(locationId) ?? locationId })) })),
+        // A carried Location the person can no longer see in the Project is never named by a live read.
+        locations: entry.locationIds.map((locationId) => ({ locationId, name: locationName.get(locationId) ?? "Removed Location" })) })),
       excludedLocations: boundary.excluded,
     } : {}),
     issueNumbers, ...(otherIssues.length ? { otherIssues } : {}), objective,

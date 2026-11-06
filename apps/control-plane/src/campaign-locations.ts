@@ -15,9 +15,10 @@ type Outcome = { ok: true; data: { joined: boolean; revision: number } } | { ok:
 /** A campaign's boundary follows its Project after launch (#4117). Every widening has one of three
  * human provenances, each checked here before a runner is asked anything:
  * - a Location the campaign's owner added to the Project, through the owner's own request;
- * - a Location excluded only because its runner was offline or unreadable, once that runner
- *   reconnects (it was already part of the owner's launch or Include in Campaign);
- * - the owner's Include in Campaign of a Location someone else added.
+ * - a Location the owner added, excluded only because its runner was offline or unreadable, once
+ *   that runner reconnects;
+ * - the owner's Include in Campaign of a Location someone else added, or one with no recorded adder.
+ *   Reconnecting never adds one of those: nobody has seen which repository it is, so it waits.
  * Agents have no route that reaches any of these, and a Location nobody added never joins on its
  * own. Every join is inspected in the Location's own path first. */
 export class CampaignLocations {
@@ -116,6 +117,7 @@ export class CampaignLocations {
     const owner = this.owner(fresh);
     const joins: Array<{ locationId: string; name: string; repository: string; source: CampaignLocationJoin["source"] }> = [];
     const excluded: CampaignExcludedLocation[] = [];
+    const pending: CampaignPendingLocation[] = [];
     let changed = false;
     results.forEach((result: ProjectLocationInspection, index) => {
       const location = locations[index]!;
@@ -130,11 +132,17 @@ export class CampaignLocations {
         (source !== "owner_included" || Boolean(includer && includer.userId === owner &&
           db.canAccessWorkspace(includer, now.runnerId, now.workspaceId))));
       if (!eligible) { changed = true; return; }
+      // Only the owner's own Location joins on a reconnect. Anyone else's, or one with no recorded
+      // adder, waits for Include in Campaign however it read: nobody has seen its repository.
+      if (source === "runner_reconnected" && was.addedBy !== owner) {
+        pending.push({ locationId: location.id, name: location.name, reason: "added_by_other" });
+        return;
+      }
       if (result.ok) joins.push({ locationId: location.id, name: location.name, repository: result.location.repository, source });
       else excluded.push({ locationId: location.id, name: location.name, failure: result.failure, reason: result.reason });
     });
     if (changed && source === "owner_included") return { ok: false, status: 409, error: "That Location changed while it was inspected; try again." };
-    return this.record(fresh, { joins, excluded, pending: [] });
+    return this.record(fresh, { joins, excluded, pending });
   }
 
   private async record(root: SessionView, update: { joins: Array<{ locationId: string; name: string; repository: string;
