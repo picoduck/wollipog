@@ -40,6 +40,7 @@ import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullContro
 import { genericRequestScreenData, implementationQuestionScreenData, ownerDecisionScreenData, screenCredentialRequest, type CredentialScreenSurface } from "./credential-screen.js";
 import { DECISION_TOTAL_BOUND_MS, DecisionRuntime, hubDecisionTransport, type DecisionOutcome } from "./decision-runtime.js";
 import { DecisionModelSettings } from "./decision-model-settings.js";
+import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, credentialFormFloor, type CredentialScreenFact, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, fullControlAutomaticResponse, type CampaignAuthorityEvaluation, type FullControlAutomaticResponse, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
 import { firstMessageTargetEpics } from "./first-message-issue-intent.js";
@@ -4578,6 +4579,9 @@ export class SessionsService {
         issueScope: import("@wollipog/protocol").CampaignIssueScope;
         /** Project Locations the reviewed launch inspection left out of the boundary (#4117). */
         excludedLocations?: import("@wollipog/protocol").CampaignExcludedLocation[];
+        /** What the reviewed preflight disclosed about capabilities and evidence (#2940), kept for
+         * Campaign Status. Informational; it grants nothing. */
+        launchDisclosure?: import("@wollipog/protocol").CampaignLaunchDisclosure;
         /** Minted against the new root id only when every launch peer declares the private
          * media contract; screenshot review never depends on it. */
         evidenceAuthority?: EvidenceAuthorityProposal;
@@ -5489,6 +5493,9 @@ export class SessionsService {
       }
       orchestratorPolicy.control = control;
       if (humanLaunch.excludedLocations?.length) orchestratorPolicy.excludedLocations = structuredClone(humanLaunch.excludedLocations);
+      if (humanLaunch.launchDisclosure && validCampaignLaunchDisclosure(humanLaunch.launchDisclosure)) {
+        orchestratorPolicy.launchDisclosure = structuredClone(humanLaunch.launchDisclosure);
+      }
       orchestratorPolicy.issueScope = structuredClone(humanLaunch.issueScope);
       orchestratorPolicy.issueNumbers = [...humanLaunch.issueScope.issueNumbers];
       if (humanLaunch.firstMessage) orchestratorPolicy.firstMessageScope = { state: "pending", derivedLimits: { ...humanLaunch.firstMessage.derivedLimits } };
@@ -10412,7 +10419,9 @@ export class SessionsService {
    * with the boundary. `firstMessage` when no message has been sent: the next one is the task. */
   derivedScope?: { repository: string; issueNumbers: number[]; firstMessage: boolean },
   /** This authorization's own limit provenance, which a waiting campaign keeps (#2940). */
-  derivedLimits?: import("@wollipog/protocol").FullControlDerivedLimits): ServiceResult<SessionView> {
+  derivedLimits?: import("@wollipog/protocol").FullControlDerivedLimits,
+  /** Enable only: what its reviewed preflight disclosed about capabilities and evidence (#2940). */
+  launchDisclosure?: import("@wollipog/protocol").CampaignLaunchDisclosure): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session || principal.kind !== "human" || !this.db.isSessionOwner(principal, sessionId)) return fail("campaign not found", 404);
     const root = this.orchestratorCampaignController(session);
@@ -10483,7 +10492,8 @@ export class SessionsService {
     try {
       if (!this.db.updateSessionCampaignControl(sessionId, control, expectedRevision, now,
         mintedScope ? { issueScope: mintedScope, firstMessage: derivedScope!.firstMessage } : undefined,
-        proposal.mode === "full_control" ? derivedLimits : undefined)) return fail("campaign authority revision changed; refresh and retry", 409);
+        proposal.mode === "full_control" ? derivedLimits : undefined,
+        proposal.mode === "full_control" ? launchDisclosure : undefined)) return fail("campaign authority revision changed; refresh and retry", 409);
     } catch (error) { return fail((error as Error).message, 409); }
     // The runner holds the scope it enforces issue writes against; each issue operation also
     // synchronizes again before it acts.

@@ -1202,6 +1202,63 @@ test("an existing campaign enables Full Control through one exact reviewed autho
   } finally { await server.close(); f.db.close(); }
 });
 
+test("a launch records its preflight's capabilities and evidence for Campaign Status; revoke drops it, enable records its own (#2940)", async () => {
+  const f = fixture({ images: false });
+  const { server } = await app(f);
+  try {
+    const { preflight: checked } = await preflight(server, launch);
+    assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
+    const before = Date.now();
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...launch, requestId: "disclosure-launch", preflightDigest: checked!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const rootId = admitted.json().id as string;
+    const recorded = f.db.getSession(rootId)!.orchestratorPolicy!.launchDisclosure!;
+    assert.ok(recorded, "the admitted launch records its disclosure with the boundary");
+    assert.equal(recorded.source, "launch");
+    assert.ok(recorded.recordedAt >= before && recorded.recordedAt <= Date.now());
+    // Every capability exactly as the person's preflight showed it, the non-verified ones included.
+    assert.deepEqual(recorded.capabilities, checked!.capabilities.map(({ id, capability, state, reason, mandatory }) => ({ id, capability, state, reason, mandatory })));
+    assert.equal(recorded.capabilities.find((item) => item.id === "image_evidence")!.state, "orchestrator_decides");
+    assert.equal(recorded.evidence.statement, checked!.summary.evidence.statement);
+    assert.equal(recorded.evidence.destination, "private_session_artifacts");
+    assert.equal(recorded.evidence.provider, null, "an Orchestrator that can't view images receives no screenshot bytes");
+    // No organization, account or destination identifier is kept.
+    assert.doesNotMatch(JSON.stringify(recorded), new RegExp(`${f.human.organizationId}|${f.human.userId}|session_artifacts:`));
+    const projection = f.db.campaignProjection(rootId)!;
+    assert.deepEqual(projection.launchDisclosure, recorded);
+    assert.equal(projection.maxIssuesSource, undefined, "a launch with a task has no first-message scope grant");
+
+    const revision = f.db.getSession(rootId)!.parentControlPolicy!.revision;
+    const revoked = f.sessions.setCampaignControl(rootId, { mode: "custom" }, revision, f.human);
+    assert.ok(revoked.ok, revoked.error ?? "revocation succeeded");
+    assert.equal(f.db.getSession(rootId)!.orchestratorPolicy!.launchDisclosure, undefined, "a revoke drops the record with its boundary");
+    assert.equal(f.db.campaignProjection(rootId)!.launchDisclosure, undefined);
+
+    // Enabling again records what its own preflight disclosed.
+    const url = `/api/sessions/${rootId}/orchestrator-campaign/full-control`;
+    const enableChecked = await server.inject({ method: "POST", url: `${url}/preflight`, headers: { authorization: "Bearer human" }, payload: {} });
+    assert.equal(enableChecked.statusCode, 200, enableChecked.body);
+    const { preflight: enablePreflight, expectedRevision } = enableChecked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    const enabled = await server.inject({ method: "POST", url, headers: { authorization: "Bearer human" },
+      payload: { expectedRevision, preflightDigest: enablePreflight.digest } });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    const reenabled = f.db.getSession(rootId)!.orchestratorPolicy!.launchDisclosure!;
+    assert.equal(reenabled.source, "enable");
+    assert.deepEqual(reenabled.capabilities.map((item) => [item.id, item.state, item.reason]),
+      enablePreflight.capabilities.map((item) => [item.id, item.state, item.reason]));
+    assert.deepEqual(f.db.campaignProjection(rootId)!.launchDisclosure, reenabled);
+
+    // A malformed stored record is informational, so it is dropped on read rather than failing the policy.
+    const stored = JSON.parse((f.db.raw().prepare("SELECT orchestrator_policy FROM sessions WHERE id=?").get(rootId) as { orchestrator_policy: string }).orchestrator_policy);
+    stored.launchDisclosure.capabilities[0].state = "ready";
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(stored), rootId);
+    assert.equal(f.db.getSession(rootId)!.orchestratorPolicy!.control!.mode, "full_control");
+    assert.equal(f.db.getSession(rootId)!.orchestratorPolicy!.launchDisclosure, undefined);
+    assert.equal(f.db.campaignProjection(rootId)!.launchDisclosure, undefined);
+  } finally { await server.close(); f.db.close(); }
+});
+
 test("enabling an existing campaign is blocked only by another person's scope; participant ceilings and no budget are informational", async () => {
   const f = fixture();
   const { server } = await app(f);
@@ -1848,6 +1905,8 @@ test("after a reauthorization sets Maximum Issues explicitly, Campaign Status sh
     assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix the highest-priority issues")).ok, true);
     let view = (await f.sessions.campaignIssueScope(id)).data!;
     assert.equal(view.scopeGrant!.ceilings.maxIssuesSource, "derived");
+    // Campaign Status's Full Control section reads the same source from the projection (#2940).
+    assert.equal(f.db.campaignProjection(id)!.maxIssuesSource, "derived");
     assert.equal(view.policyRevision, f.db.getSession(id)!.parentControlPolicy!.revision, "the view names the revision it was read at");
     f.db.updateSessionStatus(id, "idle", Date.now());
     const payload = { overrides: { issues: { maxIssues: 5 } } };
@@ -1861,6 +1920,7 @@ test("after a reauthorization sets Maximum Issues explicitly, Campaign Status sh
     view = (await f.sessions.campaignIssueScope(id)).data!;
     assert.deepEqual((({ maxIssues, maxIssuesSource }) => ({ maxIssues, maxIssuesSource }))(view.scopeGrant!.ceilings),
       { maxIssues: 5, maxIssuesSource: "explicit" }, "the current authorization's ceiling, as set");
+    assert.equal(f.db.campaignProjection(id)!.maxIssuesSource, "explicit");
     assert.equal(view.policyRevision, f.db.getSession(id)!.parentControlPolicy!.revision);
     const over = f.sessions.setScopeGrantSelectionCount(id, { count: 6, expectedRevision: view.policyRevision! }, f.human);
     assert.equal(over.status, 400);

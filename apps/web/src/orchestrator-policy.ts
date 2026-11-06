@@ -16,6 +16,7 @@ import {
 import { agentHarnessMachinesDescription, agentHarnessOptionLabel } from "./agent-presentation.js";
 import { SKILLS_UNAVAILABLE_ON_TARGET } from "./components/SkillsUnavailableNotice.js";
 import { titleCaseLabel } from "./format.js";
+import { FULL_CONTROL_LINE } from "./full-control-readiness.js";
 import {
   INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED,
   INTEGRATION_ISOLATION_PRESERVED,
@@ -90,8 +91,7 @@ export const INTEGRATION_ISOLATION_OPTIONS = [
   { value: "on", label: "On", description: "The Orchestrator gets Wollipog's management tools and no other integration." },
 ] as const;
 
-/** Full Control's one line wherever it is chosen (#2940): it adds nothing to fill in. */
-export const FULL_CONTROL_LINE = "The Orchestrator runs this campaign end to end.";
+export { FULL_CONTROL_LINE };
 export const CONTROL_MODE_OPTIONS: ReadonlyArray<{ value: CampaignControlMode; label: string; description: string }> = [
   { value: "custom", label: "Custom", description: "Choose who decides at each gate below." },
   { value: "full_control", label: "Full Control", description: FULL_CONTROL_LINE },

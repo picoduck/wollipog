@@ -10,6 +10,7 @@ import {
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
+import type { CampaignAuthorityView } from "../full-control-readiness.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import {
   campaignStatusAvailability,
@@ -39,7 +40,8 @@ export type CampaignLoadStatus = "loading" | "ready" | "error";
 export interface CampaignSummaryState {
   status: CampaignLoadStatus;
   summary: CampaignWorkSummary | null;
-  campaign: Pick<OrchestratorCampaignProjection, "status" | "limits" | "heldChildren" | "handoffs" | "ownerDecisions" | "budget" | "recovery" | "policyRevision" | "repositoryBoundary" | "cleanup" | "stuck" | "activity"> | null;
+  campaign: (Pick<OrchestratorCampaignProjection, "status" | "limits" | "heldChildren" | "handoffs" | "ownerDecisions" | "budget" | "recovery" | "policyRevision" | "repositoryBoundary" | "cleanup" | "stuck" | "activity"> &
+    Partial<CampaignAuthorityView>) | null;
   /** The root session's title, for a member's "part of" line. */
   campaignTitle: string | null;
   /** Why the summary could not be loaded, or, beside a shown summary, why it could not be refreshed. */

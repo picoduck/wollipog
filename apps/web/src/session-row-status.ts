@@ -2,6 +2,7 @@ import type { SessionReminderView, SessionView } from "@wollipog/protocol";
 import { activeFullControlCampaign, cleanupFullControlCampaign, completedFullControlCampaign, sessionFollowUp, sessionWorking,
   stuckFullControlCampaign } from "./session-follow-up.js";
 import { reminderBadgeDescription, reminderBadgeLabel, snoozedSessionAttentionReason } from "./session-reminders.js";
+import { campaignActiveDescription } from "./full-control-readiness.js";
 import {
   sessionStatusSummary,
   statusMeta,
@@ -71,7 +72,6 @@ function snoozedCondition(session: SessionStatusSource, needs: readonly SessionC
 const CAMPAIGN_STUCK_DESCRIPTION = "This Full Control campaign has unfinished work and nothing is scheduled to move it. Campaign Status names what is stuck.";
 const CAMPAIGN_CLEANUP_DESCRIPTION = "This Full Control campaign finished, and some cleanup is left. Campaign Status lists each item and how to settle it.";
 const CAMPAIGN_COMPLETE_DESCRIPTION = "This Full Control campaign finished and the server verified it. Its result is informational.";
-const CAMPAIGN_ACTIVE_DESCRIPTION = "This Full Control campaign continues automatically. Its intermediate results are informational.";
 
 /**
  * A session header's status (#2938): `sessionStatusSummary`, plus the campaign state an at-rest
@@ -109,7 +109,9 @@ export function sessionHeaderStatusSummary(session: SessionStatusSource, context
     : completedFullControlCampaign(session)
       ? { kind: "campaign", meta: statusMeta("session", "campaign_complete"), description: CAMPAIGN_COMPLETE_DESCRIPTION, needsYou: false }
       : activeFullControlCampaign(session)
-        ? { kind: "campaign", meta: statusMeta("session", "campaign_active"), description: CAMPAIGN_ACTIVE_DESCRIPTION, needsYou: false }
+        // Readiness the server's facts don't prove is never claimed (#2940), as on the row.
+        ? { kind: "campaign", meta: statusMeta("session", "campaign_active"),
+          description: campaignActiveDescription((session as SessionView).orchestratorCampaign), needsYou: false }
         : null;
   if (!campaign) return summary;
   if (completed) {
@@ -171,7 +173,7 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
       !session.stopOperation && needs.length === 0 && reminder?.state !== "fired" && !context.familyWorking &&
       !sessionWorking(session as SessionView) && activeFullControlCampaign(session)) {
     secondary = { kind: "lifecycle", meta: statusMeta("session", "campaign_active"),
-      description: CAMPAIGN_ACTIVE_DESCRIPTION, needsYou: false };
+      description: campaignActiveDescription((session as SessionView).orchestratorCampaign), needsYou: false };
   }
   const others = (stuckOverFollowUp ? needs : needs.slice(1)).map(conditionName);
   const familyLabel = context.familyFollowUpLabel;
