@@ -1,6 +1,6 @@
 [package]
 name = "wollipog-desktop"
-version = "0.36.0-rc.4"
+version = "0.36.0-rc.5"
 description = "Wollipog desktop shell"
 license = "Apache-2.0"
 repository = "https://github.com/picoduck/wollipog"
