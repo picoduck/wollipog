@@ -40,6 +40,7 @@ function checkedBy(proposal: CampaignScopeProposal): string {
   }
   switch (proposal.ownerCause) {
     case "proposal_unstructured": return "Deterministic checks, then your approval: the Orchestrator's machine can't send a structured proposal.";
+    case "repository_name_unresolved": return "Deterministic checks, then your approval: the repository your message names decides nothing, so no model was asked.";
     case "constraint_check_uncertain": return `Deterministic checks, then the Decision Model couldn't confirm ${list}, so it needs your approval.`;
     case "constraint_check_failed": return `Deterministic checks, then the Decision Model's check of ${list} failed, so it needs your approval.`;
     default: return `Deterministic checks, then your approval: it includes ${list}, which no Decision Model checked.`;
@@ -79,12 +80,14 @@ export function ScopeProposalFacts({ repository, proposal, explanation }: { repo
   return <>
     <dl className="facts">
       <div><dt>Scope</dt><dd>{proposal.initial ? "Initial Scope" : "Addition"}</dd></div>
-      <div><dt>Issues</dt><dd>{proposal.issues.length ? <ul className="campaign-detail-list">{proposal.issues.map((issue) => <li key={issue.number}>
-        {repository}#{issue.number}{issue.title ? ` ${issue.title}` : ""}{" "}
+      <div><dt>Issues</dt><dd>{proposal.issues.length ? <ul className="campaign-detail-list">{proposal.issues.map((issue) => <li key={`${issue.repository ?? repository}#${issue.number}`}>
+        {issue.repository ?? repository}#{issue.number}{issue.title ? ` ${issue.title}` : ""}{" "}
         <StatusBadge noDot tone={issue.origin === "owner_named" ? "info" : "neutral"} label={issue.origin === "owner_named" ? "Named by You" : "Chosen by Orchestrator"} />
         {issue.rationale ? <>: {issue.rationale}</> : null}
       </li>)}</ul> : "None: the Orchestrator found nothing in your message that needs issue scope."}</dd></div>
       <div><dt>Count You Asked For</dt><dd>{proposal.requestedCount ?? "None Stated"}</dd></div>
+      {proposal.repositoryConstraint && <div><dt>Repository You Named</dt><dd>{proposal.repositoryConstraint.name}: {proposal.repositoryConstraint.repository ??
+        "matches no repository in this campaign, or more than one"}</dd></div>}
       <div><dt>Constraints It Read</dt><dd>{proposal.constraints.length ? proposal.constraints.join("; ") : "None"}</dd></div>
       <div><dt>Withheld Operations</dt><dd>{proposal.withheldOperations.length ? proposal.withheldOperations.map(operationLabel).join(", ") : "None"}</dd></div>
       <div><dt>Rationale</dt><dd>{explanation}</dd></div>
@@ -112,7 +115,7 @@ export function CampaignScopeProposalSection({ grant, proposals, ceilingsShown =
     </Notice>}
     <dl className="facts">
       {!ceilingsShown && <div><dt>Maximum Issues</dt><dd>{grant.ceilings.maxIssues} <StatusBadge noDot label={grant.ceilings.maxIssuesSource === "explicit" ? "Set by You" : "Derived"} /></dd></div>}
-      <div><dt>Repository</dt><dd>{grant.ceilings.repositories.join(", ")}</dd></div>
+      <div><dt>{grant.ceilings.repositories.length > 1 ? "Repositories" : "Repository"}</dt><dd>{grant.ceilings.repositories.join(", ")}</dd></div>
       {!ceilingsShown && <div><dt>Operations</dt><dd>{grant.ceilings.operations.length ? grant.ceilings.operations.map(operationLabel).join(", ") : "None"}</dd></div>}
     </dl>
     {proposals.map((view, index) => {

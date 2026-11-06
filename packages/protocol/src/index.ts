@@ -980,7 +980,14 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      one-repository campaigns are unchanged for older runners. (This change first claimed 290,
 //      293, 299, 301, 304, 305 and 309, which no released version uses; 292 and 300 are claimed by
 //      open pull requests.)
-export const PROTOCOL_VERSION = 313;
+// 316: an Orchestrator's scope proposal names issues in any boundary repository (#4118). Each other
+//      repository's issues are read through one of its own Locations: `campaign_launch_inspect` takes
+//      `facts` and returns `issueFacts`, sent only to a v316 runner; an older one is refused by name
+//      and nothing changes. `proposal.repositoryName` is the repository the owner's message limits the
+//      work to, which the server resolves against the boundary. A v316 runner sends it only to a v316
+//      control plane; older dashboards show the launch repository for an issue that names another.
+//      (314 and 315 are claimed by open pull requests.)
+export const PROTOCOL_VERSION = 316;
 
 export * from "./campaign-authority.js";
 export * from "./decision-questions.js";
@@ -1577,6 +1584,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   campaignControlRevision: 310,
   /** v313 synchronizes its own repository's part of a multi-repository issue scope (#4118). */
   repositoryQualifiedIssueScope: 313,
+  /** v316 reads a Location's issue facts for a repository-qualified scope proposal (#4118). */
+  repositoryQualifiedProposals: 316,
 } as const;
 
 /* ========================================================================== */

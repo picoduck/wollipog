@@ -151,6 +151,20 @@ approval is invalidated. A legacy campaign with no saved repository stays unveri
   repository. If any repository has no Location online, the whole request is refused naming it and
   nothing changes. The approval snapshot keeps the launch repository's numbers at the top level and
   lists every other repository the scope holds or the change touches under `otherRepositories`.
+- **Orchestrator proposals.** An Orchestrator's scope proposal (#4282) may add issues in any campaign
+  repository. Each other repository's issues are read through its first online Location with their
+  state, labels and title (a v316 runner; an older one is refused by name), and each floor answers for
+  the issue's own repository: already in scope, held by another campaign, a pull request, closed, a
+  Human Required label. An owner-named issue must be written for its own repository: a bare `#12` means
+  the launch repository only, so another repository's needs `owner/repo#12` or its URL. The same number
+  in two repositories is two issues everywhere, including the constraint check's questions.
+- **A repository the owner names.** `proposal.repositoryName` carries the message's own words for a
+  repository the work is limited to. The words must appear in the owner's message
+  (`repository_name_not_in_message`). The server, not a model, resolves them against the boundary: the
+  full name, the name without the owner, or a Location's name, ignoring case, a leading "the" and a
+  trailing "repo" or "repository". One match binds every issue to that repository
+  (`repository_constraint_mismatch`). No match or several grants nothing: the proposal becomes the
+  owner's one approval (`repository_name_unresolved`) with no model call.
 - **Admission.** Maximum Issues counts issues across all repositories. Epic lineage admits only the
   launch repository's epic members, and follow-up lineage only a publication in the launch repository,
   until cross-repository follow-ups (#4119) and repository-qualified epics land.

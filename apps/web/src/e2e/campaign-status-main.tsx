@@ -726,7 +726,7 @@ let scopeGrantFixture: import("@wollipog/protocol").FullControlScopeGrant | null
 } : params.get("scope") === "grant-failed" ? {
   version: 1, status: "failed", occurrenceId: "dec_fixture", target: SCOPE_GRANT_TARGET, failureClass: "provider_overloaded", namedIssues: [],
   ceilings: launchCeilings(1),
-} : params.get("scope") === "proposal" || params.get("scope") === "proposal-waiting" ? {
+} : params.get("scope") === "proposal" || params.get("scope") === "proposal-waiting" || params.get("scope") === "proposal-repositories" ? {
   // The Orchestrator proposes the scope (#4282): the server read nothing from the message.
   version: 1, status: "proposal", namedIssues: [], ceilings: launchCeilings(9),
 } : params.get("scope") === "grant-uncertain" ? {
@@ -792,6 +792,20 @@ const SCOPE_PROPOSALS: import("@wollipog/protocol").CampaignScopeProposalView[] 
   proposal: { initial: true, messageDigest: "a".repeat(64), requestedCount: null, constraints: [], withheldOperations: [], checks: [], route: "admitted",
     issues: [{ number: 123, origin: "owner_named", rationale: "You named it.", title: "Composer Epic" },
       { number: 124, origin: "owner_named", rationale: "You named it.", title: "Member Work" }] },
+}];
+
+/** A proposal across a campaign's repositories (#4118): the same number in two of them is two issues. */
+const SCOPE_PROPOSALS_ACROSS_REPOSITORIES: import("@wollipog/protocol").CampaignScopeProposalView[] = [{
+  occurrenceId: "wd_scope_3", createdAt: NOW - 60_000, outcome: "waiting_for_owner",
+  explanation: "You named team/repo#123 and team/api#123. I chose the worst open API bug by priority label.",
+  proposal: { initial: true, messageDigest: "a".repeat(64), requestedCount: null, constraints: [], withheldOperations: [],
+    repositoryConstraint: { name: "the service repo", repository: null }, checks: ["chosen_issues", "repository_name_unresolved"], route: "owner",
+    ownerCause: "repository_name_unresolved", ownerMessage: "Fix team/repo#123 and team/api#123, then the worst open bug in the service repo.",
+    issues: [
+      { number: 123, origin: "owner_named", rationale: "You named it.", title: "Composer Epic" },
+      { repository: "team/api", number: 123, origin: "owner_named", rationale: "You named it, in the API repository.", title: "Token Refresh Races" },
+      { repository: "team/api", number: 140, origin: "orchestrator_chosen", rationale: "Open bug, priority:high.", title: "Timeouts Under Load" },
+    ] },
 }];
 
 const scopeRequirement = params.get("scope") === "outdated-runner" ? campaignIssueScopeChangesRequirement(207)
@@ -915,6 +929,7 @@ const client = {
     // The Orchestrator's proposals (#4282): one waiting for the owner, after an earlier one it replaced.
     ...(params.get("scope") === "proposal" ? { issueNumbers: [], scopeProposals: SCOPE_PROPOSALS } : {}),
     ...(params.get("scope") === "proposal-waiting" ? { issueNumbers: [], scopeProposals: [] } : {}),
+    ...(params.get("scope") === "proposal-repositories" ? { issueNumbers: [], scopeProposals: SCOPE_PROPOSALS_ACROSS_REPOSITORIES } : {}),
     // `activity=…` (#4146): the authorized scope covers every work item, so nothing reads as outside it.
     ...(activityScenario ? { repository: "picoduck/wollipog", revision: 1, canPropose: false, outsideScope: [], candidates: [],
       issueNumbers: [...new Set(items.flatMap((item) => item.issue ? [item.issue.number] : []))] } : {}),

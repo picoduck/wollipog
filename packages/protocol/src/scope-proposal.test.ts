@@ -40,11 +40,36 @@ test("a proposal must list exactly its additions, each once, with an origin and 
   ] as const) assert.match(normalizeScopeProposalInput(bad, additions) as string, pattern);
 });
 
+test("a recorded repository name that resolved to nothing is always the owner's (#4118)", () => {
+  const base = { initial: true, messageDigest: "a".repeat(64), issues: [{ repository: "owner/api", number: 1, origin: "orchestrator_chosen", rationale: "r", title: "" }],
+    requestedCount: null, constraints: [], withheldOperations: [], ownerMessage: "Fix the top bug in the repo." };
+  const unresolved = { ...base, repositoryConstraint: { name: "repo", repository: null }, checks: ["chosen_issues", "repository_name_unresolved"] };
+  assert.equal(validScopeProposal({ ...unresolved, route: "owner", ownerCause: "repository_name_unresolved" }), true);
+  assert.equal(validScopeProposal({ ...unresolved, route: "admitted", ownerMessage: undefined, ownerCause: undefined,
+    constraintCheck: { occurrenceId: "dec_1", verdict: "admit" } }), false, "no check can admit a name that means nothing");
+  assert.equal(validScopeProposal({ ...unresolved, checks: ["chosen_issues"], route: "owner", ownerCause: "constraint_check_unavailable" }), false, "the record and its check agree");
+  assert.equal(validScopeProposal({ ...base, repositoryConstraint: { name: "the api repo", repository: "owner/api" }, checks: ["chosen_issues"], route: "owner",
+    ownerCause: "constraint_check_unavailable" }), true);
+  assert.equal(validScopeProposal({ ...base, repositoryConstraint: { name: "the api repo", repository: "not a repository" }, checks: ["chosen_issues"], route: "owner",
+    ownerCause: "constraint_check_unavailable" }), false);
+  assert.equal(validScopeProposal({ ...base, issues: [{ ...base.issues[0], repository: "not a repository" }], checks: ["chosen_issues"], route: "owner", ownerCause: "constraint_check_unavailable" }), false);
+  const additions = [{ repository: "owner/api", number: 1 }];
+  const input = { issues: [{ repository: "OWNER/API", number: 1, origin: "owner_named", rationale: "r" }], requestedCount: null, constraints: [], withheldOperations: [] };
+  assert.deepEqual((normalizeScopeProposalInput({ ...input, repositoryName: "  the  api repo " }, additions) as { repositoryName: string }).repositoryName, "the api repo");
+  assert.match(normalizeScopeProposalInput({ ...input, repositoryName: " " }, additions) as string, /repositoryName/u);
+  assert.match(normalizeScopeProposalInput({ ...input, repositoryName: "x".repeat(201) }, additions) as string, /repositoryName/u);
+});
+
 test("only owner-named issues with nothing else stated take the no-model fast path; ranking is never a check (#4282)", () => {
   const issue = (origin: "owner_named" | "orchestrator_chosen") => ({ repository: "owner/repo", number: 1, origin, rationale: "r" });
   const base = { issues: [issue("owner_named")], requestedCount: null, constraints: [], withheldOperations: [] };
-  const referenced = [1];
+  const reference = (number: number, repository = "owner/repo") => ({ repository, number });
+  const referenced = [reference(1)];
   assert.deepEqual(scopeProposalChecks(base, referenced), []);
+  // The same number in another repository is another issue (#4118).
+  assert.deepEqual(scopeProposalChecks(base, [reference(1), reference(1, "owner/api")]), ["unproposed_references"]);
+  assert.deepEqual(scopeProposalChecks(base, [reference(1, "owner/api")]), ["unreferenced_named_issues", "unproposed_references"]);
+  assert.deepEqual(scopeProposalChecks({ ...base, issues: [{ ...issue("owner_named"), repository: "OWNER/API" }] }, [reference(1, "owner/api")]), []);
   assert.deepEqual(scopeProposalChecks({ ...base, requestedCount: 1 }, referenced), [], "a count that is exactly the named issues needs no check");
   assert.deepEqual(scopeProposalChecks({ ...base, requestedCount: 2 }, referenced), ["requested_count"]);
   // A referenced issue the proposal chose rather than marked owner-named still needs the named-or-mentioned check.
@@ -52,7 +77,7 @@ test("only owner-named issues with nothing else stated take the no-model fast pa
   assert.deepEqual(scopeProposalChecks({ ...base, issues: [issue("orchestrator_chosen")], requestedCount: 1 }, referenced),
     ["chosen_issues", "unproposed_references", "requested_count"]);
   // "See #7 for background; fix #8": proposing only #8 leaves #7 to the check, which decides whether it was asked for.
-  assert.deepEqual(scopeProposalChecks({ ...base, issues: [{ ...issue("owner_named"), number: 8 }] }, [7, 8]), ["unproposed_references"]);
+  assert.deepEqual(scopeProposalChecks({ ...base, issues: [{ ...issue("owner_named"), number: 8 }] }, [reference(7), reference(8)]), ["unproposed_references"]);
   assert.deepEqual(scopeProposalChecks({ ...base, constraints: ["open"] }, referenced), ["constraints"]);
   assert.deepEqual(scopeProposalChecks({ ...base, withheldOperations: ["pr_merge"] }, referenced), ["withheld_operations"]);
   assert.deepEqual(scopeProposalChecks({ ...base, issues: [] }, []), [], "a task that needs no issues");

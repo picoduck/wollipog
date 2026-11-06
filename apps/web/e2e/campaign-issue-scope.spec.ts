@@ -230,6 +230,25 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
 }
 
 for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844 }]) {
+  test(`a Scope Proposal names each issue by its own repository and shows the repository the owner named at ${viewport.width}px (#4118)`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=proposal-repositories");
+    const section = page.getByRole("region", { name: "Scope Proposal" });
+    const latest = section.getByRole("article", { name: "Latest Proposal" });
+    const row = (term: string) => latest.locator("dl.facts > div").filter({ has: page.getByRole("term").getByText(term, { exact: true }) }).locator("dd");
+    await expect(row("Issues").getByRole("listitem")).toHaveCount(3);
+    await expect(row("Issues")).toContainText("team/repo#123 Composer Epic");
+    await expect(row("Issues")).toContainText("team/api#123 Token Refresh Races");
+    await expect(row("Issues")).toContainText("team/api#140 Timeouts Under Load");
+    await expect(row("Repository You Named")).toHaveText("the service repo: matches no repository in this campaign, or more than one");
+    const geometry = await section.evaluate((element) => ({ client: element.clientWidth, scroll: element.scrollWidth }));
+    expect(geometry.scroll).toBeLessThanOrEqual(geometry.client + 1);
+    await section.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `playwright-report/scope-proposal-repositories-${viewport.width}.png`, fullPage: true });
+  });
+}
+
+for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844 }]) {
   test(`the owner changes a defaulted selection count from the Scope Grant at ${viewport.width}px (#4102)`, async ({ page }, info) => {
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=grant-default");

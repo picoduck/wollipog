@@ -35,7 +35,7 @@ import { PullRequestWatches } from "./pull-request-watches.js";
 import { SessionWaits } from "./session-waits.js";
 import { ReviewSettingsStore, type ReviewPolicyCapture } from "./review-settings.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
-import { campaignScopeChangeBefore, campaignScopeChangeGroups, campaignScopeChangeResult, campaignScopeForRepository, campaignScopeIssues, campaignScopeNumbers, campaignScopeWithIssues, canonicalCampaignIssues } from "@wollipog/protocol";
+import { campaignScopeChangeBefore, campaignScopeChangeGroups, campaignScopeChangeResult, campaignScopeForRepository, campaignScopeHolds, campaignScopeIssues, campaignScopeNumbers, campaignScopeWithIssues, canonicalCampaignIssues } from "@wollipog/protocol";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
 import {
   isProviderLoginFailureCode, isSessionLaunchFailureCode, type SessionLaunchFailureCode, PROJECT_CREATION_REQUEST_WINDOW_MS,
@@ -12592,17 +12592,20 @@ export class ControlPlaneDb {
 
   /** Every issue an applied (consumed) Orchestrator scope proposal of this campaign added as its own
    * choice (#4282), whether or not it is still in scope: removing an issue never frees room under the
-   * owner's count. Unbounded, for enforcement. */
-  appliedProposalChosenIssues(rootId: string): number[] {
+   * owner's count. A launch issue is its number and another repository's is `owner/repo#n` (#4118).
+   * Unbounded, for enforcement. */
+  appliedProposalChosenIssues(rootId: string): Array<number | string> {
     const rows = this.stmt(`SELECT resource_snapshot FROM workflow_decisions WHERE controlling_session_id=? AND session_id=?
       AND category='campaign_issue_scope' AND status='consumed' AND json_extract(resource_snapshot, '$.scopeProposal') IS NOT NULL`)
       .all(rootId, rootId) as Array<{ resource_snapshot: string }>;
-    const chosen = new Set<number>();
+    const chosen = new Set<number | string>();
     for (const row of rows) {
-      const issues = (JSON.parse(row.resource_snapshot) as { scopeProposal?: { issues?: Array<{ number: number; origin: string }> } }).scopeProposal?.issues ?? [];
-      for (const issue of issues) if (issue.origin === "orchestrator_chosen" && Number.isSafeInteger(issue.number)) chosen.add(issue.number);
+      const issues = (JSON.parse(row.resource_snapshot) as { scopeProposal?: { issues?: Array<{ repository?: string; number: number; origin: string }> } }).scopeProposal?.issues ?? [];
+      for (const issue of issues) {
+        if (issue.origin === "orchestrator_chosen" && Number.isSafeInteger(issue.number)) chosen.add(issue.repository ? `${issue.repository}#${issue.number}` : issue.number);
+      }
     }
-    return [...chosen].sort((a, b) => a - b);
+    return [...chosen];
   }
 
   /** A campaign's occurrences whose idempotency key starts with `prefix` (#4282: every constraint check
@@ -17512,7 +17515,7 @@ export class ControlPlaneDb {
     const active = new Set(this.listOrchestratorCampaignSessionIds().filter((id) => id !== rootId));
     for (const id of active) {
       const scope = this.getSession(id)?.orchestratorPolicy?.issueScope;
-      if (scope && scope.repository.toLowerCase() === wanted && scope.issueNumbers.includes(issue)) return true;
+      if (scope && campaignScopeHolds(scope, { repository: wanted, number: issue })) return true;
     }
     return this.campaignWorkLedger.campaignsWithCommittedIssue(wanted, issue).some((id) => active.has(id));
   }

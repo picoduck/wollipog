@@ -3,7 +3,7 @@ import { test } from "node:test";
 import Fastify from "fastify";
 import {
   CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CONTROLLED_REVIEW_PROFILE, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, WORKFLOW_DECISION_CATEGORIES,
-  campaignWorkflowOwner, SCOPE_GRANT_DEFAULT_SELECTION_COUNT,
+  campaignWorkflowOwner, SCOPE_GRANT_DEFAULT_SELECTION_COUNT, SCOPE_PROPOSAL_ANSWER_ID, SCOPE_PROPOSAL_APPROVE_LABEL,
   type CampaignIssueFacts, type CampaignIssueScopeRequest, type CampaignIssueScopeSnapshot, type FullControlScopeGrant, type CampaignLaunchInspectionResult, type CampaignLaunchPreflight, type CampaignLaunchProposal, type ControlledReviewCapability,
   isOwnerQuestionRequest, pendingRequests, presentOwnerQuestionRequest, scopeProposalOfRequest,
   type CampaignWorkItemDetail, type ControlPlaneToRunner, type ExecutionTargetDefinition, type CreateSessionRequest, type FullControlFirstMessageScope, type FullControlLaunchRequest, type GithubIssueClosureSnapshot, type RunnerMetadata, type RunnerRuntimeInfo,
@@ -1317,8 +1317,9 @@ const PENDING = { state: "pending", derivedLimits: { acceptedFollowUps: true, ma
 
 /** A launch with no task, as New Session sends it: the root starts idle like any Orchestrator. */
 async function firstMessageLaunch(f: ReturnType<typeof fixture>, server: Awaited<ReturnType<typeof app>>["server"],
-  limits: Pick<NonNullable<FullControlLaunchRequest["overrides"]>, "budget" | "issues" | "operations"> = {}) {
-  const body: FullControlLaunchRequest = { runnerId: "r", workspaceId: "w", overrides: { session: { agentId: "claude",
+  limits: Pick<NonNullable<FullControlLaunchRequest["overrides"]>, "budget" | "issues" | "operations"> = {},
+  where: Pick<FullControlLaunchRequest, "projectId" | "projectLocationId"> = {}) {
+  const body: FullControlLaunchRequest = { runnerId: "r", workspaceId: "w", ...where, overrides: { session: { agentId: "claude",
     config: { model: "claude-opus-5-5", permissionMode: "orchestrator" }, orchestrator: { behavior: { followUps: "execute_approved" } } }, ...limits } };
   const { preflight: checked } = await preflight(server, body);
   assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
@@ -1390,8 +1391,8 @@ const chosen = (number: number, rationale = `Ranked by its priority label (#${nu
 
 /** A launched campaign whose owner sent `message`, with helpers to propose, apply and answer. */
 async function proposalCampaign(f: ReturnType<typeof fixture>, server: Awaited<ReturnType<typeof app>>["server"], message: string,
-  limits: Parameters<typeof firstMessageLaunch>[2] = {}) {
-  const { id } = await firstMessageLaunch(f, server, limits);
+  limits: Parameters<typeof firstMessageLaunch>[2] = {}, where: Parameters<typeof firstMessageLaunch>[3] = {}) {
+  const { id } = await firstMessageLaunch(f, server, limits, where);
   assert.equal((await f.sessions.promptFromHuman(f.human, id, message)).ok, true);
   const revision = () => f.db.getSession(id)!.orchestratorPolicy!.issueScope!.revision;
   const propose = (issues: ProposalIssue[], extra: Partial<NonNullable<CampaignIssueScopeRequest["proposal"]>> = {},
@@ -3639,6 +3640,157 @@ test("a scope holds issues in every boundary repository, each verified through a
     assert.equal(moved.ok, false);
     assert.match(moved.error!, /could not verify every proposed change in other\/repo/u);
     assert.ok(p.other.id);
+  } finally { await server.close(); f.db.close(); }
+});
+
+/** A first-message campaign in `owner/repo` whose boundary also holds `other/repo`, read through its
+ * Location on runner `r2` (#4118). `otherFacts` overrides what that Location reports per issue. */
+async function multiRepositoryProposals(message: string, limits: Parameters<typeof firstMessageLaunch>[2] = {}) {
+  const f = fixture();
+  const p = multiRepositoryProject(f);
+  const routed: Array<{ runnerId: string; message: ControlPlaneToRunner }> = [];
+  const send = f.hub.sendToRunner.bind(f.hub);
+  f.hub.sendToRunner = (runnerId, frame) => {
+    routed.push({ runnerId, message: frame });
+    if (runnerId !== "r" && frame.type === "campaign_issue_scope" && frame.operation === "synchronize") {
+      queueMicrotask(() => f.hub.resolveRunnerRequest({ type: "campaign_issue_scope_result", requestId: frame.requestId, sessionId: frame.sessionId,
+        ok: true, repository: frame.scope.repository, revision: frame.scope.revision }, runnerId));
+      return true;
+    }
+    return send(runnerId, frame);
+  };
+  const otherFacts = new Map<number, Partial<CampaignIssueFacts>>();
+  const inspect = f.state.inspect;
+  f.state.inspect = (frame) => {
+    const answer = inspect(frame);
+    return answer?.ok && frame.facts ? { ...answer, issueFacts: frame.issueNumbers.map((number): CampaignIssueFacts => ({ number, kind: "issue", state: "open",
+      labels: [], assignees: [], title: `Other ${number}`, bodyExcerpt: "", ...otherFacts.get(number) })) } : answer;
+  };
+  const { server } = await app(f);
+  const c = await proposalCampaign(f, server, message, limits, { projectId: p.project.id, projectLocationId: p.launchLocation.id });
+  return { f, p, server, routed, otherFacts, ...c };
+}
+const otherNamed = (number: number): ProposalIssue => ({ ...named(number), repository: "other/repo" });
+const otherChosen = (number: number): ProposalIssue => ({ ...chosen(number), repository: "other/repo" });
+
+test("a proposal names issues in any boundary repository, each read through a Location of its own repository (#4118, #4282)", async () => {
+  const { f, server, routed, propose, apply, id } = await multiRepositoryProposals("Fix owner/repo#12 and other/repo#40.");
+  try {
+    routed.length = 0;
+    const proposed = await propose([named(12), otherNamed(40)]);
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "orchestrator", "owner-named references take the no-model fast path in every repository");
+    const snapshot = proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot;
+    assert.deepEqual([snapshot.additions, snapshot.otherRepositories], [[12], [{ repository: "other/repo", before: [], additions: [40], removals: [] }]]);
+    assert.deepEqual(snapshot.scopeProposal!.issues.map((issue) => [issue.repository, issue.number, issue.title]),
+      [[undefined, 12, "Issue 12"], ["other/repo", 40, "Other 40"]], "a launch issue stays bare, and another repository's title comes from its own Location");
+    assert.deepEqual(snapshot.scopeProposal!.checks, []);
+    assert.equal(f.decision.checkCalls.length, 0);
+    const inspected = routed.filter(({ message }) => message.type === "campaign_launch_inspect");
+    assert.deepEqual(inspected.map(({ runnerId, message }) => message.type === "campaign_launch_inspect" ? [runnerId, message.workspacePath, message.issueNumbers, message.facts] : []),
+      [["r2", "/fixture/two/other", [40], true]], "never the root's runner for another repository");
+    assert.equal(apply(proposed.data!.occurrenceId).ok, true);
+    const policy = f.db.getSession(id)!.orchestratorPolicy!;
+    assert.deepEqual(policy.issueScope!.issues, [{ repository: "other/repo", number: 40 }, { repository: "owner/repo", number: 12 }]);
+    assert.deepEqual(policy.issueNumbers, [12]);
+    assert.ok((policy.firstMessageScope as Extract<FullControlFirstMessageScope, { state: "established" }>).initialScope, "dispatch can start");
+    // Later, the same number in the other repository is a separate issue, and one already held is refused by name.
+    const again = await propose([otherNamed(40)]);
+    assert.deepEqual(again.errorDetails, { code: "already_in_scope", issue: 40, repository: "other/repo" });
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("each proposal floor answers for the issue's own repository (#4118, #4282)", async () => {
+  const { f, server, otherFacts, propose } = await multiRepositoryProposals("Fix #12 and other/repo#40, other/repo#42, other/repo#43, other/repo#44 and other/repo#45.");
+  try {
+    const refusedWith = async (issues: ProposalIssue[], details: Record<string, unknown>) => assert.deepEqual((await propose(issues)).errorDetails, details);
+    // A bare number is the launch repository's: it names nothing in the other one, and the reverse holds.
+    await refusedWith([otherNamed(12)], { code: "owner_named_not_in_message", issue: 12, repository: "other/repo" });
+    await refusedWith([named(40)], { code: "owner_named_not_in_message", issue: 40 });
+    otherFacts.set(42, { kind: "pull_request" });
+    await refusedWith([otherNamed(42)], { code: "not_an_issue", issue: 42, repository: "other/repo" });
+    otherFacts.set(43, { state: "closed" });
+    await refusedWith([otherNamed(43)], { code: "issue_not_open", issue: 43, repository: "other/repo" });
+    otherFacts.set(44, { labels: ["Security"] });
+    f.db.upsertGovernancePolicy({ policyId: "security-issues", name: "Security issues stay mine", effect: "ask", priority: 1, enabled: true,
+      scope: {}, conditions: { humanRequired: true, issueLabels: ["security"] } }, Date.now());
+    await refusedWith([otherNamed(44)], { code: "human_required_label", issue: 44, repository: "other/repo" });
+    assert.equal(f.decision.checkCalls.length, 0, "no floor refusal reaches a model");
+
+    // Another active campaign holding the issue in that repository holds it here too.
+    const { id: holder } = await firstMessageLaunch(f, server);
+    const held = f.db.sessionOrchestratorPolicy(holder)!;
+    held.issueScope = { ...held.issueScope!, issues: [{ repository: "other/repo", number: 45 }] };
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(held), holder);
+    await refusedWith([otherNamed(45)], { code: "other_campaign_scope", issue: 45, repository: "other/repo" });
+
+    // With no Location online the whole proposal is refused and names the repository; so is a runner too old to report facts.
+    const online = f.hub.isRunnerOnline;
+    f.hub.isRunnerOnline = (runnerId) => runnerId !== "r2" && online(runnerId);
+    const offline = await propose([named(12), otherNamed(40)]);
+    assert.match(offline.error!, /^No Location of other\/repo is online/u);
+    f.hub.isRunnerOnline = online;
+    const getRunner = f.db.getRunner.bind(f.db);
+    f.db.getRunner = (runnerId) => { const runner = getRunner(runnerId); return runner && runnerId === "r2" ? { ...runner, protocolVersion: 315 } : runner; };
+    const old = await propose([otherNamed(40)]);
+    assert.match(old.error!, /^The runner of other\/repo's Location is too old/u);
+    f.db.getRunner = getRunner;
+    assert.equal(f.db.unconsumedWorkflowDecisionsForController(holder).length, 0);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a proposal's chosen issue in another repository reaches the constraint check with its repository and facts (#4118, #4282)", async () => {
+  const { f, server, propose, ownerRequests } = await multiRepositoryProposals("Fix the 2 highest-priority open bugs.");
+  try {
+    f.decision.state.check = (message) => scopeCheckAnswer(message);
+    const proposed = await propose([chosen(12), otherChosen(12)], { requestedCount: 2, constraints: ["open"] });
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "orchestrator", "the check admitted it");
+    assert.equal(ownerRequests().length, 0);
+    assert.deepEqual(Object.values(scopeCheckParametersOf(f.decision.checkCalls[0]!)), ["owner/repo#12 Issue 12 — open", "other/repo#12 Other 12 — open"],
+      "the same number in two repositories is two questions");
+    assert.match(f.decision.checkCalls[0]!.input, /Other 12/u, "its facts come from its own Location");
+    assert.deepEqual((proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.issues.map((issue) => issue.repository), [undefined, "other/repo"]);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a repository the owner's message names limits the proposal when it means one boundary repository, and otherwise grants nothing (#4118)", async () => {
+  const { f, p, server, propose, ownerRequests, answer, id } = await multiRepositoryProposals("Fix the top bug in r2 a, or the top bug in the repo.");
+  try {
+    assert.equal(f.db.getProjectLocation(p.other.id)!.name, "r2 a");
+    const refused = await propose([otherChosen(50)], { repositoryName: "the api repository" });
+    assert.deepEqual(refused.errorDetails, { code: "repository_name_not_in_message" });
+    // A Location's name means its repository, so an issue anywhere else is refused by name.
+    const stray = await propose([chosen(50)], { repositoryName: "r2 a" });
+    assert.deepEqual(stray.errorDetails, { code: "repository_constraint_mismatch", issue: 50 });
+    assert.equal(f.decision.checkCalls.length, 0);
+    f.decision.state.check = (message) => scopeCheckAnswer(message);
+    const fits = await propose([otherChosen(50)], { repositoryName: "r2 a" });
+    assert.equal(fits.ok, true, fits.error ?? "");
+    assert.deepEqual((fits.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.repositoryConstraint, { name: "r2 a", repository: "other/repo" });
+
+    // "repo" is the name of both repositories without their owners: it means nothing, so it is the owner's, with no model call.
+    const calls = f.decision.checkCalls.length;
+    const ambiguous = await propose([otherChosen(51)], { repositoryName: "repo" });
+    assert.equal(ambiguous.ok, true, ambiguous.error ?? "");
+    assert.equal(ambiguous.data!.authority, "human");
+    const recorded = (ambiguous.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!;
+    assert.deepEqual([recorded.route, recorded.ownerCause, recorded.repositoryConstraint], ["owner", "repository_name_unresolved", { name: "repo", repository: null }]);
+    assert.equal(f.decision.checkCalls.length, calls);
+    assert.equal((await propose([otherChosen(51)], { repositoryName: "repo" })).data!.occurrenceId, ambiguous.data!.occurrenceId, "a repeat returns the same request");
+    const another = await propose([otherChosen(52)], { repositoryName: "repo" });
+    assert.notEqual(another.data!.occurrenceId, ambiguous.data!.occurrenceId, "another repository's other issue is another request");
+    assert.equal(ownerRequests().length, 1, "the newer request replaced it, so the owner has one approval");
+    assert.equal(answer({ [SCOPE_PROPOSAL_ANSWER_ID]: SCOPE_PROPOSAL_APPROVE_LABEL }).ok, true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issues, [{ repository: "other/repo", number: 52 }]);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("an explicit Maximum Issues counts a proposal's additions in every repository (#4118, #4282)", async () => {
+  const { server, f, propose } = await multiRepositoryProposals("Fix #12 and other/repo#40.", { issues: { maxIssues: 1 } });
+  try {
+    const refused = await propose([named(12), otherNamed(40)]);
+    assert.deepEqual(refused.errorDetails, { code: "capacity_exhausted", limit: 1, requested: 2 });
   } finally { await server.close(); f.db.close(); }
 });
 
