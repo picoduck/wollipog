@@ -62,7 +62,7 @@ for (const theme of ["dark", "light"] as const) {
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&recovery=failed_checks&completedChildren=1&theme=${theme}`);
       const summary = page.locator(".campaign-status-summary");
       await expect(summary.locator("dt", { hasText: /^State$/ }).locator("..")).toContainText("Active");
-      await expect(summary).not.toContainText("Verified Complete");
+      await expect(summary).not.toContainText("Campaign Complete");
       const directory = process.env.CAMPAIGN_RECOVERY_EVIDENCE_DIR;
       if (directory) {
         mkdirSync(directory, { recursive: true });

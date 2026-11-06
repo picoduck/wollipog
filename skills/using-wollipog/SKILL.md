@@ -100,8 +100,14 @@ it takes the same authority as `stop-job` and is refused if the hold changed sin
 An Orchestrator campaign must use the management tools as the policy boundary, not infer authority
 from its prompt. Call `get_campaign` at campaign start and after a human changes policy. It returns
 the effective behavior, typed decision owners, revision, admission and guardrail limits, child and
-follow-up counts, UI-review compatibility, and one of `waiting_human`, `active`, `blocked`,
-`verified_complete`, or `complete_with_handoffs`, without returning credentials. Its `behavior` holds the Child Harness, Child
+follow-up counts, UI-review compatibility, and one of `waiting_human`, `active`,
+`complete_needs_cleanup`, `verified_complete`, or `stuck` (older hosts report `blocked` and
+`complete_with_handoffs`), without returning credentials. `active` means work is actually running
+(listed in `activity.live`); an idle campaign with owed housekeeping is `complete_needs_cleanup`
+and lists each item's action in `cleanup`; an idle, unfinished campaign with nothing scheduled is
+`stuck` and names what is unfinished in `stuck`. Before either shows, Wollipog tries once to
+settle the leftovers itself and may wake the root with one `campaign_idle` continuation naming
+them. Its `behavior` holds the Child Harness, Child
 Model, Child Effort, Follow-Ups and Completion the next child creation enforces. A person can change
 them while the campaign runs; changed values carry the `active_campaign` source and a higher
 `behavior.revision`. They apply to children created afterwards, existing children keep their own
@@ -262,7 +268,8 @@ requests the forge confirms, or from the child's exact report inside its attempt
 an unfinished item's next step belongs to a person or an outside party, record a `handoff` with
 `update_campaign_work_item` (who, why, and the next action) instead of cancelling it: once every
 unfinished item is handed to `human` or `external` and nothing else is pending, the campaign ends
-as `complete_with_handoffs`, which is terminal and lists those items for the owner. `Retain` keeps
+as `complete_needs_cleanup` (`complete_with_handoffs` on older hosts), which is terminal and lists
+those items for the owner. `Retain` keeps
 it visible.
 `Stop and Archive` starts the durable stop/archive operation and automatically requests managed
 retirement of each clean, fully delivered runner-owned child worktree when the runner supports it.

@@ -141,8 +141,9 @@ export interface CampaignMergedBranch {
   branch: string | null;
   /** The approved merged head. */
   headSha: string;
-  /** `pending` keeps the campaign from finishing; `retained` (a handoff to a person or an outside
-   * party on its work item) lets it finish as `complete_with_handoffs`. */
+  /** `pending` or `retained` (a handoff to a person or an outside party on its work item) is cleanup
+   * the campaign owes: a delivered, idle campaign reads `complete_needs_cleanup` (v297, #4146;
+   * older control planes keep it `active` or finish as `complete_with_handoffs`). */
   state: "deleted" | "retained" | "pending";
   /** Why it is retained (the handoff's reason) or what is pending. */
   reason?: string;
