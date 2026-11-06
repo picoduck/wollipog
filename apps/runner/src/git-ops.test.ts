@@ -41,6 +41,7 @@ import {
   setRemoteRefsMetadataReaderForTests,
   setGitRunnerForTests,
   stageHunk,
+  latestCheckContexts,
   summarizeCheckRollup,
   summarizeGitLabPipeline,
   synchronizeCheckpointRefs,
@@ -391,6 +392,24 @@ test("summarizeCheckRollup: runs that cannot be ordered keep the worse result (#
     { name: "z", status: "COMPLETED", conclusion: "FAILURE", startedAt: "0001-01-01T00:00:00Z" },
   ]);
   assert.deepEqual(zero, { failing: 1, pending: 0, passing: 0, failingNames: ["z"] });
+});
+
+test("summarizeCheckRollup: a failure no later run is provably newer than still counts, whatever the order (#4263)", () => {
+  // No ids: a failure at 15:00, a failure with no start time, and a success at 16:00. The success is
+  // newer than the first failure but cannot be shown newer than the second.
+  const timed = { name: "w", status: "COMPLETED", conclusion: "FAILURE", startedAt: "2026-11-05T15:00:00Z" };
+  const untimed = { name: "w", status: "COMPLETED", conclusion: "FAILURE" };
+  const success = { name: "w", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "2026-11-05T16:00:00Z" };
+  for (const nodes of [[timed, untimed, success], [untimed, timed, success], [success, untimed, timed]]) {
+    assert.deepEqual(summarizeCheckRollup(nodes), { failing: 1, pending: 0, passing: 0, failingNames: ["w"] }, JSON.stringify(nodes));
+  }
+  // Once every failure is provably older, the success counts.
+  assert.deepEqual(summarizeCheckRollup([timed, { ...untimed, startedAt: "2026-11-05T15:30:00Z" }, success]),
+    { failing: 0, pending: 0, passing: 1, failingNames: [] });
+  // The check keeps the place where it first appears.
+  const first = { name: "a", status: "COMPLETED", conclusion: "SUCCESS" };
+  const queued = { name: "b", status: "QUEUED" };
+  assert.deepEqual(latestCheckContexts([first, timed, queued, success]), [first, success, queued]);
 });
 
 test("summarizeCheckRollup: failing names are bounded to 8", () => {

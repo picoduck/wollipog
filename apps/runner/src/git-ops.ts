@@ -1450,18 +1450,28 @@ function checkContextTime(n: CheckContextNode): number | null {
   return Number.isFinite(time) && time >= EARLIEST_CHECK_TIME ? time : null;
 }
 
-/** Whether `node` supersedes `previous`, an entry for the same check. Check run ids grow in
- * creation order, so a re-run, even one not started yet, has the larger id; otherwise the later
- * known time wins. When neither orders them (a missing time or the same second), the worse result
- * stands, so a failure is never hidden by a run that cannot be shown to be newer. */
-function supersedesCheckContext(node: CheckContextNode, previous: CheckContextNode): boolean {
+/** Whether `node` is provably newer than `other`, an entry for the same check. Check run ids grow
+ * in creation order, so a re-run, even one not started yet, has the larger id; otherwise the later
+ * known time is newer. A missing time or the same second proves nothing. */
+function provablyNewerCheckContext(node: CheckContextNode, other: CheckContextNode): boolean {
   const id = checkRunId(node);
-  const previousId = checkRunId(previous);
-  if (id !== null && previousId !== null && id !== previousId) return id > previousId;
+  const otherId = checkRunId(other);
+  if (id !== null && otherId !== null && id !== otherId) return id > otherId;
   const time = checkContextTime(node);
-  const previousTime = checkContextTime(previous);
-  if (time !== null && previousTime !== null && time !== previousTime) return time > previousTime;
-  return RESULT_SEVERITY[checkContextResult(node)] > RESULT_SEVERITY[checkContextResult(previous)];
+  const otherTime = checkContextTime(other);
+  return time !== null && otherTime !== null && time > otherTime;
+}
+
+/** The entry that counts for one check: of the entries no other entry is provably newer than, the
+ * worst result (the first of equals). Entries that cannot be ordered against each other all stay
+ * candidates, so a failure is never hidden by a run that cannot be shown to be newer than it. If
+ * mixed id and time comparisons leave no candidate, every entry is one. */
+function latestOfCheck(entries: readonly unknown[]): unknown {
+  const unbeaten = entries.filter((entry) =>
+    !entries.some((other) => other !== entry && provablyNewerCheckContext(other as CheckContextNode, entry as CheckContextNode)));
+  const candidates = unbeaten.length > 0 ? unbeaten : entries;
+  return candidates.reduce((worst, entry) =>
+    RESULT_SEVERITY[checkContextResult(entry)] > RESULT_SEVERITY[checkContextResult(worst)] ? entry : worst);
 }
 
 /**
@@ -1473,28 +1483,26 @@ function supersedesCheckContext(node: CheckContextNode, previous: CheckContextNo
  * workflows stay two checks. Nodes of an unknown shape are kept as they are.
  */
 export function latestCheckContexts(nodes: unknown): unknown[] {
-  const latest = new Map<string, unknown>();
-  const kept: unknown[] = [];
+  // Each slot is an unknown-shape node kept as it is, or the entries of one check, placed where
+  // that check first appears.
+  const slots: Array<{ entries: unknown[] }> = [];
+  const checks = new Map<string, { entries: unknown[] }>();
   for (const raw of Array.isArray(nodes) ? nodes : []) {
     const n = (raw ?? {}) as CheckContextNode;
     const key = typeof n.state === "string" && typeof n.context === "string" ? `status\0${n.context}`
       : typeof n.state !== "string" && typeof n.name === "string"
         ? `run\0${typeof n.workflowName === "string" ? n.workflowName : ""}\0${n.name}`
         : null;
-    if (key === null) {
-      kept.push(raw);
+    const check = key === null ? undefined : checks.get(key);
+    if (check) {
+      check.entries.push(raw);
       continue;
     }
-    const previous = latest.get(key);
-    if (previous === undefined) {
-      latest.set(key, raw);
-      kept.push(raw);
-    } else if (supersedesCheckContext(n, previous as CheckContextNode)) {
-      latest.set(key, raw);
-      kept[kept.indexOf(previous)] = raw;
-    }
+    const slot = { entries: [raw] };
+    slots.push(slot);
+    if (key !== null) checks.set(key, slot);
   }
-  return kept;
+  return slots.map((slot) => slot.entries.length === 1 ? slot.entries[0] : latestOfCheck(slot.entries));
 }
 
 /** Count every node in a rollup as it stands, superseded runs included. */

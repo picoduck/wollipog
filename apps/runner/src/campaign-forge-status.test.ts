@@ -189,6 +189,19 @@ test("GitHub's failing rollup stands unless a superseded failure certainly expla
   assert.deepEqual(unknown.checks, { state: "failing", passing: 1, failing: 0, pending: 0 });
 });
 
+test("a status context failure no later entry is provably newer than still fails, and GitHub's verdict stands (#4263)", () => {
+  const status = (state: string, createdAt?: string) =>
+    ({ __typename: "StatusContext", context: "ci/legacy", state, isRequired: true, ...(createdAt ? { createdAt } : {}) });
+  for (const nodes of [
+    [status("FAILURE", "2026-11-05T15:00:00Z"), status("FAILURE"), status("SUCCESS", "2026-11-05T16:00:00Z")],
+    [status("FAILURE"), status("FAILURE", "2026-11-05T15:00:00Z"), status("SUCCESS", "2026-11-05T16:00:00Z")],
+  ]) {
+    const rollups = checkRollups({ state: "FAILURE", contexts: { pageInfo: { hasNextPage: false }, nodes } }, true)!;
+    assert.deepEqual(rollups.checks, { state: "failing", passing: 0, failing: 1, pending: 0 }, JSON.stringify(nodes));
+    assert.equal(rollups.requiredChecks.state, "failing");
+  }
+});
+
 test("a login that cannot read workflow runs still gets an observation, and GitHub's failing rollup stands (#4263)", async () => {
   const contexts = [
     run("Lint", "CANCELLED", false, 100, "2026-11-05T15:00:00Z", null),
