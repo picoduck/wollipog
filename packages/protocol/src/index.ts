@@ -1076,7 +1076,7 @@ import type {
 } from "./campaign-work-ledger.js";
 export type { ConversationHandoffDraft, InPlaceHandoffTurn } from "./conversation-handoff.js";
 import { pendingRequests, prioritizedPendingRequests } from "./worker-attention.js";
-import { isOwnerQuestionRequest } from "./owner-question.js";
+import { isOwnerQuestionCard, isOwnerQuestionRequest } from "./owner-question.js";
 export {
   attentionRequestRank,
   pendingRequests,
@@ -5059,8 +5059,9 @@ function singleSessionAttentionStatus(
       description: `${requests.length} unresolved requests: ${approvals} approvals, ${questions} questions, ${authentication} authentication requests; ${children} belong to child agents. Open Agents to inspect each request.`,
     };
   }
-  if (isOwnerQuestionRequest(pending)) {
-    // An Owner Question (#4270) is the Orchestrator asking the person, not an approval it waits on.
+  if (isOwnerQuestionCard(pending)) {
+    // An Owner Question (#4270), stored or as the session detail presents it, is the Orchestrator
+    // asking the person, not an approval it waits on.
     return {
       kind: "input_required",
       label: "Needs Your Input",
