@@ -3753,4 +3753,18 @@ test("request_campaign_issue_scope_change sends a structured proposal only to a 
   deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryLimits;
   assert.equal((await callTool(deps, "request_campaign_issue_scope_change", several)).isError, undefined);
   assert.deepEqual(calls.at(-1)!.body, several);
+  // Nor is an epic's repository: left out, the same number would be read in the launch repository.
+  const lineage = { ...args, lineage: { kind: "epic", epic: 40, repository: "owner/api" } };
+  const issueScope = `${CP_URL}/api/sessions/${SELF_ID}/campaign/issue-scope`;
+  const reads = calls.length;
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.repositoryQualifiedEpics - 1;
+  assert.match(JSON.stringify(await callTool(deps, "request_campaign_issue_scope_change", lineage)), /an epic in another repository/u);
+  assert.match(JSON.stringify(await callTool(deps, "get_campaign_issue_scope", { epic: 40, repository: "owner/api" })), /an epic in another repository/u);
+  assert.equal(calls.slice(reads).filter((call) => call.url.startsWith(issueScope)).length, 0);
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.repositoryQualifiedEpics;
+  assert.match(JSON.stringify(await callTool(deps, "get_campaign_issue_scope", { repository: "owner/api" })), /requires epic/u);
+  assert.equal((await callTool(deps, "get_campaign_issue_scope", { epic: 40, repository: "owner/api" })).isError, undefined);
+  assert.equal(calls.at(-1)!.url, `${issueScope}?epic=40&repository=owner%2Fapi`);
+  assert.equal((await callTool(deps, "request_campaign_issue_scope_change", lineage)).isError, undefined);
+  assert.deepEqual(calls.at(-1)!.body, lineage);
 });

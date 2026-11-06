@@ -39,8 +39,11 @@ export async function inspectCampaignLaunch(
   let failure: CampaignLaunchInspectionFailure = "invalid_request";
   try {
     const publication = message.publication;
-    if (Object.keys(message).some((key) => !["type", "requestId", "workspaceId", "workspacePath", "issueNumbers", "facts", "publication"].includes(key)) ||
+    if (Object.keys(message).some((key) => !["type", "requestId", "workspaceId", "workspacePath", "issueNumbers", "facts", "publication", "epic"].includes(key)) ||
         (message.facts !== undefined && message.facts !== true) ||
+        // An epic read reports its members and nothing else, so it takes no issues, facts or payload.
+        (message.epic !== undefined && (!Number.isSafeInteger(message.epic) || message.epic < 1 || message.facts !== undefined || publication !== undefined ||
+          !Array.isArray(message.issueNumbers) || message.issueNumbers.length > 0)) ||
         // A facts read reports a pull request rather than refusing it, so it never checks a payload.
         (message.facts !== undefined && publication !== undefined) ||
         (publication !== undefined && (!publication || typeof publication !== "object" || Array.isArray(publication) ||
@@ -75,10 +78,11 @@ export async function inspectCampaignLaunch(
     // refuses any difference in its title, body or labels. The root reads its own the same way.
     const published = issueNumbers.length ? publication : undefined;
     if (published) failure = "publication_refused";
-    const { repository, candidates, issueFacts } = await inspectCampaignIssueScope(forge, undefined, issueNumbers, published, message.facts === true);
+    const { repository, candidates, issueFacts } = await inspectCampaignIssueScope(forge, message.epic, issueNumbers, published, message.facts === true);
     // A facts read reports a pull request rather than refusing it, so it is the list that must match.
+    // An epic's members are what the read finds, so there is no list to match.
     const read = message.facts ? (issueFacts ?? []).map((fact) => fact.number) : candidates.map((c) => c.issue.number);
-    if (JSON.stringify([...read].sort((a, b) => a - b)) !== JSON.stringify(issueNumbers)) throw new Error("issue mismatch");
+    if (message.epic === undefined && JSON.stringify([...read].sort((a, b) => a - b)) !== JSON.stringify(issueNumbers)) throw new Error("issue mismatch");
     // #4119: with none, the same publication inspection the root runs in its own checkout, here in
     // this Location's repository, with this runner's own forge login.
     failure = "publication_refused";
@@ -90,6 +94,7 @@ export async function inspectCampaignLaunch(
     const digest = createHash("sha256").update(JSON.stringify([cwd, repository, head, issueNumbers])).digest("hex");
     return { ...base, ok: true, repository, issueNumbers, digest,
       ...(message.facts ? { issueFacts: issueFacts! } : {}),
+      ...(message.epic !== undefined ? { candidates } : {}),
       ...(inspected ? { publicationDigest: inspected.publicationDigest, duplicateSearch: inspected.duplicateSearch } : {}) };
   } catch {
     if (signal.aborted) return { ...base, ok: false, cancelled: true, error: "Inspection was cancelled before it completed; no launch was admitted." };

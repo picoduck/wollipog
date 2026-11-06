@@ -81,5 +81,7 @@ export interface CampaignRepositoryBoundaryView {
 }
 
 export type ProjectLocationInspection =
-  | { ok: true; location: VerifiedProjectLocation; issueFacts?: import("./index.js").CampaignIssueFacts[] }
+  | { ok: true; location: VerifiedProjectLocation; issueFacts?: import("./index.js").CampaignIssueFacts[];
+    /** The asked-for epic and its members, all in `location.repository`. */
+    candidates?: NonNullable<import("./index.js").CampaignIssueScopeView["candidates"]> }
   | { ok: false; locationId: string; failure: ProjectLocationInspectionFailure; reason: string };

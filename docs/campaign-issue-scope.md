@@ -192,9 +192,20 @@ approval is invalidated. A legacy campaign with no saved repository stays unveri
   A re-authorization and an enable keep the limit. Only `campaign_repository_addition`, which the owner
   approves, gives that repository an entry, and its issues then pass the limit. Its other available
   Locations then wait for Include in Campaign, because the approval named one Location.
-- **Admission.** Maximum Issues counts issues across all repositories. Epic lineage admits only the
-  launch repository's epic members, and follow-up lineage only a publication in the launch repository,
-  until cross-repository follow-ups (#4119) and repository-qualified epics land.
+- **Admission.** Maximum Issues counts issues across all repositories. Follow-up lineage admits a
+  publication in any boundary repository (#4119), and one in another repository than its origins records both.
+- **Epics.** `issueAuthority.epics` are the launch repository's, and `issueAuthority.otherEpics` holds
+  the boundary's other repositories' as qualified refs. A stored boundary has none, and its epics read as
+  the launch repository's at the same revision. A person's launch authorizes them: `otherIssues` on a
+  Full Control launch, each read through a Location of its own repository, join the scope and its epics,
+  as `issueNumbers` do. `get_campaign_issue_scope` and `lineage: {kind: "epic", epic, repository}` take an
+  optional `repository`, defaulting to the launch repository. A repository outside the boundary is refused
+  with `repository_outside_boundary` before any runner call. An epic elsewhere is read through a Location
+  of its repository, and a member anywhere but that repository fails the read, so members count only in a
+  boundary repository. One epic's lineage admits only that repository's members
+  (`epic_members_unverified`). A scope change that drops an epic drops its authority, in that repository
+  only, and so does narrowing the boundary, since its issues leave with it. A pre-v322 runner receives
+  `epics` alone, and can't be asked to read another repository's epic.
 - **Participants.** The root holds the whole scope. Every other Orchestrator participant, and its runner,
   holds only its own Location repository's numbers in the earlier one-repository shape, so a number is
   never read in the wrong repository. A retired participant in no campaign repository records the
@@ -207,7 +218,7 @@ Custom closure approval is human-owned.
 
 A closure in another campaign repository (#4119) names it with `repository`; the root stays the requester.
 The issue is inspected and closed on the runner of the first of that repository's Locations that is in the
-campaign's Project and online at v321 or later, in that Location's path, with that runner's own forge login.
+campaign's Project and online at v323 or later, in that Location's path, with that runner's own forge login.
 That runner holds no copy of the campaign's scope, so it can't reread it at its mutation fence as the root's
 runner does. Its `execute` runs every forge check and answers `prepared`; the control plane then rechecks the
 scope, the boundary, the active children, the evidence digest and the Location's path, and only then sends
@@ -289,7 +300,8 @@ The authenticated human admission may additionally establish `control.boundary.i
 
 ```typescript
 {
-  epics: number[],              // Exact intended umbrella issues in the authorized repository
+  epics: number[],              // Exact intended umbrella issues in the launch repository
+  otherEpics?: { repository: string, number: number }[], // In the boundary's other repositories (#4118)
   relatedFollowUps: boolean,    // Evidence-based work related to authorized origin issues
   maxIssues: number,            // Maximum current scope plus reserved publication slots (1–100)
   closureReasons: ("completed" | "not_planned")[]
@@ -310,8 +322,8 @@ stale standing authority locally until it is reauthorized. Human scope and closu
 available. A closure outside delegated reasons, or without complete machine delivery/disposition
 proof, produces a human-owned exact decision instead of silently authorizing an agent.
 
-Scope proposals carry `lineage: {kind: "epic", epic}` for freshly inspected native/checklist members
-of a human-authorized epic, or `{kind: "follow_up", publicationOccurrenceId}` for one verified
+Scope proposals carry `lineage: {kind: "epic", epic, repository?}` for freshly inspected native/checklist
+members of a human-authorized epic, or `{kind: "follow_up", publicationOccurrenceId}` for one verified
 published issue. Dependencies, incidental references and cross-repository links remain excluded.
 A follow-up publication is either a bounded grant, which carries its own `issueAdmission`, or one a
 person approved as a human-owned decision. The second kind counts only when that person's recorded

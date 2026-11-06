@@ -14,7 +14,7 @@ import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { DECISION_MAX_ATTEMPTS, type DecisionRuntime } from "./decision-runtime.js";
 import { OrchestratorSettings, resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
-import { authorizeFullControl, campaignBoundaryCurrent, campaignControlForRunner, campaignScopeRepositories, evaluateCampaignAuthority } from "./campaign-authority.js";
+import { authorizeFullControl, boundaryWithScopedEpics, campaignBoundaryCurrent, campaignControlForRunner, campaignScopeRepositories, evaluateCampaignAuthority } from "./campaign-authority.js";
 import { repositoryOutsideBoundary } from "./campaign-issue-scope.js";
 import { firstMessageBoundary, firstMessageDigest, firstMessageObjective } from "./campaign-launch-admission.js";
 import { campaignBehaviorValues } from "./campaign-behavior.js";
@@ -29,7 +29,7 @@ import { campaignBoundaryRepositoryAt } from "./campaign-repository-boundary.js"
 import { inspectCampaignWorkspace, inspectProjectLocation } from "./project-location-inspection.js";
 import { CampaignRepositoryAdditions } from "./campaign-repository-additions.js";
 import { CampaignLocations, registerCampaignLocationRoutes } from "./campaign-locations.js";
-import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, PROJECT_LOCATION_INSPECTION_FAILURES, campaignBoundaryRepositories, validCampaignControl, type CampaignControl,
+import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, PROJECT_LOCATION_INSPECTION_FAILURES, campaignBoundaryEpics, campaignBoundaryRepositories, validCampaignControl, type CampaignControl,
   type CampaignAuthorityBoundary, type CampaignRepositoryAdditionRequest } from "@wollipog/protocol";
 import type { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
@@ -3967,6 +3967,118 @@ test("a named repository is only the agent's claim of a limit: the check judges 
     const campaign = JSON.parse(JSON.parse(/<untrusted_data name="campaign">\n(.*?)\n<\/untrusted_data>/su.exec(f.decision.checkCalls.at(-1)!.input)![1]!) as string) as { admitted: { repositoryLimits: string[] } };
     assert.deepEqual(campaign.admitted.repositoryLimits, ["other/repo"]);
   } finally { await server.close(); f.db.close(); }
+});
+
+test("a person's launch authorizes an epic in another repository, whose members lineage reads through its own Location (#4118)", async () => {
+  const f = fixture();
+  const p = multiRepositoryProject(f);
+  const inspect = f.state.inspect;
+  const members = (epic: number, repository = "other/repo") => [{ issue: { repository, number: epic }, title: "Epic", source: "umbrella" as const },
+    { issue: { repository, number: 41 }, title: "Member", source: "sub_issue" as const }];
+  let answerEpic = members;
+  f.state.inspect = (frame) => {
+    const answer = inspect(frame);
+    return answer?.ok && frame.epic !== undefined ? { ...answer, candidates: answerEpic(frame.epic) } : answer;
+  };
+  const { server } = await app(f);
+  const inspections = () => f.sent.filter((message) => message.type === "campaign_launch_inspect") as Array<Extract<ControlPlaneToRunner, { type: "campaign_launch_inspect" }>>;
+  const body = { ...p.body, otherIssues: [{ repository: "Other/Repo", number: 40 }], overrides: { issues: { maxIssues: 5 } } } satisfies FullControlLaunchRequest;
+  try {
+    // A repository outside the Project, or an issue no Location can read, blocks the launch by name.
+    const outside = await preflight(server, { ...body, otherIssues: [{ repository: "third/repo", number: 1 }] });
+    assert.equal(outside.preflight!.ready, false);
+    assert.match(JSON.stringify(outside.preflight!.summary.blockers), /could not be read through a Location/u);
+    const launch = await preflight(server, body);
+    assert.equal(launch.preflight!.ready, true, JSON.stringify(launch.preflight!.summary.blockers));
+    assert.deepEqual(launch.preflight!.summary.otherIssues, [{ repository: "other/repo", number: 40 }]);
+    assert.ok(inspections().some((message) => message.workspacePath === "/fixture/two/other" && JSON.stringify(message.issueNumbers) === "[40]"), "read through its own Location");
+    assert.ok(!inspections().some((message) => message.workspacePath === "/fixture/repository" && message.issueNumbers.includes(40)), "never through the launch runner");
+
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...body, requestId: "other-epic", preflightDigest: launch.preflight!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const id = admitted.json().id as string;
+    const policy = () => f.db.getSession(id)!.orchestratorPolicy!;
+    const authority = () => (policy().control as Extract<CampaignControl, { mode: "full_control" }>).boundary.issueAuthority!;
+    const launched = [{ repository: "owner/repo", number: 7 }, { repository: "owner/repo", number: 12 }];
+    assert.deepEqual(policy().issueScope!.issues, [{ repository: "other/repo", number: 40 }, ...launched]);
+    assert.deepEqual(policy().issueScope!.issueNumbers, [7, 12], "the launch repository's part is its own");
+    assert.deepEqual([authority().epics, authority().otherEpics], [[7, 12], [{ repository: "other/repo", number: 40 }]]);
+    // A runner too old for the list receives the launch repository's epics alone.
+    const older = campaignControlForRunner(policy().control!, RUNNER_CAPABILITY_MIN_PROTOCOL.repositoryQualifiedEpics - 1) as Extract<CampaignControl, { mode: "full_control" }>;
+    assert.equal(older.boundary.issueAuthority!.otherEpics, undefined);
+    assert.deepEqual(older.boundary.repositories, (policy().control as Extract<CampaignControl, { mode: "full_control" }>).boundary.repositories);
+    const stored = policy().control!;
+    assert.equal(campaignControlForRunner(stored, PROTOCOL_VERSION), stored);
+
+    // A repository outside the boundary is refused before any runner call.
+    const sent = f.sent.length;
+    const refused = await f.sessions.campaignIssueScope(id, 40, () => true, false, "third/repo");
+    assert.equal(refused.errorDetails?.code, "repository_outside_boundary");
+    assert.equal(f.sent.length, sent);
+    assert.equal((await f.sessions.campaignIssueScope(id, undefined, () => true, false, "other/repo")).status, 400, "a repository names an epic's");
+
+    const read = await f.sessions.campaignIssueScope(id, 40, () => true, false, "other/repo");
+    assert.deepEqual(read.data!.candidates!.map((c) => [c.issue.repository, c.issue.number]), [["other/repo", 40], ["other/repo", 41]]);
+    assert.equal(inspections().at(-1)!.workspacePath, "/fixture/two/other");
+    assert.equal(inspections().at(-1)!.epic, 40);
+    assert.ok(!f.sent.some((message) => message.type === "campaign_issue_scope" && message.operation === "inspect" && message.epic === 40), "the root's runner never reads it");
+
+    // A member anywhere but that repository verifies nothing.
+    answerEpic = (epic) => members(epic, "owner/repo");
+    const stray = await f.sessions.campaignIssueScope(id, 40, () => true, false, "other/repo");
+    assert.deepEqual(stray.data!.candidates, []);
+    assert.match(stray.data!.candidateMessage!, /Could not resolve the epic's members in other\/repo/u);
+    answerEpic = members;
+
+    const propose = (additions: Array<{ repository: string; number: number }>, lineage: NonNullable<CampaignIssueScopeRequest["lineage"]>) =>
+      f.sessions.proposeCampaignIssueScope(id, { requestId: randomUUID(), expectedRevision: policy().issueScope!.revision, additions, removals: [], explanation: "An epic's member.", lineage });
+    const member = { repository: "other/repo", number: 41 };
+    // The same number in the launch repository is another issue, with no authority.
+    assert.equal((await propose([{ repository: "owner/repo", number: 41 }], { kind: "epic", epic: 40 })).errorDetails?.code, "epic_not_authorized");
+    assert.equal((await propose([{ repository: "owner/repo", number: 41 }], { kind: "epic", epic: 40, repository: "other/repo" })).errorDetails?.code, "epic_members_unverified",
+      "an epic's lineage admits only its own repository's members");
+    assert.equal((await propose([{ repository: "other/repo", number: 99 }], { kind: "epic", epic: 40, repository: "other/repo" })).errorDetails?.code, "epic_members_unverified");
+    assert.equal((await propose([member], { kind: "epic", epic: 40, repository: "third/repo" })).errorDetails?.code, "repository_outside_boundary");
+    const proposed = await propose([member], { kind: "epic", epic: 40, repository: "Other/Repo" });
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "orchestrator", "the lineage admitted it");
+    assert.deepEqual((proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).lineage, { kind: "epic", epic: 40, repository: "other/repo" });
+    assert.equal(f.sessions.resolveWorkflowDecision(id, id, proposed.data!.occurrenceId, { outcome: "approve" }, "orchestrator", { kind: "agent", id }, () => true).ok, true);
+    assert.deepEqual(policy().issueScope!.issues, [{ repository: "other/repo", number: 40 }, member, ...launched]);
+    assert.deepEqual(authority().otherEpics, [{ repository: "other/repo", number: 40 }], "a member never becomes an epic");
+
+    // Re-authorizing keeps the epic along with its repository (#4117).
+    const boundaryNow = (policy().control as Extract<CampaignControl, { mode: "full_control" }>).boundary;
+    const reauthorized = f.sessions.setCampaignControl(id, reauthorization(boundaryNow), f.db.getSession(id)!.parentControlPolicy!.revision, f.human);
+    assert.equal(reauthorized.ok, true, reauthorized.error ?? "");
+    assert.deepEqual(authority().otherEpics, [{ repository: "other/repo", number: 40 }]);
+    assert.ok((policy().control as Extract<CampaignControl, { mode: "full_control" }>).boundary.repositories!.some((entry) => entry.repository === "other/repo"));
+
+    // An old Location's runner can't read one, and says so; nothing is admitted.
+    const getRunner = f.db.getRunner.bind(f.db);
+    f.db.getRunner = (runnerId) => { const runner = getRunner(runnerId); return runner && runnerId === "r2" ? { ...runner, protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.repositoryQualifiedEpics - 1 } : runner; };
+    assert.match((await f.sessions.campaignIssueScope(id, 40, () => true, false, "other/repo")).data!.candidateMessage!, /too old to read an epic's members/u);
+    f.db.getRunner = getRunner;
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a scope change narrows an epic by its own repository, and a stored boundary's epics read as the launch repository's (#4118, #3920)", () => {
+  const boundary = { version: 1, revision: 2, issueScopeRevision: 2, repository: "Owner/App", repositories: [{ repository: "owner/app", locationIds: ["l1"] }, { repository: "owner/api", locationIds: ["l2"] }],
+    objective: "Deliver.", authorizedByUserId: "u", authorizedAt: 1, operations: [], delegatablePolicyIds: [],
+    issueAuthority: { epics: [5], otherEpics: [{ repository: "owner/api", number: 5 }, { repository: "owner/api", number: 6 }], relatedFollowUps: false, maxIssues: 5, closureReasons: ["completed"] } } satisfies CampaignAuthorityBoundary;
+  assert.deepEqual(campaignBoundaryEpics(boundary), [{ repository: "owner/app", number: 5 }, { repository: "owner/api", number: 5 }, { repository: "owner/api", number: 6 }]);
+  const { otherEpics: _otherEpics, ...stored } = boundary.issueAuthority;
+  assert.deepEqual(campaignBoundaryEpics({ repository: "Owner/App", issueAuthority: stored }), [{ repository: "owner/app", number: 5 }]);
+  const scope = { repository: "owner/app", issueNumbers: [], issues: [{ repository: "owner/api", number: 5 }] };
+  assert.deepEqual(boundaryWithScopedEpics(boundary, scope).issueAuthority, { ...stored, epics: [], otherEpics: [{ repository: "owner/api", number: 5 }] }, "the same number elsewhere keeps its own");
+  assert.equal(boundaryWithScopedEpics(boundary, { ...scope, issues: [] }).issueAuthority!.otherEpics, undefined, "never left empty");
+  const control = (issueAuthority: object) => ({ mode: "full_control", boundary: { ...boundary, issueAuthority } });
+  assert.equal(validCampaignControl(control(boundary.issueAuthority)), true);
+  assert.equal(validCampaignControl(control({ ...stored, otherEpics: [] })), false);
+  assert.equal(validCampaignControl(control({ ...stored, otherEpics: [{ repository: "owner/app", number: 5 }] })), false, "the launch repository's are `epics`");
+  assert.equal(validCampaignControl(control({ ...stored, otherEpics: [{ repository: "third/repo", number: 5 }] })), false, "outside the boundary");
+  assert.equal(validCampaignControl(control({ ...stored, otherEpics: [{ repository: "owner/api", number: 6 }, { repository: "owner/api", number: 5 }] })), false, "not canonical");
 });
 
 /** A first-message campaign in a Project of three repositories, with the mid-campaign Location
