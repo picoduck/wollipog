@@ -65,7 +65,7 @@ for (const width of [1440, 390]) {
     ]));
     expect(heads).toEqual([
       ["Input", "This Device"], ["Transcript", "This Device"], ["Privacy", "This Device"],
-      ["Agent Defaults", "Your Account"], ["Session Titles", "Your Account"], ["Evidence", "Your Account"],
+      ["Agent Defaults", "Your Account"], ["Session Titles", "This Organization"], ["Evidence", "Your Account"],
     ]);
     await expect(page.locator(".settings-panel")).not.toContainText(/Stored on this device|not built yet|Reduce Motion/);
     await expect(page.getByRole("radiogroup", { name: "Enter Key" }).getByRole("radio")).toHaveText(["Send Message", "New Line"]);

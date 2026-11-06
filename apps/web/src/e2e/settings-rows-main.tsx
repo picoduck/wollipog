@@ -732,7 +732,7 @@ function Harness() {
                       </SettingsGroup>
                     )}
                     sessionNaming={(
-                      <SettingsGroup title="Session Titles" scope="Your Account">
+                      <SettingsGroup title="Session Titles" scope="This Organization">
                         <StaticRow title="Title Source" description="The visual fixture does not connect to a control plane." />
                       </SettingsGroup>
                     )}

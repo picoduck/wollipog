@@ -363,6 +363,8 @@ test("PROTOCOL_VERSION is 297", () => {
   // Campaign activity statuses reach dashboards from v297 (#4146).
   assert.equal(runnerSupportsProtocol(296, "campaignActivityStatus"), false);
   assert.equal(runnerSupportsProtocol(297, "campaignActivityStatus"), true);
+  // An owner rule on a typed decision needs a v296 control plane (#4137).
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule, 296);
   // A v294 runner cannot report the closing references of a GitLab merge (#3762).
   assert.equal(runnerSupportsProtocol(294, "gitlabMergeClosingReferences"), false);
   assert.equal(runnerSupportsProtocol(295, "gitlabMergeClosingReferences"), true);

@@ -692,6 +692,32 @@ test("declared merge closures fail closed against a control plane that would dro
   assert.equal(current.calls.length, 1, "a GitLab merge that declares no closure is still requested");
 });
 
+test("an owner rule is forwarded, and fails closed against a control plane that would drop it (#4137)", async () => {
+  const rule = { source: "~/.claude/skills/issue-workflow/SKILL.md", quote: "Ask the user before merging." };
+  const snapshot = { category: "implementation_question", question: "Which?", options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] };
+  const { deps, calls } = makeDeps(() => ({ status: 201, body: { status: "pending", authority: "human" } }));
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule;
+  const sent = await callTool(deps, "request_workflow_decision", { requestId: "q", resourceKey: "q", resourceSnapshot: snapshot, ownerRule: rule });
+  assert.equal(sent.isError, undefined, JSON.stringify(sent));
+  assert.deepEqual((calls.at(-1)!.body as { ownerRule?: unknown }).ownerRule, rule);
+  // A malformed rule never leaves the runner.
+  calls.length = 0;
+  const malformed = await callTool(deps, "request_workflow_decision", { requestId: "q2", resourceKey: "q", resourceSnapshot: snapshot,
+    ownerRule: { ...rule, quote: "q".repeat(1001) } });
+  assert.equal(malformed.isError, true);
+  assert.equal(calls.length, 0);
+  // An older control plane would ignore the rule and leave the Orchestrator owning the gate.
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule - 1;
+  const old = await callTool(deps, "request_workflow_decision", { requestId: "q3", resourceKey: "q", resourceSnapshot: snapshot, ownerRule: rule });
+  assert.equal(old.isError, true);
+  assert.equal(resultJson(old).requiredControlPlaneProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule);
+  assert.match(resultJson(old).error, /Nothing was requested/u);
+  assert.equal(calls.length, 0, "an old control plane never receives a rule it would drop");
+  await callTool(deps, "request_workflow_decision", { requestId: "q4", resourceKey: "q", resourceSnapshot: snapshot });
+  assert.equal(calls.length, 1, "a request without a rule is still sent");
+  assert.equal((calls[0]!.body as { ownerRule?: unknown }).ownerRule, undefined);
+});
+
 test("merge review citations are refused before submission to an older or unknown control plane", async () => {
   const snapshot = { category: "pr_merge", repository: "picoduck/wollipog", pullRequest: 42,
     headSha: "a".repeat(40), reviewSessionId: "review-upvote", reviewResult: "merge",

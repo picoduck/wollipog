@@ -3,13 +3,14 @@ import type { CampaignDecisionsResponse, DecisionErrorClass, DecisionKind } from
 import { useApi } from "../api-context.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
+import type { CampaignRequestTarget } from "./CampaignStatusPanel.js";
 
 type CampaignDecision = CampaignDecisionsResponse["decisions"][number];
 
-/** The checks shown here (#4104): the question screen, follow-up relatedness, closure-reason choice
- * and a Custom campaign's epic seed. Other kinds, such as Full Control's scope grant, have their own
- * place in Campaign Status. */
-const SHOWN_KINDS: ReadonlySet<DecisionKind> = new Set<DecisionKind>(["credential_screen", "follow_up_relatedness", "closure_reason"]);
+/** The checks shown here (#4104): the question screen, follow-up relatedness, closure-reason choice,
+ * a Custom campaign's epic seed, and the review of each selection proposal (#4103). Other kinds, such
+ * as Full Control's scope grant, have their own place in Campaign Status. */
+const SHOWN_KINDS: ReadonlySet<DecisionKind> = new Set<DecisionKind>(["credential_screen", "follow_up_relatedness", "closure_reason", "scope_review"]);
 const shown = (decision: CampaignDecision) => SHOWN_KINDS.has(decision.kind) ||
   decision.kind === "scope_grant" && decision.subject?.surface === "issue_scope_seed";
 
@@ -31,7 +32,21 @@ const VERDICT_LABELS: Record<string, string> = {
   fits: "Reason Fits",
   does_not_fit: "Reason Doesn't Fit",
   grant: "Message Read",
+  admit: "Fits Your Selection",
+  refuse: "Doesn't Fit Your Selection",
   uncertain: "Uncertain",
+};
+
+/** What a selection proposal's review led to (#4103). */
+const SELECTION_OUTCOMES: Record<NonNullable<CampaignDecision["selectionProposal"]>["outcome"], string> = {
+  reviewing: "It waits until the review finishes.",
+  admitted: "Admitted; the Orchestrator adds it to the scope.",
+  applied: "Admitted and added to the scope.",
+  refused: "Refused back to the Orchestrator.",
+  waiting_for_owner: "Waiting for your approval of the scope change.",
+  owner_approved: "You approved the scope change.",
+  owner_declined: "You declined the scope change.",
+  replaced: "A later proposal replaced it.",
 };
 
 export const DECISION_FAILURE_LABELS: Record<DecisionErrorClass, string> = {
@@ -76,6 +91,9 @@ function seedOutcomeText(decision: CampaignDecision): string {
 
 /** What the screen's outcome did to the request it affected, in the order it happened. */
 function outcomeText(decision: CampaignDecision): string {
+  if (decision.kind === "scope_review") {
+    return decision.selectionProposal ? SELECTION_OUTCOMES[decision.selectionProposal.outcome] : SELECTION_OUTCOMES.reviewing;
+  }
   if (decision.kind === "scope_grant") return seedOutcomeText(decision);
   if (decision.kind !== "credential_screen") return checkOutcomeText(decision);
   const classification = decision.subject?.classification;
@@ -96,17 +114,22 @@ function outcomeText(decision: CampaignDecision): string {
  * classifies it here: Decline, or Let the Orchestrator Answer. A follow-up or closure it could not
  * check becomes the owner's own decision, which they make on its request. Nobody is asked for a value.
  */
-export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey, onOpenSession }: {
+export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey, onOpenSession, findRequest, onOpenRequest }: {
   sessionId: string;
   /** The campaign's own session offers the classification; the server checks the person. */
   canClassify: boolean;
   /** Any value that changes when the campaign does, so the list reloads with it. */
   refreshKey: unknown;
   onOpenSession: (sessionId: string) => void;
+  /** Where a pending selection's scope approval card is, so the owner can open it (#4103). */
+  findRequest?: (target: CampaignRequestTarget) => string | null;
+  onOpenRequest?: (requestKey: string) => void;
 }) {
   const api = useApi();
   const headingId = useId();
   const [decisions, setDecisions] = useState<CampaignDecision[] | null>(null);
+  // A selection proposal is the campaign Orchestrator's own, whichever session shows the list.
+  const [campaignSessionId, setCampaignSessionId] = useState(sessionId);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -116,6 +139,7 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
     const controller = new AbortController();
     api.campaignDecisions(sessionId, controller.signal).then((response) => {
       setDecisions(response.decisions.filter(shown));
+      setCampaignSessionId(response.campaignSessionId);
       setLoadError(null);
     }).catch((cause: unknown) => {
       if (controller.signal.aborted) return;
@@ -144,8 +168,9 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
       <h3 id={headingId} className="section-title">Decision Model Checks</h3>
       <p className="section-note">
         The Decision Model checks whether a question asks for a credential, sign-in or access, whether a follow-up
-        belongs to the work you asked for, whether a closure's reason fits its issue, and which epic a campaign's
-        first message names. When it can't tell, the request waits for you; nobody asks you for a value.
+        belongs to the work you asked for, whether a closure's reason fits its issue, which epic a campaign's first
+        message names, and whether issues the Orchestrator chose fit the selection you asked for. When it can't tell,
+        the request waits for you; nobody asks you for a value.
       </p>
       {loadError && <Notice tone="danger" compact role="alert" title="Couldn't Load Decision Model Checks">{loadError}</Notice>}
       {actionError && <Notice tone="danger" compact role="alert" title="Couldn't Classify the Question">{actionError}</Notice>}
@@ -160,7 +185,12 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
           const seedAwaiting = decision.kind === "scope_grant" && subject?.seed === "owner" && !subject.classification;
           // An owner decision stays the owner's: classifying it only lets them choose an option.
           const ownerDecision = subject?.surface === "owner_decision";
-          const label = subject ? SURFACE_LABELS[subject.surface] : "Request";
+          const proposal = decision.selectionProposal;
+          // A selection waiting for the owner points to the scope approval card they decide it on:
+          // only that exact request, never another one pending on the session.
+          const requestKey = proposal?.outcome === "waiting_for_owner" && proposal.requestOccurrenceId && findRequest
+            ? findRequest({ occurrenceId: proposal.requestOccurrenceId, sessionId: null }) : null;
+          const label = decision.kind === "scope_review" ? "Selection Proposal" : subject ? SURFACE_LABELS[subject.surface] : "Request";
           return (
             <li key={decision.occurrenceId} className="campaign-screen-item">
               <dl className="facts">
@@ -168,6 +198,18 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
                   <dt>{label}</dt>
                   <dd>{outcomeText(decision)}</dd>
                 </div>
+                {proposal && (
+                  <div>
+                    <dt>{proposal.issues.length === 1 ? "Issue" : "Issues"}</dt>
+                    <dd>{proposal.issues.map((issue) => `#${issue.number} ${issue.title}`).join("; ")}</dd>
+                  </div>
+                )}
+                {proposal && (
+                  <div>
+                    <dt>Rationale</dt>
+                    <dd>{proposal.explanation}</dd>
+                  </div>
+                )}
                 <div>
                   <dt>Verdict</dt>
                   <dd>{decision.verdict ? VERDICT_LABELS[decision.verdict] ?? decision.verdict : decision.state === "pending" ? "Checking" : "None"}</dd>
@@ -204,6 +246,14 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
                   {subject && (
                     <button type="button" className="btn sm" onClick={() => onOpenSession(subject.sessionId)}>Open Session</button>
                   )}
+                </div>
+              )}
+              {proposal && (
+                <div className="campaign-screen-actions" role="group" aria-label={`${label} Actions`}>
+                  {requestKey && onOpenRequest && (
+                    <button type="button" className="btn primary sm" onClick={() => onOpenRequest(requestKey)}>Open Request</button>
+                  )}
+                  <button type="button" className="btn sm" onClick={() => onOpenSession(campaignSessionId)}>Open Session</button>
                 </div>
               )}
             </li>
