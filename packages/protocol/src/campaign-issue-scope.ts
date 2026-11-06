@@ -1,4 +1,5 @@
 import type { CampaignIssueScopeSnapshot } from "./index.js";
+import { validScopeProposal, type CampaignScopeProposal } from "./scope-proposal.js";
 import { campaignRepositoryLocation } from "./campaign-work-ledger.js";
 
 export function boundedIssueNumbers(value: unknown): value is number[] {
@@ -50,7 +51,12 @@ export function epicChecklistMembers(body: string, repository: string): number[]
 
 export function normalizeCampaignIssueScopeSnapshot(input: Record<string, unknown>): CampaignIssueScopeSnapshot | null {
   if (!validIssueAdmission(input.issueAdmission) || !validIssueLineage(input.lineage) || !validScopeGrantReview(input.grantReview) ||
-      !validSelectionReview(input.selectionReview) || !validScopeOwnerReview(input.ownerReview)) return null;
+      !validSelectionReview(input.selectionReview) || !validScopeOwnerReview(input.ownerReview) || !validScopeProposal(input.scopeProposal)) return null;
+  // A proposal is never also a grant review, a selection review or an owner review, and only an
+  // admitted one carries an admission (#4282).
+  const proposal = input.scopeProposal as CampaignScopeProposal | undefined;
+  if (proposal && (input.grantReview !== undefined || input.selectionReview !== undefined || input.ownerReview !== undefined ||
+      input.lineage !== undefined || (proposal.route === "admitted") !== (input.issueAdmission !== undefined))) return null;
   // An owner review is the owner's decision (#4267): it never carries an admission, a grant review or lineage.
   if (input.ownerReview !== undefined && (input.issueAdmission !== undefined || input.grantReview !== undefined ||
       input.selectionReview !== undefined || input.lineage !== undefined)) return null;
@@ -62,7 +68,10 @@ export function normalizeCampaignIssueScopeSnapshot(input: Record<string, unknow
   if (typeof input.repository !== "string" || !campaignRepositoryLocation(input.repository) ||
       !Number.isSafeInteger(input.expectedRevision) || (input.expectedRevision as number) < 0 ||
       !boundedIssueNumbers(input.before) || !boundedIssueNumbers(input.additions) || !boundedIssueNumbers(input.removals) ||
-      (!input.additions.length && !input.removals.length) ||
+      // Only an initial proposal may admit no issues: it opens dispatch for work that needs none.
+      (!input.additions.length && !input.removals.length && !proposal?.initial) ||
+      (proposal && (input.removals.length || proposal.issues.length !== input.additions.length ||
+        proposal.issues.some((issue) => !(input.additions as number[]).includes(issue.number)))) ||
       input.additions.some((n) => (input.before as number[]).includes(n)) || input.removals.some((n) => !(input.before as number[]).includes(n)) ||
       input.before.length + input.additions.length - input.removals.length > 100 ||
       typeof input.explanation !== "string" || !input.explanation.trim() || input.explanation.length > 4000 ||
@@ -92,7 +101,8 @@ export function normalizeCampaignIssueScopeSnapshot(input: Record<string, unknow
     ...(input.verifiedPublications === undefined ? {} : { verifiedPublications: structuredClone(input.verifiedPublications) as CampaignIssueScopeSnapshot["verifiedPublications"] }),
     ...(input.grantReview === undefined ? {} : { grantReview: structuredClone(input.grantReview) as CampaignIssueScopeSnapshot["grantReview"] }),
     ...(input.selectionReview === undefined ? {} : { selectionReview: structuredClone(input.selectionReview) as CampaignIssueScopeSnapshot["selectionReview"] }),
-    ...(input.ownerReview === undefined ? {} : { ownerReview: structuredClone(input.ownerReview) as CampaignIssueScopeSnapshot["ownerReview"] }) };
+    ...(input.ownerReview === undefined ? {} : { ownerReview: structuredClone(input.ownerReview) as CampaignIssueScopeSnapshot["ownerReview"] }),
+    ...(proposal === undefined ? {} : { scopeProposal: structuredClone(proposal) }) };
 }
 
 export function validIssueAdmission(value: unknown): boolean {

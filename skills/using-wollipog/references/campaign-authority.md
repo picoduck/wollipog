@@ -50,9 +50,18 @@ after launch, in one user-visible first report posted after `get_campaign` and b
   its exact source file and quoted requirement, and that each such gate will reach the owner typed
   as described below, never only in prose.
 
-The report is not a question: it asks nothing, waits for nobody, and dispatch continues in the same
+The report is not a question: it asks nothing, waits for nobody, and the root continues in the same
 turn. A nested Orchestrator does not repeat it. The always-injected Orchestrator preset carries the
 same requirement.
+
+When the owner's first message started the campaign, the server reads no scope from it: the root's
+first campaign action, right after the report, is proposing the initial scope with
+`request_campaign_issue_scope_change` and `proposal` (each issue's origin and rationale, the count,
+the constraints read and the operations withheld). `create_session` refuses campaign work until that
+proposal is admitted. Deterministic checks refuse a proposal naming its issue and condition; one of
+only owner-named issues the message writes as issue references, with nothing else to check, is
+admitted with no model call; anything else is
+the owner's one approval, asked as an Owner Question. Ranking criteria are the root's own call.
 
 When such a rule keeps a gate for a person, the gate reaches the owner as a typed request, never
 only as prose:
