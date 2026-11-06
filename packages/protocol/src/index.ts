@@ -944,11 +944,12 @@ export type { CampaignLaunchInspectionFailure } from "./campaign-control-launch.
 export type {
   CampaignLaunchProposal, FullControlLaunchRequest, FullControlLaunchOverrides, FullControlEnableRequest, PreparedCampaignLaunch,
   CampaignLaunchInspectionMessage, CampaignLaunchInspectionCancelMessage, CampaignLaunchInspectionResult,
-  CampaignLaunchPreflight, CampaignLaunchCapability, CampaignLaunchCapabilityId, CampaignLaunchSummary,
+  CampaignLaunchPreflight, CampaignLaunchCapability, CampaignLaunchCapabilityId, CampaignLaunchSummary, CampaignLaunchDisclosure,
 } from "./campaign-control-launch.js";
 export {
   CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CAMPAIGN_EVIDENCE_PROVIDER_DISCLOSURE_REVISION,
   CAMPAIGN_SESSION_ARTIFACT_DISCLOSURE_REVISION, campaignSessionArtifactDestinationId, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE,
+  campaignLaunchDisclosure, validCampaignLaunchDisclosure,
 } from "./campaign-control-launch.js";
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
@@ -3043,6 +3044,10 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   /** Project Locations the launch inspection left out of the repository boundary (#4117), each with
    * its fixed reason. Server-owned and informational: it grants nothing. */
   excludedLocations?: import("./project-location-inspection.js").CampaignExcludedLocation[];
+  /** What the Full Control launch or enable that set `control` disclosed about capabilities and
+   * evidence (#2940). Server-owned and informational: it grants nothing, a revoke to Custom drops
+   * it, and a campaign authorized before it existed has none. */
+  launchDisclosure?: import("./campaign-control-launch.js").CampaignLaunchDisclosure;
   /** Locations other people added mid-campaign, waiting for the owner's Include in Campaign (#4117). */
   pendingLocations?: import("./project-location-inspection.js").CampaignPendingLocation[];
   /** The Locations that joined the boundary after launch, newest last, bounded (#4117). */
@@ -3284,6 +3289,14 @@ export interface OrchestratorCampaignProjection {
   /** Full Control only: the request classes that still come to the Human for this campaign
    * (#2940), today at most `human_required_rules` while such a rule exists. */
   fullControlHumanRequired?: import("./campaign-authority.js").FullControlRequestClass[];
+  /** Full Control only, with `control` (#2940): the capabilities and evidence handling its launch or
+   * enable recorded. Absent when the authorization predates the record or the server doesn't keep
+   * it; Campaign Status then reads it as not recorded. A snapshot, never a live capability check:
+   * `uiEvidenceReview` and `videoEvidenceReview` are the live facts. */
+  launchDisclosure?: import("./campaign-control-launch.js").CampaignLaunchDisclosure;
+  /** Full Control only, with a first-message scope grant (#2940, #4102): whether the boundary's
+   * Maximum Issues is still derived, so it moves with the grant's selection count, or explicit. */
+  maxIssuesSource?: "derived" | "explicit";
   /** v275: unfinished committed work items handed to `human` or `external`, oldest handoff first
    * (#4070). The owner's to-do list; omitted when there are none. Bounded by
    * CAMPAIGN_HANDOFFS_LIMIT; `total` is the full count. */

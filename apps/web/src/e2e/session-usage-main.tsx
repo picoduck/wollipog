@@ -31,6 +31,10 @@ declare global {
  * `?event-heavy=1` makes 200 raw opening events collapse into one partial rendered response, and
  * `?live=1` adds a live tail event during the first prepend. */
 const params = new URLSearchParams(window.location.search);
+/** The boundary a default Full Control launch authorizes (#2940). */
+const FIXTURE_FULL_CONTROL_OPERATIONS = ["implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication",
+  "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"] as const;
+const FIXTURE_ISSUE_AUTHORITY = { epics: [12], relatedFollowUps: true, maxIssues: 3, closureReasons: ["completed" as const] };
 const FIXTURE_CODEX_HARNESS = { agentId: "codex-app-server", driver: "codex-app-server" as const, context: { kind: "native" as const } };
 const FIXTURE_CLAUDE_HARNESS = { agentId: "claude-code", driver: "claude-code" as const, context: { kind: "native" as const } };
 /** What the fixture's two machines offer for children (#3580). */
@@ -405,11 +409,21 @@ if (composerFixture) {
         authorizedByUserId: "fixture-human", authorizedAt: 1 };
       session.orchestratorPolicy.issueScope = issueScope;
       session.orchestratorPolicy.issueNumbers = [12];
+      // `1`: the boundary a default launch authorizes, every operation with issue authority (#2940).
+      // `legacy` keeps its older two-operation boundary.
+      const current = fullFixture === "1";
       session.orchestratorPolicy.control = { mode: "full_control", boundary: { version: 1, revision: 4, issueScopeRevision: 1,
         repository: issueScope.repository, objective: "Review the source fixture", authorizedByUserId: "fixture-human", authorizedAt: 2,
-        operations: ["implementation_question", "pr_merge"], delegatablePolicyIds: [] } };
+        operations: current ? [...FIXTURE_FULL_CONTROL_OPERATIONS] : ["implementation_question", "pr_merge"], delegatablePolicyIds: [],
+        ...(current ? { issueAuthority: { ...FIXTURE_ISSUE_AUTHORITY } } : {}) } };
       session.orchestratorCampaign.control = session.orchestratorPolicy.control;
-      session.orchestratorCampaign.decisionOwners = fixtureEffectiveOwners(session.orchestratorPolicy.control);
+      // Full Control keeps evidence with an image-capable Orchestrator; `images=0` is one that can't
+      // view images, which keeps the gate and asks or denies (#2940).
+      if (current) session.orchestratorCampaign.uiEvidenceReview = params.get("images") === "0"
+        ? { status: "unavailable", effectiveOwner: "orchestrator", reasonCode: "model_unsupported",
+          reason: "The Orchestrator model \"text-only\" does not accept image input. It asks for inspectable evidence or denies the claim as unproven." }
+        : { status: "available", effectiveOwner: "orchestrator" };
+      session.orchestratorCampaign.decisionOwners = fixtureEffectiveOwners(session.orchestratorPolicy.control, current);
       // `humanRules=1` (#2940): the server reports a person-marked Human Required rule; otherwise none.
       session.orchestratorCampaign.fullControlHumanRequired = params.get("humanRules") === "1" ? ["human_required_rules"] : [];
       // `video=certified|uncertified` (#1321): the server's campaign fact for delegated video review,
@@ -702,11 +716,13 @@ const navigation: ViewNavigation = {
  * resolves only the opening window; its next request stays pending so loading state is observable. */
 let tailRequestCount = 0;
 /** The projection's effective owners as the server derives them: under Full Control each gate follows
- * the boundary, and UI Evidence Approval stays with a person while this Orchestrator can't inspect images. */
-function fixtureEffectiveOwners(control: CampaignControl) {
+ * the boundary, and UI Evidence Approval stays with a person while this Orchestrator can't inspect images.
+ * `cappedExtensions`: a current runner, so Full Control owns review round extensions within their
+ * per-pull-request cap (#4075). */
+function fixtureEffectiveOwners(control: CampaignControl, cappedExtensions = false) {
   const saved = session.parentControlPolicy!.decisions;
   const owners = { ...saved };
-  for (const category of WORKFLOW_DECISION_CATEGORIES) owners[category] = campaignWorkflowOwner(control, saved, category, true);
+  for (const category of WORKFLOW_DECISION_CATEGORIES) owners[category] = campaignWorkflowOwner(control, saved, category, true, cappedExtensions);
   if (session.orchestratorCampaign?.uiEvidenceReview.effectiveOwner === "human") owners.ui_evidence_approval = "human";
   return owners;
 }
@@ -725,10 +741,13 @@ const client = {
     const scope = session.orchestratorPolicy!.issueScope!;
     const control = { mode: "full_control" as const, boundary: { version: 1 as const, revision, issueScopeRevision: scope.revision,
       repository: scope.repository, objective: "Review the source fixture", authorizedByUserId: "fixture-human", authorizedAt: 3,
-      operations: ["implementation_question", "pr_merge"] as Array<"implementation_question" | "pr_merge">, delegatablePolicyIds: [] } };
+      operations: [...FIXTURE_FULL_CONTROL_OPERATIONS], delegatablePolicyIds: [], issueAuthority: { ...FIXTURE_ISSUE_AUTHORITY } } };
     session.orchestratorPolicy = { ...session.orchestratorPolicy!, control };
     session.parentControlPolicy = { ...session.parentControlPolicy!, revision };
-    session.orchestratorCampaign = { ...session.orchestratorCampaign!, control, policyRevision: revision, decisionOwners: fixtureEffectiveOwners(control) };
+    // An image-capable Orchestrator under Full Control keeps evidence review (#2940).
+    session.orchestratorCampaign = { ...session.orchestratorCampaign!, control, policyRevision: revision,
+      uiEvidenceReview: { status: "available", effectiveOwner: "orchestrator" } };
+    session.orchestratorCampaign.decisionOwners = fixtureEffectiveOwners(control, true);
     return { ...session };
   },
   revokeCampaignControl: async (id: string, expectedRevision: number) => {

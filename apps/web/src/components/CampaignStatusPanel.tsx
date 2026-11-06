@@ -57,6 +57,7 @@ import { sessionAgentLabel } from "./agent-options.js";
 import { DetailSkeleton, Skeleton } from "./common.js";
 import { ChevronLeftIcon } from "./Icons.js";
 import { CampaignIssueScopePanel } from "./CampaignIssueScopePanel.js";
+import { CampaignAuthoritySummary } from "./CampaignAuthoritySummary.js";
 import { CampaignFollowUpLimit } from "./CampaignFollowUpLimit.js";
 import { CampaignDecisions } from "./CampaignDecisions.js";
 import { CampaignDecisionModelChecks } from "./CampaignDecisionModelChecks.js";
@@ -295,6 +296,11 @@ function AvailableCampaignStatus({
                   onOpenRequest={onOpenRequest}
                 />
               )}
+              {data.summary.campaign?.control?.mode === "full_control" && data.summary.campaign.decisionOwners &&
+                data.summary.campaign.uiEvidenceReview && (
+                <CampaignAuthoritySummary campaign={{ ...data.summary.campaign, control: data.summary.campaign.control,
+                  decisionOwners: data.summary.campaign.decisionOwners, uiEvidenceReview: data.summary.campaign.uiEvidenceReview }} />
+              )}
               {data.summary.campaign?.repositoryBoundary && (
                 <CampaignRepositories
                   campaignId={availability.campaignSessionId}
@@ -303,7 +309,8 @@ function AvailableCampaignStatus({
                 />
               )}
               <CampaignIssueScopePanel session={session} campaignId={availability.campaignSessionId}
-                policyRevision={availability.role === "campaign" ? data.summary.campaign?.policyRevision : undefined} />
+                policyRevision={availability.role === "campaign" ? data.summary.campaign?.policyRevision : undefined}
+                boundaryShown={data.summary.campaign?.control?.mode === "full_control"} />
               <CampaignDecisions campaignId={availability.campaignSessionId} />
               <CampaignWorkList
                 data={data}

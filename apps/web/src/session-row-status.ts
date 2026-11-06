@@ -1,6 +1,7 @@
 import type { SessionReminderView, SessionView } from "@wollipog/protocol";
 import { activeFullControlCampaign, completedFullControlCampaign, sessionFollowUp, sessionWorking } from "./session-follow-up.js";
 import { reminderBadgeDescription, reminderBadgeLabel, snoozedSessionAttentionReason } from "./session-reminders.js";
+import { campaignActiveDescription } from "./full-control-readiness.js";
 import {
   sessionStatusSummary,
   statusMeta,
@@ -100,7 +101,7 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
       !session.stopOperation && needs.length === 0 && reminder?.state !== "fired" && !context.familyWorking &&
       !sessionWorking(session as SessionView) && activeFullControlCampaign(session)) {
     secondary = { kind: "lifecycle", meta: statusMeta("session", "campaign_active"),
-      description: "This Full Control campaign continues automatically. Its intermediate results are informational.", needsYou: false };
+      description: campaignActiveDescription((session as SessionView).orchestratorCampaign), needsYou: false };
   }
   const others = needs.slice(1).map(conditionName);
   const familyLabel = context.familyFollowUpLabel;
