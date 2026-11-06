@@ -1403,38 +1403,123 @@ export async function gitStatus(cwd: string): Promise<GitStatusInfo> {
 
 /* ------------------------- git summary (pinned card) ---------------------- */
 
+// GitHub's CheckConclusionState vocabulary as of 2026: SUCCESS, FAILURE, NEUTRAL, CANCELLED,
+// SKIPPED, TIMED_OUT, ACTION_REQUIRED, STALE, STARTUP_FAILURE.
+const PASS_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
+
+type CheckContextNode = {
+  name?: unknown; context?: unknown; status?: unknown; conclusion?: unknown; state?: unknown;
+  workflowName?: unknown; databaseId?: unknown; detailsUrl?: unknown; startedAt?: unknown; createdAt?: unknown;
+};
+
+/** One rollup node's result. A StatusContext carries `state`; a CheckRun carries `status` and,
+ * once COMPLETED, `conclusion`. A COMPLETED check run with an unrecognized conclusion fails
+ * closed; only genuinely in-flight states (and unknown node shapes) are pending. */
+function checkContextResult(raw: unknown): "passing" | "failing" | "pending" {
+  const n = (raw ?? {}) as CheckContextNode;
+  if (typeof n.state === "string") {
+    if (n.state === "SUCCESS") return "passing";
+    return n.state === "FAILURE" || n.state === "ERROR" ? "failing" : "pending"; // PENDING / EXPECTED
+  }
+  if (n.status === "COMPLETED") return PASS_CONCLUSIONS.has(n.conclusion as string) ? "passing" : "failing";
+  return "pending"; // QUEUED / IN_PROGRESS / unknown shape
+}
+
+const RESULT_SEVERITY = { passing: 0, pending: 1, failing: 2 } as const;
+
+/** An Actions job's details URL names its job id, which is its check run's id. */
+const ACTIONS_JOB_URL = /^https:\/\/github\.com\/[^/]+\/[^/]+\/actions\/runs\/\d+\/job\/(\d+)(?:[/?#]|$)/u;
+
+/** A check run's id, assigned in creation order: the campaign query reads it directly, and
+ * `gh pr view` exposes it only inside an Actions job's details URL. Null when neither says. */
+function checkRunId(n: CheckContextNode): number | null {
+  if (Number.isSafeInteger(n.databaseId) && (n.databaseId as number) > 0) return n.databaseId as number;
+  const job = typeof n.detailsUrl === "string" ? ACTIONS_JOB_URL.exec(n.detailsUrl)?.[1] : undefined;
+  const id = job === undefined ? NaN : Number(job);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+/** When a check run started or a status was created (`gh pr view` calls both `startedAt`). */
+function checkContextTime(n: CheckContextNode): number | null {
+  const value = typeof n.startedAt === "string" ? n.startedAt : n.createdAt;
+  const time = typeof value === "string" ? Date.parse(value) : NaN;
+  return Number.isFinite(time) ? time : null;
+}
+
+/** Whether `node` supersedes `previous`, an entry for the same check. Check run ids grow in
+ * creation order, so a re-run, even one not started yet, has the larger id; otherwise the later
+ * known time wins. When neither orders them (a missing time or the same second), the worse result
+ * stands, so a failure is never hidden by a run that cannot be shown to be newer. */
+function supersedesCheckContext(node: CheckContextNode, previous: CheckContextNode): boolean {
+  const id = checkRunId(node);
+  const previousId = checkRunId(previous);
+  if (id !== null && previousId !== null && id !== previousId) return id > previousId;
+  const time = checkContextTime(node);
+  const previousTime = checkContextTime(previous);
+  if (time !== null && previousTime !== null && time !== previousTime) return time > previousTime;
+  return RESULT_SEVERITY[checkContextResult(node)] > RESULT_SEVERITY[checkContextResult(previous)];
+}
+
 /**
- * Collapse a `gh pr view` statusCheckRollup into counts + failing names. The rollup mixes two
- * node shapes: CheckRun ({name, status, conclusion}) and StatusContext ({context, state}).
- * Exported for unit tests. Failure stance: a COMPLETED check run with an unrecognized
- * conclusion counts as FAILING (fail closed) — labeling a terminal non-pass state as
- * "running" would hide it and suppress the Fix affordance if GitHub adds new vocabulary.
- * Only genuinely in-flight states (and unknown node shapes) count as pending.
+ * The latest entry of each check in a rollup, in GitHub's order (#4263). A head commit can carry
+ * several runs of one check, for example a cancelled run from a closed pull request and the
+ * replacement pull request's passing run; only the most recent counts, as in `gh pr checks`.
+ * Check runs and status contexts are separate checks even when they share a name. A check run is
+ * identified by its name and, where the source reports it, its workflow, so same-named jobs in two
+ * workflows stay two checks. Nodes of an unknown shape are kept as they are.
  */
-export function summarizeCheckRollup(nodes: unknown): Omit<GitChecksSummary, "url"> {
+export function latestCheckContexts(nodes: unknown): unknown[] {
+  const latest = new Map<string, unknown>();
+  const kept: unknown[] = [];
+  for (const raw of Array.isArray(nodes) ? nodes : []) {
+    const n = (raw ?? {}) as CheckContextNode;
+    const key = typeof n.state === "string" && typeof n.context === "string" ? `status\0${n.context}`
+      : typeof n.state !== "string" && typeof n.name === "string"
+        ? `run\0${typeof n.workflowName === "string" ? n.workflowName : ""}\0${n.name}`
+        : null;
+    if (key === null) {
+      kept.push(raw);
+      continue;
+    }
+    const previous = latest.get(key);
+    if (previous === undefined) {
+      latest.set(key, raw);
+      kept.push(raw);
+    } else if (supersedesCheckContext(n, previous as CheckContextNode)) {
+      latest.set(key, raw);
+      kept[kept.indexOf(previous)] = raw;
+    }
+  }
+  return kept;
+}
+
+/** Count every node in a rollup as it stands, superseded runs included. */
+export function countCheckContexts(nodes: unknown): Omit<GitChecksSummary, "url"> {
   const failing: string[] = [];
   let pending = 0;
   let passing = 0;
-  // GitHub's CheckConclusionState vocabulary as of 2026: SUCCESS, FAILURE, NEUTRAL, CANCELLED,
-  // SKIPPED, TIMED_OUT, ACTION_REQUIRED, STALE, STARTUP_FAILURE.
-  const PASS_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
   for (const raw of Array.isArray(nodes) ? nodes : []) {
-    const n = raw as { name?: string; context?: string; status?: string; conclusion?: string; state?: string };
-    const name = n.name ?? n.context ?? "check";
-    if (typeof n.state === "string") {
-      // StatusContext
-      if (n.state === "SUCCESS") passing++;
-      else if (n.state === "FAILURE" || n.state === "ERROR") failing.push(name);
-      else pending++; // PENDING / EXPECTED
-    } else if (n.status === "COMPLETED") {
-      // CheckRun, finished: pass on the known-good conclusions, fail on everything else.
-      if (PASS_CONCLUSIONS.has(n.conclusion ?? "")) passing++;
-      else failing.push(name);
-    } else {
-      pending++; // QUEUED / IN_PROGRESS / unknown shape
+    const result = checkContextResult(raw);
+    if (result === "passing") passing++;
+    else if (result === "pending") pending++;
+    else {
+      const n = (raw ?? {}) as CheckContextNode;
+      failing.push(typeof n.name === "string" ? n.name : typeof n.context === "string" ? n.context : "check");
     }
   }
   return { failing: failing.length, pending, passing, failingNames: failing.slice(0, 8) };
+}
+
+/**
+ * Collapse a `gh pr view` statusCheckRollup into counts + failing names. The rollup mixes two
+ * node shapes: CheckRun ({name, status, conclusion}) and StatusContext ({context, state}).
+ * Only each check's latest entry counts (#4263). Exported for unit tests. Failure stance: a
+ * COMPLETED check run with an unrecognized conclusion counts as FAILING (fail closed) — labeling
+ * a terminal non-pass state as "running" would hide it and suppress the Fix affordance if GitHub
+ * adds new vocabulary. Only genuinely in-flight states (and unknown node shapes) count as pending.
+ */
+export function summarizeCheckRollup(nodes: unknown): Omit<GitChecksSummary, "url"> {
+  return countCheckContexts(latestCheckContexts(nodes));
 }
 
 /** TTL cache for the gh PR lookup — the pinned summary refreshes on every turn flip, and a

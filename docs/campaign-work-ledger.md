@@ -565,6 +565,14 @@ derivation, refresh) and `apps/runner/src/campaign-forge-status.ts` (the read).
   GitHub still computes it, they read `unknown`. A seen failure or pending check is reported as
   such. When more checks exist than one read covers (100) and none of those seen failed, the
   required rollup is `unknown` too.
+- **Latest run per check (#4263):** a head can carry several runs of one check, such as a cancelled
+  run from a closed pull request and the replacement pull request's passing run. Only each check's
+  most recent run counts, by check run id (creation order) and otherwise by start or creation time;
+  runs that cannot be ordered keep the worse result. Check runs and status contexts are
+  de-duplicated separately. GitHub's own rollup state counts superseded runs too, so when every
+  context was read, a `FAILURE` or `ERROR` state that a superseded failure explains is set aside;
+  past a truncated read it still reads `failing`. The session Git panel's checks summary applies
+  the same rule.
 - **Refresh:** on demand, `POST /api/sessions/:id/campaign/work-items/:itemId/forge-refresh`, which
   the panel sends when an item's details open and every 60 seconds while they stay open; it waits
   at most 20 seconds and returns the item's facts (`CampaignForgeRefreshResponse`). The panel does

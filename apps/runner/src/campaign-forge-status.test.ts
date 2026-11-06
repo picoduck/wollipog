@@ -91,6 +91,86 @@ test("no required check reported is `none`, never passing, and a truncated page 
   assert.equal(statusContext.requiredChecks.state, "pending");
 });
 
+/** A check run as the campaign query reads it, with its creation-ordered id (#4263). */
+function run(name: string, conclusion: string | null, isRequired: boolean, databaseId: number, startedAt: string) {
+  return { ...check(name, conclusion, isRequired), databaseId, startedAt };
+}
+
+test("a cancelled run superseded by a newer passing run reads passing and raises no failure (#4263)", async () => {
+  // PR #4231 replaced the closed #4228 on the same head: #4228's run was cancelled, #4231's passed.
+  // GitHub's own rollup state still counts the cancelled run.
+  const contexts = [
+    run("Typecheck, Test & Sidecar Bundle", "CANCELLED", true, 127339808509, "2026-11-05T15:24:47Z"),
+    run("Unit Tests (1)", "CANCELLED", false, 127338879088, "2026-11-05T15:23:14Z"),
+    run("Unit Tests (1)", "SUCCESS", false, 127367279079, "2026-11-05T16:14:33Z"),
+    run("Typecheck, Test & Sidecar Bundle", "SUCCESS", true, 127374358123, "2026-11-05T16:27:37Z"),
+  ];
+  const outcome = await observeForgeStatus([REF], stub(answer({ r0: { pullRequest: pr({ mergeQueueEntry: { position: 0, state: "AWAITING_CHECKS" } }, contexts, "FAILURE") } })));
+  assert.ok(outcome.ok && outcome.results[0]!.ok);
+  const observation = outcome.results[0]!.observation as CampaignForgePullRequestObservation;
+  assert.deepEqual(observation.checks, { state: "passing", passing: 2, failing: 0, pending: 0 });
+  assert.deepEqual(observation.requiredChecks, { state: "passing", passing: 1, failing: 0, pending: 0 });
+});
+
+test("a check whose most recent run failed or was cancelled still reads failing (#4263)", () => {
+  const nodes = [
+    run("Typecheck, Test & Sidecar Bundle", "SUCCESS", true, 100, "2026-11-05T15:00:00Z"),
+    run("Typecheck, Test & Sidecar Bundle", "CANCELLED", true, 200, "2026-11-05T16:00:00Z"),
+    run("Lint", "FAILURE", false, 150, "2026-11-05T15:30:00Z"),
+  ];
+  const rollups = checkRollups({ state: "FAILURE", contexts: { pageInfo: { hasNextPage: false }, nodes } }, true)!;
+  assert.deepEqual(rollups.checks, { state: "failing", passing: 0, failing: 2, pending: 0 });
+  assert.deepEqual(rollups.requiredChecks, { state: "failing", passing: 0, failing: 1, pending: 0 });
+  // The check run id is creation order: an earlier start time does not make a re-run older.
+  const rerun = checkRollups({ state: "FAILURE", contexts: { pageInfo: { hasNextPage: false }, nodes: [
+    run("Lint", "SUCCESS", true, 100, "2026-11-05T16:00:00Z"),
+    run("Lint", "FAILURE", true, 200, "2026-11-05T15:59:00Z"),
+  ] } }, true)!;
+  assert.equal(rerun.requiredChecks.state, "failing");
+  assert.equal(rerun.checks.state, "failing");
+});
+
+test("check runs and status contexts each keep only their latest entry per check (#4263)", () => {
+  const nodes = [
+    { __typename: "StatusContext", context: "ci/legacy", state: "FAILURE", createdAt: "2026-11-05T15:00:00Z", isRequired: true },
+    { __typename: "StatusContext", context: "ci/legacy", state: "SUCCESS", createdAt: "2026-11-05T16:00:00Z", isRequired: true },
+    run("ci/legacy", "CANCELLED", false, 100, "2026-11-05T15:00:00Z"),
+    run("ci/legacy", "SUCCESS", false, 200, "2026-11-05T16:00:00Z"),
+    run("Unit", "SUCCESS", false, 300, "2026-11-05T16:00:00Z"),
+  ];
+  const rollups = checkRollups({ state: "FAILURE", contexts: { pageInfo: { hasNextPage: false }, nodes } }, true)!;
+  assert.deepEqual(rollups.checks, { state: "passing", passing: 3, failing: 0, pending: 0 });
+  assert.deepEqual(rollups.requiredChecks, { state: "passing", passing: 1, failing: 0, pending: 0 });
+  // A newer failing status context still fails beside a passing check run of the same name.
+  const failing = checkRollups({ state: "FAILURE", contexts: { pageInfo: { hasNextPage: false }, nodes: [
+    { __typename: "StatusContext", context: "ci/legacy", state: "SUCCESS", createdAt: "2026-11-05T15:00:00Z", isRequired: true },
+    { __typename: "StatusContext", context: "ci/legacy", state: "ERROR", createdAt: "2026-11-05T16:00:00Z", isRequired: true },
+    run("ci/legacy", "SUCCESS", false, 200, "2026-11-05T16:00:00Z"),
+  ] } }, true)!;
+  assert.deepEqual(failing.checks, { state: "failing", passing: 1, failing: 1, pending: 0 });
+  assert.equal(failing.requiredChecks.state, "failing");
+});
+
+test("past a truncated page, GitHub's failing rollup still reads failing: an unseen check could be failing (#4263)", () => {
+  const nodes = [
+    run("Lint", "CANCELLED", false, 100, "2026-11-05T15:00:00Z"),
+    run("Lint", "SUCCESS", false, 200, "2026-11-05T16:00:00Z"),
+  ];
+  const truncated = checkRollups({ state: "FAILURE", contexts: { pageInfo: { hasNextPage: true }, nodes } })!;
+  assert.deepEqual(truncated.checks, { state: "failing", passing: 1, failing: 0, pending: 0 });
+  const complete = checkRollups({ state: "FAILURE", contexts: { pageInfo: { hasNextPage: false }, nodes } })!;
+  assert.equal(complete.checks.state, "passing");
+  // GitHub's pending states are still honored on a complete page.
+  const expected = checkRollups({ state: "EXPECTED", contexts: { pageInfo: { hasNextPage: false }, nodes } })!;
+  assert.equal(expected.checks.state, "pending");
+});
+
+test("the query reads what orders a check's runs (#4263)", () => {
+  const query = forgeStatusQuery([{ owner: "picoduck", name: "wollipog", number: 7 }]);
+  assert.match(query, /\.\.\. on CheckRun\{databaseId name status conclusion startedAt isRequired\(pullRequestNumber:7\)\}/u);
+  assert.match(query, /\.\.\. on StatusContext\{context state createdAt isRequired\(pullRequestNumber:7\)\}/u);
+});
+
 test("a merged pull request carries its merge commit, approval, and draft and closed states map exactly", async () => {
   const gh = stub(answer({
     r0: { pullRequest: pr({ state: "MERGED", reviewDecision: "APPROVED", mergeCommit: { oid: MERGE } }) },
