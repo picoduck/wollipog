@@ -142,18 +142,33 @@ A typed call goes only to a v307 runner (`typedDecisionQuestions`), which accept
 (`DECISION_SCHEMA_MAX_CHARS`) and output (`DECISION_OUTPUT_MAX_BYTES`). With an older runner the
 occurrence records one non-transient `runner_incapable` attempt and takes the person route.
 
-No production kind is typed yet: the scope constraint check (#4282) and the migration of the
-credential screen, follow-up relatedness and closure-reason kinds come next. The optional dedicated
-decisions provider is deferred.
+The credential screen, follow-up relatedness and closure-reason kinds are typed (prompt version
+`v2`, each with a fixed confidence threshold of 0.8; see their sections below). The scope constraint
+check (#4282) comes next. Their verdict names are unchanged, so every caller, and every record from
+before typed questions, keeps its meaning: a replay of a `v1` occurrence joins its recorded
+single-verdict outcome and is never asked again. The optional dedicated decisions provider is
+deferred, and #4283 closes without it.
 
 ## The Question and Credential Screen (`credential_screen`, #4104)
 
 `apps/control-plane/src/credential-screen.ts` screens Full Control question and tool text that the
 deterministic floor in `@wollipog/protocol` (`campaign-authority.ts`) left open. The `request`
 data field is one JSON document: the `surface` (`implementation_question`, `provider_question`,
-`tool_request` or `owner_decision`) and the request's own text, quoted. Verdicts are `ask`,
-`discusses` and `uncertain`. The occurrence key names the session, the request occurrence and a
-digest of that text, so a replay joins the recorded outcome.
+`tool_request` or `owner_decision`) and the request's own text, quoted. The occurrence key names the
+session, the request occurrence and a digest of that text, so a replay joins the recorded outcome.
+
+It asks three typed yes-or-no questions about what answering or approving the request would do. Each
+one excludes a request that only names its subject as part of a design or the code:
+**No Credential Handed Over** (`hands_over_credential`), **No Sign-In Performed**
+(`performs_sign_in`) and **No Access Granted** (`grants_access`). The server derives:
+
+- `ask` from a confident yes to any of them, which declines the request;
+- `discusses` from a confident no to all three, which leaves it to the Orchestrator;
+- `uncertain` from anything else, including a yes below the threshold, which holds the request for
+  the owner to classify.
+
+The screen's authority is unchanged. A low-confidence yes holds the request rather than declining it,
+and nobody may answer a held request.
 
 - The typed route screens an implementation question before it is admitted and passes the fact to
   the evaluation. A re-evaluation of a stored occurrence never re-screens it.
@@ -174,8 +189,18 @@ digest of that text, so a replay joins the recorded outcome.
 - inputs too large for one call, or a runtime that cannot finish, recorded as a failed occurrence
   rather than judged in part.
 
+Both are typed:
+
+- Follow-up relatedness asks one choice, **Related to the Requested Work** (`relation`).
+  `completes_requested_work` or `gap_found_in_requested_work` satisfy it, `separate_work` violates it,
+  and `cannot_tell` settles nothing.
+- Closure-reason choice asks **Evidence Supports the Reason** (`supports`, `does_not_support`,
+  `cannot_tell`) and **Explanation Matches the Evidence** (`consistent`, `contradicts_evidence`,
+  `cannot_tell`).
+
 The confirming verdict (`related`, `fits`) leaves the request as its floor admitted it. The refusing
-one (`unrelated`, `does_not_fit`) returns it to the Orchestrator with the model's reason. An uncertain
+one (`unrelated`, `does_not_fit`) returns it to the Orchestrator with the server's sentence naming the
+deciding question, followed by that answer's evidence. An uncertain
 or failed check makes the affected publication or closure the person's: that request is the one
 typed, person-owned request, so no second one is created. `follow_up_relatedness` is the only kind
 besides `scope_grant` that reads the owner's message (the boundary objective). See

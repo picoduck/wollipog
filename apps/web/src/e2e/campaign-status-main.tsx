@@ -54,7 +54,18 @@ import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-t
 import { MINUTE, campaignProjection, forgeObservation, itemDetail, itemSummary, knownCost, workSummary } from "./campaign-status-fixtures.js";
 import "../styles.css";
 import { campaignRecoveryFixture } from "./campaign-recovery-fixtures.js";
-import { campaignDecisionsFixture, TYPED_ADMITTED, TYPED_REFUSED, TYPED_UNCERTAIN } from "./decision-model-fixtures.js";
+import {
+  campaignDecisionsFixture,
+  TYPED_ADMITTED,
+  TYPED_CLOSURE_MISFIT,
+  TYPED_REFUSED,
+  TYPED_RELATED,
+  TYPED_SCREEN_ASK,
+  TYPED_SCREEN_DISCUSSES,
+  TYPED_SCREEN_UNCERTAIN,
+  TYPED_UNCERTAIN,
+  TYPED_UNRELATED,
+} from "./decision-model-fixtures.js";
 import type { DecisionTypedAnswersView } from "@wollipog/protocol";
 
 declare global {
@@ -786,16 +797,25 @@ let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["dec
         { repository: "team/repo", number: 141, title: "Sidebar badges overlap on narrow screens" }] } },
 ] : [];
 
-// `typed=1` with `selection=1` (#4283): the same reviews as typed questions, each with its answers
-// and the reason the server derived from them.
+// `typed=1` (#4283): the same checks as typed questions, each with its answers and the reason the
+// server derived from them: the selection reviews with `selection=1`, and the migrated credential
+// screen, follow-up relatedness and closure-reason kinds with `screen=1` or `checks=1`. A failed
+// check has no answers, so it reads as before.
 if (params.get("typed") === "1") {
+  const admitted = "Every answer is satisfied with at least 80% confidence.";
   const typed: Record<string, { typedAnswers: DecisionTypedAnswersView; reason: string }> = {
-    sel_admitted: { typedAnswers: TYPED_ADMITTED, reason: "Every answer is satisfied with at least 80% confidence." },
+    sel_admitted: { typedAnswers: TYPED_ADMITTED, reason: admitted },
     sel_refused: { typedAnswers: TYPED_REFUSED, reason: "Issue 140 violates 'Skip Security'." },
     sel_uncertain: { typedAnswers: TYPED_UNCERTAIN, reason: "Issue 141 on 'UI Only' is below the 80% confidence threshold." },
+    dec_keys: { typedAnswers: TYPED_SCREEN_DISCUSSES, reason: admitted },
+    dec_token: { typedAnswers: TYPED_SCREEN_ASK, reason: "The answer violates 'No Credential Handed Over'." },
+    dec_owner: { typedAnswers: TYPED_SCREEN_UNCERTAIN, reason: "The answer on 'No Sign-In Performed' is below the 80% confidence threshold." },
+    rel_related: { typedAnswers: TYPED_RELATED, reason: admitted },
+    rel_unrelated: { typedAnswers: TYPED_UNRELATED, reason: "The answer violates 'Related to the Requested Work'." },
+    why_misfit: { typedAnswers: TYPED_CLOSURE_MISFIT, reason: "The answer violates 'Evidence Supports the Reason'." },
   };
   screenDecisions = screenDecisions.map((decision) => typed[decision.occurrenceId]
-    ? { ...decision, promptVersion: "scope_review.v2", ...typed[decision.occurrenceId] } : decision);
+    ? { ...decision, promptVersion: `${decision.kind}.v2`, ...typed[decision.occurrenceId] } : decision);
 }
 
 const client = {
