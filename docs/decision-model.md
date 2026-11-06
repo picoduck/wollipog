@@ -58,6 +58,12 @@ const outcome = await decisionRuntime.decide({
 
 ### Scope Grant
 
+Since #4282 a Full Control first message gets no call of this kind: the Orchestrator reads the
+owner's first message and proposes the scope, and the server's deterministic floors bind that
+proposal to the message (`docs/full-control-launch-preparation.md`). Full Control grants stored
+before then still read as below. A Custom campaign's epic seed still uses this reading until #4282's
+second slice moves it onto the Orchestrator's proposal.
+
 `scope_grant` (#4102) reads a Full Control owner's exact first message and nothing else: no data
 fields, no tools, no repository or issue content. Its fields are `explicit`, `ranges` and `context`
 (each repository-qualified, with an empty repository meaning the campaign's own), the selection

@@ -1,4 +1,5 @@
 import type { AgentQuestion, OwnerDecisionSnapshot, PendingApproval, WorkflowDecisionResourceSnapshot } from "./index.js";
+import { presentScopeProposalRequest, scopeProposalOfRequest } from "./scope-proposal.js";
 
 /**
  * Owner Questions (#4270). A Full Control root asks its campaign's owner a design choice, a
@@ -33,8 +34,10 @@ export function ownerQuestionOfRequest(request: Pick<PendingApproval, "kind" | "
   return isOwnerQuestionSnapshot(snapshot) ? snapshot : null;
 }
 
+/** Whether a pending card is answered as an Owner Question: an owner question, or the owner's one
+ * approval of an Orchestrator's scope proposal (#4282), which is presented the same way. */
 export function isOwnerQuestionRequest(request: Pick<PendingApproval, "kind" | "workflowDecision"> | null | undefined): boolean {
-  return ownerQuestionOfRequest(request) !== null;
+  return ownerQuestionOfRequest(request) !== null || scopeProposalOfRequest(request) !== null;
 }
 
 function optionLabel(snapshot: OwnerQuestionSnapshot, option: OwnerQuestionSnapshot["options"][number]): string {
@@ -100,6 +103,7 @@ export function ownerQuestionAnswer(snapshot: OwnerQuestionSnapshot, answers: Re
  * route, which the control plane resolves as the owner's answer.
  */
 export function presentOwnerQuestionRequest(request: PendingApproval): PendingApproval {
+  if (scopeProposalOfRequest(request)) return presentScopeProposalRequest(request);
   const snapshot = ownerQuestionOfRequest(request);
   // A question the Decision Model could not screen is classified on its own card first (#4104).
   if (!snapshot || request.workflowDecision?.authorityEvaluation?.reason === "credential_screen_review") return request;

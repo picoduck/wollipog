@@ -112,7 +112,9 @@ export type CampaignScopeAdmissionFailure =
   | "publication_authority_changed" | "recommendation_not_found" | "recommendation_not_accepted" | "resulting_issue_mismatch" | "origin_outside_scope" | "payload_mismatch"
   // Selection lineage (#4103): its deterministic floors, in the order they run.
   | "selection_not_granted" | "selection_additions_only" | "repository_outside_boundary" | "not_an_issue" | "issue_not_open"
-  | "already_in_scope" | "other_campaign_scope" | "selection_count_exhausted" | "human_required_label";
+  | "already_in_scope" | "other_campaign_scope" | "selection_count_exhausted" | "human_required_label"
+  // The Orchestrator's own scope proposal (#4282): its floors beyond those above.
+  | "owner_named_not_in_message" | "proposal_additions_only";
 
 const HUMAN_SCOPE_ROUTE = "ask the campaign owner to propose this change from Campaign Status";
 
@@ -152,6 +154,9 @@ export const CAMPAIGN_SCOPE_ADMISSION_REFUSALS: Readonly<Record<CampaignScopeAdm
     "Only the owner can change that count, in Campaign Status; an Orchestrator can't." },
   human_required_label: { status: 403, message: "A proposed issue has a label that a Human Required rule names, so only the campaign owner " +
     "can add it; choose another issue or ask the owner to propose it from Campaign Status." },
+  owner_named_not_in_message: { status: 409, message: "A proposed issue is marked as named by the owner, but the owner's message doesn't " +
+    "write its number for this campaign's repository. Mark it as your own choice, with your rationale, or leave it out." },
+  proposal_additions_only: { status: 400, message: "A scope proposal adds issues only; propose removals as their own change." },
 };
 
 /** The accepted recommendation a consumed publication delivered as `issue`. A bounded grant names it.

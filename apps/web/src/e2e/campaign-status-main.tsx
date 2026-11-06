@@ -646,10 +646,34 @@ let scopeGrantFixture: import("@wollipog/protocol").FullControlScopeGrant | null
 } : params.get("scope") === "grant-failed" ? {
   version: 1, status: "failed", occurrenceId: "dec_fixture", target: SCOPE_GRANT_TARGET, failureClass: "provider_overloaded", namedIssues: [],
   ceilings: launchCeilings(1),
+} : params.get("scope") === "proposal" || params.get("scope") === "proposal-waiting" ? {
+  // The Orchestrator proposes the scope (#4282): the server read nothing from the message.
+  version: 1, status: "proposal", namedIssues: [], ceilings: launchCeilings(9),
 } : params.get("scope") === "grant-uncertain" ? {
   version: 1, status: "uncertain", occurrenceId: "dec_fixture", target: SCOPE_GRANT_TARGET, namedIssues: [],
   reason: "The message doesn't say whether #12 is a request or background.", ceilings: launchCeilings(1),
 } : null;
+
+const SCOPE_PROPOSALS: import("@wollipog/protocol").CampaignScopeProposalView[] = [{
+  occurrenceId: "wd_scope_2", createdAt: NOW - 60_000, outcome: "waiting_for_owner",
+  explanation: "You named #123 and #124. For the rest I ranked open UI issues by priority label, then by age.",
+  proposal: { initial: true, messageDigest: "a".repeat(64), requestedCount: 5, constraints: ["open", "UI only"], withheldOperations: ["pr_merge"],
+    checks: ["chosen_issues", "requested_count", "constraints", "withheld_operations"], route: "owner", ownerCause: "constraint_check_unavailable",
+    ownerMessage: "Fix #123 and #124, then the 5 highest-priority open UI issues. Don't merge anything yet.",
+    issues: [
+      { number: 123, origin: "owner_named", rationale: "You named it first.", title: "Composer Epic" },
+      { number: 124, origin: "owner_named", rationale: "You named it second.", title: "Member Work" },
+      { number: 131, origin: "orchestrator_chosen", rationale: "Open, UI, priority:high, oldest.", title: "Sidebar Collapses on Resize" },
+      { number: 140, origin: "orchestrator_chosen", rationale: "Open, UI, priority:high.", title: "Badge Contrast in Light Theme" },
+      { number: 152, origin: "orchestrator_chosen", rationale: "Open, UI, priority:medium, most reactions.", title: "Composer Hint Overlaps Send" },
+    ] },
+}, {
+  occurrenceId: "wd_scope_1", createdAt: NOW - 120_000, outcome: "replaced",
+  explanation: "You named #123 and #124.",
+  proposal: { initial: true, messageDigest: "a".repeat(64), requestedCount: null, constraints: [], withheldOperations: [], checks: [], route: "admitted",
+    issues: [{ number: 123, origin: "owner_named", rationale: "You named it.", title: "Composer Epic" },
+      { number: 124, origin: "owner_named", rationale: "You named it.", title: "Member Work" }] },
+}];
 
 const scopeRequirement = params.get("scope") === "outdated-runner" ? campaignIssueScopeChangesRequirement(207)
   : params.get("scope") === "issue-limits" ? campaignIssueLimitsRequirement(216) : null;
@@ -748,6 +772,9 @@ const client = {
     // count, and the failure route.
     ...(scopeGrantFixture ? { issueNumbers: scopeGrantFixture.namedIssues, revision: 2, outsideScope: [], candidates: [],
       ...(params.get("scope") === "grant" ? { contextIssueNumbers: [126] } : {}), scopeGrant: scopeGrantFixture, policyRevision: revision } : {}),
+    // The Orchestrator's proposals (#4282): one waiting for the owner, after an earlier one it replaced.
+    ...(params.get("scope") === "proposal" ? { issueNumbers: [], scopeProposals: SCOPE_PROPOSALS } : {}),
+    ...(params.get("scope") === "proposal-waiting" ? { issueNumbers: [], scopeProposals: [] } : {}),
     // `activity=…` (#4146): the authorized scope covers every work item, so nothing reads as outside it.
     ...(activityScenario ? { repository: "picoduck/wollipog", revision: 1, canPropose: false, outsideScope: [], candidates: [],
       issueNumbers: [...new Set(items.flatMap((item) => item.issue ? [item.issue.number] : []))] } : {}),

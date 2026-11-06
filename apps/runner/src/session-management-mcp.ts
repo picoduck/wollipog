@@ -758,6 +758,20 @@ function forgeActionSummary(decision: unknown): string {
   }
 }
 
+/** The operations a scope proposal may withhold (#4282): a Full Control boundary's own. */
+const CAMPAIGN_SCOPE_PROPOSAL_OPERATIONS = ["implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication",
+  "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"] as const;
+
+/** Whether the control plane reports at least `required`; an unreadable version counts as no. */
+async function controlPlaneSupports(deps: McpDeps, required: number): Promise<boolean> {
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const result = await cpFetch(deps, "GET", "/api/compatibility");
+    actual = result.ok ? result.data?.protocolVersion : undefined;
+  }
+  return Number.isInteger(actual) && actual! >= required;
+}
+
 /** A pre-v281 control plane has no owner-decision routes (#4064). Refuse by name: nothing reached
  * the owner, and the decision keeps the owner it had. A pre-v303 control plane would ignore an Owner
  * Question's `kind` (#4270) and ask it as an approval, so a question needs v303. */
@@ -1483,7 +1497,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_campaign_issue_scope_change",
-    description: "Propose exact repository-qualified issue additions/removals at the current scope revision. Custom requires a human. A human-established Full Control issue boundary admits verified epic or exact published follow-up lineage within its limits. When the owner's first message asked the campaign to choose issues (a selection grant), propose the issues you chose with lineage {kind:\"selection\"} and your ranking as the explanation, additions only: the server refuses, with a fixed code and no model call, an issue outside the campaign's repositories, a pull request, a closed issue, one already in scope, one in another active campaign's scope, one past the selection count or Maximum Issues, and one with a Human Required label; otherwise the owner decides. Under Full Control, additions without lineage that no grant admits become the owner's one typed approval, stating any Maximum Issues increase they need; tell the owner to approve it, and a repeat while it is pending returns the same request. Resolution atomically applies and consumes scope; do not consume it yourself. Pending, denied, stale and replayed requests never widen authority.",
+    description: "Propose exact repository-qualified issue additions/removals at the current scope revision. Under Full Control whose owner's first message started the campaign, you read that message and propose its scope (#4282): your first campaign action is the initial proposal, and nothing is dispatched until it is admitted. Send the issues as additions with `proposal`: for each issue whether the owner named it (owner_named: its number is in the owner's message) or you chose it (orchestrator_chosen), with a one-line rationale; `requestedCount`, the number the owner asked for or null; `constraints`, each checkable limit you read (\"open\", \"UI only\", \"skip anything labeled security\"), never ranking criteria such as priority, which are your call; and `withheldOperations`, operations the message rules out (\"don't merge\" withholds pr_merge). A task that needs no issues proposes no additions. Deterministic floors refuse, naming the issue: an owner-named number the message doesn't write, an issue outside the campaign's repositories, a pull request, a closed issue, one already in scope or held by another campaign, one past an explicit Maximum Issues, and one with a Human Required label; revise and propose again. A proposal of only owner-named issues with nothing else to check returns an Orchestrator-owned change: resolve it with resolve_descendant_workflow_decision and your own session ID. Anything else becomes the owner's one approval, asked as an Owner Question; proposing the same issues again returns it. Custom requires a human. A human-established Full Control issue boundary admits verified epic or exact published follow-up lineage within its limits. When the owner's first message asked the campaign to choose issues (a selection grant), propose the issues you chose with lineage {kind:\"selection\"} and your ranking as the explanation, additions only: the server refuses, with a fixed code and no model call, an issue outside the campaign's repositories, a pull request, a closed issue, one already in scope, one in another active campaign's scope, one past the selection count or Maximum Issues, and one with a Human Required label; otherwise the owner decides. Under Full Control, additions without lineage that no grant admits become the owner's one typed approval, stating any Maximum Issues increase they need; tell the owner to approve it, and a repeat while it is pending returns the same request. Resolution atomically applies and consumes scope; do not consume it yourself. Pending, denied, stale and replayed requests never widen authority.",
     inputSchema: { type: "object", properties: {
       requestId: { type: "string" }, expectedRevision: { type: "integer", minimum: 0 }, explanation: { type: "string", minLength: 1, maxLength: 4000 },
       additions: { type: "array", maxItems: 100, items: { type: "object", properties: { repository: { type: "string" }, number: { type: "integer", minimum: 1 } }, required: ["repository", "number"], additionalProperties: false } },
@@ -1491,12 +1505,26 @@ export const TOOLS: McpTool[] = [
       lineage: { oneOf: [ { type: "object", properties: { kind: { const: "epic" }, epic: { type: "integer", minimum: 1 } }, required: ["kind", "epic"], additionalProperties: false },
         { type: "object", properties: { kind: { const: "follow_up" }, publicationOccurrenceId: { type: "string" } }, required: ["kind", "publicationOccurrenceId"], additionalProperties: false },
         { type: "object", properties: { kind: { const: "selection" } }, required: ["kind"], additionalProperties: false } ] },
+      proposal: { type: "object", description: "Under Full Control (#4282): how you read the owner's message. Its issues are exactly the additions.",
+        properties: {
+          issues: { type: "array", maxItems: 100, items: { type: "object", properties: {
+            repository: { type: "string" }, number: { type: "integer", minimum: 1 },
+            origin: { type: "string", enum: ["owner_named", "orchestrator_chosen"] },
+            rationale: { type: "string", minLength: 1, maxLength: 500 } }, required: ["repository", "number", "origin", "rationale"], additionalProperties: false } },
+          requestedCount: { type: ["integer", "null"], minimum: 1, maximum: 100 },
+          constraints: { type: "array", maxItems: 10, items: { type: "string", minLength: 1, maxLength: 200 } },
+          withheldOperations: { type: "array", items: { type: "string", enum: [...CAMPAIGN_SCOPE_PROPOSAL_OPERATIONS] } },
+        }, required: ["issues", "requestedCount", "constraints", "withheldOperations"], additionalProperties: false },
     }, required: ["requestId", "expectedRevision", "explanation", "additions", "removals"], additionalProperties: false },
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
       const compatibility = await campaignIssueScopeCompatibilityError(deps);
       if (compatibility) return compatibility;
-      const result = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/campaign/issue-scope/proposals`, args, deps.requestTimeoutMs ?? 150_000);
+      // A pre-v308 control plane reads no proposal (#4282); it keeps its own first-message grant, so
+      // the proposal is left out rather than sent to be ignored.
+      const body = args.proposal !== undefined && !await controlPlaneSupports(deps, RUNNER_CAPABILITY_MIN_PROTOCOL.campaignScopeProposals)
+        ? Object.fromEntries(Object.entries(args).filter(([key]) => key !== "proposal")) : args;
+      const result = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/campaign/issue-scope/proposals`, body, deps.requestTimeoutMs ?? 150_000);
       return result.ok ? textResult({ decision: result.data }) : errorResult(result.message);
     },
   },

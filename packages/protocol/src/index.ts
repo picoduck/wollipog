@@ -940,11 +940,22 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      policy changes leave it pending. A v303 runner sends the field only to a v303 control plane;
 //      a v303 control plane accepts it only from a v303 root runner. (299-301 are claimed by open
 //      pull requests.)
-export const PROTOCOL_VERSION = 303;
+// 308: the Orchestrator proposes a Full Control campaign's scope (#4282). The owner's first message
+//      is no longer read into a scope grant: the campaign starts with an empty scope (grant status
+//      `proposal`) and dispatches nothing until the Orchestrator's initial proposal is admitted.
+//      request_campaign_issue_scope_change takes `proposal` (each issue's origin and rationale, the
+//      count, constraints and withheld operations). Deterministic floors run first; a proposal with
+//      nothing checkable beyond owner-named issues is admitted with no model call, and anything else
+//      is the owner's one approval, presented as an Owner Question. A v308 runner sends `proposal`
+//      only to a v308 control plane; a v308 control plane reads it only from a v308 root runner, and
+//      an older runner's proposal takes the owner route. (304 to 307 are claimed by open pull
+//      requests.)
+export const PROTOCOL_VERSION = 308;
 
 export * from "./campaign-authority.js";
 export * from "./workflow-decision-owner-rule.js";
 export * from "./owner-question.js";
+export * from "./scope-proposal.js";
 export * from "./closing-references.js";
 export * from "./gitlab-closing-references.js";
 export * from "./issue-closure-refusal.js";
@@ -1344,6 +1355,10 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * the control plane by the runner, because an older control plane would ignore the field and ask
    * the question as an approval, and against the root's runner by the control plane. */
   ownerQuestions: 303,
+  /** v308 (#4282): structured scope proposals, `proposal` on request_campaign_issue_scope_change.
+   * Checked against the control plane by the runner, and against the root's runner by the control
+   * plane, which sends an older runner's proposal to the owner. */
+  campaignScopeProposals: 308,
   /** v296 (#4137): `ownerRule` on request_workflow_decision. Checked against the control plane by
    * the runner, because an older control plane ignores the field and would let the Orchestrator
    * decide a gate its owner kept. */
@@ -3128,7 +3143,9 @@ export type FullControlFirstMessageScope =
   /** `derivedLimits` beside a grant (#4102) is the current authorization's: every later
    * authorization or revoke replaces it, so a limit a person has since set is never treated as derived. */
   | { state: "established"; messageDigest: string; establishedAt: number; contextIssueNumbers?: number[]; grant?: FullControlScopeGrant;
-      derivedLimits?: FullControlDerivedLimits };
+      derivedLimits?: FullControlDerivedLimits;
+      /** The Orchestrator's admitted initial scope (#4282), once a grant of status `proposal` has one. */
+      initialScope?: import("./scope-proposal.js").FullControlInitialScope };
 
 /** A selection without a stated count gets this many issues, capped by an explicit Maximum Issues (#4102). */
 export const SCOPE_GRANT_DEFAULT_SELECTION_COUNT = 3;
@@ -3168,7 +3185,9 @@ export interface ScopeGrantSelection {
  * is granted or shown; the Orchestrator's scope proposal goes to one typed, person-owned approval. */
 export interface FullControlScopeGrant {
   version: 1;
-  status: "granted" | "uncertain" | "failed";
+  /** `proposal` (#4282): the server read nothing from the message. The scope starts empty and the
+   * Orchestrator proposes it; `namedIssues` is empty and the ceilings are the launch's. */
+  status: "granted" | "uncertain" | "failed" | "proposal";
   /** The audited Decision occurrence; absent only when no Decision Model runtime was available. */
   occurrenceId?: string;
   /** The model's verdict reason, for a granted or uncertain grant. */
@@ -5391,6 +5410,9 @@ export interface CampaignIssueScopeRequest {
   /** `selection` fills the owner's selection from the first message's scope grant (#4103). Under a
    * healthy selection grant a proposal without lineage takes the same route. */
   lineage?: { kind: "epic"; epic: number } | { kind: "follow_up"; publicationOccurrenceId: string } | { kind: "selection" };
+  /** The Orchestrator's structured proposal (#4282, protocol 308): each addition's origin and
+   * rationale, the count, constraints and withheld operations it read from the owner's message. */
+  proposal?: import("./scope-proposal.js").CampaignScopeProposalInput;
 }
 
 export interface CampaignIssueAdmission {
@@ -5425,6 +5447,9 @@ export interface CampaignIssueScopeSnapshot {
    * admits, so the proposal is the owner's one typed approval rather than a refusal (#4267).
    * Server-derived; it changes who decides, never what is granted. */
   ownerReview?: CampaignScopeOwnerReview;
+  /** The Orchestrator's proposal under the propose-then-check flow (#4282), as the server recorded
+   * it after the floors. Server-derived; it changes who decides, never what is granted. */
+  scopeProposal?: import("./scope-proposal.js").CampaignScopeProposal;
 }
 
 /** Why an Orchestrator's scope proposal waits for the owner (#4267), and the Maximum Issues increase
@@ -5556,6 +5581,8 @@ export interface CampaignIssueScopeView {
    * ceilings are the current authorization's: `maxIssuesSource` is `derived` only while that
    * authorization still derives Maximum Issues. */
   scopeGrant?: FullControlScopeGrant;
+  /** The Orchestrator's scope proposals under the propose-then-check flow (#4282), newest first. */
+  scopeProposals?: import("./scope-proposal.js").CampaignScopeProposalView[];
   /** With `scopeGrant`: the policy revision this view was read at. A selection count change is
    * compare-and-set against it, so a change made from a stale view is refused. */
   policyRevision?: number;

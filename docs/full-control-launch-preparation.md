@@ -48,52 +48,51 @@ only) establishes the boundary before the Orchestrator's first turn:
   text: a slash command or image-only message is refused, so that the task is stated.
 - The objective is the message, normalized to one line and bounded to 4000 characters. The
   boundary records the SHA-256 digest of the exact message text (`messageDigest`).
-- The issue scope comes from a typed **scope grant** (#4102). During delivery, the Decision Model
-  (`docs/decision-model.md`, kind `scope_grant`) reads only the exact message: no tools, no
-  repository and no issue content. It returns `explicit` issue numbers in any notation (`#4090`,
-  `issue 4090`, a bare number that names an issue, an issue URL), `ranges` (`#2997–#3005`, "issues
-  10 through 14"), `context` numbers mentioned without being asked for, a `selection` the campaign
-  should choose itself (count, criteria and constraints, as in "find the 5 highest-priority open
-  issues"), and any narrowing of the launch's operations ("fix but don't merge"). This happens
-  inside the runtime's time bound and retry budget; nothing is added before launch.
-- Deterministic floors only remove from that answer (`scope-grant.ts`): every explicit number and
-  both ends of every range must be written in the message as a digit string, so an invented number
-  is dropped; every reference must resolve to a repository in the campaign's boundary, and a number
-  the message writes only as another repository's (`other/repo#5`, another repository's issue or
-  pull request URL) is dropped even when the model left it unqualified; a range expands only when
-  ascending and narrower than 100 issues, and only while the message stays within 100 distinct
-  issues; a number listed both as named and as context is context; and the operations are
-  intersected with the launch's. No verdict can raise a ceiling, change a repository or grant an
-  operation. The exact-reference parser (`issueReferenceSpans`) is only a fast path that starts the
-  runner reading exact references while the model runs; it never grants anything itself.
-- The runner then reads every remaining number, named or context, and only verified issues are
-  kept: a pull request, a missing issue, or an unreadable origin leaves it out. Verified named issues
-  become the scope and its `issueAuthority.epics`. Verified context references, and named issues an
-  explicit Maximum Issues left out, are recorded on the first-message record
-  (`firstMessageScope.contextIssueNumbers`), disjoint from the scope. They grant nothing.
-- The ceilings: Maximum Issues holds the named issues plus `selection.count` plus follow-up room
-  derived as before; the selection never counts against follow-up room. A selection without a count
-  gets `SCOPE_GRANT_DEFAULT_SELECTION_COUNT` (3) and is marked `defaulted`. An explicit Maximum
-  Issues still caps everything (the named issues first, then the selection, marked `capped`) and
-  never grows. The grant is stored on the first-message record (`firstMessageScope.grant`), bound
-  to its `messageDigest`, with the ceilings, the dropped numbers and why, and the Decision Model
-  that read it with its reason.
-- When the Decision Model fails after its bounded retries, fails non-transiently (including a
-  runner that cannot host Decision calls), or answers `uncertain`, the boundary is established with
-  an empty scope and the launch's ceilings, the message is still delivered, and nothing is parsed
-  from its text instead: no scope and no context references. The grant records `failed` or
-  `uncertain` with the failure class or reason. The Orchestrator then proposes its scope as usual,
-  and its proposal of issues without lineage becomes exactly one typed, person-owned scope approval
-  (`campaign_issue_scope` with `grantReview`) showing the owner's message, the proposed issues, the
-  Orchestrator's rationale, and the failure class or uncertain reason. A revised proposal replaces
-  it. The owner's approval also sets a derived Maximum Issues to fit the scope they approved; an
-  explicit one never grows. Until the Decision Model reviews selection proposals (#4103), a
-  proposal that fills a healthy grant's selection goes to the owner the same way, within the
-  selection's ceiling.
-- Campaign Status shows a **Scope Grant** section above Authorized Issue Scope: Named Issues,
-  Selection Count (with Defaulted or Capped), Selection Criteria, Selection Constraints, Maximum
-  Issues, Repository, Operations, any operations the message withheld, numbers not granted and why,
-  the Decision Model, and its reason or failure.
+- The Orchestrator proposes the issue scope (#4282); the server reads nothing from the message.
+  The boundary is established with an empty scope and the launch's ceilings, and the first-message
+  record keeps a grant of status `proposal` (`firstMessageScope.grant`) with those ceilings. Nothing
+  is dispatched (`create_session` for campaign work answers 409 `initial_scope_not_admitted`) until
+  an initial scope is applied (`firstMessageScope.initialScope`).
+- The Orchestrator's first campaign action is that proposal: `request_campaign_issue_scope_change`
+  with `proposal` (protocol 308): each issue's `origin` (`owner_named` or `orchestrator_chosen`) and
+  `rationale`, the `requestedCount` the owner stated or `null`, the `constraints` it read, and the
+  `withheldOperations` the message rules out. Ranking criteria ("highest priority") are its own call,
+  recorded in its rationale and never checked. Its issues are exactly the additions; a task that
+  needs none proposes no additions.
+- Deterministic floors run first, in order, and refuse with a fixed code naming the issue: additions
+  only (`proposal_additions_only`), in a boundary repository (`repository_outside_boundary`); every
+  owner-named number written in the owner's exact message and not only qualified by another
+  repository (`owner_named_not_in_message`); an open issue, not a pull request (`not_an_issue`,
+  `issue_not_open`); not already in scope (`already_in_scope`) nor held by another active campaign
+  (`other_campaign_scope`); within an explicit Maximum Issues (`capacity_exhausted`; a derived one
+  grows to fit the scope plus follow-up room, never past 100); and no Human Required label
+  (`human_required_label`). Withheld operations only ever narrow the launch's.
+- A proposal with nothing checkable beyond owner-named issues (no Orchestrator-chosen issue, no
+  constraint, no withheld operation, and no count other than the named issues') is admitted after
+  the floors with no model call: an Orchestrator-owned `campaign_issue_scope` change carrying
+  `scopeProposal` and server-derived `issueAdmission`, which the Orchestrator applies by resolving
+  it. Anything else needs a constraint check. Until the Decision Model's constraint check exists
+  (#4282's second slice), and whenever it later fails or is uncertain, it fails closed: the owner
+  gets exactly one person-owned approval of the proposal (`scopeProposal.route: "owner"`), presented
+  as an Owner Question (Approve Scope, Decline Scope, or an answer in their own words, which declines
+  it and reaches the Orchestrator as a prompt). Proposing the same issues again returns that request.
+  Approving applies exactly the proposal, grows a derived Maximum Issues to fit and withholds the
+  stated operations. Nothing is parsed from the message text on any route.
+- A root runner older than protocol 308 cannot send a structured proposal: its additions take the
+  owner's approval route (`proposal_unstructured`).
+- Later additions take the same route; epic and follow-up lineage keep their own rules.
+- Campaign Status shows a **Scope Proposal** section in place of the Scope Grant: Maximum Issues,
+  Repository and Operations, then each proposal with its issues (Named by You or Chosen by
+  Orchestrator, with the rationale), the count, constraints, withheld operations, rationale, how it
+  was checked and what it led to.
+- A campaign whose first message was read before #4282 keeps its stored grant and scope, and the
+  rest of this section describes that grant. The issue scope came from a typed **scope grant**
+  (#4102): the Decision Model (`scope_grant`) read only the exact message and returned explicit
+  issues, ranges, context numbers, a selection and any narrowing of the launch's operations, and
+  deterministic floors (`scope-grant.ts`) only removed from that answer. A failed or uncertain grant
+  left the scope empty and routed the Orchestrator's proposal to one typed, person-owned approval
+  (`grantReview`), whose approval also sets a derived Maximum Issues. Campaign Status shows its
+  **Scope Grant** section.
 - On the campaign's own Campaign Status, the owner can change a granted selection's count with
   Change Count (`POST /api/sessions/:id/orchestrator-campaign/scope-grant/selection-count`, Human
   only, compare-and-set on the policy revision, `setScopeGrantSelectionCount`). Only the person who
