@@ -1015,7 +1015,20 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      repository only to a v322 control plane. A Full Control launch's `otherIssues` are read through a
 //      Location of each repository with today's plain issue read. (This change first claimed 317 and
 //      319, which no released version uses for it; 321 is claimed by an open pull request.)
-export const PROTOCOL_VERSION = 322;
+// 323: issue closure through a Location (#4119). A `github_issue_closure` message may name a
+//      `location`: the runner inspects or closes the issue in that Location's own path, with its
+//      own forge login, instead of in an Orchestrator session's checkout, refuses an origin other
+//      than the named repository, and records each execution in a durable attempt file. Its `execute`
+//      stops at the mutation fence and answers `prepared`, and a `commit` lets it go on once the
+//      control plane has rechecked the campaign's authority. A closure in a campaign
+//      repository other than the launch one needs such a Location's runner at v323;
+//      an older runner is never sent it, and a runner refuses `repository` on an older control
+//      plane, which would ignore it. (This change first claimed 319, 320 and 321, which no released
+//      version uses.)
+// 324: a new Custom campaign starts with the repositories its Project verified (#4118), in the
+//      `repositories` list v317 added, and a Custom seed proposal refuses `repositoryNames` by name
+//      rather than ignoring it. Both are the control plane's: no runner or client needs this version.
+export const PROTOCOL_VERSION = 324;
 
 export * from "./campaign-authority.js";
 export * from "./decision-questions.js";
@@ -1615,6 +1628,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   campaignControlRevision: 310,
   /** v313 synchronizes its own repository's part of a multi-repository issue scope (#4118). */
   repositoryQualifiedIssueScope: 313,
+  /** v323 inspects and closes an issue in a named Location's own path (#4119). */
+  locationIssueClosure: 323,
   /** v317 asks for and carries out a campaign repository addition (#4117). */
   campaignRepositoryAddition: 317,
   /** v318 reads a Location's issue facts for a repository-qualified scope proposal (#4118). */
@@ -5876,6 +5891,8 @@ export interface GithubIssueClosureInspection {
 export interface GithubIssueClosureRequest {
   requestId: string;
   issue: number;
+  /** v323 (#4119): the campaign repository the issue belongs to. Defaults to the launch repository. */
+  repository?: string;
   reason: "completed" | "not_planned";
   explanation: string;
   evidence: string[];
@@ -10742,16 +10759,29 @@ export interface WorkflowActionAdmissionRecordedMessage {
   error?: string;
 }
 
+/** v323 (#4119): the Location of the issue's repository a closure runs in, when that is not the
+ * Orchestrator session's own checkout. Resolved by the control plane, never by an agent. */
+export interface GithubIssueClosureLocation {
+  workspaceId: string;
+  workspacePath: string;
+  repository: string;
+}
+
 /** Trusted runner inspection or execution of one human-owned closure occurrence. */
 export type GithubIssueClosureMessage = {
   type: "github_issue_closure";
   requestId: string;
   sessionId: string;
+  location?: GithubIssueClosureLocation;
 } & (
   | { operation: "inspect"; issue: number; scopeRevision?: number; deliveryPullRequests?: Array<{ number: number; headSha: string }>;
       /** v278 (#4060): also read the issue's epic members into the inspection and its digest. */
       epicMembers?: true }
   | { operation: "execute"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot }
+  /** v323 (#4119): only with `location`. A Location's runner holds no copy of the campaign's scope,
+   * so its `execute` stops at the mutation fence and answers `prepared`. The control plane rechecks
+   * the campaign's authority after those forge reads, and this lets the prepared closure go on. */
+  | { operation: "commit"; occurrenceId: string }
 );
 
 export interface GithubIssueClosureResultMessage {
@@ -10762,6 +10792,8 @@ export interface GithubIssueClosureResultMessage {
   ok: boolean;
   inspection?: GithubIssueClosureInspection;
   result?: GithubIssueClosureResult;
+  /** v323 (#4119): a Location's `execute` passed every forge check and waits for `commit`. Nothing was written. */
+  prepared?: true;
   error?: string;
   /** Classification of an `ok: false` reply (#4059), one of `GITHUB_ISSUE_CLOSURE_FAILURE_REASONS`.
    * Older runners omit it, and the control plane then records `runner_failed`. */

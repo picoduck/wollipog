@@ -191,7 +191,7 @@ function deliveryChange(approved: GithubIssueClosureSnapshot["delivery"], curren
 export async function executeGithubIssueClosure(
   snapshot: GithubIssueClosureSnapshot,
   run: Run,
-  begin: () => boolean,
+  begin: () => boolean | Promise<boolean>,
 ): Promise<GithubIssueClosureResult> {
   const result = (outcome: GithubIssueClosureResult["outcome"]): GithubIssueClosureResult => ({ outcome, completedAt: Date.now() });
   // Every refusal precedes the mutation fence, so it names its reason and nothing was written.
@@ -207,7 +207,7 @@ export async function executeGithubIssueClosure(
   if (snapshot.issueAdmission && JSON.stringify(current.delivery) !== JSON.stringify(snapshot.delivery)) {
     return refused(githubIssueClosureRefusal("delivery_changed", { pullRequests: deliveryChange(snapshot.delivery, current.delivery) }));
   }
-  if (!begin()) return refused(githubIssueClosureRefusal("mutation_fence_unavailable"));
+  if (!await begin()) return refused(githubIssueClosureRefusal("mutation_fence_unavailable"));
   try {
     if (campaignRepositoryLocation(current.repository)?.forge === "gitlab") await closeGitlabIssue(run, snapshot);
     else await run("gh", ["issue", "close", current.url, "--reason", snapshot.reason === "completed" ? "completed" : "not planned",

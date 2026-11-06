@@ -120,7 +120,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 322);
+  assert.equal(PROTOCOL_VERSION, 324);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -358,8 +358,12 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 322", () => {
-  assert.equal(PROTOCOL_VERSION, 322);
+test("PROTOCOL_VERSION is 324", () => {
+  assert.equal(PROTOCOL_VERSION, 324);
+  // A closure through a Location needs a v323 runner there (#4119).
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.locationIssueClosure, 323);
+  assert.equal(runnerSupportsProtocol(RUNNER_CAPABILITY_MIN_PROTOCOL.locationIssueClosure - 1, "locationIssueClosure"), false);
+  assert.equal(runnerSupportsProtocol(RUNNER_CAPABILITY_MIN_PROTOCOL.locationIssueClosure, "locationIssueClosure"), true);
   // An epic in another repository is resolved through a v322 Location's runner (#4118).
   assert.equal(runnerSupportsProtocol(321, "repositoryQualifiedEpics"), false);
   assert.equal(runnerSupportsProtocol(322, "repositoryQualifiedEpics"), true);
