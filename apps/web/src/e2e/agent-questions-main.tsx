@@ -205,7 +205,7 @@ const ownerDecision: OwnerDecisionSnapshot = {
     "- **Retry** keeps children working through short outages.\n- **Stop** surfaces the failure at once.",
   recommendedOptionId: "retry",
   options: [
-    { optionId: "retry", label: "Retry With Backoff", description: "Up to three attempts, then report." },
+    { optionId: "retry", label: "Retry with Backoff", description: "Up to three attempts, then report." },
     { optionId: "stop", label: "Stop and Report", description: "Fail the child's step at once." },
   ],
 };
