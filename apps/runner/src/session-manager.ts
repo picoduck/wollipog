@@ -20330,14 +20330,15 @@ export class SessionManager {
       const { occurrenceId, snapshot } = message;
       const digest = createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
       let commit = () => {};
-      const committed = new Promise<boolean>((resolve) => {
-        const timer = setTimeout(() => resolve(false), commitWaitMs);
-        timer.unref();
-        commit = () => { clearTimeout(timer); resolve(true); };
-      });
+      let answerCommit = (_granted: boolean) => {};
+      const committed = new Promise<boolean>((resolve) => { answerCommit = resolve; });
       let atFence = () => {};
       const reachedFence = new Promise<"prepared">((resolve) => { atFence = () => resolve("prepared"); });
       const finished = executeGithubIssueClosure(snapshot, run, async () => {
+        // The wait starts here: however long the forge checks took, the control plane gets all of it.
+        const timer = setTimeout(() => answerCommit(false), commitWaitMs);
+        timer.unref();
+        commit = () => { clearTimeout(timer); answerCommit(true); };
         atFence();
         // Nothing awaits between the commit and the durable record, and the mutation follows it.
         return await committed && this.beginLocationIssueClosure(occurrenceId, digest);
@@ -20346,7 +20347,8 @@ export class SessionManager {
           occurrenceId, outcome: result.outcome, ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
         return { ...base, ok: true, result };
       }, (error) => issueClosureFailure(base, error)).finally(() => this.preparedLocationClosures.delete(occurrenceId));
-      this.preparedLocationClosures.set(occurrenceId, { commit, finished });
+      // A commit before the fence is reached grants nothing: `prepared` hasn't been answered yet.
+      this.preparedLocationClosures.set(occurrenceId, { commit: () => commit(), finished });
       const first = await Promise.race([reachedFence, finished]);
       return first === "prepared" ? { ...base, ok: true, prepared: true } : first;
     } catch (error) {

@@ -4100,7 +4100,7 @@ test("each Orchestrator participant's runner stores only its own Location reposi
  * while a Location's `execute` is reading the forge, before it answers. */
 function closureRunners(f: ReturnType<typeof fixture>) {
   const closures: Array<{ runnerId: string; message: Extract<ControlPlaneToRunner, { type: "github_issue_closure" }> }> = [];
-  const state = { origin: null as string | null, duringChecks: null as (() => unknown) | null, prepareAnswer: { prepared: true } as { prepared?: true } };
+  const state = { origin: null as string | null, duringChecks: null as (() => unknown) | null, prepareAnswer: { prepared: true } as { prepared?: true; result?: never } };
   const send = f.hub.sendToRunner.bind(f.hub);
   f.hub.sendToRunner = (runnerId, message) => {
     if (message.type !== "github_issue_closure") return send(runnerId, message);
@@ -4254,13 +4254,34 @@ test("a Location's closure gets no commit when the campaign's authority changes 
     refused(moved.occurrenceId, "campaign_authority_changed");
     f.db.getWorkspacePath = workspacePath;
 
-    // A malformed answer can't prove readiness, and no write can have happened without a commit.
-    const silent = await approved("close-41-silent", 41);
+    // A malformed answer can't prove readiness, and no write can have happened without a commit: not
+    // even a reply claiming the issue was closed.
     state.duringChecks = null;
-    state.prepareAnswer = {};
-    assert.equal((await f.sessions.executeGithubIssueClosure(id, silent.occurrenceId, silent.resourceDigest)).ok, true);
-    refused(silent.occurrenceId, "runner_failed");
+    const malformed: unknown[] = [{}, { result: {} }, { result: { outcome: "refused", completedAt: "soon" } },
+      { result: { outcome: "closed", completedAt: Date.now() } }, { result: { outcome: "uncertain", completedAt: Date.now() } }];
+    for (const [index, answer] of malformed.entries()) {
+      const silent = await approved(`close-41-malformed-${index}`, 41);
+      state.prepareAnswer = answer as typeof state.prepareAnswer;
+      assert.equal((await f.sessions.executeGithubIssueClosure(id, silent.occurrenceId, silent.resourceDigest)).ok, true);
+      refused(silent.occurrenceId, "runner_failed");
+    }
     state.prepareAnswer = { prepared: true };
+
+    // A request the session must have answered first arrives while the checks run.
+    const asked = await approved("close-41-asked", 41);
+    state.duringChecks = () => { f.db.setPendingApproval(id, { requestId: "continue", kind: "authentication", title: "Authentication Required",
+      options: [{ optionId: "auth:revalidate", name: "Recheck Authentication", kind: "allow_once" }] }); };
+    assert.equal((await f.sessions.executeGithubIssueClosure(id, asked.occurrenceId, asked.resourceDigest)).ok, true);
+    refused(asked.occurrenceId, "campaign_authority_changed");
+    f.db.setPendingApproval(id, null);
+
+    // So does a policy hook's approval.
+    const hooked = await approved("close-41-hooked", 41);
+    const openHooks = f.db.listOpenPolicyHookApprovals.bind(f.db);
+    state.duringChecks = () => { f.db.listOpenPolicyHookApprovals = () => [{}] as unknown as ReturnType<typeof openHooks>; };
+    assert.equal((await f.sessions.executeGithubIssueClosure(id, hooked.occurrenceId, hooked.resourceDigest)).ok, true);
+    refused(hooked.occurrenceId, "campaign_authority_changed");
+    f.db.listOpenPolicyHookApprovals = openHooks;
 
     // The owner removes the issue from the scope while the checks run, after the last check before
     // dispatch: a scope that reached no runner here must still stop the close.

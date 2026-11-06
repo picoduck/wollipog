@@ -13368,7 +13368,8 @@ export class SessionsService {
         !session.parentControlPolicy || decision.policyRevision !== session.parentControlPolicy.revision ||
         !this.workflowDecisionAuthorityCurrent(session, session.parentControlPolicy, decision) ||
         auditDigest(issueClosureActiveChildren(this.db, sessionId, { repository: snapshot.repository, number: snapshot.issue })) !== auditDigest(snapshot.activeChildren) ||
-        this.pendingPolicyAsk(session) || this.gateOnPolicy(sessionId, Date.now())) return false;
+        this.pendingPolicyAsk(session) || pendingRequests(session.pendingApproval).some((request) => request.kind !== "workflow_decision") ||
+        this.db.listOpenPolicyHookApprovals(sessionId).length || this.gateOnPolicy(sessionId, Date.now())) return false;
     if (decision.authority === "orchestrator" && (scopeCompatibility(this.db, session) ||
         issueEvidenceDigest(closureEvidence(this.db, session, snapshot)) !== snapshot.issueAdmission?.evidenceDigest)) return false;
     // The Location must still be one of that repository's, at the path the checks ran in.
@@ -13483,7 +13484,9 @@ export class SessionsService {
             type: "github_issue_closure", operation: "commit", requestId: commitId, sessionId, occurrenceId, location: target.location,
           }, 150_000);
         }
-      } else if (!mayHaveWritten && !(response.type === "github_issue_closure_result" && response.sessionId === sessionId && (response.result || !response.ok))) {
+      } else if (!mayHaveWritten && !(response.type === "github_issue_closure_result" && response.sessionId === sessionId && (!response.ok ||
+          // Without a commit the only results there can be are an issue already closed and a refusal.
+          response.result && ["already_closed", "refused"].includes(response.result.outcome) && Number.isSafeInteger(response.result.completedAt)))) {
         response = { type: "github_issue_closure_result", requestId, sessionId, ok: false, failure: "runner_failed", error: "The Location's runner gave no valid answer; nothing was written." };
       }
       if (response.type === "github_issue_closure_result" && response.sessionId === sessionId && response.ok &&

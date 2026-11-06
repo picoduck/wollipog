@@ -40,6 +40,7 @@ function fixture(t: TestContext, mode: CloseMode = "closed") {
   const commands: Command[] = [];
   let origin = "example/project";
   let beforeNextInspection: (() => void) | undefined;
+  let inspectionDelayMs = 0;
   const diskMeta = () => JSON.parse(readFileSync(join(store.sessionPath(sessionId), "meta.json"), "utf8")) as SessionMeta;
 
   // Only the OS command transport is replaced. The manager, context-command path, GitHub
@@ -60,6 +61,12 @@ function fixture(t: TestContext, mode: CloseMode = "closed") {
       beforeNextInspection = undefined;
       before?.();
       stdout = JSON.stringify({ data: { repository } });
+      if (inspectionDelayMs) {
+        const delay = inspectionDelayMs;
+        inspectionDelayMs = 0;
+        setTimeout(() => callback(null, stdout, ""), delay);
+        return { stdin: null } as ChildProcess;
+      }
     } else if (file === "gh" && args[0] === "api" && args.includes("search/issues")) {
       stdout = JSON.stringify({ items: [], total_count: 0, incomplete_results: false });
     } else if (file === "gh" && args[0] === "api" && args.some((arg) => arg.includes("issues?state=all"))) {
@@ -109,6 +116,7 @@ function fixture(t: TestContext, mode: CloseMode = "closed") {
   return { root, repository, commands, logs, inspect, execute, snapshot, restart, diskMeta, scope: (message: ScopeOperation) => manager.campaignIssueScope({ type: "campaign_issue_scope", requestId: "scope", sessionId, ...message }),
     setOrigin: (value: string) => { origin=value; },
     beforeNextInspection: (callback: () => void) => { beforeNextInspection=callback; },
+    delayNextInspection: (ms: number) => { inspectionDelayMs=ms; },
     manager: () => manager, store: () => store, mutations: () => commands.filter((command) => command.file === "gh" && command.args[0] === "issue") };
 }
 
@@ -238,6 +246,22 @@ test("a closure at a Location runs in that path on this runner with no session o
   const missing = await inspect({ ...location, workspacePath: join(f.root, "missing") });
   assert.deepEqual([missing.ok, missing.failure], [false, "runner_failed"]);
   assert.equal(f.commands.length, before);
+});
+
+test("a Location's commit wait starts at its fence, so slow forge checks don't use it up (#4119)", async (t) => {
+  const f = fixture(t);
+  const location = { workspaceId: "api", workspacePath: f.root, repository: "example/project" };
+  const inspected = await f.manager().githubIssueClosure({ type: "github_issue_closure", operation: "inspect", requestId: "inspect", sessionId: "s_on_another_runner", issue, location });
+  const { state: _state, ...evidence } = inspected.inspection!;
+  const snapshot: GithubIssueClosureSnapshot = { ...evidence, category: "issue_closure", reason: "not_planned", explanation: "Retire obsolete work.",
+    evidence: ["Superseded."], activeChildren: [] };
+  f.delayNextInspection(60);
+  const prepared = await f.manager().githubIssueClosure({ type: "github_issue_closure", operation: "execute", requestId: "execute", sessionId: "s_on_another_runner",
+    occurrenceId: "slow", snapshot, location }, { locationCommitWaitMs: 20 });
+  assert.equal(prepared.prepared, true, prepared.error ?? "");
+  const closed = await f.manager().githubIssueClosure({ type: "github_issue_closure", operation: "commit", requestId: "commit", sessionId: "s_on_another_runner", occurrenceId: "slow", location });
+  assert.equal(closed.result?.outcome, "closed", closed.result?.refusal?.reason ?? closed.error ?? "");
+  assert.equal(f.mutations().length, 1);
 });
 
 test("publication inspection through the runner handler binds payload across distinct request IDs", async (t) => {
