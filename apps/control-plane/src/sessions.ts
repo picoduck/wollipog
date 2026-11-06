@@ -12168,7 +12168,10 @@ export class SessionsService {
     const held = additions.find((n) => this.db.issueHeldByOtherCampaign(sessionId, repository, n));
     if (held !== undefined) return refuse("other_campaign_scope", { issue: held });
     // What the proposal needs checked beyond the floors; nothing is the no-model fast path.
-    const checks: ScopeProposalCheck[] = proposal ? scopeProposalChecks(proposal) : ["proposal_unstructured"];
+    // The fast path also needs every owner-named number written as an issue reference of the campaign
+    // repository, not a bare number such as a count; this only narrows the fast path, never admits.
+    const checks: ScopeProposalCheck[] = proposal ? scopeProposalChecks(proposal, issueReferencesInMessage(ownerMessage, repository))
+      : ["proposal_unstructured"];
     const route = checks.length ? "owner" as const : "admitted" as const;
     const issues = proposal?.issues ?? additions.map((number) => ({ number, origin: "orchestrator_chosen" as const, rationale: "" }));
     const record: CampaignScopeProposal = { initial, messageDigest: first.messageDigest,
@@ -13877,9 +13880,10 @@ export class SessionsService {
       const proposedMax = boundary ? proposalMaxIssues(currentChild.orchestratorPolicy, snapshot, boundary, scopeSize) : undefined;
       if (authority === "orchestrator" && (!boundary || scopeSize + reserved >
           this.db.campaignIssueLimit(childSessionId, proposedMax ?? boundary.issueAuthority!.maxIssues))) return fail("Scope capacity or its human boundary changed before resolution", 409);
-      // A selection the Orchestrator applies must still hold no issue another active campaign took
-      // since its review (#4103); nothing awaits between this check and the approval below.
-      const taken = authority === "orchestrator" && snapshot.lineage?.kind === "selection"
+      // A selection, or a proposal the floors admitted (#4282), the Orchestrator applies must still
+      // hold no issue another active campaign took since its review; nothing awaits between this
+      // check and the approval below.
+      const taken = authority === "orchestrator" && (snapshot.lineage?.kind === "selection" || snapshot.scopeProposal !== undefined)
         ? snapshot.additions.find((n) => this.db.issueHeldByOtherCampaign(childSessionId, snapshot.repository, n)) : undefined;
       if (taken !== undefined) {
         this.revokeWorkflowDecision(decision, { reason: "approval_refused_stale", triggeredBy: actor });

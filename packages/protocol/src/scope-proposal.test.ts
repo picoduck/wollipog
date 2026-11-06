@@ -43,14 +43,19 @@ test("a proposal must list exactly its additions, each once, with an origin and 
 test("only owner-named issues with nothing else stated take the no-model fast path; ranking is never a check (#4282)", () => {
   const issue = (origin: "owner_named" | "orchestrator_chosen") => ({ repository: "owner/repo", number: 1, origin, rationale: "r" });
   const base = { issues: [issue("owner_named")], requestedCount: null, constraints: [], withheldOperations: [] };
-  assert.deepEqual(scopeProposalChecks(base), []);
-  assert.deepEqual(scopeProposalChecks({ ...base, requestedCount: 1 }), [], "a count that is exactly the named issues needs no check");
-  assert.deepEqual(scopeProposalChecks({ ...base, requestedCount: 2 }), ["requested_count"]);
-  assert.deepEqual(scopeProposalChecks({ ...base, issues: [issue("orchestrator_chosen")] }), ["chosen_issues"]);
-  assert.deepEqual(scopeProposalChecks({ ...base, issues: [issue("orchestrator_chosen")], requestedCount: 1 }), ["chosen_issues", "requested_count"]);
-  assert.deepEqual(scopeProposalChecks({ ...base, constraints: ["open"] }), ["constraints"]);
-  assert.deepEqual(scopeProposalChecks({ ...base, withheldOperations: ["pr_merge"] }), ["withheld_operations"]);
-  assert.deepEqual(scopeProposalChecks({ ...base, issues: [] }), [], "a task that needs no issues");
+  const referenced = [1];
+  assert.deepEqual(scopeProposalChecks(base, referenced), []);
+  assert.deepEqual(scopeProposalChecks({ ...base, requestedCount: 1 }, referenced), [], "a count that is exactly the named issues needs no check");
+  assert.deepEqual(scopeProposalChecks({ ...base, requestedCount: 2 }, referenced), ["requested_count"]);
+  assert.deepEqual(scopeProposalChecks({ ...base, issues: [issue("orchestrator_chosen")] }, referenced), ["chosen_issues"]);
+  assert.deepEqual(scopeProposalChecks({ ...base, issues: [issue("orchestrator_chosen")], requestedCount: 1 }, referenced), ["chosen_issues", "requested_count"]);
+  assert.deepEqual(scopeProposalChecks({ ...base, constraints: ["open"] }, referenced), ["constraints"]);
+  assert.deepEqual(scopeProposalChecks({ ...base, withheldOperations: ["pr_merge"] }, referenced), ["withheld_operations"]);
+  assert.deepEqual(scopeProposalChecks({ ...base, issues: [] }, []), [], "a task that needs no issues");
+  // An owner-named number the message writes only as a plain number ("fix 1 bug") is not the fast path's.
+  assert.deepEqual(scopeProposalChecks(base, []), ["unreferenced_named_issues"]);
+  assert.deepEqual(scopeProposalChecks({ ...base, issues: [issue("orchestrator_chosen")] }, []), ["chosen_issues"],
+    "the reference list only concerns issues marked owner-named");
 });
 
 const record: CampaignScopeProposal = { initial: true, messageDigest: "a".repeat(64), requestedCount: 2, constraints: ["open"],

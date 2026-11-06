@@ -1471,6 +1471,34 @@ test("\"Fix #12 and #13\": exactly #12 and #13 are admitted after the floors wit
   } finally { await server.close(); f.db.close(); }
 });
 
+test("an owner-named number the message writes only as a plain number is the owner's, and an admitted proposal is re-checked for other campaigns when applied (#4282)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    // "3" is a count here, not an issue: the floor finds the digits, but the fast path needs an issue reference.
+    const plain = await proposalCampaign(f, server, "Fix 3 flaky tests in issue 12.");
+    const proposed = await plain.propose([named(3), named(12)]);
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "human");
+    assert.deepEqual((proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.checks, ["unreferenced_named_issues"]);
+    assert.equal(plain.ownerRequests().length, 1);
+    assert.equal(f.decision.calls.length + f.decision.reviewCalls.length, 0);
+
+    // Two campaigns' floors admit the same issue; the first to apply it holds it, and the other's apply is refused.
+    const first = await proposalCampaign(f, server, "Fix #61.");
+    const second = await proposalCampaign(f, server, "Fix #61 and #62.");
+    const late = await second.propose([named(61), named(62)]);
+    assert.equal(late.data!.authority, "orchestrator");
+    const early = await first.propose([named(61)]);
+    assert.equal(first.apply(early.data!.occurrenceId).ok, true);
+    const refused = second.apply(late.data!.occurrenceId);
+    assert.equal(refused.ok, false);
+    assert.deepEqual(refused.errorDetails, { code: "other_campaign_scope", issue: 61 });
+    assert.deepEqual(f.db.getSession(second.id)!.orchestratorPolicy!.issueScope!.issueNumbers, []);
+    assert.equal(establishedOf(f, second.id).initialScope, undefined, "nothing is dispatched for the refused campaign");
+  } finally { await server.close(); f.db.close(); }
+});
+
 test("each deterministic floor refuses a proposal with its fixed code and the issue it names, with no model call (#4282)", async () => {
   const f = fixture();
   const { server } = await app(f);

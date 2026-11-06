@@ -50,8 +50,12 @@ export interface CampaignScopeProposalInput {
   withheldOperations: CampaignAuthorityOperation[];
 }
 
-/** What a proposal needs checked beyond the floors. Empty means the no-model fast path. */
-export type ScopeProposalCheck = "requested_count" | "chosen_issues" | "constraints" | "withheld_operations" | "proposal_unstructured";
+/** What a proposal needs checked beyond the floors. Empty means the no-model fast path.
+ * `unreferenced_named_issues`: an issue marked owner-named whose number the message writes only as
+ * a bare number, never as an issue reference (`#12`, `owner/repo#12` or the issue's URL), so the
+ * floor alone can't tell it from a count or a version. */
+export type ScopeProposalCheck = "requested_count" | "chosen_issues" | "unreferenced_named_issues" | "constraints" | "withheld_operations" |
+  "proposal_unstructured";
 
 /** Why a proposal is the owner's one approval. `constraint_check_unavailable`: it states checkable
  * constraints and no constraint check is available yet (#4282, slice 1), or a later one failed;
@@ -105,7 +109,8 @@ export interface CampaignScopeProposalView {
 
 const OPERATIONS: readonly CampaignAuthorityOperation[] = ["implementation_question", "pr_merge", "merged_branch_deletion",
   "follow_up_issue_publication", "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"];
-const CHECKS: readonly ScopeProposalCheck[] = ["requested_count", "chosen_issues", "constraints", "withheld_operations", "proposal_unstructured"];
+const CHECKS: readonly ScopeProposalCheck[] = ["requested_count", "chosen_issues", "unreferenced_named_issues", "constraints", "withheld_operations",
+  "proposal_unstructured"];
 
 const plainText = (value: unknown, max: number): value is string => typeof value === "string" && value.length <= max &&
   !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value);
@@ -150,15 +155,18 @@ export function normalizeScopeProposalInput(value: unknown, additions: ReadonlyA
 
 /**
  * What a proposal needs checked beyond the deterministic floors (#4282). The fast path — nothing to
- * check — holds only when every issue is one the owner named (the floor proved its number is in the
- * owner's exact message), no constraint is stated, no operation is withheld, and any stated count is
- * exactly the named issues. Everything else is the constraint check's, which fails closed to the
- * owner until it exists.
+ * check — holds only when every issue is one the owner named and the owner's exact message writes as
+ * an issue reference (`referencedIssues`: the campaign repository's `#n`, `owner/repo#n` or issue
+ * URL), no constraint is stated, no operation is withheld, and any stated count is exactly the named
+ * issues. The reference list only narrows: a number it misses goes to the check, never past it.
+ * Everything else is the constraint check's, which fails closed to the owner until it exists.
  */
-export function scopeProposalChecks(proposal: Pick<CampaignScopeProposalInput, "issues" | "requestedCount" | "constraints" | "withheldOperations">): ScopeProposalCheck[] {
+export function scopeProposalChecks(proposal: Pick<CampaignScopeProposalInput, "issues" | "requestedCount" | "constraints" | "withheldOperations">,
+    referencedIssues: readonly number[]): ScopeProposalCheck[] {
   const checks: ScopeProposalCheck[] = [];
   const chosen = proposal.issues.some((issue) => issue.origin === "orchestrator_chosen");
   if (chosen) checks.push("chosen_issues");
+  if (proposal.issues.some((issue) => issue.origin === "owner_named" && !referencedIssues.includes(issue.number))) checks.push("unreferenced_named_issues");
   if (proposal.requestedCount !== null && (chosen || proposal.requestedCount !== proposal.issues.length)) checks.push("requested_count");
   if (proposal.constraints.length) checks.push("constraints");
   if (proposal.withheldOperations.length) checks.push("withheld_operations");
@@ -210,6 +218,7 @@ export function scopeProposalOfRequest(request: Pick<PendingApproval, "kind" | "
 const CHECK_PHRASES: Record<ScopeProposalCheck, string> = {
   chosen_issues: "issues the Orchestrator chose",
   requested_count: "a count you asked for",
+  unreferenced_named_issues: "issues it says you named that your message writes only as plain numbers",
   constraints: "constraints it read from your message",
   withheld_operations: "operations your message rules out",
   proposal_unstructured: "a proposal the Orchestrator's machine can't structure",

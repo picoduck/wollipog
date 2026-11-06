@@ -67,8 +67,10 @@ only) establishes the boundary before the Orchestrator's first turn:
   (`other_campaign_scope`); within an explicit Maximum Issues (`capacity_exhausted`; a derived one
   grows to fit the scope plus follow-up room, never past 100); and no Human Required label
   (`human_required_label`). Withheld operations only ever narrow the launch's.
-- A proposal with nothing checkable beyond owner-named issues (no Orchestrator-chosen issue, no
-  constraint, no withheld operation, and no count other than the named issues') is admitted after
+- A proposal with nothing checkable beyond owner-named issues (every one written in the message as
+  an issue reference of the campaign repository, `#12`, `owner/repo#12` or its URL, not only as a
+  bare number such as a count; no Orchestrator-chosen issue, no constraint, no withheld operation,
+  and no count other than the named issues') is admitted after
   the floors with no model call: an Orchestrator-owned `campaign_issue_scope` change carrying
   `scopeProposal` and server-derived `issueAdmission`, which the Orchestrator applies by resolving
   it. Anything else needs a constraint check. Until the Decision Model's constraint check exists

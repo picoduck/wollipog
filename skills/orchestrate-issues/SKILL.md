@@ -250,7 +250,8 @@ additions. Deterministic checks run first and refuse, naming the issue and condi
 number the message doesn't write, an issue outside the campaign's repositories, a pull request, a
 closed issue, one already in scope, one another active campaign holds, one past an explicit Maximum
 Issues, and one with a label a Human Required rule names; revise and propose again rather than asking.
-A proposal of only owner-named issues with no constraint, withheld operation or other count returns
+A proposal of only owner-named issues that the message writes as issue references (`#12`,
+`owner/repo#12` or the issue's URL), with no constraint, withheld operation or other count, returns
 an Orchestrator-owned scope change that you resolve and apply yourself. Anything else becomes the
 owner's one approval, asked as an Owner Question with your proposal and rationale; proposing the same
 issues again returns that same request, and an answer in the owner's own words declines it and

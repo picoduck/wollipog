@@ -63,7 +63,7 @@ function harness(options: { runnerProtocol?: number } = {}) {
   ];
   const answer = (decision: WorkflowDecisionView, answers: Record<string, string>, actor: { kind: "human" | "agent"; id: string } = owner) =>
     svc.answerQuestion("root", decision.occurrenceId, answers, actor, "submit", undefined, decision.occurrenceId);
-  return { db, svc, principal, owner, control, material, askQuestion, askApproval, card, prompts, answer, toRunner, uncertain };
+  return { db, hub, svc, principal, owner, control, material, askQuestion, askApproval, card, prompts, answer, toRunner, uncertain };
 }
 
 test("the owner's Decline of an Owner Question the screen could not settle dismisses it and tells the root (#4270 review)", async () => {
@@ -250,6 +250,35 @@ test("a scope or policy change leaves an Owner Question pending and answerable b
     assert.equal(h.db.workflowDecisionByOccurrence(question.data.occurrenceId)!.status, "pending");
     assert.ok(h.answer(question.data, { [OWNER_QUESTION_ANSWER_ID]: "Short-Lived Lease (Recommended)" }).ok, "the owner still answers it");
     assert.equal(h.db.workflowDecisionByOccurrence(question.data.occurrenceId)!.selectedOptionId, "lease");
+  } finally { h.db.close(); }
+});
+
+test("an issue-scope change leaves a pending Owner Question pending and answerable (#4282)", async () => {
+  const h = harness();
+  try {
+    const question = await h.askQuestion();
+    assert.ok(question.ok && question.data);
+    h.hub.requestFromRunner = async (_runner, requestId, message) => {
+      if (message.type !== "campaign_issue_scope") throw new Error("Unexpected runner command");
+      return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: true, repository: "team/repo",
+        ...(message.operation === "synchronize" ? { revision: message.scope.revision }
+          : { candidates: (("issues" in message ? message.issues : undefined) ?? []).map((number: number) =>
+            ({ issue: { repository: "team/repo", number }, title: `Issue ${number}`, source: "sub_issue" as const })) }) };
+    };
+    const scope = () => h.db.getSession("root")!.orchestratorPolicy!.issueScope!;
+    const before = scope().revision;
+    const proposed = await h.svc.proposeCampaignIssueScope("root", { requestId: "owner-add", expectedRevision: before,
+      additions: [{ repository: "team/repo", number: 101 }], removals: [], explanation: "The owner adds #101" }, () => true, h.principal);
+    assert.ok(proposed.ok && proposed.data, proposed.error ?? "proposed");
+    const applied = h.svc.resolveWorkflowDecision("root", "root", proposed.data.occurrenceId, { outcome: "approve" }, proposed.data.authority,
+      proposed.data.authority === "human" ? h.owner : { kind: "agent", id: "root" }, () => true);
+    assert.ok(applied.ok, applied.error ?? "applied");
+    assert.ok(scope().revision > before, "the issue scope revision moved");
+    assert.deepEqual(scope().issueNumbers, [100, 101]);
+    assert.equal(h.db.workflowDecisionByOccurrence(question.data.occurrenceId)!.status, "pending", "the Owner Question is not revoked");
+    assert.ok(h.card(question.data), "its card still waits on the root");
+    assert.ok(h.answer(question.data, { [OWNER_QUESTION_ANSWER_ID]: "Broker Process" }).ok, "the owner still answers it");
+    assert.equal(h.db.workflowDecisionByOccurrence(question.data.occurrenceId)!.selectedOptionId, "broker");
   } finally { h.db.close(); }
 });
 

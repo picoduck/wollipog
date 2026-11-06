@@ -18,13 +18,14 @@ const OUTCOMES: Record<CampaignScopeProposalView["outcome"], { label: string; to
 const CHECKS: Partial<Record<ScopeProposalCheck, string>> = {
   chosen_issues: "issues the Orchestrator chose",
   requested_count: "a count you asked for",
+  unreferenced_named_issues: "issues your message writes only as plain numbers",
   constraints: "constraints it read",
   withheld_operations: "operations it withholds",
 };
 
 /** How a proposal was checked: the floors alone, or the owner's approval, and why. */
 function checkedBy(proposal: CampaignScopeProposal): string {
-  if (proposal.route === "admitted") return "Deterministic checks only. It named only issues your message writes, so no model was asked.";
+  if (proposal.route === "admitted") return "Deterministic checks only. It named only issues your message references, so no model was asked.";
   if (proposal.ownerCause === "proposal_unstructured") return "Deterministic checks, then your approval: the Orchestrator's machine can't send a structured proposal.";
   const what = proposal.checks.flatMap((check) => CHECKS[check] ?? []);
   const list = what.length > 1 ? `${what.slice(0, -1).join(", ")} and ${what.at(-1)}` : what[0] ?? "nothing it could check";
