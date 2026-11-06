@@ -263,6 +263,11 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
         ...(rootLimits.maxToolCalls != null ? { maxToolCalls: rootLimits.maxToolCalls } : {}) },
       useWorktree: session.useWorktree, executionTarget: (session.executionTarget ?? { adapter: "host" }) as PreparedCampaignLaunch["executionTarget"], policy, scope };
     const issueScope = policy.issueScope;
+    // The issues a Custom campaign's first message names come only from the Decision Model's reading
+    // of it (#4259): while that reading runs, nothing is derived, and enabling waits for it.
+    if (!issueScope && sessions.campaignFirstMessageReadingPending(id)) {
+      return reply.code(409).send({ error: "The Decision Model is still reading this campaign's first message for its issues. Try again in a moment." });
+    }
     // A campaign with no issue scope yet gets the one a launch would derive: its repository and the
     // issues its first message names. With no message yet, the next one is the task.
     const derived = issueScope ? null : await sessions.campaignScopeFromFirstMessage(id);

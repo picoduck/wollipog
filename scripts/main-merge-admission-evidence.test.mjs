@@ -6,6 +6,7 @@ import { admissionEvidenceApi } from "./main-merge-admission-evidence.mjs";
 import { rebuildAdmissionCycle } from "./main-merge-admission-controller.mjs";
 import { collectHealth } from "./main-ci-health.mjs";
 import { REQUIRED, UNIT_SHARDS } from "./main-rolling-validation.mjs";
+import { BROWSER_SHARDS } from "./browser-shard-count.mjs";
 
 const repository = "example/project", revision = "a".repeat(40);
 const files = ["main-rolling-validation.yml", "ci.yml", "settings-rows-win32.yml"];
@@ -105,7 +106,7 @@ test("real full-health collection preserves evidence and final rechecks while sa
     "Verify Node 23 Engine Boundary", "Verify Recommended Node Engine Boundary", "Verify Delegated Linux Provider Containment",
     "Validate Web Production Build", "Validate Runner Bundle", "Validate Control-Plane Bundle"];
   const steps = [core, ["Remote-Instance Browser End-to-End Tests", "Rendered Production Browser Smoke"],
-    ...[2, 3, 4, 5].map(() => ["Remote-Instance Browser End-to-End Tests"]), ["WebKit Browser End-to-End Tests"],
+    ...BROWSER_SHARDS.slice(1).map(() => ["Remote-Instance Browser End-to-End Tests"]), ["WebKit Browser End-to-End Tests"],
     ["Compare the Diff Against the Settings-Rows Paths"], ["Compare Against the Committed win32 Baselines"],
     ["Verify Recorded-Boundary Pipeline Recovery"], ...UNIT_SHARDS.map(() => ["Unit Tests"]), ["Require Every Job to Have Succeeded"]];
   const jobs = REQUIRED.map((name, i) => ({ id: i + 1, name, status: "completed", conclusion: "success",

@@ -65,7 +65,7 @@ export function dependencyCandidates(job, work, aggregator) {
   if (PLANNING_JOBS.has(job.name)) return [];
   // Runs before #3770 named the checks job "Typecheck, Unit Tests & Bundles" and had no unit shards.
   const gated = ["Typecheck & Bundles", "Typecheck, Unit Tests & Bundles"].includes(job.name) ||
-    /^(?:Browser End-to-End Tests \([1-5]\)|Unit Tests \([1-9]\))$/.test(job.name);
+    /^(?:Browser End-to-End Tests \([1-9][0-9]*\)|Unit Tests \([1-9][0-9]*\))$/.test(job.name);
   const routed = gated || job.name === "Delegated Pipeline Recovery";
   const routing = routed ? requiredWork.filter((other) => other.name === "PR Suite Routing" ||
     gated && other.name === "Merge Group Gate") : [];
@@ -214,8 +214,8 @@ export async function listRemovals(api, repository, number) {
   return { nodes, truncated: true };
 }
 
-export async function collect(api, { repository, since, until, timeoutMinutes, allEvents = false, assumedRate = null }) {
-  if (allEvents) return collectEvents(api, { repository, since, until, timeoutMinutes, assumedRate });
+export async function collect(api, { repository, since, until, timeoutMinutes, allEvents = false, assumedRate = null, browserShards = 5 }) {
+  if (allEvents) return collectEvents(api, { repository, since, until, timeoutMinutes, assumedRate, browserShards });
   const { runs, truncated } = await listRuns(api, repository, since, until);
   const ci = runs.filter((run) => run?.path === ".github/workflows/ci.yml" && run?.event === "merge_group");
   const metrics = await pool(ci, async (run) => {
@@ -270,7 +270,11 @@ const jobHasStarted = (job) => hasStarted(job) && (job.status !== "completed" ||
   (job.steps ?? []).some((step) => step.conclusion !== "skipped" && Number.isFinite(Date.parse(step.started_at))));
 
 /** Only API metadata is retained. No names from tests, log bodies, inputs or runner identities. */
-export function attemptRecord(repository, run, jobs, window, jobsTruncated = false) {
+// The expected inventory is explicit, never inferred from whichever jobs happened to appear.
+// Historical callers/exports default to five; current rolling callers pass their pinned inventory.
+export function attemptRecord(repository, run, jobs, window, jobsTruncated = false, browserShards = 5) {
+  if (!Number.isSafeInteger(browserShards) || browserShards < 1 || browserShards > 100)
+    throw new ReportError("Browser shard inventory must contain 1–100 projects");
   const attempt = run.run_attempt;
   const first = attempt === 1;
   const projected = jobs.map((job) => ({
@@ -289,7 +293,8 @@ export function attemptRecord(repository, run, jobs, window, jobsTruncated = fal
   }));
   const measured = projected.filter((job) => Number.isFinite(job.executionMinutes));
   const missing = projected.filter((job) => job.state !== "skipped" && job.executionMinutes === null).length;
-  const shards = projected.filter((job) => /^Browser End-to-End Tests \([1-5]\)$/.test(job.name));
+  const shards = projected.filter((job) => /^Browser End-to-End Tests \([1-9][0-9]*\)$/.test(job.name));
+  const shardIds = shards.map((job) => Number(job.name.match(/\((\d+)\)$/)[1])).sort((a, b) => a - b);
   const shardTimes = shards.map((job) => job.executionMinutes).filter(Number.isFinite);
   const split = runMetrics(run, jobs.filter((job) => jobHasStarted(job) ||
     job.name === "PR Suite Routing" && job.conclusion === "skipped"));
@@ -318,8 +323,9 @@ export function attemptRecord(repository, run, jobs, window, jobsTruncated = fal
         job.steps.length > 0 && job.steps.every((step) => step.state === "skipped" || step.minutes !== null))
         ? projected.flatMap((job) => job.steps).filter((step) => step.kind === "non-test-overhead")
           .reduce((sum, step) => sum + (step.minutes ?? 0), 0) : null,
-      browserShardImbalance: { observed: shardTimes.length, expected: 5,
-        complete: shards.length === 5 && shardTimes.length === 5,
+      browserShardImbalance: { observed: shardTimes.length, expected: browserShards,
+        complete: !jobsTruncated && shardTimes.length === browserShards && shardIds.length === browserShards &&
+          shardIds.every((id, i) => id === i + 1),
         maxMinusMinMinutes: shardTimes.length > 1 ? Math.max(...shardTimes) - Math.min(...shardTimes) : null,
         maxOverMin: shardTimes.length > 1 && Math.min(...shardTimes) > 0 ? Math.max(...shardTimes) / Math.min(...shardTimes) : null },
     },
@@ -364,7 +370,7 @@ export function eventSummary(records, assumedRate = null) {
       mergesBeyondSnapshot: null, failureDetectedAt: null, detectionLagMinutes: null, restoredAt: null, restorationMinutes: null } };
 }
 
-export async function collectEvents(api, { repository, since, until, timeoutMinutes, assumedRate = null }) {
+export async function collectEvents(api, { repository, since, until, timeoutMinutes, assumedRate = null, browserShards = 5 }) {
   const windows = [{ since, until }];
   const listings = await Promise.all(["pull_request", "merge_group", "push"].map(async (event) => {
     const listing = await listRuns(api, repository, since, until, event, false);
@@ -381,7 +387,7 @@ export async function collectEvents(api, { repository, since, until, timeoutMinu
       if (snapshot?.id !== run.id || snapshot?.run_attempt !== attempt || snapshot?.head_sha !== run.head_sha)
         throw new ReportError("Unreadable or changed run attempt");
       const { jobs, truncated } = await listJobs(api, repository, run.id, attempt);
-      attempts.push(attemptRecord(repository, snapshot, jobs, windows[0], truncated));
+      attempts.push(attemptRecord(repository, snapshot, jobs, windows[0], truncated, browserShards));
     }
     return attempts;
   })).flat();
@@ -537,7 +543,8 @@ export function reprojectAttempt(row) {
       conclusion: step.conclusion ?? ({ passing: "success", skipped: "skipped", failing: "failure" }[step.state]),
       started_at: step.startedAt, completed_at: step.completedAt })) });
   const fresh = attemptRecord(row.repository, { id: row.runId, run_attempt: row.attempt,
-    event: row.event, created_at: row.createdAt, head_branch: row.branch }, (row.jobs ?? []).map(raw), row.window, row.jobsTruncated);
+    event: row.event, created_at: row.createdAt, head_branch: row.branch }, (row.jobs ?? []).map(raw), row.window, row.jobsTruncated,
+    row.metrics?.browserShardImbalance?.expected ?? 5);
   return { ...row, metrics: fresh.metrics, jobs: fresh.jobs.map((job, i) => ({ ...row.jobs[i], ...job })) };
 }
 
@@ -645,6 +652,7 @@ export function options(argv, now = new Date()) {
         input: { type: "string", multiple: true },
         baseline: { type: "string" },
         "timing-job": { type: "string", multiple: true },
+        "browser-shards": { type: "string" },
         "assumed-usd-per-minute": { type: "string" },
       },
     }));
@@ -660,6 +668,10 @@ export function options(argv, now = new Date()) {
   const until = values.until === undefined ? now.getTime() : parse("--until", values.until);
   const since = values.since === undefined ? until - 48 * 60 * MINUTE : parse("--since", values.since);
   const timeoutMinutes = Number(values["timeout-minutes"]);
+  const browserShards = Number(values["browser-shards"] ?? 5);
+  if (!Number.isSafeInteger(browserShards) || browserShards < 1 || browserShards > 100 ||
+      values["browser-shards"] !== undefined && (!values["all-events"] || values.input))
+    throw new ReportError("--browser-shards requires live --all-events and an integer from 1 to 100");
   if (!values.input && !REPOSITORY.test(values.repo ?? "")) throw new ReportError("--repo <owner>/<name> is required");
   if (values.baseline && !values.input) throw new ReportError("--baseline requires offline --input post-window.json");
   if (since >= until) throw new ReportError("--since must be before --until");
@@ -675,6 +687,7 @@ export function options(argv, now = new Date()) {
     ...(values["all-events"] ? { allEvents: true } : {}), ...(values.input ? { input: values.input } : {}),
     ...(values.baseline ? { baseline: values.baseline } : {}),
     ...(values["timing-job"] ? { timingJobs: values["timing-job"] } : {}),
+    ...(values["browser-shards"] !== undefined ? { browserShards } : {}),
     ...(assumedRate !== null ? { assumedRate } : {}),
   };
 }
