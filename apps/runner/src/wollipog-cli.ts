@@ -509,9 +509,19 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       if (!resourceKey || resourceKey.startsWith("--")) return { error: "decision request requires --resource-key" };
       const snapshot = jsonObjectOption(args, "--snapshot");
       if ("error" in snapshot) return snapshot;
+      // #4137: the rule that keeps this gate for a person, given as both its source and its quote.
+      const hasSource = optionPresent(args, "--owner-rule-source");
+      const hasQuote = optionPresent(args, "--owner-rule-quote");
+      if (hasSource && !hasQuote) return { error: "--owner-rule-source requires --owner-rule-quote" };
+      if (hasQuote && !hasSource) return { error: "--owner-rule-quote requires --owner-rule-source" };
+      const source = option(args, "--owner-rule-source");
+      const quote = option(args, "--owner-rule-quote");
+      if (hasSource && (!source || source.startsWith("--"))) return { error: "--owner-rule-source requires a file path" };
+      if (hasQuote && (!quote || quote.startsWith("--"))) return { error: "--owner-rule-quote requires the quoted requirement" };
       return {
         tool: "request_workflow_decision",
-        input: { requestId, resourceKey, resourceSnapshot: snapshot.value },
+        input: { requestId, resourceKey, resourceSnapshot: snapshot.value,
+          ...(hasSource ? { ownerRule: { source, quote } } : {}) },
       };
     }
     if (verb === "get") {
@@ -1043,6 +1053,8 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.forgeDecisionActions
     : parsed.tool === "request_owner_decision" || parsed.tool === "hand_workflow_decision_to_owner"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions
+    : parsed.tool === "request_workflow_decision" && parsed.input.ownerRule !== undefined
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule
     : ["get_campaign_issue_scope", "request_campaign_issue_scope_change"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueScopeChanges
     : ["request_github_issue_closure", "close_github_issue"].includes(parsed.tool)

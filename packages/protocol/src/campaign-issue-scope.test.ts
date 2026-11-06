@@ -138,3 +138,20 @@ test("a scope change snapshot groups every other repository's part and bounds th
     assert.equal(normalizeCampaignIssueScopeSnapshot({ ...base, ...patch }), null, JSON.stringify(patch).slice(0, 120));
   }
 });
+
+test("selection lineage, its review evidence and its owner causes keep their exact shapes (#4103)", () => {
+  const base = { category: "campaign_issue_scope", repository: "team/repo", expectedRevision: 1, before: [], additions: [3],
+    removals: [], explanation: "Highest priority", affectedAssignments: [], affectedDecisions: [], lineage: { kind: "selection" } };
+  const review = { occurrenceId: "dec_1", grantDigest: "a".repeat(64), verdict: "admit", reason: "Fits." };
+  assert.deepEqual(normalizeCampaignIssueScopeSnapshot({ ...base, selectionReview: review })?.selectionReview, review);
+  assert.deepEqual(normalizeCampaignIssueScopeSnapshot(base)?.lineage, { kind: "selection" });
+  for (const bad of [{ ...review, verdict: "refuse" }, { ...review, grantDigest: "x" }, { ...review, extra: 1 }, { ...review, reason: "r".repeat(301) }]) {
+    assert.equal(normalizeCampaignIssueScopeSnapshot({ ...base, selectionReview: bad }), null);
+  }
+  assert.equal(normalizeCampaignIssueScopeSnapshot({ ...base, lineage: { kind: "selection", epic: 1 } }), null);
+  const grantReview = { ownerMessage: "Find the 3 highest-priority issues", messageDigest: "b".repeat(64), reviewOccurrenceId: "dec_2" };
+  for (const cause of ["selection_uncertain", "selection_failed", "selection_unverified", "selection"]) {
+    assert.ok(normalizeCampaignIssueScopeSnapshot({ ...base, grantReview: { ...grantReview, cause } }), cause);
+  }
+  assert.equal(normalizeCampaignIssueScopeSnapshot({ ...base, grantReview: { ...grantReview, cause: "selection_admitted" } }), null);
+});

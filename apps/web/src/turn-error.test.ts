@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { describeTurnError, isAutomaticTurnsHeld, TURN_ERROR_FALLBACK } from "./turn-error.js";
+import { describeTurnError, isAutomaticTurnsHeld, isBackgroundResultsHeld, TURN_ERROR_FALLBACK } from "./turn-error.js";
 
 test("describeTurnError says known failures in plain words", () => {
   const cases: Array<[string, string]> = [
@@ -34,6 +34,21 @@ test("the runner's rejection hold is recognised whatever provider error it quote
   assert.equal(isAutomaticTurnsHeld(held("turn/start failed: 429 Too Many Requests")), true);
   assert.equal(isAutomaticTurnsHeld("prompt failed: Rate limit reached"), false);
   assert.equal(isAutomaticTurnsHeld("Automatic turns are held until you send a message or restart the session. Then more"), false);
+});
+
+test("the runner's background-results hold is recognised for one job or many, with or without a provider error (#3542)", () => {
+  const held = (results: string, error = "") =>
+    `The automatic turn that returns ${results} failed to start 3 times in a row, before the provider accepted it` +
+    `${error ? `: ${error}` : ""}. Wollipog stopped retrying it and kept the results. Restart the session to deliver ` +
+    "them in a fresh provider process; a message the provider accepts also retries it.";
+  assert.equal(isBackgroundResultsHeld(held("the result of 1 finished background job")), true);
+  assert.equal(isBackgroundResultsHeld(held("the results of 12 finished background jobs",
+    "bwrap: Can't find source path /tmp/worktrees/old: No such file or directory")), true);
+  assert.equal(isBackgroundResultsHeld(`prompt failed: ${held("the results of 2 finished background jobs")}`), true);
+  assert.equal(isAutomaticTurnsHeld(held("the result of 1 finished background job")), false);
+  assert.equal(isBackgroundResultsHeld("Claude resume accounting baseline could not be recovered."), false);
+  assert.equal(isBackgroundResultsHeld(`Earlier: ${held("the result of 1 finished background job")}`), false,
+    "only the runner's own sentence, at the start, is the hold");
 });
 
 test("describeTurnError never guesses at an unknown message", () => {

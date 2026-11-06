@@ -156,7 +156,7 @@ export function SessionTitlesPanel() {
 
   return (
     <>
-      <SettingsGroup title="Session Titles" scope="Your Account" headingRef={headingRef} failure={groupFailure}>
+      <SettingsGroup title="Session Titles" scope="This Organization" headingRef={headingRef} failure={groupFailure}>
         <SelectRow
           title="Title Source"
           description={sourceDescription}

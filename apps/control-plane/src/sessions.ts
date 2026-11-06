@@ -1,3 +1,4 @@
+import { normalizeWorkflowDecisionOwnerRule, sameWorkflowDecisionOwnerRule } from "@wollipog/protocol";
 import { normalizeDeliveryVerificationFailure } from "@wollipog/protocol";
 import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
 import { runnerSupportsReviewQuestionPreservation } from "./review-session-capability.js";
@@ -35,7 +36,7 @@ import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignControlForRunner, campaignLaunchRepository, campaignScopeRepositories } from "./campaign-authority.js";
 import { genericRequestScreenData, implementationQuestionScreenData, ownerDecisionScreenData, screenCredentialRequest, type CredentialScreenSurface } from "./credential-screen.js";
-import { DecisionRuntime, hubDecisionTransport, type DecisionOutcome } from "./decision-runtime.js";
+import { DECISION_TOTAL_BOUND_MS, DecisionRuntime, hubDecisionTransport, type DecisionOutcome } from "./decision-runtime.js";
 import { DecisionModelSettings } from "./decision-model-settings.js";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, credentialFormFloor, type CredentialScreenFact, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, fullControlAutomaticResponse, type CampaignAuthorityEvaluation, type FullControlAutomaticResponse, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
@@ -44,6 +45,7 @@ import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelec
   type ScopeGrantFields } from "./scope-grant.js";
 import { recordUnfinishedDecision, runCampaignCheck, type CampaignCheckOutcome } from "./campaign-decision-checks.js";
 import { DecisionInputError } from "./decision-kinds.js";
+import { scopeGrantDigest, scopeReviewInputDigest, scopeReviewInputs, scopeReviewKey } from "./scope-selection.js";
 import { boundedIssueNumbers, validCampaignIssueFacts, type CampaignIssueFacts, type CampaignScopeGrantReview, type DecisionErrorClass, type FullControlScopeGrant } from "@wollipog/protocol";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
@@ -311,6 +313,7 @@ import {
   type SessionAutomationOrigin,
   type SessionStopConfirmation,
   type WorkflowDecisionResumeState,
+  type DecisionOccurrenceRecord,
 } from "./db.js";
 import { questionPolicyAnswers } from "./question-policy.js";
 import type { SessionEvent } from "@wollipog/protocol";
@@ -497,6 +500,13 @@ function boundedCampaignEventText(text: string): string {
 /** The one Decision occurrence that reads a Custom campaign's first message for its epic seed (#4104). */
 function issueScopeSeedKey(rootId: string, messageDigest: string): string {
   return `scope_grant:issue_scope_seed:${rootId}:${messageDigest}`;
+}
+
+/** The seed a Custom campaign's trimmed first message starts (#4104): `pending` for a reading, or
+ * `none` when it needs none. */
+function customCampaignIssueScopeSeed(text: string): { state: "pending" | "none"; messageDigest: string } {
+  return { state: needsCampaignIssueScopeSeed(text, orchestratorIssueNumbersFromInitialPrompt(text)) ? "pending" : "none",
+    messageDigest: firstMessageDigest(text) };
 }
 
 function publicationRefusalCoordinate(sessionId: string, recommendationId: string): string {
@@ -845,8 +855,9 @@ function decisionLiteral(value: string): string {
  * provider turn, so a child that ended its turn behind the card has nothing else to wake it. The
  * decision record stays authoritative: a child polling inside its turn may already have read it. */
 function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): string {
-  // A decision the owner kept (#4064) is answered by that owner, never by an agent or a reviewer.
-  const ownerKept = decision.category === "owner_decision" || decision.ownerHandoff !== undefined;
+  // A decision the owner kept (#4064), or an owner rule kept for them (#4137), is answered by that
+  // owner, never by an agent or a reviewer.
+  const ownerKept = decision.category === "owner_decision" || decision.ownerHandoff !== undefined || decision.ownerRule !== undefined;
   const resolver = decision.withdrawal || decision.authority === "orchestrator" ? "Your Orchestrator"
     : ownerKept && decision.status !== "revoked" ? "Your campaign's owner" : "A human reviewer";
   // A withdrawal's own reason replaces the message an earlier approval left (#3917), and the option
@@ -896,6 +907,8 @@ function ownerKeptTargets(category: WorkflowDecisionCategory, resourceKey: strin
       break;
     case "ui_evidence_approval":
       for (const item of snapshot.evidence) targets.push(`${snapshot.category}:evidence:${item.sha256}`);
+      // A video stored as its derived frames still names the video it came from (#4137 review).
+      if (snapshot.videoReview) targets.push(`${snapshot.category}:evidence:${snapshot.videoReview.sourceSha256}`);
       break;
     case "campaign_issue_scope":
       targets.push(`${snapshot.category}:${snapshot.repository.toLowerCase()}:+${[...snapshot.additions].sort((a, b) => a - b).join(",")}` +
@@ -5210,11 +5223,18 @@ export class SessionsService {
         !runnerSupportsProtocol(runner.protocolVersion, "repositoryQualifiedIssueScope")) {
       return capabilityFail(runnerCapabilityRequirementError(runner.protocolVersion, "repositoryQualifiedIssueScope", "issue scope in another campaign repository"));
     }
-    if (campaignController && campaignNeedsEpicScope(campaignController)) {
-      const unsupported = scopeCompatibility(this.db, campaignController);
+    // A campaign whose first message predates the epic seed gets its seed now (#4258), before the hold is read.
+    // A prepared media child is created inside a ledger transaction, which never starts a reading:
+    // a campaign whose recorded first message needs one is held, and the next ordinary check seeds it.
+    if (campaignController && capture && this.preUpgradeIssueScopeSeed(campaignController)?.seed.state === "pending") {
+      return fail("Confirm the epic's authorized issue scope in Campaign Status before delegating work. Use get_campaign_issue_scope and request_campaign_issue_scope_change, then wait for human approval.", 409);
+    }
+    const scopeController = campaignController && !capture ? this.seedPreUpgradeCampaign(campaignController) : campaignController;
+    if (scopeController && campaignNeedsEpicScope(scopeController)) {
+      const unsupported = scopeCompatibility(this.db, scopeController);
       if (unsupported) return capabilityFail(unsupported);
-      this.settleInterruptedIssueScopeSeed(campaignController);
-      if (this.db.getSession(campaignController.id)?.orchestratorPolicy?.issueScopeSeed?.state === "pending") {
+      this.settleInterruptedIssueScopeSeed(scopeController);
+      if (this.db.getSession(scopeController.id)?.orchestratorPolicy?.issueScopeSeed?.state === "pending") {
         return fail("The Decision Model is still reading this campaign's first message for the epic to seed its issue scope. Retry delegating in a moment.", 409);
       }
       return fail("Confirm the epic's authorized issue scope in Campaign Status before delegating work. Use get_campaign_issue_scope and request_campaign_issue_scope_change, then wait for human approval.", 409);
@@ -5974,13 +5994,47 @@ export class SessionsService {
    * Null otherwise. The message is read like a launch prompt: `none` when it needs no reading. */
   private firstMessageIssueScopeSeed(sessionId: string, text: string): { state: "pending" | "none"; messageDigest: string } | null {
     const root = this.db.getSession(sessionId);
-    const policy = root?.orchestratorPolicy;
     const trimmed = text.trim();
-    if (!root || !policy || !trimmed || root.parentSessionId || policy.control?.mode === "full_control" || policy.issueScopeSeed ||
-        policy.issueScope || policy.issueScopeProposalEpic !== undefined || policy.issueNumbers?.length ||
-        !this.db.sessionWasHumanCreatedOrchestrator(root.id) || this.db.initialUserMessageText(root.id) !== null) return null;
-    return { state: needsCampaignIssueScopeSeed(trimmed, orchestratorIssueNumbersFromInitialPrompt(trimmed)) ? "pending" : "none",
-      messageDigest: firstMessageDigest(trimmed) };
+    if (!root || !trimmed || !this.unseededCustomCampaign(root) || this.db.initialUserMessageText(root.id) !== null) return null;
+    return customCampaignIssueScopeSeed(trimmed);
+  }
+
+  /** A person-created Custom campaign root that could still get an epic seed: no seed, scope, epic
+   * or explicit issue list yet. Whether its first message has been recorded is the caller's test. */
+  private unseededCustomCampaign(root: SessionView): boolean {
+    const policy = root.orchestratorPolicy;
+    return Boolean(policy && !root.parentSessionId && policy.control?.mode !== "full_control" && !policy.issueScopeSeed &&
+      !policy.issueScope && policy.issueScopeProposalEpic === undefined && !policy.issueNumbers?.length &&
+      this.db.sessionWasHumanCreatedOrchestrator(root.id));
+  }
+
+  /**
+   * A Custom campaign whose first message was recorded before the epic seed existed (#4258): the
+   * build before #4216 held its delegation by reading that message through the `initialCampaignEpic`
+   * regex on every check, so the campaign carries no seed and its first message can no longer start
+   * one. Its recorded first message gets the seed a campaign started on this build would have got
+   * from it, through the same Decision Model reading (`seedCampaignIssueScope`); nothing is parsed
+   * from the text here. While that reading runs delegation waits, a seeded epic waits for the
+   * owner's scope approval, and a failed or uncertain reading leaves the seed with the owner, who
+   * approves a scope or continues without an epic. Returns the root as it now reads.
+   */
+  private seedPreUpgradeCampaign(root: SessionView): SessionView {
+    const preUpgrade = this.preUpgradeIssueScopeSeed(root);
+    if (!preUpgrade) return root;
+    const { text, seed } = preUpgrade;
+    if (!this.db.beginCampaignIssueScopeSeed(root.id, seed, Date.now())) return this.db.getSession(root.id) ?? root;
+    this.log.info(JSON.stringify({ event: "campaign_issue_scope_seed_pre_upgrade", sessionId: root.id, state: seed.state }));
+    this.hub.sessionChangedById(root.id);
+    if (seed.state === "pending") this.startCampaignIssueScopeSeed(root.id, text);
+    return this.db.getSession(root.id) ?? root;
+  }
+
+  /** The seed a pre-upgrade campaign's recorded first message would start (#4258), written by
+   * nobody: null for any campaign that already has a seed or can't get one. */
+  private preUpgradeIssueScopeSeed(root: SessionView): { text: string; seed: { state: "pending" | "none"; messageDigest: string } } | null {
+    if (!this.unseededCustomCampaign(root)) return null;
+    const text = this.db.initialUserMessageText(root.id)?.trim();
+    return text ? { text, seed: customCampaignIssueScopeSeed(text) } : null;
   }
 
   /** Start reading a Custom campaign's first message for its epic seed (#4104), once per root. */
@@ -11121,7 +11175,7 @@ export class SessionsService {
       return this.createWorkflowDecisionWithVideoInner(sessionId, request, canAccess);
     }
     const key = `${sessionId}:${request.requestId}`;
-    const requestDigest = auditDigest({ resourceKey: request.resourceKey, snapshot: snapshot.data })!;
+    const requestDigest = auditDigest({ resourceKey: request.resourceKey, snapshot: snapshot.data, ownerRule: request.ownerRule ?? null })!;
     const existing = SessionsService.inFlightVideoDecisions.get(key);
     if (existing) return existing.requestDigest === requestDigest
       ? existing.result : fail("requestId was already used for different workflow decision content", 409);
@@ -11135,6 +11189,9 @@ export class SessionsService {
     request: CreateWorkflowDecisionRequest,
     canAccess: (sessionId: string) => boolean,
   ): Promise<ServiceResult<WorkflowDecisionView>> {
+    // A malformed owner rule (#4137) is refused before any inspection or GitHub read it would waste.
+    const ownerRule = normalizeWorkflowDecisionOwnerRule(request?.ownerRule);
+    if (!ownerRule.ok) return fail(ownerRule.message, 400);
     const normalized = normalizeWorkflowDecisionSnapshot(request?.resourceSnapshot);
     if (normalized.ok && normalized.data?.category === "follow_up_issue_publication" && normalized.data.recommendationId) {
       if (normalized.data.issueAdmission) return this.createWorkflowDecision(sessionId, request, canAccess);
@@ -11175,6 +11232,9 @@ export class SessionsService {
     }
     const video = normalized.data.evidence.filter((item) => item.mediaType?.startsWith("video/"));
     if (!video.length) return this.createWorkflowDecision(sessionId, request, canAccess);
+    // A video an owner rule keeps for a person (#4137) is theirs to review: no delegated frame
+    // review applies, and the ordinary route compares the rule before any replay can return.
+    if (ownerRule.rule) return this.createWorkflowDecision(sessionId, request, canAccess);
     if (!this.videoFrameReviewCandidateEnabled) {
       return this.createWorkflowDecision(sessionId, request, canAccess, {
         videoFallbackReason: "Delegated video-frame review awaits live App Server delivery and model-cost validation.",
@@ -11205,6 +11265,12 @@ export class SessionsService {
         }
         if (previous.status === "pending") this.restorePendingWorkflowDecisionCards(sessionId);
         return ok(previous);
+      }
+      // A video the owner kept, by a rule or a handoff (#4137, #4064), stays theirs under a new
+      // requestId or key: the ordinary route matches the original evidence, before frame derivation
+      // would replace it, and carries the rule over.
+      if (this.ownerKept(controller.session.id, normalized.data.category, request.resourceKey, normalized.data)) {
+        return this.createWorkflowDecision(sessionId, request, canAccess);
       }
     }
     // Eligibility is the same direct authority that resolution checks: the saved owner under Custom,
@@ -11503,8 +11569,11 @@ export class SessionsService {
 
   async campaignIssueScope(sessionId: string, epic?: number, canAccess: (id: string) => boolean = () => true, resolveInitialEpic = true): Promise<ServiceResult<CampaignIssueScopeView>> {
     const rootId = this.db.campaignRootForMember(sessionId);
-    const root = rootId ? this.db.getSession(rootId) : null;
-    if (!root?.orchestratorPolicy || !canAccess(root.id)) return fail("campaign not found", 404);
+    const found = rootId ? this.db.getSession(rootId) : null;
+    if (!found?.orchestratorPolicy || !canAccess(found.id)) return fail("campaign not found", 404);
+    // Reading the scope starts a pre-upgrade campaign's seed too (#4258), so Campaign Status shows it.
+    const root = this.seedPreUpgradeCampaign(found);
+    if (!root.orchestratorPolicy) return fail("campaign not found", 404);
     this.settleInterruptedIssueScopeSeed(root);
     const compatibility = scopeCompatibility(this.db, root);
     const stored = root.orchestratorPolicy.issueScope;
@@ -11850,13 +11919,181 @@ export class SessionsService {
     }
     const snapshot = scopeSnapshot(this.db, latest, repository, { ...request, removals: [], lineage: { kind: "selection" } });
     if (!snapshot) return malformed();
-    snapshot.grantReview = selection;
-    snapshot.affectedDecisions = everyOutstandingScopeDecision(this.db, sessionId);
-    this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "scope_proposal", sessionId, requestId: request.requestId,
-      boundaryRevision: boundary.revision, scopeRevision: request.expectedRevision, lineage: "selection", outcome: "owner_review",
-      factsVerified: facts !== null }));
-    return this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: `campaign_issue_scope:${sessionId}`,
-      resourceSnapshot: snapshot }, canAccess, { trustedIssueScope: true });
+    const log = (outcome: string, extra: Record<string, unknown> = {}) => this.log.info(JSON.stringify({ event: "campaign_issue_admission",
+      entryPoint: "scope_proposal", sessionId, requestId: request.requestId, boundaryRevision: boundary.revision,
+      scopeRevision: request.expectedRevision, lineage: "selection", outcome, ...extra }));
+    // The owner's one typed approval: the proposal, its rationale (`explanation`), the grant and why
+    // nothing admitted it. It carries no admission, so it is the owner's, and approving it revokes
+    // every outstanding decision as any Full Control scope approval does (#3915).
+    const ownerRequest = (review: CampaignScopeGrantReview): ServiceResult<WorkflowDecisionView> => {
+      const current = this.db.getSession(sessionId);
+      if (!current || (current.orchestratorPolicy?.issueScope?.revision ?? 0) !== request.expectedRevision ||
+          issueBoundary(current)?.revision !== boundary.revision) return fail("Campaign scope changed during review; refresh and propose again.", 409);
+      // One owner request per proposal and reason: a repeat while it is pending returns it.
+      const pending = this.db.pendingWorkflowDecisionsForController(sessionId).find((d) => {
+        const s = d.resourceSnapshot;
+        return s.category === "campaign_issue_scope" && s.expectedRevision === request.expectedRevision &&
+          s.grantReview?.cause === review.cause && s.grantReview.reviewOccurrenceId === review.reviewOccurrenceId &&
+          JSON.stringify(s.additions) === JSON.stringify(snapshot.additions) && !s.removals.length;
+      });
+      if (pending) return ok(pending);
+      const owned = { ...snapshot, grantReview: review, affectedDecisions: everyOutstandingScopeDecision(this.db, sessionId) };
+      log("owner_review", { cause: review.cause, ...(review.failureClass ? { failureClass: review.failureClass } : {}) });
+      return this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: `campaign_issue_scope:${sessionId}`,
+        resourceSnapshot: owned }, canAccess, { trustedIssueScope: true });
+    };
+    // Without facts the open and label floors are unverified: nothing reviews the proposal.
+    if (!facts) return ownerRequest({ ...selection, cause: "selection_unverified" });
+    // Re-proposing the same additions while the owner's request for them is pending returns that
+    // request, whatever the rationale now says: it is never reviewed again behind the owner's back.
+    const awaitingOwner = this.db.pendingWorkflowDecisionsForController(sessionId).find((d) => {
+      const s = d.resourceSnapshot;
+      return s.category === "campaign_issue_scope" && s.lineage?.kind === "selection" && s.expectedRevision === request.expectedRevision &&
+        Boolean(s.grantReview) && !s.removals.length && JSON.stringify(s.additions) === JSON.stringify(snapshot.additions);
+    });
+    if (awaitingOwner) return ok(awaitingOwner);
+
+    // The Decision Model's review (#4103). It may only confirm or narrow: an admit admits exactly
+    // this proposal, whose floors already ran, and nothing it returns can move a ceiling.
+    const first = latest.orchestratorPolicy?.firstMessageScope;
+    const grant = first && first.state !== "pending" ? first.grant : undefined;
+    const organizationId = this.db.sessionScope(sessionId)?.organizationId;
+    // The owner's exact first message when the transcript still holds it, else the boundary's record.
+    const exact = this.db.initialUserMessageText(sessionId);
+    const ownerMessage = exact !== null && firstMessageDigest(exact) === selection.messageDigest ? exact : selection.ownerMessage;
+    // Inputs that cannot fit one Decision input as rendered, even without body excerpts, are never
+    // reviewed in part: the proposal is the owner's.
+    const inputs = grant ? scopeReviewInputs(ownerMessage, grant, facts, snapshot.explanation) : null;
+    const inputDigest = inputs ? scopeReviewInputDigest(inputs) : null;
+    if (!grant || !organizationId || !inputs || !inputDigest) {
+      return ownerRequest({ ...selection, cause: "selection_failed", failureClass: "configuration", reason: undefined });
+    }
+    const grantDigest = scopeGrantDigest(grant);
+    const titled = facts.map((fact) => ({ repository, number: fact.number, title: fact.title }));
+    const record = (occurrenceId: string) => this.db.recordSelectionProposal({ occurrenceId, campaignSessionId: sessionId, issues: titled,
+      explanation: snapshot.explanation }, Date.now());
+    // The one owner request of an uncertain or failed occurrence, idempotent per occurrence.
+    const routeOwner = (occurrence: DecisionOccurrenceRecord): string => {
+      record(occurrence.occurrenceId);
+      const existing = this.db.unconsumedWorkflowDecisionsForController(sessionId).find((d) =>
+        d.resourceSnapshot.category === "campaign_issue_scope" && d.resourceSnapshot.grantReview?.reviewOccurrenceId === occurrence.occurrenceId);
+      const linkedRequest = this.db.selectionProposal(occurrence.occurrenceId)?.workflowOccurrenceId ?? null;
+      if (existing) {
+        if (linkedRequest !== existing.occurrenceId) this.db.linkSelectionProposalDecision(occurrence.occurrenceId, existing.occurrenceId, linkedRequest);
+        return existing.occurrenceId;
+      }
+      const created = ownerRequest({ ...selection, cause: occurrence.state === "uncertain" ? "selection_uncertain" : "selection_failed",
+        reviewOccurrenceId: occurrence.occurrenceId, reason: occurrence.state === "uncertain" ? occurrence.reason ?? undefined : undefined,
+        ...(occurrence.failureClass ? { failureClass: occurrence.failureClass as DecisionErrorClass } : {}) });
+      if (!created.ok || !created.data) throw new Error(created.error ?? "the owner's scope approval could not be created");
+      // Campaign Status follows the proposal's current request through this link.
+      this.db.linkSelectionProposalDecision(occurrence.occurrenceId, created.data.occurrenceId, linkedRequest);
+      return created.data.occurrenceId;
+    };
+    const occurrenceKey = scopeReviewKey(sessionId, boundary.revision, request.expectedRevision, snapshot.additions, grantDigest);
+    // A repeat of the same issues at this revision reads the review's outcome rather than asking
+    // again: its rationale or facts may differ, and only the first proposal was reviewed. A review
+    // still running with other inputs is waited for, within the runtime's own bound; one past that
+    // bound can never settle (its process stopped), so it is settled as timed out here.
+    let settled = this.db.decisionOccurrenceByKey(occurrenceKey);
+    if (settled?.state === "pending" && settled.inputDigest !== inputDigest) {
+      const deadline = settled.createdAt + DECISION_TOTAL_BOUND_MS + 5_000;
+      while (settled?.state === "pending" && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        settled = this.db.decisionOccurrenceByKey(occurrenceKey);
+      }
+      if (settled?.state === "pending") {
+        this.db.settleDecisionOccurrence(settled.occurrenceId, { state: "failed", failureClass: "timed_out", now: Date.now() });
+        settled = this.db.decisionOccurrenceByKey(occurrenceKey);
+      }
+    }
+    let recorded: DecisionOutcome | null = null;
+    try {
+      if (settled?.state === "decided") {
+        recorded = { outcome: "verdict", occurrenceId: settled.occurrenceId, verdict: settled.verdict!, reason: settled.reason!, fields: settled.fields };
+      } else if (settled && (settled.state === "uncertain" || settled.state === "failed")) {
+        let humanRequestId = settled.humanRequestId;
+        // Routed by nobody yet (a process stopped first, or it was settled above): route it once.
+        if (!humanRequestId && (this.db.claimDecisionHumanRoute(settled.occurrenceId, Date.now()) ||
+            settled.humanRouteClaimedAt !== null && settled.humanRoutedAt === null)) {
+          humanRequestId = routeOwner(this.db.getDecisionOccurrence(settled.occurrenceId)!);
+          this.db.completeDecisionHumanRoute(settled.occurrenceId, humanRequestId, Date.now());
+        }
+        if (!humanRequestId) return fail("The owner's scope approval for this selection is being created. Refresh Campaign Status and propose again.", 409);
+        recorded = { outcome: "human_required", occurrenceId: settled.occurrenceId, cause: settled.state, humanRequestId };
+      }
+    } catch (error) {
+      this.log.warn(JSON.stringify({ event: "campaign_selection_review_unavailable", sessionId, error: (error as Error).message.slice(0, 200) }));
+      return fail("The Decision Model's review of this selection could not finish. Refresh Campaign Status and propose again.", 409);
+    }
+    let outcome: DecisionOutcome;
+    try {
+      outcome = recorded ?? await this.decisionRuntime.decide({
+        organizationId,
+        kind: "scope_review",
+        campaignSessionId: sessionId,
+        occurrenceKey,
+        automaticHarness: latest.agentId ? { runnerId: latest.runnerId, agentId: latest.agentId, driver: latest.driver } : null,
+        inputs,
+        routeToHuman: routeOwner,
+      });
+    } catch (error) {
+      this.log.warn(JSON.stringify({ event: "campaign_selection_review_unavailable", sessionId, error: (error as Error).message.slice(0, 200) }));
+      return fail("The Decision Model's review of this selection could not finish. Refresh Campaign Status and propose again.", 409);
+    }
+    this.db.recordSelectionProposal({ occurrenceId: outcome.occurrenceId, campaignSessionId: sessionId, issues: titled,
+      explanation: snapshot.explanation }, Date.now());
+    // A request something else retired without deciding it (revoked, superseded or withdrawn) is
+    // never handed back: it can no longer be applied.
+    const live = (d: WorkflowDecisionView | null): d is WorkflowDecisionView => Boolean(d) && ["pending", "approved", "consumed", "denied"].includes(d!.status);
+    if (outcome.outcome === "human_required") {
+      // The proposal's link names its current owner request; the audit names the first one.
+      const current = this.db.selectionProposal(outcome.occurrenceId)?.workflowOccurrenceId ?? outcome.humanRequestId;
+      const owned = current ? this.db.workflowDecisionByOccurrence(current) : null;
+      if (live(owned)) return ok(owned);
+      // The owner's request for this occurrence was retired: ask them again, once, and move the
+      // proposal's link to the new request.
+      const occurrence = this.db.getDecisionOccurrence(outcome.occurrenceId);
+      let replacement: WorkflowDecisionView | null = null;
+      try {
+        replacement = occurrence ? this.db.workflowDecisionByOccurrence(routeOwner(occurrence)) : null;
+      } catch { /* refused below */ }
+      return replacement ? ok(replacement)
+        : fail("The owner's scope approval for this selection could not be created. Refresh Campaign Status and propose again.", 409);
+    }
+    if (outcome.verdict === "refuse") {
+      log("refused", { reason: "selection_refused", reviewOccurrenceId: outcome.occurrenceId });
+      return { ok: false, status: 409, error: "The Decision Model found that this proposal does not fit what the owner asked for. " +
+        "Propose a different issue; the reason says why.", errorDetails: { code: "selection_refused", reason: outcome.reason, occurrenceId: outcome.occurrenceId } };
+    }
+    // Admit: one live scope change per review occurrence, Orchestrator-owned through the server's
+    // admission evidence. A repeated proposal returns the change this occurrence already created; one
+    // retired before it was applied is replaced, which admits nothing twice.
+    const linked = this.db.selectionProposal(outcome.occurrenceId)?.workflowOccurrenceId ?? null;
+    const existingAdmission = linked ? this.db.workflowDecisionByOccurrence(linked) : null;
+    if (existingAdmission && live(existingAdmission)) return ok(existingAdmission);
+    const current = this.db.getSession(sessionId);
+    const currentBoundary = current && issueBoundary(current);
+    if (!current || !currentBoundary || currentBoundary.revision !== boundary.revision ||
+        (current.orchestratorPolicy?.issueScope?.revision ?? 0) !== request.expectedRevision) return fail("Campaign scope changed during review; refresh and propose again.", 409);
+    // Another campaign may have taken an issue while the review ran; neither revision shows that.
+    const taken = snapshot.additions.find((n) => this.db.issueHeldByOtherCampaign(sessionId, repository, n));
+    if (taken !== undefined) return refuse("other_campaign_scope", { issue: taken });
+    const selectionReview = { occurrenceId: outcome.occurrenceId, grantDigest, verdict: "admit" as const, reason: outcome.reason };
+    const admittedSnapshot = { ...snapshot, selectionReview,
+      issueAdmission: { boundaryRevision: boundary.revision, evidenceDigest: issueEvidenceDigest({ kind: "selection_review", ...selectionReview }) } };
+    const created = this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: `campaign_issue_scope:${sessionId}`,
+      resourceSnapshot: admittedSnapshot }, canAccess, { trustedIssueScope: true });
+    if (created.ok && created.data) {
+      if (!this.db.linkSelectionProposalDecision(outcome.occurrenceId, created.data.occurrenceId, linked)) {
+        // Another call of the same proposal linked first: its scope change is the one.
+        const winner = this.db.selectionProposal(outcome.occurrenceId)?.workflowOccurrenceId;
+        const existing = winner ? this.db.workflowDecisionByOccurrence(winner) : null;
+        if (existing) return ok(existing);
+      }
+      log("admitted", { reviewOccurrenceId: outcome.occurrenceId, authority: created.data.authority });
+    }
+    return created;
   }
 
   async synchronizeCampaignIssueScope(sessionId: string): Promise<boolean> {
@@ -12285,6 +12522,8 @@ export class SessionsService {
     if (!boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
       return fail("requestId and resourceKey are required bounded identifiers", 400);
     }
+    const ownerRule = normalizeWorkflowDecisionOwnerRule(request.ownerRule);
+    if (!ownerRule.ok) return fail(ownerRule.message, 400);
     const normalized = normalizeWorkflowDecisionSnapshot(request.resourceSnapshot, internal?.trustedDerivedVideo);
     if (!normalized.ok || !normalized.data) return failAs(normalized);
     // An item naming an artifact is reviewed as that artifact's checked bytes, so the human review
@@ -12403,9 +12642,25 @@ export class SessionsService {
     }
     // A resource its owner kept stays theirs (#4064): a later request for it, under any key and from
     // any campaign member, is the person's too, so withdrawing and asking again cannot move it back.
-    if (authority === "orchestrator" && this.ownerKept(controller.session.id, category, request.resourceKey, normalized.data)) {
+    const kept = this.ownerKeptBy(controller.session.id, category, request.resourceKey, normalized.data);
+    if (authority === "orchestrator" && kept.length) {
       authority = "human";
       Object.assign(authorityEvaluation, { owner: "human", basis: "human_required", reason: "owner_kept" });
+    }
+    // An installed or user-authored rule that keeps the gate for a person (#4137) makes it theirs at
+    // creation, under any mode, grant or category. It only narrows: a question the owner must first
+    // classify stays held for that. A later request for the same resource keeps the rule it matched,
+    // so the person's card still says why it is theirs.
+    const keptRule = ownerRule.rule ?? [...kept].reverse().find((decision) => decision.ownerRule)?.ownerRule;
+    if (ownerRule.rule) {
+      authority = "human";
+      if (authorityEvaluation.reason !== "credential_screen_review") {
+        Object.assign(authorityEvaluation, { owner: "human", basis: "human_required", reason: "owner_kept" });
+      }
+      const prior = this.db.workflowDecisionByRequestId(sessionId, request.requestId);
+      if (prior && !sameWorkflowDecisionOwnerRule(prior.ownerRule, ownerRule.rule)) {
+        return fail("requestId was already used for different workflow decision content", 409);
+      }
     }
     if (category === "follow_up_issue_publication" && normalized.data.category === category && authority === "human") {
       // Under an issue boundary no person-owned publication is recorded without its reason (#4065):
@@ -12453,6 +12708,7 @@ export class SessionsService {
       ...(evaluated.effectiveOwner === "human" && evaluated.fallback ? { humanFallback: evaluated.fallback } : {}),
       ...(category === "pr_merge" && internal?.closingReferenceCheck ? { closingReferenceCheck: internal.closingReferenceCheck } : {}),
       ...(retired.length ? { alsoSupersede: retired } : {}),
+      ...(keptRule && authority === "human" ? { ownerRule: keptRule } : {}),
       createdAt: now,
     });
     if (!created) return fail("requestId was already used for different workflow decision content", 409);
@@ -12606,8 +12862,10 @@ export class SessionsService {
         const control = root.orchestratorPolicy?.control;
         const boundaryRevision = control?.mode === "full_control" ? { boundaryRevision: control.boundary.revision } : {};
         // An owner decision stays the owner's: classifying it only lets the owner choose an option.
-        const released = this.db.releaseCredentialScreenReview(decision.occurrenceId, ownerDecision ? "human" : "orchestrator", ownerDecision
-          ? { owner: "human", basis: "human_required", reason: "owner_kept", operation: "owner_decision", credentialScreen: screen, ...boundaryRevision }
+        // So does a question an owner rule kept for them (#4137).
+        const keptForOwner = ownerDecision || decision.ownerRule !== undefined;
+        const released = this.db.releaseCredentialScreenReview(decision.occurrenceId, keptForOwner ? "human" : "orchestrator", keptForOwner
+          ? { owner: "human", basis: "human_required", reason: "owner_kept", operation: decision.category, credentialScreen: screen, ...boundaryRevision }
           : { owner: "orchestrator", basis: decision.sessionId === root.id ? "standing_authorization" : "campaign_delegation",
             reason: "authorized_operation", operation: "implementation_question", credentialScreen: screen, ...boundaryRevision });
         if (!released) return fail("this question changed concurrently; read it again", 409);
@@ -12615,7 +12873,7 @@ export class SessionsService {
         this.db.setPendingApproval(released.sessionId, appendPendingApproval(
           removePendingRequest(this.db.getSession(released.sessionId)?.pendingApproval, released.occurrenceId),
           this.workflowDecisionApproval(released)));
-        this.recordWorkflowDecisionAudit(released, "pending", actor, now, ownerDecision
+        this.recordWorkflowDecisionAudit(released, "pending", actor, now, keptForOwner
           ? "Owner classified the question: answer it themselves." : "Owner classified the question: Let the Orchestrator Answer.");
       }
     } else {
@@ -12742,7 +13000,7 @@ export class SessionsService {
         !canAccess(root.id) || !canAccess(requesterId) || !this.workflowDecisionRelationship(root.id, requesterId)) {
       return fail("workflow decision not found", 404);
     }
-    if (decision.ownerHandoff || decision.category === "owner_decision") {
+    if (decision.ownerHandoff || decision.ownerRule || decision.category === "owner_decision") {
       return fail("this decision is already your campaign owner's", 409);
     }
     if (decision.status !== "pending") {
@@ -12784,13 +13042,20 @@ export class SessionsService {
   }
 
   /** Whether the campaign's owner kept this resource (#4064): its root handed an occurrence for it
-   * to the owner. See ownerKeptTargets for what counts as the same resource. */
+   * to the owner, or an owner rule kept one for a person (#4137). See ownerKeptTargets for what
+   * counts as the same resource. */
   private ownerKept(controllerId: string, category: WorkflowDecisionCategory, resourceKey: string,
     snapshot: WorkflowDecisionResourceSnapshot): boolean {
-    const handed = this.db.ownerHandedWorkflowDecisions(controllerId);
-    if (!handed.length) return false;
+    return this.ownerKeptBy(controllerId, category, resourceKey, snapshot).length > 0;
+  }
+
+  /** The occurrences, oldest first, through which the owner kept this resource. */
+  private ownerKeptBy(controllerId: string, category: WorkflowDecisionCategory, resourceKey: string,
+    snapshot: WorkflowDecisionResourceSnapshot): WorkflowDecisionView[] {
+    const kept = this.db.ownerKeptWorkflowDecisions(controllerId);
+    if (!kept.length) return [];
     const targets = new Set(ownerKeptTargets(category, resourceKey, snapshot));
-    return handed.some((decision) =>
+    return kept.filter((decision) =>
       ownerKeptTargets(decision.category, decision.resourceKey, decision.resourceSnapshot).some((target) => targets.has(target)));
   }
 
@@ -12979,7 +13244,7 @@ export class SessionsService {
     }
     // A decision the campaign's owner kept (#4064) is theirs alone: never an agent's, and not any
     // other person's who can open the session.
-    if ((decision.category === "owner_decision" || decision.ownerHandoff ||
+    if ((decision.category === "owner_decision" || decision.ownerHandoff || decision.ownerRule ||
         this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot)) &&
         (authority !== "human" || actor.kind !== "human" || !actor.id || !this.db.campaignOwnerUser(decision.controllingSessionId, actor.id))) {
       return fail("Only the campaign's owner can decide a decision the owner kept", 403);
@@ -13103,6 +13368,7 @@ export class SessionsService {
       if (latest && snapshot.issueAdmission) latest.issueAdmission = snapshot.issueAdmission;
       if (latest && snapshot.verifiedPublications) latest.verifiedPublications = snapshot.verifiedPublications;
       if (latest && snapshot.grantReview) latest.grantReview = snapshot.grantReview;
+      if (latest && snapshot.selectionReview) latest.selectionReview = snapshot.selectionReview;
       if (latest && authority === "human" && currentChild.orchestratorPolicy?.control?.mode === "full_control") {
         latest.affectedDecisions = everyOutstandingScopeDecision(this.db, childSessionId);
       }
@@ -13111,6 +13377,15 @@ export class SessionsService {
       const reserved = reservedPublicationSlots(this.db, currentChild, snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined);
       if (authority === "orchestrator" && (!boundary || scopeSize + reserved >
           this.db.campaignIssueLimit(childSessionId, boundary.issueAuthority!.maxIssues))) return fail("Scope capacity or its human boundary changed before resolution", 409);
+      // A selection the Orchestrator applies must still hold no issue another active campaign took
+      // since its review (#4103); nothing awaits between this check and the approval below.
+      const taken = authority === "orchestrator" && snapshot.lineage?.kind === "selection"
+        ? snapshot.additions.find((n) => this.db.issueHeldByOtherCampaign(childSessionId, snapshot.repository, n)) : undefined;
+      if (taken !== undefined) {
+        this.revokeWorkflowDecision(decision, { reason: "approval_refused_stale", triggeredBy: actor });
+        const refusal = CAMPAIGN_SCOPE_ADMISSION_REFUSALS.other_campaign_scope;
+        return { ok: false, status: refusal.status, error: refusal.message, errorDetails: { code: "other_campaign_scope", issue: taken } };
+      }
       // A Human approval re-mints the Full Control boundary around the scope it establishes (#2940),
       // within the scope limit that boundary names, counting the slots consumed publications still
       // hold other than those this change admits: only a fresh authorization can raise that limit.
@@ -14993,7 +15268,7 @@ export class SessionsService {
       // A root's own decision its owner kept (#4064) waits for that person without parking the root:
       // the root keeps working, and campaign continuations keep reaching it.
       ...(decision.sessionId === decision.controllingSessionId && decision.authority === "human" &&
-        (decision.category === "owner_decision" || decision.ownerHandoff ||
+        (decision.category === "owner_decision" || decision.ownerHandoff || decision.ownerRule ||
           decision.authorityEvaluation?.reason === "owner_kept" ||
           decision.authorityEvaluation?.reason === "credential_screen_review") ? { async: true } : {}),
       context: {
@@ -16076,7 +16351,7 @@ export class SessionsService {
         return fail("workflow decision not found", 404);
       }
       if (decision.status !== "pending") return fail("only pending workflow requests can be withdrawn", 409);
-      if (decision.authority !== "human" || decision.category !== "review_round_extension" || decision.ownerHandoff) {
+      if (decision.authority !== "human" || decision.category !== "review_round_extension" || decision.ownerHandoff || decision.ownerRule) {
         return fail("this category is not designated for Orchestrator withdrawal", 403);
       }
       if (!boundedDecisionString(resolution.reason, WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS)) {

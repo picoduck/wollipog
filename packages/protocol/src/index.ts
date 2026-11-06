@@ -904,16 +904,25 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      Under Full Control a checked GitLab merge whose closures are all in scope is then owned like a
 //      GitHub one. A pre-v295 child runner is not asked; its decisions carry no check and stay
 //      human-owned under Full Control. (292 to 294 are claimed by pull requests still open.)
-// 299: repository-qualified campaign issue scope (#4118). The control plane stores the scope as
+// 296: an owner rule on a typed workflow decision (#4137). request_workflow_decision
+//      (`wollipog decision request --owner-rule-source/--owner-rule-quote`) accepts an optional,
+//      bounded `ownerRule` naming the installed or user-authored file, and the quoted requirement,
+//      that keeps the gate for a person. The occurrence is created human-owned (`owner_kept`)
+//      under any mode, grant or category; later requests for the same resource stay the person's,
+//      and Campaign Status lists it under Waiting for You with the rule. A runner refuses the field
+//      against an older control plane, which would drop it.
+// 301: repository-qualified campaign issue scope (#4118). The control plane stores the scope as
 //      `issues`, `{ repository, number }` pairs across the boundary's repositories, and sends each
 //      participating runner only its own Location repository's numbers, in the earlier shape. A
-//      v299 runner accepts that part when its origin is any repository of the boundary, not only
-//      the launch one. An Orchestrator participant in another boundary repository needs v299;
-//      one-repository campaigns are unchanged for older runners. (This change first claimed 290
-//      and 293, which no released version uses; 296 to 298 are claimed by open pull requests.)
-export const PROTOCOL_VERSION = 299;
+//      v301 runner accepts that part when its origin is any repository of the boundary, not only
+//      the launch one. An Orchestrator participant in another boundary repository needs v301;
+//      one-repository campaigns are unchanged for older runners. (This change first claimed 290,
+//      293 and 299, which no released version uses; 297, 298 and 300 are claimed by open pull
+//      requests.)
+export const PROTOCOL_VERSION = 301;
 
 export * from "./campaign-authority.js";
+export * from "./workflow-decision-owner-rule.js";
 export * from "./closing-references.js";
 export * from "./gitlab-closing-references.js";
 export * from "./issue-closure-refusal.js";
@@ -1303,6 +1312,10 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * and a one-way handoff of an Orchestrator-owned occurrence to that owner. Checked against the
    * root's runner by the control plane and against the control plane by the runner. */
   ownerDecisions: 281,
+  /** v296 (#4137): `ownerRule` on request_workflow_decision. Checked against the control plane by
+   * the runner, because an older control plane ignores the field and would let the Orchestrator
+   * decide a gate its owner kept. */
+  workflowDecisionOwnerRule: 296,
   /** (#4138) A regular session's request_location_switch, checked against the requester's runner by
    * the control plane and against the control plane by the runner. */
   sessionLocationSwitch: 287,
@@ -1473,8 +1486,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   campaignRepositoryBoundary: 288,
   /** v291 reports issue facts (kind, state, labels, assignees) for selection scope (#4103). */
   campaignIssueFacts: 291,
-  /** v299 synchronizes its own repository's part of a multi-repository issue scope (#4118). */
-  repositoryQualifiedIssueScope: 299,
+  /** v301 synchronizes its own repository's part of a multi-repository issue scope (#4118). */
+  repositoryQualifiedIssueScope: 301,
 } as const;
 
 /* ========================================================================== */
@@ -3189,6 +3202,9 @@ export interface CampaignOwnerDecision {
   summary: string;
   /** The root handed an Orchestrator-owned occurrence to the owner, rather than asking anew. */
   handedOff: boolean;
+  /** v296 (#4137): the installed or user-authored rule that keeps it for the owner, when the
+   * requester named one. */
+  ownerRule?: import("./workflow-decision-owner-rule.js").WorkflowDecisionOwnerRule;
   createdAt: number;
 }
 
@@ -5367,6 +5383,18 @@ export interface CampaignIssueScopeSnapshot {
   /** Present when the Orchestrator's own proposal is the owner's to approve because of the first
    * message's scope grant (#4102). Server-derived; it changes who decides, never what is granted. */
   grantReview?: CampaignScopeGrantReview;
+  /** The Decision Model's `admit` of a selection proposal (#4103), which the server's
+   * `issueAdmission` evidence binds: the review occurrence, the grant it read and its reason. */
+  selectionReview?: CampaignSelectionReview;
+}
+
+export interface CampaignSelectionReview {
+  /** The `scope_review` Decision occurrence. One occurrence admits at most one scope change. */
+  occurrenceId: string;
+  /** SHA-256 of the stored scope grant the review read. */
+  grantDigest: string;
+  verdict: "admit";
+  reason: string;
 }
 
 /** Why an Orchestrator's scope proposal is the owner's one typed approval (#4102), with what the
@@ -5375,18 +5403,38 @@ export interface CampaignIssueScopeSnapshot {
  *
  * - `grant_failed` / `grant_uncertain`: the Decision Model failed or was uncertain on the first
  *   message, so there is no grant to review the proposal against.
- * - `selection`: the proposal fills the grant's selection. Until the Decision Model reviews
- *   selection proposals (#4103), the owner approves them. */
+ * - `selection_uncertain` / `selection_failed` (#4103): the proposal passed every deterministic
+ *   floor of the grant's selection, but the Decision Model's review of it was uncertain or failed.
+ * - `selection_unverified` (#4103): the runner could not report the issues' state and labels, so
+ *   the open and Human Required floors are unverified and nothing reviewed it.
+ * - `selection`: the interim before #4103, when the owner approved every selection proposal. Kept
+ *   so requests created then still read; nothing creates it now. */
 export interface CampaignScopeGrantReview {
-  cause: "grant_failed" | "grant_uncertain" | "selection";
+  cause: "grant_failed" | "grant_uncertain" | "selection" | "selection_uncertain" | "selection_failed" | "selection_unverified";
   /** The owner's first message as the boundary records it: one line, at most 4000 characters. */
   ownerMessage: string;
   messageDigest: string;
   grantOccurrenceId?: string;
+  /** The `scope_review` Decision occurrence that was uncertain or failed (#4103). */
+  reviewOccurrenceId?: string;
   failureClass?: DecisionErrorClass;
-  /** The model's uncertain reason, or for `selection` its reason for the grant. */
+  /** The model's uncertain reason, or for a selection its reason for the grant. */
   reason?: string;
   selection?: Pick<ScopeGrantSelection, "count" | "defaulted" | "criteria" | "constraints">;
+}
+
+/** One selection proposal the Decision Model reviewed (#4103), for Campaign Status. */
+export interface CampaignSelectionProposal {
+  issues: Array<{ repository: string; number: number; title: string }>;
+  /** The Orchestrator's rationale, as it proposed it. */
+  explanation: string;
+  /** `reviewing` until the review settles; `admitted` once an Orchestrator-owned scope change
+   * exists, `applied` once it is in scope; `refused` by the review; `waiting_for_owner` while the
+   * owner's one request is pending, then `owner_approved` or `owner_declined`; `replaced` when a
+   * later proposal superseded its scope change before it was applied. */
+  outcome: "reviewing" | "admitted" | "applied" | "refused" | "waiting_for_owner" | "owner_approved" | "owner_declined" | "replaced";
+  /** The scope change it led to, when there is one. */
+  requestOccurrenceId?: string;
 }
 
 /** The follow-up a `campaign_follow_up_admission` decision admits (#2940): a recommendation the
@@ -5876,6 +5924,10 @@ export interface WorkflowDecisionView {
    * owner. One way: it stays the person's, and so does every later request for the same resource
    * in the campaign. Only a person resolves it. */
   ownerHandoff?: { bySessionId: string; at: number; reason: string };
+  /** v296 (#4137): the installed or user-authored rule that keeps this occurrence for a person,
+   * named by its requester or carried over from an earlier occurrence for the same resource. The
+   * occurrence was created human-owned (`owner_kept`); only a person resolves it. */
+  ownerRule?: import("./workflow-decision-owner-rule.js").WorkflowDecisionOwnerRule;
 }
 
 /** v281 (#4064): a Full Control root's question for its campaign's owner. */
@@ -5905,6 +5957,10 @@ export interface CreateWorkflowDecisionRequest {
    * that would supersede a person-owned follow-up publication is refused instead (#4066). */
   resourceKey: string;
   resourceSnapshot: WorkflowDecisionResourceSnapshot;
+  /** v296 (#4137): an installed or user-authored rule keeps this gate for a person. The occurrence
+   * is created human-owned under any mode or grant; it can only narrow authority. Bounded and
+   * refused, never truncated, when oversize. Reusing a requestId with a different rule fails. */
+  ownerRule?: import("./workflow-decision-owner-rule.js").WorkflowDecisionOwnerRule;
 }
 
 export interface ResolveWorkflowDecisionRequest {
@@ -7412,7 +7468,7 @@ export interface SessionNamingConnectionTestResult {
  * `scope_grant` reads a Full Control owner's first message into a typed scope grant (#4102), and
  * `credential_screen` screens Full Control questions (#4104); the other Full Control callers add
  * their kinds here with their prompts. */
-export type DecisionKind = "probe" | "scope_grant" | "credential_screen" | "follow_up_relatedness" | "closure_reason";
+export type DecisionKind = "probe" | "scope_grant" | "credential_screen" | "follow_up_relatedness" | "closure_reason" | "scope_review";
 
 /** Why one Decision attempt failed. The control plane, not the runner, decides what is transient:
  * see DECISION_TRANSIENT_ERROR_CLASSES. */
@@ -7579,7 +7635,7 @@ export interface ClassifyCampaignDecisionRequest {
 
 export interface CampaignDecisionsResponse {
   campaignSessionId: string;
-  decisions: Array<DecisionOccurrenceView & { subject?: CampaignDecisionSubject }>;
+  decisions: Array<DecisionOccurrenceView & { subject?: CampaignDecisionSubject; selectionProposal?: CampaignSelectionProposal }>;
   usage: DecisionUsageView & { calls: number; unpricedCalls: number };
 }
 

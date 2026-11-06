@@ -7,8 +7,9 @@ import { decisionCostText, decisionModelName, decisionOutcomeText, verdictLabel 
 const SHOWN = 10;
 const REFRESH_MS = 60_000;
 /** Kinds Campaign Status shows in their own section, beside the request they affected: the
- * Question Screen's credential checks (#4104). They are not listed here a second time. */
-const OWN_SECTION_KINDS: ReadonlySet<string> = new Set(["credential_screen"]);
+ * Question Screen's credential checks (#4104) and the review of each selection proposal (#4103).
+ * They are not listed here a second time. */
+const OWN_SECTION_KINDS: ReadonlySet<string> = new Set(["credential_screen", "scope_review"]);
 
 /**
  * Campaign Status › Decision Model (#4101): the campaign's Decision calls, each as its own group
