@@ -50,7 +50,7 @@ import { boundedIssueNumbers, validCampaignIssueFacts, type CampaignIssueFacts, 
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
   everyOutstandingScopeDecision } from "./campaign-issue-scope.js";
-import { needsCampaignIssueScopeSeed, seedEpicCandidate } from "./campaign-issue-scope-seed.js";
+import { needsCampaignIssueScopeSeed, readingNamesIssues, seedEpicCandidate } from "./campaign-issue-scope-seed.js";
 import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, githubIssueClosureRefusal, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure,
   CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, CAMPAIGN_PUBLICATION_CORRECTABLE_FAILURES, type CampaignPullRequestRef } from "@wollipog/protocol";
@@ -377,7 +377,6 @@ import {
   parseOrchestratorOverrides,
   resolveOrchestratorCampaignPolicy,
 } from "./orchestrator-settings.js";
-import { orchestratorIssueNumbersFromInitialPrompt } from "./orchestrator-issue-scope.js";
 import {
   cleanupEventPayloadArtifacts,
   externalizableEventPayloadBytes,
@@ -496,6 +495,14 @@ function boundedCampaignEventText(text: string): string {
 
 /** One member's correctable publication refusal for one recommendation (#4065), hashed. */
 /** The one Decision occurrence that reads a Custom campaign's first message for its epic seed (#4104). */
+/** Who wrote the first message a Custom campaign's reading reads (#4259), which decides what the reading
+ * may grant. Only a message the server knows the owner wrote grants issues: the owner's own create
+ * request (with the launch provenance Full Control enable trusts) or the owner's first prompt after an
+ * empty launch. An unattributed message (a recorded transcript message whose author was never stored,
+ * or a staged automation launch) and a first prompt from anyone other than the campaign's owner never
+ * grant issues: a reading that names some is left with the owner. */
+type FirstMessageAuthor = "launch_request" | "owner" | "unattributed" | "other";
+
 function issueScopeSeedKey(rootId: string, messageDigest: string): string {
   return `scope_grant:issue_scope_seed:${rootId}:${messageDigest}`;
 }
@@ -503,7 +510,7 @@ function issueScopeSeedKey(rootId: string, messageDigest: string): string {
 /** The seed a Custom campaign's trimmed first message starts (#4104): `pending` for a reading, or
  * `none` when it needs none. */
 function customCampaignIssueScopeSeed(text: string): { state: "pending" | "none"; messageDigest: string } {
-  return { state: needsCampaignIssueScopeSeed(text, orchestratorIssueNumbersFromInitialPrompt(text)) ? "pending" : "none",
+  return { state: needsCampaignIssueScopeSeed(text) ? "pending" : "none",
     messageDigest: firstMessageDigest(text) };
 }
 
@@ -5232,11 +5239,10 @@ export class SessionsService {
     }
     if (orchestratorPolicy && inheritedIssueScope && campaignController && !campaignIssueNumbers) return fail("A scoped Orchestrator participant must use the campaign's runner and repository workspace. Select that workspace or start an independent campaign.", 409);
     if (orchestratorPolicy && inheritedIssueScope) orchestratorPolicy.issueScope = inheritedIssueScope;
+    // A person's launch prompt grants no issue numbers here (#4259): `createSession` can't wait for
+    // the Decision Model, so the first-message reading below grants them once it settles.
     const orchestratorIssueNumbers = inheritedIssueScope?.issueNumbers ?? snapshotSpec?.orchestrator?.issueNumbers ??
-      campaignIssueNumbers ??
-      (orchestratorPolicy && creationContext?.defaultOwnerUserId && !parentSessionId
-        ? orchestratorIssueNumbersFromInitialPrompt(requestedText)
-        : []);
+      campaignIssueNumbers ?? [];
     if (orchestratorPolicy && orchestratorIssueNumbers.length &&
         !runnerSupportsProtocol(runner.protocolVersion, "orchestratorIssueScope")) {
       return capabilityFail(runnerCapabilityRequirementError(runner.protocolVersion, "orchestratorIssueScope", "campaign issue coordination"));
@@ -5244,20 +5250,16 @@ export class SessionsService {
     if (orchestratorPolicy && (orchestratorIssueNumbers.length || inheritedIssueScope)) {
       orchestratorPolicy.issueNumbers = [...orchestratorIssueNumbers];
     }
-    // A Custom campaign's epic seed (#4104): the Decision Model reads the first message once the
-    // session starts, and delegation waits for that reading. Nothing is parsed from the text here.
-    // A first message that needs no reading is recorded as `none`, so no later message counts as
-    // the first; with no first message yet, the person's first prompt decides (`promptFromHuman`).
+    // A Custom campaign's first-message reading (#4104, #4259): the Decision Model reads the first
+    // message once the session starts. Nothing is parsed from the text here. Until it settles,
+    // delegation waits and the campaign holds no issue numbers, so every GitHub write on an issue
+    // takes the person's ordinary approval path. A first message that needs no reading is recorded
+    // as `none`, so no later message counts as the first; with no first message yet, the person's
+    // first prompt decides (`promptFromHuman`).
     if (orchestratorPolicy && creationContext?.defaultOwnerUserId && !parentSessionId && !snapshotCommand &&
-        !creationContext.humanCampaignLaunch && !inheritedIssueScope && requestedText) {
-      orchestratorPolicy.issueScopeSeed = { state: needsCampaignIssueScopeSeed(requestedText, orchestratorIssueNumbers) ? "pending" : "none",
+        !creationContext.humanCampaignLaunch && !inheritedIssueScope && !orchestratorIssueNumbers.length && requestedText) {
+      orchestratorPolicy.issueScopeSeed = { state: needsCampaignIssueScopeSeed(requestedText) ? "pending" : "none",
         messageDigest: firstMessageDigest(requestedText) };
-    }
-    // Provenance for Full Control enable (#2940): these numbers came from the authenticated Human's
-    // own create request, not an inherited scope, a snapshot, a staged delivery or a later backfill.
-    if (orchestratorPolicy && orchestratorIssueNumbers.length && !inheritedIssueScope && !snapshotSpec?.orchestrator?.issueNumbers &&
-        !campaignIssueNumbers && creationContext?.defaultOwnerUserId && !parentSessionId && !snapshotCommand && !delivery) {
-      orchestratorPolicy.issueNumbersSource = "human_launch_request";
     }
     let text = requestedText;
     // A delegated image reviewer receives only its server-pinned review prompt, never a campaign
@@ -5284,7 +5286,9 @@ export class SessionsService {
       const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model, view.authority.costUsd !== undefined);
       if (req.launchSurface === "native_tui" || accountingError) return fail(accountingError ?? "Campaign limits cannot admit unmetered Native TUI workers.", 409);
       try {
-        const allocation = this.db.campaignBudgets.prepare(budgetRoot, id, campaignBudgetUserLimits);
+        // Its review record is not written yet, so say whether this session is a reviewer (#3618).
+        const allocation = this.db.campaignBudgets.prepare(budgetRoot, id, campaignBudgetUserLimits,
+          Boolean(creationContext?.review || creationContext?.delegatedImageReview));
         if (allocation.costUsd !== undefined) config.costBudgetUsd = allocation.costUsd;
         if (allocation.toolCalls !== undefined) config.maxToolCalls = allocation.toolCalls;
       } catch (error) { return fail((error as Error).message, 409); }
@@ -5638,7 +5642,7 @@ export class SessionsService {
     if (!capture) this.log.info(`session created ${id} on ${req.runnerId} (${req.agentId} @ ${req.workspaceId})`);
     if (!capture && session.reviewPolicy) this.log.info(JSON.stringify({ event: "campaign_child_review_policy_snapshot",
       entryPoint: "create_session", sessionId: id, parentSessionId, ...session.reviewPolicy }));
-    if (!capture && session.orchestratorPolicy?.issueScopeSeed?.state === "pending") this.startCampaignIssueScopeSeed(id, requestedText);
+    if (!capture && session.orchestratorPolicy?.issueScopeSeed?.state === "pending") this.startCampaignIssueScopeSeed(id, requestedText, delivery ? "unattributed" : "launch_request");
     return ok(this.db.getSession(id)!, 201);
   }
 
@@ -5748,7 +5752,7 @@ export class SessionsService {
       const admitted = await this.promptFromUser(principal.userId, sessionId, text, images, slashCommand, config, reviewedResultRevision);
       if (admitted.ok && seed && this.db.beginCampaignIssueScopeSeed(sessionId, seed, Date.now())) {
         this.hub.sessionChangedById(sessionId);
-        if (seed.state === "pending") this.startCampaignIssueScopeSeed(sessionId, text.trim());
+        if (seed.state === "pending") this.startCampaignIssueScopeSeed(sessionId, text.trim(), this.db.isSessionOwner(principal, sessionId) ? "owner" : "other");
       }
       return admitted;
     }
@@ -5922,6 +5926,16 @@ export class SessionsService {
     return result;
   }
 
+  /** Whether the Decision Model is still reading a Custom campaign's first message (#4259), so its
+   * issues aren't known yet and Full Control enable waits rather than establishing a scope without
+   * them. A reading left pending with none in flight is settled with the owner first. */
+  campaignFirstMessageReadingPending(sessionId: string): boolean {
+    const root = this.db.getSession(sessionId);
+    if (!root) return false;
+    this.settleInterruptedIssueScopeSeed(root);
+    return this.db.getSession(sessionId)?.orchestratorPolicy?.issueScopeSeed?.state === "pending";
+  }
+
   /** Enabling Full Control on a campaign with no issue scope derives one (#2940): the runner's
    * repository and the issues the server recorded from the owner's own launch request, as the
    * runner verifies them. Without such issues the scope is task-only and the owner's next message,
@@ -5939,9 +5953,9 @@ export class SessionsService {
           !gitlabIssueCompatibility(this.db, root, response.repository)) repository = response.repository.toLowerCase();
     } catch { /* An unreachable runner verifies no repository. */ }
     if (!repository) return null;
-    // Transcript messages record no author, and a restart backfill reads the transcript, so only
-    // numbers the server marked as the Human's own launch request count. Anything else waits for
-    // the owner's next message.
+    // Transcript messages record no author, and a restart's reading reads the transcript, so only
+    // numbers the Decision Model's reading of the Human's own launch request granted count (#4259).
+    // Anything else, including a reading that failed or was uncertain, grants no issue here.
     const trusted = root.orchestratorPolicy.issueNumbersSource === "human_launch_request" ? root.orchestratorPolicy.issueNumbers ?? [] : [];
     const candidates = [...new Set(trusted)].sort((a, b) => a - b).slice(0, 100);
     const issueNumbers = candidates.length ? await this.verifiedMessageIssues(root, repository, candidates) : [];
@@ -6014,7 +6028,7 @@ export class SessionsService {
     if (!this.db.beginCampaignIssueScopeSeed(root.id, seed, Date.now())) return this.db.getSession(root.id) ?? root;
     this.log.info(JSON.stringify({ event: "campaign_issue_scope_seed_pre_upgrade", sessionId: root.id, state: seed.state }));
     this.hub.sessionChangedById(root.id);
-    if (seed.state === "pending") this.startCampaignIssueScopeSeed(root.id, text);
+    if (seed.state === "pending") this.startCampaignIssueScopeSeed(root.id, text, "unattributed");
     return this.db.getSession(root.id) ?? root;
   }
 
@@ -6026,10 +6040,11 @@ export class SessionsService {
     return text ? { text, seed: customCampaignIssueScopeSeed(text) } : null;
   }
 
-  /** Start reading a Custom campaign's first message for its epic seed (#4104), once per root. */
-  private startCampaignIssueScopeSeed(rootId: string, text: string): void {
+  /** Start reading a Custom campaign's first message for its epic seed and issues (#4104, #4259),
+   * once per root. `author` decides what the reading may grant (`FirstMessageAuthor`). */
+  private startCampaignIssueScopeSeed(rootId: string, text: string, author: FirstMessageAuthor): void {
     if (this.issueScopeSeeds.has(rootId)) return;
-    const run = this.seedCampaignIssueScope(rootId, text).catch((error: unknown) => {
+    const run = this.seedCampaignIssueScope(rootId, text, author).catch((error: unknown) => {
       this.log.warn(JSON.stringify({ event: "campaign_issue_scope_seed_failed", sessionId: rootId, error: String((error as Error)?.message ?? error).slice(0, 200) }));
     }).finally(() => this.issueScopeSeeds.delete(rootId));
     this.issueScopeSeeds.set(rootId, run);
@@ -6062,15 +6077,23 @@ export class SessionsService {
   }
 
   /**
-   * A Custom campaign's epic seed (#4104), replacing the `initialCampaignEpic` regex. The Decision
-   * Model reads the person's first message as a scope grant, with the same floors as Full Control's
-   * (`scopeGrantCandidates`). When it names exactly one issue, and nothing else to work on, the runner
-   * reads that issue: one with sub-issues or checklist members is the seeded epic; any other issue
-   * seeds nothing and holds nothing. A failed or uncertain reading, a floor that drops what the model
-   * named, or an issue the runner can't read leaves the seed with the owner: delegation waits for
-   * the person to approve a scope, as it did for every epic request before.
+   * A Custom campaign's first-message reading (#4104, #4259), replacing the `initialCampaignEpic` and
+   * `orchestratorIssueNumbersFromInitialPrompt` grammars. The Decision Model reads the person's first
+   * message as a scope grant, with the same floors as Full Control's (`scopeGrantCandidates`).
+   *
+   * - When it names exactly one issue, and nothing else to work on, the runner reads that issue: one
+   *   with sub-issues or checklist members is the seeded epic, held for the person's scope approval.
+   * - Otherwise the issues it names, once the floors keep all of them and the runner reads each as an
+   *   issue of the campaign repository, become the campaign's issue numbers.
+   * - A failed or uncertain reading, a floor that drops what the model named, or an issue the runner
+   *   can't read leaves the seed with the owner: delegation waits for the person to approve a scope
+   *   or continue without one, and no issue numbers are granted.
+   *
+   * `author` decides what it may grant (`FirstMessageAuthor`): only the owner's own create request
+   * carries the provenance Full Control enable trusts, and a first prompt from anyone other than the
+   * campaign's owner grants no issue at all.
    */
-  private async seedCampaignIssueScope(rootId: string, text: string): Promise<void> {
+  private async seedCampaignIssueScope(rootId: string, text: string, author: FirstMessageAuthor): Promise<void> {
     const root = this.db.getSession(rootId);
     const pending = root?.orchestratorPolicy?.issueScopeSeed;
     if (!root || pending?.state !== "pending") return;
@@ -6101,15 +6124,56 @@ export class SessionsService {
       requestId: `issue_scope_seed:${messageDigest}` }, Date.now());
     if (outcome?.outcome !== "verdict") return settle({ state: "owner", occurrenceId });
     const fields = outcome.fields as unknown as ScopeGrantFields;
-    const epic = seedEpicCandidate(fields);
-    if (epic === null) return settle({ state: "none", occurrenceId });
+    // Context references and a selection without numbers name no issue to work on: nothing to grant.
+    if (!readingNamesIssues(fields)) return settle({ state: "none", occurrenceId });
     // The floor that needs no runner runs first: a number the message never writes is not read at all.
-    if (!writtenAsDigits(text, epic)) return settle({ state: "owner", occurrenceId });
-    const inspected = await this.inspectSeedEpic(root, epic);
-    if (!inspected) return settle({ state: "owner", occurrenceId });
-    const kept = scopeGrantCandidates(text, fields, { repository: inspected.repository }).explicit;
-    if (kept.length !== 1 || kept[0] !== epic) return settle({ state: "owner", occurrenceId });
-    settle(inspected.members.length ? { state: "seeded", epic, occurrenceId } : { state: "none", occurrenceId });
+    const named = [...fields.explicit.map((ref) => ref.number), ...fields.ranges.flatMap((range) => [range.first, range.last])];
+    if (named.some((n) => !writtenAsDigits(text, n))) return settle({ state: "owner", occurrenceId });
+    const epic = seedEpicCandidate(fields);
+    let repository: string;
+    if (epic !== null) {
+      const inspected = await this.inspectSeedEpic(root, epic);
+      if (!inspected) return settle({ state: "owner", occurrenceId });
+      if (inspected.members.length) {
+        const kept = scopeGrantCandidates(text, fields, { repository: inspected.repository }).explicit;
+        return settle(kept.length === 1 && kept[0] === epic ? { state: "seeded", epic, occurrenceId } : { state: "owner", occurrenceId });
+      }
+      repository = inspected.repository;
+    } else {
+      const inspected = await this.inspectCampaignRepository(root);
+      if (!inspected) return settle({ state: "owner", occurrenceId });
+      repository = inspected;
+    }
+    // The issues the reading names (#4259), under the same floors as Full Control's grant. The model
+    // may only narrow or confirm: a floor that drops anything it named, a reference the runner can't
+    // read as an issue of the campaign repository, or a runner that can't hold an issue scope leaves
+    // the whole reading with the owner rather than granting part of it.
+    if (gitlabIssueCompatibility(this.db, root, repository)) return settle({ state: "owner", occurrenceId });
+    const candidates = scopeGrantCandidates(text, fields, { repository });
+    if (candidates.dropped.length) return settle({ state: "owner", occurrenceId });
+    if (!candidates.explicit.length) return settle({ state: "none", occurrenceId });
+    if (!runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "orchestratorIssueScope")) {
+      return settle({ state: "owner", occurrenceId });
+    }
+    // Issue-write authority is the owner's to grant: only a message the server knows the owner wrote
+    // grants issues. A first prompt someone else wrote, a staged automation launch, or a recorded
+    // transcript message whose author was never stored names issues the owner decides on instead.
+    if (author !== "launch_request" && author !== "owner") return settle({ state: "owner", occurrenceId });
+    const verified = await this.verifiedMessageIssues(root, repository, candidates.explicit);
+    if (verified.length !== candidates.explicit.length) return settle({ state: "owner", occurrenceId });
+    settle({ state: "none", occurrenceId, grant: { issueNumbers: verified, launchRequest: author === "launch_request" } });
+  }
+
+  /** The campaign repository the runner reads from the campaign's checkout, or null when it can't. */
+  private async inspectCampaignRepository(root: SessionView): Promise<string | null> {
+    const requestId = `issue_scope_seed_${randomUUID()}`;
+    try {
+      const response = await this.hub.requestFromRunner(root.runnerId, requestId,
+        { type: "campaign_issue_scope", operation: "inspect", requestId, sessionId: root.id }, 30_000);
+      if (response.type !== "campaign_issue_scope_result" || response.sessionId !== root.id || !response.ok ||
+          !response.repository || !campaignRepositoryLocation(response.repository)) return null;
+      return response.repository.toLowerCase();
+    } catch { return null; }
   }
 
   /** The campaign repository and the members the runner reads for one issue: its sub-issues and
@@ -8684,18 +8748,11 @@ export class SessionsService {
       "orchestratorIssueScope",
       "campaign issue coordination",
     ));
-    if (session.orchestratorPolicy && !session.orchestratorPolicy.issueScope && !session.orchestratorPolicy.issueNumbers?.length &&
-        this.db.sessionWasHumanCreatedOrchestrator(sessionId)) {
-      const initialPrompt = this.db.initialUserMessageText(sessionId);
-      const recovered = initialPrompt ? orchestratorIssueNumbersFromInitialPrompt(initialPrompt) : [];
-      if (recovered.length && !supportsIssueScope) {
-        return issueScopeRefusal();
-      }
-      if (recovered.length &&
-          this.db.backfillSessionOrchestratorIssueNumbers(sessionId, recovered, Date.now())) {
-        session = this.db.getSession(sessionId)!;
-      }
-    }
+    // A person-created Custom campaign whose recorded first message never got a reading (one that
+    // predates the seed) gets it now (#4259): the same Decision Model reading a new campaign gets,
+    // which grants its issues only once it settles, never from the transcript's text. The restart
+    // goes ahead without them, so until then every GitHub write on an issue takes the person's path.
+    if (session.orchestratorPolicy && !session.parentSessionId) session = this.seedPreUpgradeCampaign(session);
     if (session.orchestratorPolicy?.issueNumbers?.length && !supportsIssueScope) {
       return issueScopeRefusal();
     }

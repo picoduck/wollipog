@@ -33,6 +33,9 @@ import { ControlPlaneDb } from "./db.js";
 import { Hub, type Socket } from "./hub.js";
 import type { HumanPrincipal } from "./identity.js";
 import { SessionsService } from "./sessions.js";
+import { fakeDecisionKind, fakeDecisionRuntime, HEALTHY_VERDICTS } from "./credential-screen-test-fixture.js";
+import type { DecisionRuntime } from "./decision-runtime.js";
+import { EMPTY_GRANT } from "./scope-grant-test-fixture.js";
 
 const RUNNER_ID = "acceptance-runner";
 const WORKSPACE_ID = "acceptance-workspace";
@@ -94,7 +97,7 @@ type RunnerReply = (message: ControlPlaneToRunner, hub: Hub) => void;
  * One control plane: the real hub and service over an in-memory database, the observation wiring
  * from index.ts, the browser routes, a scripted runner socket, and a dashboard for the owner.
  */
-async function acceptanceStack(options: { completion?: "retain" | "stop_and_archive"; prompt?: string } = {}) {
+async function acceptanceStack(options: { completion?: "retain" | "stop_and_archive"; prompt?: string; issues?: number[] } = {}) {
   const completion = options.completion ?? "retain";
   const db = ControlPlaneDb.open(":memory:");
   db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
@@ -167,7 +170,25 @@ async function acceptanceStack(options: { completion?: "retain" | "stop_and_arch
     svc.onSessionStatus(created.data.id, "running");
     return created.data.id;
   };
+  // The root's first message names its issues; only the Decision Model's reading grants them (#4259).
+  // The reading is scripted to name `options.issues`, and the runner reads each as an issue of REPO.
+  const internals = svc as unknown as { decisionRuntime: DecisionRuntime };
+  const defaultRuntime = internals.decisionRuntime;
+  const named = options.issues ?? [101, 102];
+  svc.setDecisionRuntime(fakeDecisionRuntime(db, (message) => fakeDecisionKind(message) === "scope_grant"
+    ? { verdict: "grant", fields: { ...EMPTY_GRANT, explicit: named.map((number) => ({ repository: "", number })) } }
+    : { verdict: HEALTHY_VERDICTS[fakeDecisionKind(message)]! }).runtime);
+  reply = (message, replyHub) => {
+    if (message.type !== "campaign_issue_scope" || message.operation !== "inspect") return;
+    replyHub.resolveRunnerRequest({ type: "campaign_issue_scope_result", requestId: message.requestId, sessionId: message.sessionId, ok: true,
+      repository: REPO, candidates: (message.issues ?? []).map((number) => ({ issue: { repository: REPO, number }, title: `Issue ${number}`,
+        source: "member_checklist" as const })) }, RUNNER_ID);
+  };
   const root = createRoot("Acceptance Campaign");
+  await svc.campaignIssueScopeSeedSettled(root);
+  assert.deepEqual(db.getSession(root)!.orchestratorPolicy!.issueNumbers, named, "the scripted reading granted the root's issues");
+  reply = null;
+  svc.setDecisionRuntime(defaultRuntime);
   controllerId = root;
 
   let sequence = 0;
@@ -527,7 +548,7 @@ test("AC5: archiving and deleting a child through the service preserves work-ite
 });
 
 test("AC6: delivery requires work-item verification; idleness, completion, a merged or merge-queued stage, an approved merge, and a closed issue never satisfy it", async () => {
-  const stack = await acceptanceStack({ prompt: "Orchestrate issue 101." });
+  const stack = await acceptanceStack({ prompt: "Orchestrate issue 101.", issues: [101] });
   const { db, svc, owner, root, child, report, byKey, setRunnerReply, close } = stack;
   try {
     const plan = svc.recordCampaignPlan(root, {

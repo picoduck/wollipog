@@ -69,7 +69,7 @@ export function certifyRun(repository, run, listing, { workflows, trusted } = {}
   }
   const named = (name) => jobs.filter((job) => job.name === name);
   const passed = (job, step) => (job.steps ?? []).some((item) => item.name === step && item.status === "completed" && item.conclusion === "success");
-  // Every browser job must be one of the five shards; a missing or extra leg is not full coverage.
+  // Every browser job must be in the pinned inventory; missing or extra legs are not full coverage.
   if (jobs.filter((job) => /^Browser End-to-End Tests\b/.test(job.name ?? "")).length !== SHARDS.length) reasons.push("browser-shards-incomplete");
   for (const name of FULL_JOBS) {
     const matches = named(name);

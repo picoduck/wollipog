@@ -96,7 +96,7 @@ test("only exact worker checkout proofs and every required job can certify the t
   assert.ok(good.metrics.consumedRunnerMinutes > 0);
   assert.equal(good.metrics.unmeasuredAllocationJobs, 0);
   assert.ok(good.metrics.requiredMinutes > 0);
-  assert.equal(good.metrics.browserShardImbalance.observed, 5);
+  assert.equal(good.metrics.browserShardImbalance.observed, 10);
   assert.equal(good.jobs[1].name, REQUIRED[1]);
   assert.equal(good.jobs[1].measurementName, "Browser End-to-End Tests (1)");
   assert.equal(good.suiteVersion.length, 64);
