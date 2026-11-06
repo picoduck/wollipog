@@ -1544,12 +1544,19 @@ export const TOOLS: McpTool[] = [
   {
     name: "get_campaign_issue_scope",
     description: "Inspect the root campaign's authorized repository-qualified issue scope, grouped by repository under `repositories` (every campaign repository, the launch repository first, with whether one of its Locations is online), its revision, outside-scope work, and optional epic membership candidates. Native sub-issues and leading checklist entries in member sections are proposals only; dependencies and incidental references grant no authority. GitLab issues are supported from runner protocol v249: a GitLab epic is an ordinary issue of the same project whose member checklist (#N or same-project issue URLs) names its members; GitLab epics and issue links are not read. Use before delegating an epic and after any human scope change.",
-    inputSchema: { type: "object", properties: { epic: { type: "integer", minimum: 1 } }, additionalProperties: false },
+    inputSchema: { type: "object", properties: { epic: { type: "integer", minimum: 1 },
+      repository: { type: "string", minLength: 1, maxLength: 256, description: "The epic's repository, owner/name, in any of the campaign's repositories; defaults to the launch repository. Requires epic. Its members are read through a Location of that repository." } }, additionalProperties: false },
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
       const compatibility = await campaignIssueScopeCompatibilityError(deps);
       if (compatibility) return compatibility;
-      const result = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/campaign/issue-scope${typeof args.epic === "number" ? `?epic=${args.epic}` : ""}`, undefined, deps.requestTimeoutMs ?? 75_000);
+      if (typeof args.repository === "string" && typeof args.epic !== "number") return errorResult("repository names an epic's repository, so it requires epic.");
+      // Left out, an epic would be read in the launch repository: the same number, another issue.
+      if (typeof args.repository === "string" && !await controlPlaneSupports(deps, RUNNER_CAPABILITY_MIN_PROTOCOL.repositoryQualifiedEpics)) {
+        return errorResult("This campaign's control plane can't read an epic in another repository yet. Update the control plane.");
+      }
+      const query = typeof args.epic === "number" ? `?epic=${args.epic}${typeof args.repository === "string" ? `&repository=${encodeURIComponent(args.repository)}` : ""}` : "";
+      const result = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/campaign/issue-scope${query}`, undefined, deps.requestTimeoutMs ?? 75_000);
       return result.ok ? textResult(result.data) : errorResult(result.message);
     },
   },
@@ -1560,7 +1567,8 @@ export const TOOLS: McpTool[] = [
       requestId: { type: "string" }, expectedRevision: { type: "integer", minimum: 0 }, explanation: { type: "string", minLength: 1, maxLength: 4000 },
       additions: { type: "array", maxItems: 100, items: { type: "object", properties: { repository: { type: "string" }, number: { type: "integer", minimum: 1 } }, required: ["repository", "number"], additionalProperties: false } },
       removals: { type: "array", maxItems: 100, items: { type: "object", properties: { repository: { type: "string" }, number: { type: "integer", minimum: 1 } }, required: ["repository", "number"], additionalProperties: false } },
-      lineage: { oneOf: [ { type: "object", properties: { kind: { const: "epic" }, epic: { type: "integer", minimum: 1 } }, required: ["kind", "epic"], additionalProperties: false },
+      lineage: { oneOf: [ { type: "object", properties: { kind: { const: "epic" }, epic: { type: "integer", minimum: 1 },
+        repository: { type: "string", minLength: 1, maxLength: 256, description: "The epic's repository, defaulting to the launch repository. Its members must all be in it." } }, required: ["kind", "epic"], additionalProperties: false },
         { type: "object", properties: { kind: { const: "follow_up" }, publicationOccurrenceId: { type: "string" } }, required: ["kind", "publicationOccurrenceId"], additionalProperties: false },
         { type: "object", properties: { kind: { const: "selection" } }, required: ["kind"], additionalProperties: false } ] },
       proposal: { type: "object", description: "Under Full Control (#4282): how you read the owner's message. Its issues are exactly the additions.",
@@ -1589,6 +1597,10 @@ export const TOOLS: McpTool[] = [
         }
         const { repositoryNames: _names, ...proposal } = args.proposal as Record<string, unknown>;
         sent = { ...args, proposal: { ...proposal, repositoryName: names[0] } };
+      }
+      if ((args.lineage as { repository?: unknown } | undefined)?.repository !== undefined &&
+          !await controlPlaneSupports(deps, RUNNER_CAPABILITY_MIN_PROTOCOL.repositoryQualifiedEpics)) {
+        return errorResult("This campaign's control plane can't read an epic in another repository yet. Update the control plane.");
       }
       // A pre-v308 control plane reads no proposal (#4282); it keeps its own first-message grant, so
       // the proposal is left out rather than sent to be ignored.

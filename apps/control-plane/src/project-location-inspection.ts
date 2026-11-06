@@ -18,7 +18,7 @@ export const LOCATION_PUBLICATION_INSPECTION_MIN_VERSION = 4;
  * runner, stops that one inspection. Older runners stay bounded by their per-command timeouts. */
 export async function inspectCampaignWorkspace(hub: Hub, runner: RunnerView, workspaceId: string, issueNumbers: number[],
   signal: AbortSignal, timeoutMs = CAMPAIGN_LAUNCH_INSPECTION_TIMEOUT_MS, workspacePath?: string, facts = false,
-  publication?: NonNullable<CampaignLaunchInspectionMessage["publication"]>): Promise<CampaignLaunchInspectionResult | undefined> {
+  publication?: NonNullable<CampaignLaunchInspectionMessage["publication"]>, epic?: number): Promise<CampaignLaunchInspectionResult | undefined> {
   const version = runner.runtime?.campaignLaunchInspection?.version ?? 0;
   if (version < (publication ? LOCATION_PUBLICATION_INSPECTION_MIN_VERSION : PROJECT_LOCATION_INSPECTION_MIN_VERSION) ||
       !workspacePath || signal.aborted) return undefined;
@@ -33,7 +33,7 @@ export async function inspectCampaignWorkspace(hub: Hub, runner: RunnerView, wor
   try {
     const result = await hub.requestFromRunner(runner.runnerId, requestId, {
       type: "campaign_launch_inspect", requestId, workspaceId, workspacePath, issueNumbers,
-      ...(facts ? { facts: true as const } : {}), ...(publication ? { publication } : {}),
+      ...(facts ? { facts: true as const } : {}), ...(publication ? { publication } : {}), ...(epic !== undefined ? { epic } : {}),
     }, timeoutMs);
     if (signal.aborted || result.type !== "campaign_launch_inspection_result" || result.requestId !== requestId) return undefined;
     return result;
@@ -70,7 +70,10 @@ export async function inspectProjectLocation(
     issueNumbers?: readonly number[];
     /** Also return those issues' facts (#4118), with a pull request reported rather than failing.
      * A runner too old to report them fails as `runner_too_old`. */
-    facts?: boolean } = {},
+    facts?: boolean;
+    /** Resolve this epic's members in the Location's repository (#4118), with no `issueNumbers`.
+     * A member anywhere else fails the inspection, and so does a runner too old to read one. */
+    epic?: number } = {},
 ): Promise<ProjectLocationInspection> {
   const { db, hub } = dependencies;
   const fail = (failure: ProjectLocationInspectionFailure): ProjectLocationInspection =>
@@ -87,12 +90,13 @@ export async function inspectProjectLocation(
   if (!runner || !hub.isRunnerOnline(location.runnerId)) return fail("runner_offline");
   if ((runner.runtime?.campaignLaunchInspection?.version ?? 0) < PROJECT_LOCATION_INSPECTION_MIN_VERSION ||
       (options.requireProtocol && !runnerSupportsProtocol(runner.protocolVersion, options.requireProtocol)) ||
-      (options.facts && !runnerSupportsProtocol(runner.protocolVersion, "repositoryQualifiedProposals"))) return fail("runner_too_old");
+      (options.facts && !runnerSupportsProtocol(runner.protocolVersion, "repositoryQualifiedProposals")) ||
+      (options.epic !== undefined && !runnerSupportsProtocol(runner.protocolVersion, "repositoryQualifiedEpics"))) return fail("runner_too_old");
   const workspacePath = db.getWorkspacePath(location.runnerId, location.workspaceId);
   if (!workspacePath) return fail("path_missing");
   const issueNumbers = [...options.issueNumbers ?? []].sort((a, b) => a - b);
   const result = await inspectCampaignWorkspace(hub, runner, location.workspaceId, issueNumbers,
-    options.signal ?? new AbortController().signal, options.timeoutMs, workspacePath, options.facts);
+    options.signal ?? new AbortController().signal, options.timeoutMs, workspacePath, options.facts, undefined, options.epic);
   // Runner frames are not validated on the wire: only an exact success for this workspace verifies.
   if (result?.ok !== true || result.cancelled !== undefined || result.workspaceId !== location.workspaceId ||
       JSON.stringify(result.issueNumbers ?? []) !== JSON.stringify(issueNumbers) ||
@@ -104,6 +108,11 @@ export async function inspectProjectLocation(
   // Facts out of their bounds, or missing a requested number, verify nothing.
   const issueFacts = options.facts ? issueNumbers.map((n) => result.issueFacts?.find((fact) => validCampaignIssueFacts(fact) && fact.number === n)) : [];
   if (issueFacts.some((fact) => !fact)) return fail("read_failed");
+  // An epic's members count only in this Location's repository: one anywhere else verifies nothing.
+  const repository = result.repository!.toLowerCase();
+  if (options.epic !== undefined && (!Array.isArray(result.candidates) || result.candidates.some((candidate) => !candidate?.issue ||
+      typeof candidate.issue.repository !== "string" || candidate.issue.repository.toLowerCase() !== repository ||
+      !Number.isSafeInteger(candidate.issue.number) || candidate.issue.number < 1 || typeof candidate.title !== "string"))) return fail("read_failed");
   // The answer describes the path that was inspected; a Location removed, moved to another Project
   // or repointed meanwhile is not the Location the caller asked about.
   const current = active();
@@ -112,8 +121,9 @@ export async function inspectProjectLocation(
       db.getWorkspacePath(location.runnerId, location.workspaceId) !== workspacePath) return fail("read_failed");
   return { ok: true, location: {
     locationId, projectId: current.projectId, runnerId: current.runnerId, workspaceId: current.workspaceId,
-    repository: result.repository!.toLowerCase(), digest: result.digest, verifiedAt: (options.now ?? Date.now)(),
-  }, ...(options.facts ? { issueFacts: issueFacts as CampaignIssueFacts[] } : {}) };
+    repository, digest: result.digest, verifiedAt: (options.now ?? Date.now)(),
+  }, ...(options.facts ? { issueFacts: issueFacts as CampaignIssueFacts[] } : {}),
+    ...(options.epic !== undefined ? { candidates: result.candidates! } : {}) };
 }
 
 /** Check a follow-up's payload in a boundary repository other than the root's own (#4119), through

@@ -254,6 +254,32 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
 }
 
 for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844 }]) {
+  test(`the owner resolves an epic in another repository from Authorized Issue Scope at ${viewport.width}px (#4118)`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=epic-repositories");
+    const section = page.getByRole("region", { name: "Authorized Issue Scope" });
+    await section.getByRole("button", { name: "Epic Repository: team/repo", exact: true }).click();
+    await page.getByRole("option", { name: "team/api", exact: true }).click();
+    await section.getByLabel("Epic Issue Number", { exact: true }).fill("123");
+    await section.getByRole("button", { name: "Resolve Epic Members", exact: true }).click();
+    const members = section.getByRole("group", { name: "Proposed Epic Members" });
+    // team/repo#123 is held, but team/api#123 is another issue, and stays selectable.
+    const umbrella = members.getByRole("checkbox", { name: /^team\/api#123/u });
+    await expect(umbrella).toBeEnabled();
+    await umbrella.check();
+    await members.getByRole("checkbox", { name: /^team\/api#140/u }).check();
+    const geometry = await section.evaluate((element) => ({ client: element.clientWidth, scroll: element.scrollWidth }));
+    expect(geometry.scroll).toBeLessThanOrEqual(geometry.client + 1);
+    // Tall enough to show the whole panel, so the screenshot is complete evidence at each width.
+    await page.setViewportSize({ width: viewport.width, height: 1900 });
+    // Settled, with nothing hovered, so both selected rows show their resting state.
+    await page.mouse.move(0, 0);
+    await page.evaluate(() => Promise.all(document.getAnimations().filter((animation) => animation.effect?.getTiming().iterations !== Infinity).map((animation) => animation.finished)));
+    await page.screenshot({ path: `playwright-report/epic-repositories-${viewport.width}.png`, fullPage: true });
+  });
+}
+
+for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844 }]) {
   test(`the owner changes a defaulted selection count from the Scope Grant at ${viewport.width}px (#4102)`, async ({ page }, info) => {
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=grant-default");
