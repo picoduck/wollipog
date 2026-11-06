@@ -91,9 +91,13 @@ test("no required check reported is `none`, never passing, and a truncated page 
   assert.equal(statusContext.requiredChecks.state, "pending");
 });
 
-/** A check run as the campaign query reads it, with its creation-ordered id (#4263). */
-function run(name: string, conclusion: string | null, isRequired: boolean, databaseId: number, startedAt: string) {
-  return { ...check(name, conclusion, isRequired), databaseId, startedAt };
+/** A check run as the campaign query reads it, with its creation-ordered id and its workflow, or a
+ * null workflow run (another app's run, or a login that cannot read workflow runs) (#4263). */
+function run(name: string, conclusion: string | null, isRequired: boolean, databaseId: number, startedAt: string, workflow: string | null = "CI") {
+  return {
+    ...check(name, conclusion, isRequired), databaseId, startedAt,
+    checkSuite: { workflowRun: workflow === null ? null : { workflow: { name: workflow } } },
+  };
 }
 
 test("a cancelled run superseded by a newer passing run reads passing and raises no failure (#4263)", async () => {
@@ -165,9 +169,41 @@ test("past a truncated page, GitHub's failing rollup still reads failing: an uns
   assert.equal(expected.checks.state, "pending");
 });
 
-test("the query reads what orders a check's runs (#4263)", () => {
+test("GitHub's failing rollup stands unless a superseded failure certainly explains it (#4263)", () => {
+  const rollup = (nodes: unknown[]) => checkRollups({ state: "FAILURE", contexts: { pageInfo: { hasNextPage: false }, nodes } }, true)!;
+  // Nothing superseded: GitHub's verdict is not set aside, even though every seen check passed.
+  assert.equal(rollup([run("Lint", "SUCCESS", false, 100, "2026-11-05T15:00:00Z")]).checks.state, "failing");
+  // The same job name in two workflows is two checks: the older workflow's failure still counts.
+  const siblings = rollup([
+    run("build", "FAILURE", true, 100, "2026-11-05T15:00:00Z", "Release"),
+    run("build", "SUCCESS", true, 200, "2026-11-05T16:00:00Z", "CI"),
+  ]);
+  assert.deepEqual(siblings.checks, { state: "failing", passing: 1, failing: 1, pending: 0 });
+  assert.equal(siblings.requiredChecks.state, "failing");
+  // With no workflow known (another app, or a login that cannot read workflow runs), runs are told
+  // apart by name alone, so a superseded run could be another workflow's job: GitHub's verdict stands.
+  const unknown = rollup([
+    run("build", "FAILURE", false, 100, "2026-11-05T15:00:00Z", null),
+    run("build", "SUCCESS", false, 200, "2026-11-05T16:00:00Z", null),
+  ]);
+  assert.deepEqual(unknown.checks, { state: "failing", passing: 1, failing: 0, pending: 0 });
+});
+
+test("a login that cannot read workflow runs still gets an observation, and GitHub's failing rollup stands (#4263)", async () => {
+  const contexts = [
+    run("Lint", "CANCELLED", false, 100, "2026-11-05T15:00:00Z", null),
+    run("Lint", "SUCCESS", false, 200, "2026-11-05T16:00:00Z", null),
+  ];
+  const denied = { type: "FORBIDDEN", message: "Resource not accessible by personal access token",
+    path: ["r0", "pullRequest", "commits", "nodes", 0, "commit", "statusCheckRollup", "contexts", "nodes", 0, "checkSuite", "workflowRun"] };
+  const outcome = await observeForgeStatus([REF], stub(answer({ r0: { pullRequest: pr({}, contexts, "FAILURE") } }, [denied])));
+  assert.ok(outcome.ok && outcome.results[0]!.ok);
+  assert.equal((outcome.results[0]!.observation as CampaignForgePullRequestObservation).checks.state, "failing");
+});
+
+test("the query reads what orders and identifies a check's runs (#4263)", () => {
   const query = forgeStatusQuery([{ owner: "picoduck", name: "wollipog", number: 7 }]);
-  assert.match(query, /\.\.\. on CheckRun\{databaseId name status conclusion startedAt isRequired\(pullRequestNumber:7\)\}/u);
+  assert.match(query, /\.\.\. on CheckRun\{databaseId name status conclusion startedAt checkSuite\{workflowRun\{workflow\{name\}\}\} isRequired\(pullRequestNumber:7\)\}/u);
   assert.match(query, /\.\.\. on StatusContext\{context state createdAt isRequired\(pullRequestNumber:7\)\}/u);
 });
 

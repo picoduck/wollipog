@@ -1439,11 +1439,15 @@ function checkRunId(n: CheckContextNode): number | null {
   return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
+/** Before any check could have run: `gh` prints Go's zero time (0001-01-01) for a run that has
+ * not started, which is unknown, not old. */
+const EARLIEST_CHECK_TIME = Date.UTC(2000, 0, 1);
+
 /** When a check run started or a status was created (`gh pr view` calls both `startedAt`). */
 function checkContextTime(n: CheckContextNode): number | null {
   const value = typeof n.startedAt === "string" ? n.startedAt : n.createdAt;
   const time = typeof value === "string" ? Date.parse(value) : NaN;
-  return Number.isFinite(time) ? time : null;
+  return Number.isFinite(time) && time >= EARLIEST_CHECK_TIME ? time : null;
 }
 
 /** Whether `node` supersedes `previous`, an entry for the same check. Check run ids grow in

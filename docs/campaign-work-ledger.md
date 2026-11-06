@@ -569,10 +569,12 @@ derivation, refresh) and `apps/runner/src/campaign-forge-status.ts` (the read).
   run from a closed pull request and the replacement pull request's passing run. Only each check's
   most recent run counts, by check run id (creation order) and otherwise by start or creation time;
   runs that cannot be ordered keep the worse result. Check runs and status contexts are
-  de-duplicated separately. GitHub's own rollup state counts superseded runs too, so when every
-  context was read, a `FAILURE` or `ERROR` state that a superseded failure explains is set aside;
-  past a truncated read it still reads `failing`. The session Git panel's checks summary applies
-  the same rule.
+  de-duplicated separately, and a check run's workflow keeps same-named jobs of two workflows
+  apart. GitHub's own rollup state counts superseded runs too, so when every context was read, a
+  `FAILURE` or `ERROR` state that superseded failures explain is set aside, but only when each is
+  a status context or a check run whose workflow is known (another app's run, or a login that
+  cannot read workflow runs, leaves it unknown). Past a truncated read it still reads `failing`.
+  The session Git panel's checks summary de-duplicates the same way.
 - **Refresh:** on demand, `POST /api/sessions/:id/campaign/work-items/:itemId/forge-refresh`, which
   the panel sends when an item's details open and every 60 seconds while they stay open; it waits
   at most 20 seconds and returns the item's facts (`CampaignForgeRefreshResponse`). The panel does

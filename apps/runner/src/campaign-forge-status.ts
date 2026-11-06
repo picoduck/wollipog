@@ -90,7 +90,7 @@ export function forgeStatusQuery(refs: ReadonlyArray<{ owner: string; name: stri
       commits(last:1){nodes{commit{statusCheckRollup{state
         contexts(first:${CONTEXTS_PER_PULL_REQUEST}){pageInfo{hasNextPage} nodes{
           __typename
-          ... on CheckRun{databaseId name status conclusion startedAt isRequired(pullRequestNumber:${ref.number})}
+          ... on CheckRun{databaseId name status conclusion startedAt checkSuite{workflowRun{workflow{name}}} isRequired(pullRequestNumber:${ref.number})}
           ... on StatusContext{context state createdAt isRequired(pullRequestNumber:${ref.number})}
         }}
       }}}}
@@ -160,16 +160,27 @@ export function checkRollups(
   if (!value || !Array.isArray(nodes) || typeof pageInfo?.hasNextPage !== "boolean") return null;
   const complete = pageInfo.hasNextPage === false;
   // Only each check's latest run counts: a newer run supersedes a cancelled or failed one (#4263).
-  const latest = latestCheckContexts(nodes);
+  // A check run's workflow keeps same-named jobs of two workflows apart. GitHub leaves it null for
+  // another app's run, and for an Actions run when the login cannot read workflow runs; those runs
+  // are told apart by name alone.
+  const runs = nodes.map((node) => {
+    const workflowName = record(record(record(record(node)?.checkSuite)?.workflowRun)?.workflow)?.name;
+    return typeof workflowName === "string" && workflowName ? { ...record(node), workflowName } : node;
+  });
+  const latest = latestCheckContexts(runs);
   const all = summarizeCheckRollup(latest);
   const required = summarizeCheckRollup(latest.filter((node) => record(node)?.isRequired === true));
   // GitHub's own rollup state covers every check, even past the bounded page, but it also counts
-  // superseded runs. With every context seen, a failing state that a superseded failure explains is
-  // set aside; past a truncated page, an unseen check could be the failure, so it stands.
+  // superseded runs. With every context seen, a failing state that superseded failures explain is
+  // set aside, but only when each of them is certainly an earlier run of the check that replaced
+  // it: a status context, or a check run whose workflow is known. Past a truncated page, an unseen
+  // check could be the failure, and a run told apart by name alone could be another workflow's
+  // job, so GitHub's state stands.
   const github = value.state;
   const kept = new Set(latest);
-  const explainedFailure = (github === "FAILURE" || github === "ERROR") && complete &&
-    countCheckContexts(nodes.filter((node) => !kept.has(node))).failing > 0;
+  const supersededFailures = runs.filter((node) => !kept.has(node) && countCheckContexts([node]).failing > 0);
+  const explainedFailure = (github === "FAILURE" || github === "ERROR") && complete && supersededFailures.length > 0 &&
+    supersededFailures.every((node) => typeof record(node)?.state === "string" || typeof record(node)?.workflowName === "string");
   let overall: CampaignForgeCheckRollup["state"];
   if (all.failing > 0 || (github === "FAILURE" || github === "ERROR") && !explainedFailure) overall = "failing";
   else if (all.pending > 0 || github === "PENDING" || github === "EXPECTED") overall = "pending";

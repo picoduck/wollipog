@@ -385,6 +385,12 @@ test("summarizeCheckRollup: runs that cannot be ordered keep the worse result (#
   ]) {
     assert.deepEqual(summarizeCheckRollup(nodes), { failing: 1, pending: 0, passing: 0, failingNames: ["y"] });
   }
+  // `gh` prints Go's zero time for a run with no start: unknown, never older than a real time.
+  const zero = summarizeCheckRollup([
+    { name: "z", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "2026-11-05T15:00:00Z" },
+    { name: "z", status: "COMPLETED", conclusion: "FAILURE", startedAt: "0001-01-01T00:00:00Z" },
+  ]);
+  assert.deepEqual(zero, { failing: 1, pending: 0, passing: 0, failingNames: ["z"] });
 });
 
 test("summarizeCheckRollup: failing names are bounded to 8", () => {
