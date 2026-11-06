@@ -1,5 +1,5 @@
 import { sessionCampaignRequests } from "@wollipog/protocol";
-import { attentionRequestRank, pendingRequests, type SessionView } from "@wollipog/protocol";
+import { attentionRequestRank, columnForStatus, pendingRequests, type BoardColumn, type SessionView } from "@wollipog/protocol";
 
 export type SessionFollowUpGroup = "needs_input" | "ready_for_review" | "working" | "quiet";
 
@@ -52,6 +52,34 @@ export function activeFullControlCampaign(session: CampaignFacts): boolean {
   return fullControlRootStatus(session) === "active" && session.status !== "failed" && session.status !== "stopped" &&
     (session.attention?.humanActions?.length ?? 0) === 0 &&
     (sessionCampaignRequests(session)?.human ?? 0) === 0;
+}
+
+/**
+ * The Board column a session's card sits in (#2938). It is the server's column, except for an
+ * at-rest Full Control root whose campaign result is informational: the server derives the column
+ * from the root's own lifecycle, so an idle root would sit in Review although nothing there is the
+ * person's to review.
+ *
+ * - Campaign Active (work is running somewhere in the campaign) goes to Running.
+ * - Campaign Complete and Complete, Needs Cleanup go to Done. The cleanup is listed in Campaign
+ *   Status and is not review work.
+ * - Campaign Stuck, Waiting for You, the older Blocked and Complete with Handoffs, a Custom campaign
+ *   and any descendant keep the server's column, as do a failed or stopped root, one with a request
+ *   or human-owned campaign request, one with a pending Stop, and one whose reminder fired, which is
+ *   the person's own follow-up.
+ *
+ * Only the server's own derived column moves: an idle session the person filed elsewhere (to Done,
+ * say) keeps its filing. A dashboard reading a control plane that sends no campaign status keeps
+ * the server's column.
+ */
+export function sessionBoardColumn(session: Pick<SessionView, "column" | "status"> &
+  Partial<Pick<SessionView, "stopOperation">> & CampaignFacts, { reminderFired = false }: { reminderFired?: boolean } = {}): BoardColumn {
+  const column = session.column;
+  if (session.status !== "idle" || column !== columnForStatus("idle") || session.stopOperation || reminderFired) return column;
+  if ((session.attention?.humanActions?.length ?? 0) > 0 || (sessionCampaignRequests(session)?.human ?? 0) > 0) return column;
+  if (activeFullControlCampaign(session)) return "running";
+  if (completedFullControlCampaign(session)) return "done";
+  return column;
 }
 
 export function outstandingSessionResult(session: Pick<SessionView, "attention"> & CampaignFacts) {
