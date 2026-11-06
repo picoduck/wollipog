@@ -12308,6 +12308,13 @@ export class SessionsService {
           ...(occurrence.typedAnswers?.decisive ? { question: occurrence.typedAnswers.decisive.questionId } : {}) } };
     }
     if (occurrence.state === "decided" && occurrence.verdict === "admit") {
+      // An owner approval of these same issues that a concurrent proposal created while this check
+      // ran wins: an admit never replaces it. Nothing awaits between here and the admission below.
+      const ownerMeanwhile = pendingOwnerApproval();
+      if (ownerMeanwhile) {
+        log("owner_review", { checks, cause: "owner_pending", ownerRequest: ownerMeanwhile.occurrenceId, checkOccurrenceId: occurrence.occurrenceId });
+        return ok(ownerMeanwhile);
+      }
       // A repeat of the same checked proposal returns the change this check already admitted.
       const existing = this.db.pendingWorkflowDecisionsForController(sessionId).find((d) => d.sessionId === sessionId &&
         d.resourceSnapshot.category === "campaign_issue_scope" && d.resourceSnapshot.scopeProposal?.constraintCheck?.occurrenceId === occurrence.occurrenceId);

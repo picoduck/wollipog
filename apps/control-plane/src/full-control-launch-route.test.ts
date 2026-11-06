@@ -1865,6 +1865,32 @@ test("a check that fails after the runtime's retries sends exactly one owner req
   } finally { await server.close(); f.db.close(); }
 });
 
+test("a check that admits after a concurrent proposal of the same issues went to the owner never replaces that owner approval (#4282)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const c = await proposalCampaign(f, server, "Fix the 2 most important open bugs.");
+    // A's check ("open") waits; B's check ("open bugs") is uncertain and creates the owner's approval.
+    let releaseA: () => void = () => {};
+    const constraintsOf = (message: RunDecisionMessage) => (JSON.parse(JSON.parse(
+      /<untrusted_data name="proposal">\n(.*?)\n<\/untrusted_data>/su.exec(message.input)![1]!) as string) as { constraints: string[] }).constraints;
+    f.decision.state.check = (message) => constraintsOf(message).join() === "open"
+      ? new Promise<ScopeGrantAnswer>((resolve) => { releaseA = () => resolve(scopeCheckAnswer(message)); })
+      : uncertainCheck(message);
+    const a = c.propose([chosen(51), chosen(52)], { requestedCount: 2, constraints: ["open"] }, "A.");
+    while (f.decision.checkCalls.length === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+    const b = await c.propose([chosen(51), chosen(52)], { requestedCount: 2, constraints: ["open bugs"] }, "B.");
+    assert.equal(b.data!.authority, "human");
+    releaseA();
+    const admittedLate = await a;
+    assert.equal(admittedLate.ok, true, admittedLate.error ?? "");
+    assert.equal(admittedLate.data!.occurrenceId, b.data!.occurrenceId, "the late admit returns the owner's approval");
+    assert.equal(f.db.workflowDecisionByOccurrence(b.data!.occurrenceId)!.status, "pending");
+    assert.equal(c.ownerRequests().length, 1);
+    assert.deepEqual(f.db.getSession(c.id)!.orchestratorPolicy!.issueScope!.issueNumbers, []);
+  } finally { await server.close(); f.db.close(); }
+});
+
 test("removing a chosen issue never frees room under the count, and re-adding the same one takes no second slot (#4282)", async () => {
   const f = fixture();
   const { server } = await app(f);
