@@ -51,7 +51,8 @@ import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-t
 import { MINUTE, campaignProjection, forgeObservation, itemDetail, itemSummary, knownCost, workSummary } from "./campaign-status-fixtures.js";
 import "../styles.css";
 import { campaignRecoveryFixture } from "./campaign-recovery-fixtures.js";
-import { campaignDecisionsFixture } from "./decision-model-fixtures.js";
+import { campaignDecisionsFixture, TYPED_ADMITTED, TYPED_REFUSED, TYPED_UNCERTAIN } from "./decision-model-fixtures.js";
+import type { DecisionTypedAnswersView } from "@wollipog/protocol";
 
 declare global {
   interface Window {
@@ -716,6 +717,18 @@ let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["dec
       requestOccurrenceId: "wd_sel_3", explanation: "A UI regression three users reported this week.", issues: [
         { repository: "team/repo", number: 141, title: "Sidebar badges overlap on narrow screens" }] } },
 ] : [];
+
+// `typed=1` with `selection=1` (#4283): the same reviews as typed questions, each with its answers
+// and the reason the server derived from them.
+if (params.get("typed") === "1") {
+  const typed: Record<string, { typedAnswers: DecisionTypedAnswersView; reason: string }> = {
+    sel_admitted: { typedAnswers: TYPED_ADMITTED, reason: "Every answer is satisfied with at least 80% confidence." },
+    sel_refused: { typedAnswers: TYPED_REFUSED, reason: "Issue 140 violates 'Skip Security'." },
+    sel_uncertain: { typedAnswers: TYPED_UNCERTAIN, reason: "Issue 141 on 'UI Only' is below the 80% confidence threshold." },
+  };
+  screenDecisions = screenDecisions.map((decision) => typed[decision.occurrenceId]
+    ? { ...decision, promptVersion: "scope_review.v2", ...typed[decision.occurrenceId] } : decision);
+}
 
 const client = {
   ...api,
