@@ -37,6 +37,7 @@ import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignClosureIssueHeld, campaignRepositoryLimits, campaignControlForRunner, campaignControlRevisionForRunner, campaignLaunchRepository, campaignOtherRepository, campaignScopeRepositories, carriedCampaignRepositories } from "./campaign-authority.js";
+import { campaignRepositoryOutsideLimit } from "./campaign-authority.js";
 import { campaignBoundaryRepositoryAt, launchBoundaryRepositories } from "./campaign-repository-boundary.js";
 import { inspectBoundaryPublication, verifyBoundaryPublishedIssue } from "./project-location-inspection.js";
 import { campaignBoundaryRepository } from "@wollipog/protocol";
@@ -4390,6 +4391,9 @@ export class SessionsService {
       const misplaced = place ? this.campaignPlacementRefusal(campaignAuthority, parent, place)
         : "Full Control children must use a Location of a repository in the campaign's boundary";
       if (misplaced) return fail(misplaced, 409);
+    } else if (campaignAuthority && place) {
+      const misplaced = this.campaignPlacementRefusal(campaignAuthority, parent, place);
+      if (misplaced) return fail(misplaced, 409);
     }
     const campaignPolicy = campaignAuthority?.orchestratorPolicy;
     const campaignBehavior = campaignPolicy?.behavior;
@@ -4812,6 +4816,9 @@ export class SessionsService {
       if (!preflight.supported || !campaignBoundaryCurrent(campaignController)) {
         return campaignRefusalFail(preflight.requirement ?? preflight.reason ?? "campaign authority boundary is stale");
       }
+      const misplaced = this.campaignPlacementRefusal(campaignController, parentSession, req);
+      if (misplaced) return fail(misplaced, 409);
+    } else if (campaignController) {
       const misplaced = this.campaignPlacementRefusal(campaignController, parentSession, req);
       if (misplaced) return fail(misplaced, 409);
     }
@@ -5832,10 +5839,10 @@ export class SessionsService {
   }
 
   /** A Custom campaign's initial repositories (#4118): every verified Location of its Project that
-   * its owner can reach, inspected in its own path, as a Full Control launch builds its boundary.
-   * It grants nothing: a person still approves every scope change, and a Location added later still
-   * needs an approved repository addition. A Project with one repository records nothing, so such a
-   * campaign reads as it always has, and so does one whose own Location can't be read now. */
+   * its owner added and can reach, inspected in its own path, as a Full Control enable builds its
+   * boundary. It grants nothing: a person still approves every scope change, and any other Location
+   * still needs an approved repository addition. A Project with one such repository records nothing,
+   * so that campaign reads as it always has, and so does one whose own Location can't be read now. */
   private async establishCustomCampaignRepositories(rootId: string): Promise<void> {
     const root = this.db.getSession(rootId);
     const scope = this.db.sessionScope(rootId);
@@ -5846,7 +5853,9 @@ export class SessionsService {
     if (!root?.projectId || !owner || !launchLocationId || !ownBefore || !runnerSupportsProtocol(rootProtocolVersion, "campaignRepositoryAddition")) return;
     const projectId = root.projectId;
     const ownPath = this.db.getWorkspacePath(ownBefore.runnerId, ownBefore.workspaceId);
-    const survey = projectLocationSurvey(this.db, this.hub, owner, { projectId, launchLocationId, rootProtocolVersion });
+    // Nobody sees this survey, so a Location the owner didn't add stays out. Otherwise an enable would
+    // carry it into the boundary as a Location the campaign already holds (#4117).
+    const survey = projectLocationSurvey(this.db, this.hub, owner, { projectId, launchLocationId, rootProtocolVersion, onlyAddedBy: owner.userId });
     const [own] = await Promise.all([
       inspectProjectLocation({ db: this.db, hub: this.hub }, launchLocationId, { projectId, requireProtocol: "campaignRepositoryBoundary" }),
       survey.inspect(new AbortController().signal),
@@ -10447,9 +10456,21 @@ export class SessionsService {
    * workflows all apply it. */
   private campaignPlacementRefusal(root: SessionView, parent: SessionView | null,
     place: { runnerId: string; workspaceId?: string | null; workspacePath?: string }): string | null {
-    if (root.orchestratorPolicy?.control?.mode !== "full_control") return null;
+    if (root.orchestratorPolicy?.control?.mode !== "full_control") {
+      // A limit outlives Full Control (#4118): a Custom child isn't bound to a repository, but it
+      // can't work in one the limit leaves out, as far as this campaign can tell which that is.
+      if (place.workspacePath || !place.workspaceId || !campaignRepositoryLimits(root.orchestratorPolicy).length) return null;
+      const known = place.runnerId === root.runnerId && place.workspaceId === root.workspaceId ? campaignLaunchRepository(root)
+        : this.db.campaignParticipantRepository(root, { id: "", runnerId: place.runnerId, workspaceId: place.workspaceId });
+      return known && campaignRepositoryOutsideLimit(root.orchestratorPolicy, known)
+        ? `The owner's first message limited this campaign to ${campaignRepositoryLimits(root.orchestratorPolicy).join(", ")}, so a child can't work in ${known}. Place it in a Location of one of those repositories.` : null;
+    }
     const repository = place.workspacePath ? null : campaignBoundaryRepositoryAt(this.db, root, place);
     const parentRepository = parent && parent.id !== root.id ? campaignBoundaryRepositoryAt(this.db, root, parent) : repository;
+    // The launch entry a first-message limit leaves out stays only because the root runs there (#4117).
+    if (repository && campaignRepositoryOutsideLimit(root.orchestratorPolicy, repository)) {
+      return `The owner's first message limited this campaign to ${campaignRepositoryLimits(root.orchestratorPolicy).join(", ")}, so a child can't work in ${repository}. Place it in a Location of one of those repositories.`;
+    }
     return repository && parentRepository === repository ? null
       : "Full Control children must use a Location of a repository in the campaign's boundary";
   }
@@ -10460,6 +10481,8 @@ export class SessionsService {
   private campaignServesOwnRepository(root: SessionView, session: SessionView): boolean {
     const repository = campaignBoundaryRepositoryAt(this.db, root, session);
     if (!repository) return false;
+    // Only the root may be in a repository a first-message limit leaves out (#4117).
+    if (session.id !== root.id && campaignRepositoryOutsideLimit(root.orchestratorPolicy, repository)) return false;
     const parent = session.parentSessionId && session.parentSessionId !== root.id ? this.db.getSession(session.parentSessionId) : null;
     return !parent || campaignBoundaryRepositoryAt(this.db, root, parent) === repository;
   }
@@ -10644,12 +10667,13 @@ export class SessionsService {
   derivedLimits?: import("@wollipog/protocol").FullControlDerivedLimits,
   /** Enable only: what its reviewed preflight disclosed about capabilities and evidence (#2940). */
   launchDisclosure?: import("@wollipog/protocol").CampaignLaunchDisclosure,
-  /** Enable only (#4117): the repositories and exclusions the reviewed enable preflight built from
-   * every verified Location of the campaign's Project, exactly as a launch does. Server-derived;
-   * no caller proposal carries them. */
+  /** Enable only (#4117): the repositories and exclusions the enable preflight built from the
+   * Locations of the campaign's Project that its owner added, and the Locations it left waiting
+   * because someone else added them. Server-derived; no caller proposal carries them. */
   projectRepositories?: { repositories: import("@wollipog/protocol").CampaignBoundaryRepository[];
     excludedLocations: import("@wollipog/protocol").CampaignExcludedLocation[];
-    availableLocations?: import("@wollipog/protocol").CampaignAvailableLocation[] }): ServiceResult<SessionView> {
+    availableLocations?: import("@wollipog/protocol").CampaignAvailableLocation[];
+    pendingLocations?: import("@wollipog/protocol").CampaignPendingLocation[] }): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session || principal.kind !== "human" || !this.db.isSessionOwner(principal, sessionId)) return fail("campaign not found", 404);
     const root = this.orchestratorCampaignController(session);
@@ -10668,8 +10692,8 @@ export class SessionsService {
     const mintedScope: CampaignIssueScope | undefined = derivedScope ? { repository: derivedScope.repository.toLowerCase(),
       issueNumbers: [...derivedScope.issueNumbers].sort((a, b) => a - b), revision: 1, authorizedByUserId: principal.userId, authorizedAt: now } : undefined;
     const scope = storedScope ?? mintedScope;
-    // #4117: an authorization keeps the campaign's repositories. A reviewed enable brings the ones
-    // its preflight verified; otherwise the boundary (or a Custom list) the campaign already has is
+    // #4117: an authorization keeps the campaign's repositories. An enable brings the ones its
+    // preflight verified; otherwise the boundary (or a Custom list) the campaign already has is
     // carried over, so a reauthorization never drops a repository back to one.
     const repositories = proposal.mode !== "full_control" || !scope ? undefined
       : projectRepositories?.repositories ?? carriedCampaignRepositories(session, scope.repository);
@@ -10731,7 +10755,8 @@ export class SessionsService {
         proposal.mode === "full_control" ? derivedLimits : undefined,
         proposal.mode === "full_control" ? launchDisclosure : undefined,
         control.mode === "full_control" ? projectRepositories?.excludedLocations : undefined,
-        control.mode === "full_control" ? projectRepositories?.availableLocations : undefined)) return fail("campaign authority revision changed; refresh and retry", 409);
+        control.mode === "full_control" ? projectRepositories?.availableLocations : undefined,
+        control.mode === "full_control" ? projectRepositories?.pendingLocations : undefined)) return fail("campaign authority revision changed; refresh and retry", 409);
     } catch (error) { return fail((error as Error).message, 409); }
     // The runner holds the scope it enforces issue writes against, and a diagnostic copy of this
     // control: every change synchronizes both now, at the new policy revision (#3363), rather than
@@ -11125,6 +11150,11 @@ export class SessionsService {
       return fail(`fullReason, when given, says in at most ${REVIEW_FULL_REASON_LIMIT} characters why the whole pull request needs review again`, 400);
     }
     if (session.archived || isTerminal(session.status)) return fail("an archived or finished session cannot request a review", 409);
+    // A repository a first-message limit leaves out gets no campaign work, reviews included (#4117).
+    const reviewRoot = this.db.campaignRootForMember(session.id);
+    if (reviewRoot && campaignRepositoryOutsideLimit(this.db.getSession(reviewRoot)?.orchestratorPolicy, pullRequest.repository)) {
+      return fail(`The owner's first message limited this campaign to other repositories, so ${pullRequest.repository} gets no campaign review.`, 409);
+    }
     const runner = this.db.getRunner(session.runnerId);
     if (!runnerSupportsProtocol(runner?.protocolVersion, "reviewSession")) {
       return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "reviewSession", "review sessions"));

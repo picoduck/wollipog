@@ -261,7 +261,7 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
     const ownProjectId = session.projectId ?? null;
     const ownLocationId = session.projectLocationId ?? null;
     const survey = projectLocationSurvey(db, dependencies.hub, principal, { projectId: ownProjectId, launchLocationId: ownLocationId,
-      rootProtocolVersion: runner.protocolVersion, timeoutMs: dependencies.inspectionTimeoutMs });
+      rootProtocolVersion: runner.protocolVersion, timeoutMs: dependencies.inspectionTimeoutMs, onlyAddedBy: principal.userId });
     const lifetime = new AbortController();
     const onClose = () => { if (!reply.raw.writableFinished) lifetime.abort(); };
     reply.raw.once("close", onClose);
@@ -325,7 +325,7 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
       } } : {}) }, revision, principal, derived ?? undefined, derivedLaunchLimits(body.overrides),
       campaignLaunchDisclosure(preflight, "enable", Date.now()),
       proposal.repositories ? { repositories: proposal.repositories, excludedLocations: preflight.summary.excludedLocations ?? [],
-        availableLocations: preflight.summary.availableLocations ?? [] } : undefined);
+        availableLocations: preflight.summary.availableLocations ?? [], pendingLocations: preflight.summary.pendingLocations ?? [] } : undefined);
     if (!result.ok || !result.data) return reply.code(result.status).send({ error: result.error ?? "Full Control was not enabled" });
     return result.data;
   });

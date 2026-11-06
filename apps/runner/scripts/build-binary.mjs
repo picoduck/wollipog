@@ -85,7 +85,7 @@ if (process.platform === "linux") {
 const leaseIoHelper = join(buildDir, "provider-home-lease-io");
 if (process.platform === "linux" || process.platform === "darwin") {
   execFileSync(process.platform === "darwin" ? "/usr/bin/clang" : "/usr/bin/cc",
-    ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror", ...(process.platform === "linux" ? ["-static"] : []),
+    ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror", ...(process.platform === "linux" ? ["-static"] : ["-mmacosx-version-min=14.0"]),
       join(runner, "native", "provider-home-lease-io.c"), "-o", leaseIoHelper], { stdio: "inherit" });
 }
 
@@ -124,8 +124,18 @@ if (process.platform === "linux") assets["wollipog/linux-cgroup-launch"] = cgrou
 if (process.platform === "darwin") {
   const helper = join(buildDir, "macos-skill-snapshots");
   execFileSync("/usr/bin/clang", ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror",
-    "-Wno-deprecated-declarations", join(runner, "native", "macos-skill-snapshots.c"), "-o", helper],
+    "-Wno-deprecated-declarations", "-mmacosx-version-min=14.0", join(runner, "native", "macos-skill-snapshots.c"), "-o", helper],
   { stdio: "inherit" });
+  // Preserve the macOS 14 helper baseline when the native build host/SDK advances.
+  // Check the actual Mach-O load commands before embedding either helper in the SEA.
+  for (const binary of [leaseIoHelper, helper]) {
+    const info = execFileSync("/usr/bin/xcrun", ["vtool", "-show-build", binary], { encoding: "utf8" });
+    const minimums = [...info.matchAll(/^\s*minos\s+(\S+)/gm)].map((match) => match[1]);
+    if (minimums.length !== 1 || !/^14\.0(?:\.0)?$/.test(minimums[0])) {
+      throw new Error(`macOS helper must target 14.0: ${binary}\n${info}`);
+    }
+    console.log(`verified macOS helper deployment target 14.0: ${binary}`);
+  }
   assets["wollipog/macos-skill-snapshots"] = helper;
 }
 if (process.platform === "linux") assets["wollipog/linux-skill-rename"] = linuxRenameHelper;

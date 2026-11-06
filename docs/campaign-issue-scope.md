@@ -141,11 +141,14 @@ incompatible participants first. A participant outside the launch repository nee
 
 The scope holds `{ repository, number }` pairs (`issues`) across the campaign's repositories: a Full
 Control boundary's entries, or for Custom its list. A Custom campaign starts with every verified Location
-of its Project that its owner can reach, each inspected in its own path when the campaign is created, and
-any Location that fails is excluded with its reason. A Project with one repository records no list. The
-list grants nothing: a person still approves every Custom scope change, and a Location added later, or one
-unread at creation, joins only through an approved repository addition. A campaign created before this
-list keeps its launch repository and any its owner approved adding.
+of its Project that its owner added and can reach, each inspected in its own path when the campaign is
+created, and any of those that fails is excluded with its reason. As with an enable, nobody sees this
+survey, so another person's Location stays out, and an enable can't carry it in as one the campaign holds.
+A Project with one such repository records no list. The list grants nothing: a person still approves every
+Custom scope change, and any other Location joins only through an approved repository addition. A campaign
+created before this list keeps its launch repository and any its owner approved adding. A first-message
+limit outlives Full Control: back in Custom, a gate of a repository it leaves out is the person's, and no
+child is placed in such a repository, as far as the campaign knows the Location's repository.
 `owner/app#5` and `owner/api#5` are separate entries with separate authority. `repository` and
 `issueNumbers` stay as the launch repository's part for older clients and runners. A scope saved before
 #4118 reads as its numbers in its repository, at the same revision; nothing is rewritten and no
@@ -188,12 +191,16 @@ approval is invalidated. A legacy campaign with no saved repository stays unveri
 - **Narrowing the boundary (#4117).** Admitting a limited initial scope, by the check or by the owner,
   re-mints the boundary without the other repositories at a new revision, and revokes what was bound to
   the old one. It happens before anything is dispatched. The admitted scope records `repositoryLimits`, and
-  a later addition outside them is refused, whether it names a repository or not. The launch entry always
-  stays first, because the root runs there and the boundary requires it, so a limit to other repositories
-  keeps that entry beside them while its issues stay refused.
+  a later addition outside them is refused, whether it names a repository or not.
+- **A limit naming only other repositories.** The launch entry stays first, because the root runs there
+  and the boundary requires it, so the boundary lists it beside them. It grants no work: no child is placed
+  in it, none of its gates (a merge, a branch deletion, an issue closure, a follow-up publication) is the
+  Orchestrator's to decide, no campaign review runs on it, and no agent adds its issues. What remains is
+  the root's own process, which keeps running in that checkout under its provider's permissions, and the
+  owner's own decisions, which stay the owner's.
 - **Repositories the limit left out.** Their Locations show in Campaign Status as Available but Not in
   This Campaign. A Location of a repository with no entry never joins while a limit stands, whether the
-  owner added it, its runner reconnected, the owner used Include in Campaign, or a reviewed enable found it.
+  owner added it, its runner reconnected, the owner used Include in Campaign, or an enable found it.
   A re-authorization and an enable keep the limit. Only `campaign_repository_addition`, which the owner
   approves, gives that repository an entry, and its issues then pass the limit. Its other available
   Locations then wait for Include in Campaign, because the approval named one Location.

@@ -1,6 +1,6 @@
 import {
   CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_BOUNDARY_REPOSITORIES_MAX, PROJECT_LOCATION_INSPECTION_FAILURES, campaignBoundaryRepositories,
-  type CampaignAvailableLocation, type CampaignBoundaryRepository, type CampaignExcludedLocation, type ProjectLocationInspection, type ProjectLocationView, type SessionView,
+  type CampaignAvailableLocation, type CampaignBoundaryRepository, type CampaignPendingLocation, type CampaignExcludedLocation, type ProjectLocationInspection, type ProjectLocationView, type SessionView,
 } from "@wollipog/protocol";
 
 /** The repository whose listed Location a runner and workspace are, lower-cased, or null: an active
@@ -54,7 +54,10 @@ export interface CampaignProjectLocation { id: string; name: string }
  * newly verified Location is the one left out when the boundary is full.
  *
  * `limits` is what the owner's first message limited an existing campaign to: an enable inspects the
- * whole Project, but a verified Location of another repository is available and doesn't join. */
+ * whole Project, but a verified Location of another repository is available and doesn't join.
+ *
+ * `waiting` is what an enable never inspected, because its owner didn't add it: unless the campaign
+ * already holds it, it keeps waiting for Include in Campaign. */
 export function launchBoundaryRepositories(input: {
   launchRepository: string;
   launchLocationId: string | null;
@@ -62,7 +65,8 @@ export function launchBoundaryRepositories(input: {
   inspections: ReadonlyMap<string, ProjectLocationInspection>;
   carried?: readonly CampaignBoundaryRepository[] | undefined;
   limits?: readonly string[] | undefined;
-}): { repositories: CampaignBoundaryRepository[]; excluded: CampaignExcludedLocation[]; available: CampaignAvailableLocation[] } {
+  waiting?: readonly CampaignProjectLocation[] | undefined;
+}): { repositories: CampaignBoundaryRepository[]; excluded: CampaignExcludedLocation[]; available: CampaignAvailableLocation[]; pending: CampaignPendingLocation[] } {
   const launch = input.launchRepository.toLowerCase();
   const entries = new Map<string, CampaignBoundaryRepository>([[launch, { repository: launch, locationIds: [] }]]);
   const excluded: CampaignExcludedLocation[] = [];
@@ -116,5 +120,7 @@ export function launchBoundaryRepositories(input: {
     }
   }
   return { repositories: [...entries.values()], excluded: excluded.filter((item) => !placed.has(item.locationId)),
-    available: available.filter((item) => !placed.has(item.locationId)) };
+    available: available.filter((item) => !placed.has(item.locationId)),
+    pending: (input.waiting ?? []).filter((location) => !placed.has(location.id))
+      .map((location) => ({ locationId: location.id, name: location.name, reason: "added_by_other" as const })) };
 }
