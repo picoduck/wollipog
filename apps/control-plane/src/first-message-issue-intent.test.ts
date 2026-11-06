@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import fc from "fast-check";
 import { issueReferencesInMessage } from "./campaign-launch-admission.js";
-import { firstMessageTargetEpics, issueReferenceSpans, MAX_EXPANDED_REFERENCES, MAX_TARGET_EPICS } from "./first-message-issue-intent.js";
+import { digitRangeMembers, firstMessageTargetEpics, issueReferenceSpans, MAX_EXPANDED_REFERENCES, MAX_TARGET_EPICS } from "./first-message-issue-intent.js";
 
 const repo = "owner/repo";
 const references = (text: string, repository = repo) => issueReferencesInMessage(text, repository);
@@ -92,4 +92,14 @@ test("the parser reads each reference once, in text order, whatever surrounds it
     assert.ok(spans.every((r, i) => i === 0 || spans[i - 1]!.start <= r.start));
     assert.equal(references(text).includes(9), false, "another repository's reference is never read");
   }), { numRuns: 300 });
+});
+
+test("a Custom seed's bare-digit range floor reads only a range written after \"issue\", never a year span, chain or qualified range (#4282)", () => {
+  assert.deepEqual(digitRangeMembers("Claim and delegate issue 1201 through 1203."), [1201, 1202, 1203]);
+  assert.deepEqual(digitRangeMembers("Work issues 7-9, then issue 20 to 21."), [7, 8, 9, 20, 21]);
+  assert.deepEqual(digitRangeMembers("Released 2020-2025; see 3-5 for context."), [], "no year span or bare pair without the word");
+  assert.deepEqual(digitRangeMembers("Fix issues 1-3-5."), [], "a chain is no range");
+  assert.deepEqual(digitRangeMembers("Orchestrate other/repo#3-#5 and v1.2-3."), [], "a qualified range is another repository's");
+  assert.deepEqual(digitRangeMembers("Fix issues 5-3 and issue 1 to 200."), [], "backwards or 100+ ranges name nothing");
+  assert.deepEqual(digitRangeMembers("Issue 1-60 and issues 100-160."), [], "more than 100 members in all name nothing");
 });

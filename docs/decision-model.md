@@ -61,8 +61,10 @@ const outcome = await decisionRuntime.decide({
 Since #4282 a Full Control first message gets no call of this kind: the Orchestrator reads the
 owner's first message and proposes the scope, and the server's deterministic floors bind that
 proposal to the message (`docs/full-control-launch-preparation.md`). Full Control grants stored
-before then still read as below. A Custom campaign's epic seed still uses this reading until #4282's
-second slice moves it onto the Orchestrator's proposal.
+before then still read as below. Since #4282's third slice a Custom campaign's epic seed gets no call
+of this kind either: it is the constraint check of the Custom Orchestrator's first-message proposal
+(see [Custom Epic Seed](#custom-epic-seed-issue_scope_seed-4104)). Seed readings recorded before then
+still show in Campaign Status.
 
 `scope_grant` (#4102) reads a Full Control owner's exact first message and nothing else: no data
 fields, no tools, no repository or issue content. Its fields are `explicit`, `ranges` and `context`
@@ -222,36 +224,49 @@ and #4061 regression cases run through `scopeGrantCandidates` in `scope-grant.te
 
 ### Custom Epic Seed (`issue_scope_seed`, #4104)
 
-A Custom campaign's epic seed uses the same `scope_grant` reading in place of the
-`initialCampaignEpic` regular expression. The reading starts once the session is created, or once the
-person's first prompt is admitted when the campaign was launched without one, so neither adds a wait.
-A campaign whose first message was recorded before the seed existed gets the same reading of that
-message the first time it tries to delegate, its issue scope is read (#4258), or it is restarted
-(#4259).
+A Custom campaign's epic seed and first-message issues (#4104, #4259) come from propose-then-check
+since #4282, with the authority the server reading had and no new person step. The server reads
+nothing from the message. When the first message writes a digit string (`needsCampaignIssueScopeSeed`)
+the seed is `pending`, awaiting the Custom Orchestrator's proposal (`proposal: true`), and records who
+wrote the message (`author`: the owner's create request, the owner's first prompt, someone else, or a
+transcript with no author). Delegation is held meanwhile: `create_session` refuses with
+`seed_proposal_required` and tells the Orchestrator to propose. The seed starts once the session is
+created, or once the person's first prompt is admitted when the campaign was launched without one. A
+campaign whose first message was recorded before the seed existed gets the same pending seed the
+first time it tries to delegate, its issue scope is read (#4258), or it is restarted. A restart
+leaves a pending proposal seed waiting; only a pre-#4282 reading interrupted mid-flight becomes the
+owner's.
 
-Its outcome:
+The Orchestrator calls `request_campaign_issue_scope_change` with the issues the message asks for as
+additions (or none) and a structured `proposal`, every issue `owner_named`. `proposeCampaignSeedScope`
+in `apps/control-plane/src/sessions.ts` then runs:
 
-- Only a reading that names exactly one issue can seed it.
-- The same floors apply (`scopeGrantCandidates`, against the repository the runner reports).
-- The runner must read members for that issue: sub-issues or checklist members.
+1. Deterministic floors, with no model call and no runner read of an unwritten number: additions only;
+   every issue in the campaign repository; every number written in the person's exact message as
+   digits, inside a `#`-written range, or inside a bare-digit range written right after "issue" or
+   "issues" (`digitRangeMembers`), and not only as another repository's; an issue the Orchestrator
+   chose is refused (`seed_owner_named_only`). One proposed issue is read for its members; every
+   issue must be one the runner reads as an issue of the campaign repository.
+2. The typed constraint check (`scope_check`, below) against the person's message, always, as the
+   server reading always ran: an empty proposal and one that adds every referenced issue are checked
+   too, so the Orchestrator alone never decides that a number is only background or that no epic is
+   named. At most three distinct checks per seed whatever each proposes, and one proposal is checked
+   at a time (`seed_proposal_in_flight`).
+3. An admit grants exactly what the reading did. One issue with sub-issues or checklist members is the
+   seeded epic, which still waits for the person's scope approval or **Continue Without an Epic**.
+   Otherwise the issues become the campaign's `issueNumbers` with no person step, when the owner wrote
+   the message (only the owner's create request carries `issueNumbersSource: "human_launch_request"`),
+   and a v302 runner receives them for the live Orchestrator without a relaunch (#4269, see
+   `docs/campaign-issue-scope.md`). An admitted empty proposal seeds nothing and holds nothing.
 
-The same reading also grants the issues the first message names (#4259), in place of the
-`orchestratorIssueNumbersFromInitialPrompt` grammar, which is removed. When the reading names issues
-or ranges and no epic is seeded, every one must survive the floors and the runner must read each as an
-issue of the campaign repository; they then become the campaign's `issueNumbers`. A drop of any of
-them, or a runner older than the issue scope protocol, grants none and leaves the reading with the
-owner. So does a message the server can't show the campaign's owner wrote: only the owner's create
-request or first prompt grants issues. Nothing is granted at creation: the reading settles after
-`createSession` returns, and the campaign holds no issue numbers until then. A v302 runner then
-receives the granted numbers for the live Orchestrator without a relaunch (#4269, see
-`docs/campaign-issue-scope.md`); the delivery carries only what the reading granted.
-
-A failed or uncertain reading, or one the floors or the runner cannot confirm, falls back to today's
-Custom human scope approval with no seed. It never falls back to parsing the text. That is the
-typed, person-owned request: the owner approves a scope, or chooses **Continue Without an Epic**.
-The occurrence is recorded with the `issue_scope_seed` subject, so Campaign Status shows the reading
-under Decision Model Checks as **Epic Seed**, with the seed's state. See
-`docs/campaign-issue-scope.md` for the states.
+A refusal (a floor's or the check's) names why, and the seed stays pending while the Orchestrator
+revises. An uncertain or failed check, the fourth distinct check, an unstructured proposal, a root
+runner older than structured proposals or typed questions, a message the server can't confirm, or
+issues from a message the owner didn't write leave the seed with the owner: today's Custom human scope
+approval with no seed. It never falls back to parsing the text. That is the typed, person-owned
+request: the owner approves a scope, or chooses **Continue Without an Epic**. Every check is recorded
+with the `issue_scope_seed` subject, so Campaign Status shows it under Decision Model Checks as
+**Epic Seed**, with the seed's state. See `docs/campaign-issue-scope.md` for the states.
 
 ## Scope Review (`scope_review`, #4103)
 
@@ -310,6 +325,10 @@ anything checkable is asked the `scope_check` kind's typed questions (#4283) in 
   operations. The rationale is left out, so a repeat reads the recorded outcome. One set of additions
   gets at most three distinct checks per scope revision; past that it is the owner's. A check still
   pending with other inputs is waited for within the runtime's bound, then settled as timed out.
+- **Custom seed.** A Custom campaign's first-message proposal ([Custom Epic Seed](#custom-epic-seed-issue_scope_seed-4104))
+  is always checked, with no fast path, under a seed-wide key prefix
+  (`scope_check:issue_scope_seed:<root>:<message digest>:`), so its three distinct checks count every
+  proposal of that seed whatever issues it names, and one proposal is checked at a time.
 
 ## Audit and Usage
 

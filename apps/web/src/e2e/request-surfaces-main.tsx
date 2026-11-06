@@ -10,6 +10,7 @@ import {
   type PendingApproval,
   type SessionView,
   type AutomationCreationSnapshot,
+  type CampaignRepositoryAdditionSnapshot,
   type LocationSwitchSnapshot,
 } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
@@ -354,6 +355,20 @@ function automationCreationSession(): SessionView {
   return { ...base, title: "Automation Creation", pendingApproval: { ...base.pendingApproval!, title: "Create Automation Approval Required",
     context: { input: JSON.stringify(snapshot) }, workflowDecision: { ...base.pendingApproval!.workflowDecision!,
       category: "automation_creation", resourceSnapshot: snapshot, controllingSessionId: base.id, authority: "human" } } };
+}
+
+/** `scenario=repository-addition` (#4117): a campaign root asks its owner to add one inspected
+ * Project Location's repository for a recorded follow-up. */
+function repositoryAdditionSession(): SessionView {
+  const base = evidenceSession();
+  const snapshot: CampaignRepositoryAdditionSnapshot = { category: "campaign_repository_addition", locationId: "loc-docs",
+    locationName: "Docs Site", repository: "acme/docs", reason: "The follow-up fixes the install link in the documentation repository.",
+    work: { kind: "follow_up", id: "fu-docs", title: "Fix the Broken Install Link" } };
+  return { ...base, title: "Release Campaign", pendingApproval: { ...base.pendingApproval!, title: "Add Repository to Campaign Approval Required",
+    context: { toolName: "Typed Workflow Decision", input: JSON.stringify(snapshot) },
+    workflowDecision: { ...base.pendingApproval!.workflowDecision!, category: "campaign_repository_addition",
+      resourceKey: "campaign_repository_addition:acme/docs", resourceSnapshot: snapshot, controllingSessionId: base.id, sessionId: base.id,
+      authority: "human" } } };
 }
 
 /** `scenario=location-switch` (#4138): a regular session's repository mismatch, with `locations=2`
@@ -940,7 +955,7 @@ function ReadingKeys({ scrollRef }: {
 function Fixture() {
   const [keyboard, updateKeyboard] = useState(keyboardOpen);
   setKeyboard = updateKeyboard;
-  const [session, setSession] = useState(() => scenario === "automation-creation" ? automationCreationSession() : scenario === "location-switch" ? locationSwitchSession() :scenario === "issue-scope" ? issueScopeSession() : scenario === "follow-up-admission" ? followUpAdmissionSession() : scenario === "follow-up-rebinding" ? followUpAdmissionSession(true) : scenario === "issue-closure-refused" ? issueClosureSession(true) : scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
+  const [session, setSession] = useState(() => scenario === "automation-creation" ? automationCreationSession() : scenario === "location-switch" ? locationSwitchSession() : scenario === "repository-addition" ? repositoryAdditionSession() : scenario === "issue-scope" ? issueScopeSession() : scenario === "follow-up-admission" ? followUpAdmissionSession() : scenario === "follow-up-rebinding" ? followUpAdmissionSession(true) : scenario === "issue-closure-refused" ? issueClosureSession(true) : scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
     ? continuationSession()
     : scenario === "held" || scenario === "both"
     ? heldCampaignSession()

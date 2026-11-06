@@ -132,6 +132,12 @@ test("#4062 a Full Control merge is the Orchestrator's only while every issue it
     const custom = { ...root, orchestratorPolicy: { ...root.orchestratorPolicy!, control: undefined },
       parentControlPolicy: { revision: 1, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, pr_merge: "orchestrator" as const } } };
     assert.deepEqual(evaluate(custom, merge({ intendedClosures: ["picoduck/wollipog#3903"] }), 241), { owner: "orchestrator", reason: "custom_owner" });
+    // #4119: every reported check stands in for required ones; no checks at all is the person's in both modes.
+    const reported = merge({ checksBasis: "all_reported" });
+    const unchecked = merge({ checksBasis: "all_reported", requiredChecks: { headSha: head, status: "passed", checkedAt: 1, checks: [] } });
+    assert.deepEqual(evaluate(root, reported), delegated);
+    assert.deepEqual(evaluate(root, unchecked), { owner: "human", reason: "no_checks" });
+    assert.deepEqual(evaluate(custom, unchecked), { owner: "human", reason: "no_checks" });
   } finally { h.db.close(); }
 });
 

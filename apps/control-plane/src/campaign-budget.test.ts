@@ -249,8 +249,13 @@ test("a run on a runner without campaign budget admission is refused with the sh
   try {
     assert.ok(h.enable(allowance({costUsd:100})).ok);
     h.db.registerRunner({...h.metadata,runnerId:"older"},10,217);
-    // Same campaign Project, so the run reaches the worker gate rather than Location admission.
-    h.db.addProjectLocation(h.db.getSession("root")!.projectId!,{runnerId:"older",workspaceId:"w"});
+    // Same campaign Project, and a Location of its boundary (#4119), so the run reaches the worker
+    // gate rather than Location admission or placement.
+    const older=h.db.addProjectLocation(h.db.getSession("root")!.projectId!,{runnerId:"older",workspaceId:"w"});
+    const policy=h.db.getSession("root")!.orchestratorPolicy!;
+    if(policy.control?.mode!=="full_control") throw new Error("fixture control expected");
+    policy.control.boundary.repositories=[{repository:policy.control.boundary.repository,locationIds:[older.id]}];
+    h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
     const members=h.db.campaignBudgets.members("root").length;
     const refused=h.svc.createRun({runnerId:"older",workspaceId:"w",agentIds:["claude"],task:"Implement #2936",config:{model:"claude-opus-5-5"}},{parentSessionId:"root"});
     assert.equal(refused.status,409);

@@ -51,6 +51,19 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck }: {
       return <AutomationCreationSummary snapshot={snapshot} />;
     case "location_switch":
       return <LocationSwitchSummary snapshot={snapshot} />;
+    case "campaign_repository_addition":
+      // A repository addition (#4117): the Location and the repository it verified as come from the
+      // server's inspection; the reason is the Orchestrator's own words, shown as such.
+      return <section aria-label="Add Repository Details">
+        <dl className="facts">
+          <div><dt>Location</dt><dd>{snapshot.locationName}</dd></div>
+          <div><dt>Repository</dt><dd>{snapshot.repository}</dd></div>
+          <div><dt>{snapshot.work.kind === "follow_up" ? "Follow-Up" : "Work Item"}</dt><dd>{snapshot.work.title}</dd></div>
+          <div><dt>Orchestrator's Reason</dt><dd><q>{snapshot.reason}</q></dd></div>
+        </dl>
+        <p>Approving adds this repository to the campaign, so the Orchestrator can work in it like its other repositories.
+          Declining changes nothing, and the work that needs it stays blocked on you.</p>
+      </section>;
     case "implementation_question":
       return <>
         <p>{snapshot.question}</p>

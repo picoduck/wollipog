@@ -980,21 +980,36 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      one-repository campaigns are unchanged for older runners. (This change first claimed 290,
 //      293, 299, 301, 304, 305 and 309, which no released version uses; 292 and 300 are claimed by
 //      open pull requests.)
-// 316: an Orchestrator's scope proposal names issues in any boundary repository (#4118). Each other
+// 315: merges in repositories without required checks (#4119). A GitHub merge preflight may ask
+//      for `checks`; the runner then also reads every check reported for the head, how many
+//      GitHub marks required, and whether its merge state is clean, so the control plane can
+//      verify a `pr_merge` snapshot whose `checksBasis` is `all_reported`. A pre-v315 runner is
+//      never asked, and the basis is refused for it. (This change first claimed 292, which no
+//      released version uses; 314 is claimed by an open pull request.)
+// 317: campaign repository additions (#4117). A campaign root asks its owner to add one Project
+//      Location's repository with request_campaign_repository_addition (`wollipog campaign
+//      repository-addition`); the control plane inspects the Location first and creates a
+//      human-owned `campaign_repository_addition` decision, and the root carries out the exact
+//      approved Location with execute_campaign_repository_addition. Older runners and control
+//      planes refuse the tools by name. (This change first claimed 290, 292, 294, 300 and 314, which
+//      no released version uses; 316 is claimed by an open pull request.)
+// 318: an Orchestrator's scope proposal names issues in any boundary repository (#4118). Each other
 //      repository's issues are read through one of its own Locations: `campaign_launch_inspect` takes
-//      `facts` and returns `issueFacts`, sent only to a v316 runner; an older one is refused by name
-//      and nothing changes. `proposal.repositoryName` is the repository the owner's message limits the
-//      work to, which the server resolves against the boundary. A v316 runner sends it only to a v316
-//      control plane; older dashboards show the launch repository for an issue that names another.
-//      (314 and 315 are claimed by open pull requests.)
-// 317: a campaign's epics are repository-qualified (#4118). `issueAuthority.otherEpics` holds the
+//      `facts` and returns `issueFacts`, sent only to a v318 runner; an older one is refused by name
+//      and nothing changes. `proposal.repositoryName` is the repository the Orchestrator says the owner's
+//      message limits the work to, which the server resolves against the boundary and the constraint
+//      check judges. A v318 runner sends it only to a v318 control plane; older dashboards show the
+//      launch repository for an issue that names another. (This change first claimed 316, which no
+//      released version uses.)
+// 319: a campaign's epics are repository-qualified (#4118). `issueAuthority.otherEpics` holds the
 //      boundary's other repositories' epics and is stripped for an older runner, which keeps reading
 //      `epics` as the launch repository's. `lineage.epic` and `get_campaign_issue_scope` take an optional
 //      `repository`. `campaign_launch_inspect` takes `epic` and returns `candidates`, sent only to a
-//      v317 runner; an older one is refused by name and nothing changes. A v317 runner sends a
-//      repository only to a v317 control plane. A Full Control launch's `otherIssues` are read through a
-//      Location of each repository with today's plain issue read.
-export const PROTOCOL_VERSION = 317;
+//      v319 runner; an older one is refused by name and nothing changes. A v319 runner sends a
+//      repository only to a v319 control plane. A Full Control launch's `otherIssues` are read through a
+//      Location of each repository with today's plain issue read. (This change first claimed 317, which
+//      campaign repository additions took.)
+export const PROTOCOL_VERSION = 319;
 
 export * from "./campaign-authority.js";
 export * from "./decision-questions.js";
@@ -1114,6 +1129,7 @@ export const SESSION_NAMING_SUPERVISION_MARGIN_MS = SESSION_NAMING_TRANSPORT_MAR
 export { buildConversationHandoff, handoffDestinationError, inPlaceHandoffTurns } from "./conversation-handoff.js";
 export * from "./automation-messages.js";
 export * from "./location-switch.js";
+export * from "./campaign-repository-addition.js";
 export { PROMPT_TITLE_MAX, titleFromPrompt } from "./session-title.js";
 export { plainTextPreview } from "./plain-text-preview.js";
 export * from "./campaign-work-ledger.js";
@@ -1581,6 +1597,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   capacityLockDiagnostics: 137,
   /** v288 validates a Full Control boundary's `repositories` list (#4117). */
   campaignRepositoryBoundary: 288,
+  /** v315 reads a pull request's reported checks in the GitHub merge preflight (#4119). */
+  githubMergeChecksBasis: 315,
   /** v291 reports issue facts (kind, state, labels, assignees) for selection scope (#4103). */
   campaignIssueFacts: 291,
   /** v302 (#4269): a `campaign_issue_scope` `grant_issue_numbers` operation hands the issue numbers a
@@ -1591,10 +1609,12 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   campaignControlRevision: 310,
   /** v313 synchronizes its own repository's part of a multi-repository issue scope (#4118). */
   repositoryQualifiedIssueScope: 313,
-  /** v316 reads a Location's issue facts for a repository-qualified scope proposal (#4118). */
-  repositoryQualifiedProposals: 316,
-  /** v317 reads `issueAuthority.otherEpics` and resolves an epic's members through a Location (#4118). */
-  repositoryQualifiedEpics: 317,
+  /** v317 asks for and carries out a campaign repository addition (#4117). */
+  campaignRepositoryAddition: 317,
+  /** v318 reads a Location's issue facts for a repository-qualified scope proposal (#4118). */
+  repositoryQualifiedProposals: 318,
+  /** v319 reads `issueAuthority.otherEpics` and resolves an epic's members through a Location (#4118). */
+  repositoryQualifiedEpics: 319,
 } as const;
 
 /* ========================================================================== */
@@ -2989,8 +3009,12 @@ export type DelegatableWorkflowDecisionCategory = typeof WORKFLOW_DECISION_CATEG
 /** `location_switch` (#4138): a regular session's request to continue its task in another Project
  * Location of the repository it belongs to. Created only through request_location_switch; only the
  * session's owner decides it, and the requester executes the exact approved target. */
+/** `campaign_repository_addition` (#4117): an Orchestrator's request to add one Project Location's
+ * repository to its campaign. Created only through request_campaign_repository_addition after the
+ * server inspects that Location; always the campaign owner's, in Full Control and Custom alike, and
+ * the Orchestrator carries out only the exact approved Location. */
 export type WorkflowDecisionCategory = DelegatableWorkflowDecisionCategory | "issue_closure" | "campaign_issue_scope" | "automation_creation" |
-  "campaign_follow_up_admission" | "owner_decision" | "location_switch";
+  "campaign_follow_up_admission" | "owner_decision" | "location_switch" | "campaign_repository_addition";
 export type WorkflowDecisionAuthority = "human" | "orchestrator";
 
 export type ParentControlDecisionPolicy = Record<DelegatableWorkflowDecisionCategory, WorkflowDecisionAuthority>;
@@ -3172,6 +3196,9 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   pendingLocations?: import("./project-location-inspection.js").CampaignPendingLocation[];
   /** The Locations that joined the boundary after launch, newest last, bounded (#4117). */
   locationJoins?: import("./project-location-inspection.js").CampaignLocationJoin[];
+  /** A Custom campaign's repositories (#4117): its own Location's repository first, then those its
+   * owner approved adding. Full Control keeps them in its authority boundary instead. */
+  repositories?: import("./campaign-authority.js").CampaignBoundaryRepository[];
   /** The epic a Custom campaign's first message names, once its seed (below) found one; a proposal
    * seed, never authority. */
   issueScopeProposalEpic?: number;
@@ -5461,6 +5488,12 @@ export interface CampaignIssueScopeSeed {
   /** SHA-256 of the exact first message the seed reads. */
   messageDigest: string;
   occurrenceId?: string;
+  /** #4282: a pending seed awaits the Custom Orchestrator's proposal (`proposal: true`), checked
+   * against the person's own message; one without it was a server reading in flight before #4282. */
+  proposal?: true;
+  /** Who wrote the first message, which decides what an admitted proposal may grant (#4259): only
+   * the owner's own launch request or message grants issue numbers. */
+  author?: "launch_request" | "owner" | "other" | "unattributed";
 }
 
 export interface CampaignIssueScope {
@@ -5921,6 +5954,7 @@ export const OWNER_DECISION_LIMITS = { question: 4000, material: 8000, minOption
 export type WorkflowDecisionResourceSnapshot =
   | AutomationCreationSnapshot
   | import("./location-switch.js").LocationSwitchSnapshot
+  | import("./campaign-repository-addition.js").CampaignRepositoryAdditionSnapshot
   | GithubIssueClosureSnapshot
   | CampaignIssueScopeSnapshot
   | CampaignFollowUpAdmissionSnapshot
@@ -5960,6 +5994,11 @@ export type WorkflowDecisionResourceSnapshot =
        * merge only when these are exactly the issues the forge would close. Absent when it closes
        * none, so earlier digests are unchanged. */
       intendedClosures?: string[];
+      /** GitHub only (v315, #4119): the pull request's repository requires no checks, so
+       * `requiredChecks.checks` lists every check reported for the head instead, each passing,
+       * with GitHub's merge state clean. With no checks at all the merge stays a person's
+       * (`no_checks`). Absent for the required-checks basis, so earlier digests are unchanged. */
+      checksBasis?: "all_reported";
     }
   | {
       /** #3369: more review rounds for one epoch of the requester's review run on this pull
@@ -6117,6 +6156,8 @@ export interface WorkflowDecisionView {
   automationCreationResult?: AutomationCreationResult;
   /** (#4138) Where an approved Location switch continued the task. */
   locationSwitchResult?: import("./location-switch.js").LocationSwitchResult;
+  /** (#4117) What an approved repository addition did once its Orchestrator carried it out. */
+  campaignRepositoryAdditionResult?: import("./campaign-repository-addition.js").CampaignRepositoryAdditionResult;
   /** v242 (#3713): what the child's runner read from GitHub when a GitHub merge was requested.
    * Absent when the runner predates the check, so the closures it would make are unknown. */
   closingReferenceCheck?: PullRequestClosingReferenceCheck;
@@ -10618,6 +10659,19 @@ export interface GithubMergePreflightMessage {
   repository: string;
   pullRequest: number;
   headSha: string;
+  /** v315 (#4119): also read the head's checks, for a snapshot whose `checksBasis` is `all_reported`. */
+  checks?: true;
+}
+
+/** v315 (#4119): what GitHub reports for a pull request's head: every check, how many it marks
+ * required, and whether its merge state is clean. */
+export interface PullRequestChecksRead {
+  /** Reported checks GitHub marks required for this pull request. */
+  required: number;
+  /** Every check reported for the head, at most 100, by name. */
+  reported: Array<{ name: string; state: "passed" | "pending" | "failing" }>;
+  /** GitHub's `mergeStateStatus` is `CLEAN`. */
+  clean: boolean;
 }
 
 /** `refusal` is set when `ok` is false: `stale_head` (the pull request is not open at the snapshot's
@@ -10631,6 +10685,8 @@ export interface GithubMergePreflightResultMessage {
   refusal?: "stale_head" | "unavailable";
   reason?: string;
   check?: PullRequestClosingReferenceCheck;
+  /** v315: present when the request asked for `checks` and the read succeeded. */
+  checks?: PullRequestChecksRead;
 }
 
 /** v295 (#3762): before a GitLab `pr_merge` is requested or armed, the child's runner reads the open

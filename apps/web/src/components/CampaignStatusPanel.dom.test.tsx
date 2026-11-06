@@ -1605,6 +1605,34 @@ test("a decision an owner rule kept is waiting for you with the rule's source an
   }
 });
 
+test("an Orchestrator's request to add a repository waits for the owner, who never kept it (#4117)", async () => {
+  harnessRequests.descendants = [pendingRequest("s_root", "occ_addition")];
+  const { client } = fakeClient(() => ({ revision: 1, items: [], nextCursor: null }), {});
+  const root = session({
+    orchestratorCampaign: campaignProjection(workSummary(), {
+      status: "waiting_human",
+      ownerDecisions: { total: 1, items: [
+        { occurrenceId: "occ_addition", sessionId: "s_root", category: "campaign_repository_addition",
+          summary: "Add picoduck/docs to the campaign", handedOff: false, createdAt: NOW },
+      ] },
+    }),
+  });
+  const panel = await mount({ initial: root, client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    const section = [...panel.container.querySelectorAll("section")]
+      .find((candidate) => candidate.querySelector("h3")?.textContent === "Waiting for You")!;
+    assert.ok(section, "Waiting for You is shown");
+    assert.match(section.querySelector(".section-note")!.textContent!, /^Only you can make this decision\./u);
+    assert.equal(section.querySelector("dt")!.textContent, "Add Repository");
+    assert.match(section.querySelector("dd")!.textContent!, /^Add picoduck\/docs to the campaignAsked by the Orchestrator/u);
+    assert.ok(section.querySelector("button[aria-label='Open Request: Add picoduck/docs to the campaign']"));
+  } finally {
+    await panel.dispose();
+  }
+});
+
 /** A recovery projection whose automation is held with `automation`, plus any records. */
 function heldRecovery(automation: NonNullable<OrchestratorCampaignProjection["recovery"]>["automation"],
   records: CampaignRecoveryRecord[] = []): OrchestratorCampaignProjection["recovery"] {

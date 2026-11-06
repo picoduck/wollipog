@@ -105,7 +105,7 @@ export interface CampaignLaunchInspectionMessage {
    * `locationIssueFacts`, and an older one refuses it as invalid. */
   facts?: true;
   /** Resolve this epic's members as `candidates` (#4118), with no `issueNumbers`: sent only to a
-   * v317 runner, and an older one refuses it as invalid. */
+   * v319 runner, and an older one refuses it as invalid. */
   epic?: number;
 }
 

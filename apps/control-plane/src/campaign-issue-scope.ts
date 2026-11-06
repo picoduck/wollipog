@@ -45,8 +45,8 @@ export function participantScope(db: ControlPlaneDb, root: SessionView, member: 
 export function repositoryOutsideBoundary(repository: string): { status: 409; error: string; errorDetails: { code: "repository_outside_boundary"; repository: string } } {
   return { status: 409, errorDetails: { code: "repository_outside_boundary", repository },
     error: `${repository} is not one of this campaign's repositories, so its issues can't join the scope. If the campaign's Project ` +
-      "has a Location of that repository, ask the campaign owner to include it in the campaign, then retry this scope change. " +
-      "Otherwise report that the work needs a repository with no Location in this Project." };
+      "has a Location of that repository, ask the campaign's owner to add it with request_campaign_repository_addition, then retry " +
+      "this scope change once the addition is carried out. Otherwise report that the work needs a repository with no Location in this Project." };
 }
 
 /** GitLab issue closure and scope (#3539) need every participating Orchestrator runner at v249: an

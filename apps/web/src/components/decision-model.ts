@@ -120,7 +120,8 @@ const DECISION_MODEL_CHECK_KINDS: ReadonlySet<DecisionKind> = new Set<DecisionKi
 
 /**
  * Whether Campaign Status lists a decision in Decision Model Checks: one of the kinds above, or a
- * Custom campaign's epic-seed reading, which is a scope grant on the `issue_scope_seed` surface. The
+ * Custom campaign's retired epic-seed reading, a scope grant on the `issue_scope_seed` surface (since
+ * #4282 the seed is the scope check of the Orchestrator's first-message proposal, listed above). The
  * Decision Model section lists every other decision, such as Full Control's scope grant, so each
  * decision appears in exactly one list (#4265).
  */

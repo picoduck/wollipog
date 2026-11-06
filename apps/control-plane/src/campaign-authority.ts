@@ -29,7 +29,7 @@ export function authorizeFullControl(
 }
 
 /** The runner's diagnostic copy of a campaign's control. A pre-v288 runner rejects a boundary with
- * a `repositories` list (#4117), and a pre-v317 one an issue authority with `otherEpics` (#4118), so
+ * a `repositories` list (#4117), and a pre-v319 one an issue authority with `otherEpics` (#4118), so
  * each receives the boundary without them, which names the same first repository and its epics. The
  * server keeps and enforces the full boundary. */
 export function campaignControlForRunner(control: CampaignControl, protocolVersion: number | null | undefined): CampaignControl {
@@ -112,14 +112,17 @@ export function campaignLaunchRepository(root: Pick<SessionView, "orchestratorPo
 }
 
 /** The repositories the campaign's issue scope may hold, the launch repository first (#4118): a
- * Full Control boundary's entries, each with its verified Locations in order. A Custom campaign
- * stores no repository list yet, so its one entry is the launch repository its scope recorded. */
+ * Full Control boundary's entries, each with its verified Locations in order. A Custom campaign's
+ * entries are the launch repository its scope recorded and the list its owner's approved additions
+ * grew (#4117). */
 export function campaignScopeRepositories(root: Pick<SessionView, "orchestratorPolicy">): CampaignBoundaryRepository[] {
   const control = root.orchestratorPolicy?.control;
   if (control?.mode === "full_control") return campaignBoundaryRepositories(control.boundary)
     .map((entry) => ({ repository: entry.repository.toLowerCase(), locationIds: entry.locationIds }));
   const launch = campaignLaunchRepository(root);
-  return launch ? [{ repository: launch, locationIds: [] }] : [];
+  const listed = (root.orchestratorPolicy?.repositories ?? []).map((entry) => ({ repository: entry.repository.toLowerCase(), locationIds: entry.locationIds }));
+  const own = listed.find((entry) => entry.repository === launch);
+  return [...(launch ? [own ?? { repository: launch, locationIds: [] }] : []), ...listed.filter((entry) => entry.repository !== launch)];
 }
 
 /** Under Full Control the issue scope bounds what the Orchestrator may deliver (#4062): a child is
@@ -153,7 +156,12 @@ function mergeClosureScope(policy: SessionView["orchestratorPolicy"], protocol: 
 
 export function evaluateCampaignAuthority(
   controller: Pick<SessionView, "id" | "driver" | "orchestratorPolicy" | "parentControl" | "parentControlPolicy"> & Partial<Pick<SessionView, "runnerId" | "workspaceId">>,
-  requester: Pick<SessionView, "id" | "driver"> & { repositoryRoot?: string } & Partial<Pick<SessionView, "runnerId" | "workspaceId">>,
+  requester: Pick<SessionView, "id" | "driver"> & Partial<Pick<SessionView, "runnerId" | "workspaceId">> & {
+    repositoryRoot?: string;
+    /** #4119: `campaignBoundaryRepositoryAt` for the requester's runner and workspace, resolved by
+     * the server. Needed only away from the controller's own place; absent there means none. */
+    boundaryRepository?: string | null;
+  },
   protocol: number | null | undefined,
   request: PendingApproval | WorkflowDecisionResourceSnapshot,
   policy: ParentControlPolicy = controller.parentControlPolicy ?? { revision: 0, decisions: {
@@ -187,17 +195,32 @@ export function evaluateCampaignAuthority(
       runnerSupportsProtocol(protocol, "fullControlReviewExtensions") &&
       runnerSupportsProtocol(controllerProtocol, "fullControlReviewExtensions") ? { reviewExtensionCap } : {}),
     ...(snapshot?.category === "implementation_question" && credentialScreen ? { credentialScreen } : {}) });
-  const repositoryBound = !pending || (controller.runnerId !== undefined && requester.runnerId === controller.runnerId &&
-    controller.workspaceId !== undefined && controller.workspaceId !== null && requester.workspaceId === controller.workspaceId);
+  // The boundary repository whose Location the requester runs in (#4119): the controller's own
+  // place is the first entry's; any other place is the caller's server-resolved Location lookup.
+  const atController = controller.runnerId !== undefined && requester.runnerId === controller.runnerId &&
+    controller.workspaceId !== undefined && controller.workspaceId !== null && requester.workspaceId === controller.workspaceId;
+  const placeRepository = !full ? null : atController ? control.boundary.repository.toLowerCase() : requester.boundaryRepository?.toLowerCase() ?? null;
+  // Every request, typed or not: a participant whose Location left the boundary owns nothing.
+  const repositoryBound = placeRepository !== null;
+  // A pull request's gates belong to the requester's own repository: a child in one boundary
+  // repository's Location never merges, extends or deletes another repository's pull request.
+  const pullRequestGate = snapshot?.category === "pr_merge" || snapshot?.category === "merged_branch_deletion" ||
+    snapshot?.category === "review_round_extension";
+  const pullRequestBound = !full || !pullRequestGate || placeRepository === snapshot.repository.toLowerCase();
   const issueOperation = snapshot?.category === "campaign_issue_scope" || snapshot?.category === "issue_closure" ||
     snapshot?.category === "follow_up_issue_publication" && full && control.boundary.issueAuthority;
   const issueBound = !issueOperation || !full || !control.boundary.issueAuthority || Boolean(snapshot && "issueAdmission" in snapshot &&
     snapshot.issueAdmission?.boundaryRevision === control.boundary.revision && (protocol ?? 0) >= 217 && (controllerProtocol ?? 0) >= 217);
-  if (full && (!campaignBoundaryCurrent({ ...controller, parentControlPolicy: policy }) || !repositoryBound || !issueBound)) {
+  if (full && (!campaignBoundaryCurrent({ ...controller, parentControlPolicy: policy }) || !repositoryBound || !pullRequestBound || !issueBound)) {
     // A stale boundary authorizes nothing, including the server's own Full Control declines.
     const { requestClass: _requestClass, disposition: _disposition, ...rest } = evaluated;
     return { ...rest, owner: "human", basis: "human_required",
       reason: repositoryBound && closureProofIncomplete(controller, policy, protocol, controllerProtocol, snapshot) ? "closure_proof_incomplete" : "outside_boundary" };
+  }
+  // #4119: nothing reported is never green, so a merge citing no checks is the person's in every mode.
+  if (snapshot?.category === "pr_merge" && snapshot.checksBasis === "all_reported" && !snapshot.requiredChecks.checks.length) {
+    const { requestClass: _requestClass, disposition: _disposition, ...rest } = evaluated;
+    return { ...rest, owner: "human", basis: "human_required", reason: "no_checks" };
   }
   const closures = full && evaluated.owner === "orchestrator" && snapshot?.category === "pr_merge"
     ? mergeClosureScope(controller.orchestratorPolicy, protocol, snapshot) : null;

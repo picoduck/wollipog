@@ -1254,10 +1254,15 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
         requiredChecks: { type: "object", properties: {
           headSha: { type: "string", pattern: "^[0-9a-f]{40}$" }, status: { const: "passed" },
           checkedAt: { type: "integer", minimum: 1 },
-          checks: { type: "array", minItems: 1, items: { type: "object", properties: {
+          checks: { type: "array", items: { type: "object", properties: {
             name: { type: "string" }, state: { const: "passed" }, url: { type: "string" },
           }, required: ["name", "state"], additionalProperties: false } },
         }, required: ["headSha", "status", "checkedAt", "checks"], additionalProperties: false },
+        // GitHub only (#4119): the repository requires no checks, so checks lists every reported check.
+        checksBasis: { const: "all_reported",
+          description: "GitHub only, when GitHub reports no required checks for the pull request: requiredChecks.checks then lists " +
+            "every check reported for the head, each passing, with the merge state clean; the runner verifies it. A head with no " +
+            "checks at all lists none, and its merge is the person's. Omit it whenever required checks exist." },
         // GitLab only, and then required (#3602): repository is <gitlab-host>/group/project, pullRequest the IID.
         mergeMethod: { type: "string", enum: ["merge_train", "merge"] },
         squash: { type: "boolean" },
@@ -1353,12 +1358,14 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "prepare_descendant_ui_evidence_review", "get_descendant_ui_evidence_review",
   "reconcile_workflow_decision", "execute_workflow_decision", "withdraw_workflow_decision", "list_workflow_decisions",
   "request_owner_decision", "hand_workflow_decision_to_owner",
+  "request_campaign_repository_addition", "get_campaign_repository_addition", "execute_campaign_repository_addition",
   "wait_session", "wait_pull_request", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "list_steering_attempts", "get_steering_attempt", "resolve_steering_attempt", "handoff_session_result",
   "stop_session", "stop_background_job", "release_queue_hold", "restart_session", "archive_session", "unarchive_session", "set_guardrails", "create_worktree",
   "attach_worktree", "select_worktree", "discard_worktree", "delete_worktree_refs"]);
 const PARENT_CONTROL_TOOLS = new Set(["get_campaign_issue_scope", "request_campaign_issue_scope_change", "request_github_issue_closure", "close_github_issue",
   "request_owner_decision", "hand_workflow_decision_to_owner",
+  "request_campaign_repository_addition", "get_campaign_repository_addition", "execute_campaign_repository_addition",
   "allocate_campaign_budget",
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child", ...CAMPAIGN_WORK_LEDGER_TOOLS,
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
@@ -1421,7 +1428,58 @@ async function locationSwitchCall(deps: McpDeps, method: "GET" | "POST", suffix:
   return response.ok ? textResult(response.data) : errorResult(response.message);
 }
 
+/** A campaign root's request to add a Project repository, and carrying out its owner's approval (#4117). */
+async function repositoryAdditionCall(deps: McpDeps, method: "GET" | "POST", suffix: string, body?: Json): Promise<ToolResult> {
+  if (!deps.selfSessionId) return errorResult("A repository addition requires a Wollipog session identity");
+  const compatibility = deps.controlPlaneProtocolVersion === undefined ? await cpFetch(deps, "GET", "/api/compatibility") : null;
+  const version = deps.controlPlaneProtocolVersion ?? (compatibility?.ok ? compatibility.data?.protocolVersion : undefined);
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryAddition;
+  if (!Number.isSafeInteger(version) || version < required) {
+    return controlPlaneUpdateRequired("Adding a repository to a campaign needs a newer version of Wollipog. Update Wollipog; until then, " +
+      "record the work that needs it as blocked on the campaign's owner.", required, version);
+  }
+  const response = await cpFetch(deps, method,
+    `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/repository-additions${suffix}`,
+    body, method === "POST" ? deps.requestTimeoutMs ?? 90_000 : undefined);
+  return response.ok ? textResult(response.data) : errorResult(response.message);
+}
+
 export const TOOLS: McpTool[] = [
+  {
+    name: "request_campaign_repository_addition",
+    description: "Ask your campaign's owner to add one Location of the campaign's Project, and so its repository, to the campaign, " +
+      "when recorded work needs a Project repository the campaign does not cover (most often a follow-up in another repository). " +
+      "Name the Location by id (list it with get_campaign or the Project), a one-line reason, and the recorded follow-up or work item " +
+      "that needs it. The control plane inspects that Location first; one outside the Project or failing inspection is refused before " +
+      "the owner sees it. The decision is always the owner's, in Full Control and Custom: nobody acting for the campaign can approve it. " +
+      "A pending request for the same repository is reused, and a declined one is not asked again for the same work. You cannot create " +
+      "a Location: when no Location of the repository exists, report that instead. Then end your turn; the owner's answer resumes you.",
+    inputSchema: { type: "object", properties: {
+      requestId: { type: "string", minLength: 1, maxLength: 256 },
+      locationId: { type: "string", minLength: 1, maxLength: 256, description: "The Project Location to add, by id." },
+      reason: { type: "string", minLength: 1, maxLength: 1000, description: "One line the owner reads, quoted as your words: why the campaign needs this repository." },
+      work: { type: "object", properties: {
+        kind: { type: "string", enum: ["follow_up", "work_item"] },
+        id: { type: "string", minLength: 1, maxLength: 256, description: "The recorded follow-up's id or the work item's id." },
+      }, required: ["kind", "id"], additionalProperties: false },
+    }, required: ["requestId", "locationId", "reason", "work"], additionalProperties: false },
+    handler: async (args, deps) => repositoryAdditionCall(deps, "POST", "", args),
+  },
+  {
+    name: "get_campaign_repository_addition",
+    description: "Read one of your campaign's repository-addition requests: the Location, the repository it verified as, the owner's " +
+      "answer and, once carried out, the boundary revision it joined at. Nothing is approved or added.",
+    inputSchema: { type: "object", properties: { occurrenceId: { type: "string", minLength: 1, maxLength: 256 } }, required: ["occurrenceId"], additionalProperties: false },
+    handler: async (args, deps) => repositoryAdditionCall(deps, "GET", `/${encodeURIComponent(args.occurrenceId)}`),
+  },
+  {
+    name: "execute_campaign_repository_addition",
+    description: "Carry out a repository addition your campaign's owner approved: the control plane inspects the exact approved Location " +
+      "again and adds its repository to the campaign at a new boundary revision. Supply the occurrenceId and resourceDigest of the " +
+      "request; no Location can be supplied. Read get_campaign afterwards for the new boundary.",
+    inputSchema: { type: "object", properties: { occurrenceId: { type: "string", minLength: 1, maxLength: 256 }, resourceDigest: { type: "string", pattern: "^[0-9a-f]{64}$" } }, required: ["occurrenceId", "resourceDigest"], additionalProperties: false },
+    handler: async (args, deps) => repositoryAdditionCall(deps, "POST", `/${encodeURIComponent(args.occurrenceId)}/execute`, { resourceDigest: args.resourceDigest }),
+  },
   {
     name: "request_location_switch",
     description: "Ask your person to continue this task in another Location of the same Project when the task belongs to another " +
@@ -1504,7 +1562,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_campaign_issue_scope_change",
-    description: "Propose exact repository-qualified issue additions/removals at the current scope revision, in any of the campaign's repositories; the same number in two repositories is two issues. Each repository is verified through one of its own online Locations. A repository outside the campaign is refused with repository_outside_boundary before any runner call. Under Full Control whose owner's first message started the campaign, you read that message and propose its scope (#4282): your first campaign action is the initial proposal, and nothing is dispatched until it is admitted. A proposal may add issues in any of the campaign's repositories: a bare #N in the message means the launch repository, so an issue in another repository counts as owner-named only when the message writes owner/repo#N or its URL. When the message limits the work to one repository, send its words as `repositoryName`. Send the issues as additions with `proposal`: for each issue whether the owner named it (owner_named: its number is in the owner's message) or you chose it (orchestrator_chosen), with a one-line rationale; `requestedCount`, the number the owner asked for or null; `constraints`, each checkable limit you read (\"open\", \"UI only\", \"skip anything labeled security\"), never ranking criteria such as priority, which are your call; and `withheldOperations`, operations the message rules out (\"don't merge\" withholds pr_merge). A task that needs no issues proposes no additions. Deterministic floors refuse, naming the issue: an owner-named number the message doesn't write, an issue outside the campaign's repositories, a pull request, a closed issue, one already in scope or held by another campaign, one past an explicit Maximum Issues, and one with a Human Required label; revise and propose again. A proposal of only owner-named issues the message writes as issue references (#12, owner/repo#12 or a URL), with nothing else to check, returns an Orchestrator-owned change: resolve it with resolve_descendant_workflow_decision and your own session ID. Anything else goes to the Decision Model's constraint check, which checks only what the owner's words allow, never priority: its admit returns an Orchestrator-owned change, its refusal (constraint_check_refused) names the question and issue so you revise, and when it is uncertain or fails the proposal becomes the owner's one approval, asked as an Owner Question; proposing the same issues again returns the recorded outcome. A stated count must be written in the message, and chosen issues stay within it (3 when none is stated; later additions within the admitted count). Custom requires a human. A human-established Full Control issue boundary admits verified epic or exact published follow-up lineage within its limits. When the owner's first message asked the campaign to choose issues (a selection grant), propose the issues you chose with lineage {kind:\"selection\"} and your ranking as the explanation, additions only: the server refuses, with a fixed code and no model call, an issue outside the campaign's repositories, a pull request, a closed issue, one already in scope, one in another active campaign's scope, one past the selection count or Maximum Issues, and one with a Human Required label; otherwise the owner decides. Under Full Control, additions without lineage that no grant admits become the owner's one typed approval, stating any Maximum Issues increase they need; tell the owner to approve it, and a repeat while it is pending returns the same request. Resolution atomically applies and consumes scope; do not consume it yourself. Pending, denied, stale and replayed requests never widen authority.",
+    description: "Propose exact repository-qualified issue additions/removals at the current scope revision, in any of the campaign's repositories; the same number in two repositories is two issues. Each repository is verified through one of its own online Locations. A repository outside the campaign is refused with repository_outside_boundary before any runner call. Under Full Control whose owner's first message started the campaign, you read that message and propose its scope (#4282): your first campaign action is the initial proposal, and nothing is dispatched until it is admitted. A proposal may add issues in any of the campaign's repositories: a bare #N in the message means the launch repository, so an issue in another repository counts as owner-named only when the message writes owner/repo#N or its URL. When the message limits the work to one repository, send its words as `repositoryName`. Send the issues as additions with `proposal`: for each issue whether the owner named it (owner_named: its number is in the owner's message) or you chose it (orchestrator_chosen), with a one-line rationale; `requestedCount`, the number the owner asked for or null; `constraints`, each checkable limit you read (\"open\", \"UI only\", \"skip anything labeled security\"), never ranking criteria such as priority, which are your call; and `withheldOperations`, operations the message rules out (\"don't merge\" withholds pr_merge). A task that needs no issues proposes no additions. Deterministic floors refuse, naming the issue: an owner-named number the message doesn't write, an issue outside the campaign's repositories, a pull request, a closed issue, one already in scope or held by another campaign, one past an explicit Maximum Issues, and one with a Human Required label; revise and propose again. A proposal of only owner-named issues the message writes as issue references (#12, owner/repo#12 or a URL), with nothing else to check, returns an Orchestrator-owned change: resolve it with resolve_descendant_workflow_decision and your own session ID. Anything else goes to the Decision Model's constraint check, which checks only what the owner's words allow, never priority: its admit returns an Orchestrator-owned change, its refusal (constraint_check_refused) names the question and issue so you revise, and when it is uncertain or fails the proposal becomes the owner's one approval, asked as an Owner Question; proposing the same issues again returns the recorded outcome. A stated count must be written in the message, and chosen issues stay within it (3 when none is stated; later additions within the admitted count). Custom requires a human, except a Custom root's first-message proposal (#4282): when create_session refuses with seed_proposal_required, propose exactly the issues the person's first message asks for, each owner_named, or none; the server checks it against their words, and an admit seeds the epic the person approves (one issue with members) or makes the issues the campaign's issue numbers with no person step, while an uncertain or failed check leaves the scope to the person. A human-established Full Control issue boundary admits verified epic or exact published follow-up lineage within its limits. When the owner's first message asked the campaign to choose issues (a selection grant), propose the issues you chose with lineage {kind:\"selection\"} and your ranking as the explanation, additions only: the server refuses, with a fixed code and no model call, an issue outside the campaign's repositories, a pull request, a closed issue, one already in scope, one in another active campaign's scope, one past the selection count or Maximum Issues, and one with a Human Required label; otherwise the owner decides. Under Full Control, additions without lineage that no grant admits become the owner's one typed approval, stating any Maximum Issues increase they need; tell the owner to approve it, and a repeat while it is pending returns the same request. Resolution atomically applies and consumes scope; do not consume it yourself. Pending, denied, stale and replayed requests never widen authority.",
     inputSchema: { type: "object", properties: {
       requestId: { type: "string" }, expectedRevision: { type: "integer", minimum: 0 }, explanation: { type: "string", minLength: 1, maxLength: 4000 },
       additions: { type: "array", maxItems: 100, items: { type: "object", properties: { repository: { type: "string" }, number: { type: "integer", minimum: 1 } }, required: ["repository", "number"], additionalProperties: false } },

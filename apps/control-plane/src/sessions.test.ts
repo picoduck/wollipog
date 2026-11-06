@@ -98,42 +98,78 @@ import {
 } from "./sessions.js";
 import { RunnerFrameQueue } from "./runner-frame-queue.js";
 import { fakeDecisionKind, fakeDecisionRuntime, HEALTHY_VERDICTS } from "./credential-screen-test-fixture.js";
-import { EMPTY_GRANT } from "./scope-grant-test-fixture.js";
+import { scopeCheckAnswer } from "./scope-grant-test-fixture.js";
 import type { DecisionRuntime } from "./decision-runtime.js";
 
 /** A Decision Model that reads a Custom campaign's first message as naming epic #123 (#4104). */
+/** A healthy fake Decision Model whose constraint check admits a Custom seed proposal (#4282). */
 function epicSeedReading(db: ControlPlaneDb) {
-  return fakeDecisionRuntime(db, (message) => fakeDecisionKind(message) === "scope_grant"
-    ? { verdict: "grant", fields: { ...EMPTY_GRANT, explicit: [{ repository: "", number: 123 }] } }
+  return fakeDecisionRuntime(db, (message) => fakeDecisionKind(message) === "scope_check"
+    ? { outputText: (scopeCheckAnswer(message) as { outputText: string }).outputText }
     : { verdict: HEALTHY_VERDICTS[fakeDecisionKind(message)]! }).runtime;
+}
+
+/** The Custom root proposes `epic` as the issue its person's first message `prompt` names (#4282),
+ * after the runner's echo of that prompt; the test's runner handler also reports issue facts. */
+async function proposeSeedEpic(svc: SessionsService, db: ControlPlaneDb, hub: FakeHub, id: string, prompt: string, epic: number, repository = "team/repo") {
+  if (db.initialUserMessageText(id) === null) db.appendEvent(id, { kind: "user_message", text: prompt }, Date.now());
+  const handler = hub.requestHandler!;
+  hub.requestHandler = async (message) => {
+    const result = await handler(message);
+    if (message.type !== "campaign_issue_scope" || message.operation !== "inspect" || !message.facts || result.type !== "campaign_issue_scope_result" || !result.ok) return result;
+    return { ...result, issueFacts: (message.issues ?? []).map((number) => ({ number, kind: "issue" as const, state: "open" as const, labels: [], assignees: [],
+      title: `Issue ${number}`, bodyExcerpt: "" })) };
+  };
+  try {
+    const result = await svc.proposeCampaignSeedScope(id, { requestId: `seed-epic-${epic}`, expectedRevision: 0, removals: [],
+      additions: [{ repository, number: epic }], explanation: "The epic the message names.",
+      proposal: { issues: [{ repository, number: epic, origin: "owner_named", rationale: "Named." }], requestedCount: null, constraints: [], withheldOperations: [] } });
+    assert.equal(result?.data?.seedProposal.outcome, "epic_seeded", result?.error ?? JSON.stringify(result?.data));
+  } finally { hub.requestHandler = handler; }
 }
 
 /**
  * Creates a person-created Custom campaign whose first message names `numbers`, and grants them the
- * only way a first message can (#4259): the Decision Model's scripted `scope_grant` reading names
- * exactly those issues, and the runner reads each as an issue of team/repo. Resolves once the reading
- * settled, with the harness's own Decision runtime and runner handler restored.
+ * only way a first message can (#4259, #4282): the root proposes exactly those issues as the ones the
+ * message names, the fake constraint check admits, and the runner reads each as an issue of
+ * team/repo. The runner's echo of the launch prompt is recorded as the first user message when the
+ * test hasn't recorded one. Resolves once the proposal settled, with the harness's own Decision
+ * runtime and runner handler restored.
  */
 async function createWithIssueListReading<T extends { ok: boolean; data?: { id: string } }>(
-  svc: SessionsService, db: ControlPlaneDb, hub: { requestHandler?: (message: ControlPlaneToRunner) => RunnerRequestResult | Promise<RunnerRequestResult> },
-  numbers: number[], create: () => T): Promise<T> {
+  svc: SessionsService, db: ControlPlaneDb, hub: FakeHub, numbers: number[], create: () => T): Promise<T> {
   const internals = svc as unknown as { decisionRuntime: DecisionRuntime };
   const previousRuntime = internals.decisionRuntime;
   const previousHandler = hub.requestHandler;
-  svc.setDecisionRuntime(fakeDecisionRuntime(db, (message) => fakeDecisionKind(message) === "scope_grant"
-    ? { verdict: "grant", fields: { ...EMPTY_GRANT, explicit: numbers.map((number) => ({ repository: "", number })) } }
+  svc.setDecisionRuntime(fakeDecisionRuntime(db, (message) => fakeDecisionKind(message) === "scope_check"
+    ? { outputText: (scopeCheckAnswer(message) as { outputText: string }).outputText }
     : { verdict: HEALTHY_VERDICTS[fakeDecisionKind(message)]! }).runtime);
   hub.requestHandler = (message) => {
     if (message.type === "campaign_issue_scope" && message.operation === "inspect") {
+      const issues = message.issues ?? [];
       return { type: "campaign_issue_scope_result", requestId: message.requestId, sessionId: message.sessionId, ok: true, repository: "team/repo",
-        candidates: (message.issues ?? []).map((number) => ({ issue: { repository: "team/repo", number }, title: `Issue ${number}`, source: "member_checklist" as const })) };
+        candidates: issues.map((number) => ({ issue: { repository: "team/repo", number }, title: `Issue ${number}`, source: "member_checklist" as const })),
+        ...(message.facts ? { issueFacts: issues.map((number) => ({ number, kind: "issue" as const, state: "open" as const, labels: [], assignees: [],
+          title: `Issue ${number}`, bodyExcerpt: "" })) } : {}) };
+    }
+    if (message.type === "campaign_issue_scope" && message.operation === "grant_issue_numbers") {
+      return { type: "campaign_issue_scope_result", requestId: message.requestId, sessionId: message.sessionId, ok: true, issueNumbersGrant: "applied" };
     }
     if (previousHandler) return previousHandler(message);
     throw new Error("runner did not respond in time");
   };
   try {
     const created = create();
-    if (created.ok && created.data) await svc.campaignIssueScopeSeedSettled(created.data.id);
+    const id = created.ok ? created.data?.id : undefined;
+    const seed = id ? db.getSession(id)?.orchestratorPolicy?.issueScopeSeed : undefined;
+    if (id && seed?.state === "pending" && seed.proposal) {
+      const prompt = hub.sentOfType("start_session").filter((message) => message.spec.sessionId === id).at(-1)?.initialPrompt;
+      if (db.initialUserMessageText(id) === null && prompt) db.appendEvent(id, { kind: "user_message", text: prompt }, Date.now());
+      await svc.proposeCampaignSeedScope(id, { requestId: `seed-${id}`, expectedRevision: 0, removals: [],
+        additions: numbers.map((number) => ({ repository: "team/repo", number })), explanation: "The issues the message names.",
+        proposal: { issues: numbers.map((number) => ({ repository: "team/repo", number, origin: "owner_named" as const, rationale: "Named." })),
+          requestedCount: null, constraints: [], withheldOperations: [] } });
+    }
     return created;
   } finally {
     svc.setDecisionRuntime(previousRuntime);
@@ -870,14 +906,14 @@ test("orchestrator separates default provider execution from the negotiated stri
     "strict Native TUI still needs its static fixed-rule mode");
     agent.capabilities.permissionModes = ["default", "dontAsk", "orchestrator"];
     db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1);
-    // A launch prompt grants no issue scope at creation (#4259): the Decision Model's reading decides
-    // later, and on a runner that can't hold an issue scope it takes the person-owned route.
+    // A launch prompt grants no issue scope at creation (#4259): the Orchestrator's checked proposal
+    // decides later (#4282), and a runner that can't send one takes the person-owned route at once.
     const outdatedScope = svc.createSession({ ...request, prompt: "Claim and orchestrate issue 1245.",
       config: { permissionMode: "orchestrator" } },
     undefined, undefined, false, false, false, { defaultOwnerUserId: "human" });
     assert.equal(outdatedScope.ok, true, outdatedScope.error);
     assert.equal(outdatedScope.data!.orchestratorPolicy!.issueNumbers, undefined, "an older runner is never silently granted an issue scope");
-    assert.equal(outdatedScope.data!.orchestratorPolicy!.issueScopeSeed?.state, "pending");
+    assert.equal(outdatedScope.data!.orchestratorPolicy!.issueScopeSeed?.state, "owner");
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     assert.equal(svc.createSession({ ...request, launchSurface: "native_tui",
       config: { permissionMode: "orchestrator" } }).ok, true);
@@ -5639,6 +5675,101 @@ test("a GitHub merge is requested and armed only while GitHub would close exactl
     assert.ok(legacy.ok && legacy.data, legacy.error);
     assert.equal(legacy.data.closingReferenceCheck, undefined);
     assert.equal(preflights.length, asked, "a pre-v242 runner receives no github_merge_preflight");
+  } finally {
+    db.close();
+  }
+});
+
+test("a repository without required checks merges on every reported check, verified by the runner; no checks stays a person's (#4119)", async () => {
+  const { db, hub } = makeHarness();
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  try {
+    const meta = runnerMeta();
+    meta.agents.find((agent) => agent.id === "test-orchestrator")!.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "off" });
+    assert.ok(parent.ok && parent.data, parent.error);
+    db.updateSessionStatus(parent.data.id, "running", Date.now());
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title: "GitHub Child" };
+    let created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    if (created.status === 428) {
+      assert.ok(svc.approve(parent.data.id, db.getSession(parent.data.id)!.pendingApproval!.requestId, "allow").ok);
+      created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    }
+    assert.ok(created.ok && created.data, created.error);
+    const child = created.data;
+    db.updateSessionStatus(child.id, "running", Date.now());
+    // The Orchestrator owns merges here, so only the basis decides who owns this one.
+    assert.ok(svc.setParentControlPolicy(parent.data.id, {
+      implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "human",
+      follow_up_issue_publication: "human", ui_evidence_approval: "human", review_round_extension: "human",
+    }, 0).ok);
+
+    const preflights: Array<Extract<ControlPlaneToRunner, { type: "github_merge_preflight" }>> = [];
+    let checks: Record<string, unknown> | undefined;
+    hub.githubMergePreflight = async (msg) => {
+      preflights.push(msg);
+      return { type: "github_merge_preflight_result", requestId: msg.requestId, sessionId: msg.sessionId, ok: true,
+        check: { checkedAt: 5, closures: [] }, ...(checks ? { checks } : {}) } as RunnerRequestResult;
+    };
+    const cite = (...names: string[]) => ({ ...GITHUB_MERGE, checksBasis: "all_reported",
+      requiredChecks: { ...GITHUB_MERGE.requiredChecks, checks: names.map((name) => ({ name, state: "passed" })) } });
+    const ask = (key: string, snapshot: Record<string, unknown>) => svc.createWorkflowDecisionWithVideo(child.id,
+      { requestId: key, resourceKey: key, resourceSnapshot: snapshot as unknown as WorkflowDecisionResourceSnapshot });
+    const passed = (name: string) => ({ name, state: "passed" });
+
+    // Every reported check passing under a clean merge state admits it, recording the basis.
+    checks = { required: 0, clean: true, reported: [passed("build"), passed("lint")] };
+    const admitted = await ask("all-reported", cite("lint", "build"));
+    assert.ok(admitted.ok && admitted.data, admitted.error);
+    assert.equal(admitted.data.authority, "orchestrator");
+    assert.equal((admitted.data.resourceSnapshot as { checksBasis?: string }).checksBasis, "all_reported");
+    assert.equal(preflights.at(-1)!.checks, true, "the runner is asked for the head's checks");
+
+    // Pending, failing, unclean, required, or differently named checks refuse it; nothing is created.
+    for (const [label, read, pattern] of [
+      ["pending", { required: 0, clean: true, reported: [passed("build"), { name: "lint", state: "pending" }] }, /has not finished/u],
+      ["failing", { required: 0, clean: true, reported: [passed("build"), { name: "lint", state: "failing" }] }, /is failing/u],
+      ["unclean", { required: 0, clean: false, reported: [passed("build"), passed("lint")] }, /merge state as clean/u],
+      ["required", { required: 1, clean: true, reported: [passed("build"), passed("lint")] }, /must cite its required checks/u],
+      ["other names", { required: 0, clean: true, reported: [passed("build"), passed("test")] }, /exactly the checks GitHub reports/u],
+      ["malformed", { required: -1, clean: true, reported: [] }, /the runner's answer was incomplete/u],
+    ] as const) {
+      checks = read as unknown as Record<string, unknown>;
+      const refused = await ask(`refused-${label}`, cite("build", "lint"));
+      assert.equal(refused.status, 409, label);
+      assert.match(refused.error ?? "", pattern, label);
+    }
+
+    // A head with no checks at all is never green: the merge is the person's, even here.
+    checks = { required: 0, clean: false, reported: [] };
+    const none = await ask("no-checks", cite());
+    assert.ok(none.ok && none.data, none.error);
+    assert.equal(none.data.authority, "human");
+    assert.equal(none.data.authorityEvaluation?.reason, "no_checks");
+    // Only the all-reported basis may cite no checks, and only for GitHub.
+    assert.equal((await ask("empty-required", { ...GITHUB_MERGE, requiredChecks: { ...GITHUB_MERGE.requiredChecks, checks: [] } })).status, 400);
+    assert.equal(normalizeWorkflowDecisionSnapshot({ ...GITHUB_MERGE, checksBasis: "required" }).status, 400);
+    assert.equal(normalizeWorkflowDecisionSnapshot({ ...GITLAB_MERGE, checksBasis: "all_reported" }).status, 400);
+
+    // A required-checks merge keeps its snapshot, digest and preflight unchanged.
+    checks = undefined;
+    const plain = await ask("required-basis", GITHUB_MERGE);
+    assert.ok(plain.ok && plain.data, plain.error);
+    assert.deepEqual(plain.data.resourceSnapshot, GITHUB_MERGE);
+    assert.equal("checks" in preflights.at(-1)!, false);
+
+    // A runner that cannot read checks cannot support the basis.
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.githubMergeChecksBasis - 1);
+    const asked = preflights.length;
+    const older = await ask("older-runner", cite("build", "lint"));
+    assert.equal(older.status, 409);
+    assert.match(older.error ?? "", /newer runner/u);
+    assert.equal(preflights.length, asked);
   } finally {
     db.close();
   }
@@ -31033,9 +31164,9 @@ test("human campaign scope recovery, additions, denial, removal and closure use 
       }
       throw new Error("unexpected fixture command");
     };
-    // The seed is pending from creation, before any runner echo; the Decision Model's reading then names the epic (#4104).
+    // The seed is pending from creation, before any runner echo; the Orchestrator then proposes the epic, which the check admits (#4104, #4282).
     assert.equal(db.getSession(id)!.orchestratorPolicy!.issueScopeSeed!.state,"pending","the seed is held before any runner echo");
-    await svc.campaignIssueScopeSeedSettled(id);
+    await proposeSeedEpic(svc, db, hub, id, "Orchestrate epic #123.", 123);
     assert.equal(db.getSession(id)!.orchestratorPolicy!.issueScopeProposalEpic,123);
     const beforeScopeChild = svc.createSession({runnerId:RUNNER_ID,workspaceId:WORKSPACE_ID,agentId:AGENT_ID,prompt:"Fix issue 124.",config:{}},undefined,undefined,false,false,false,{parentSessionId:id});
     assert.equal(beforeScopeChild.ok,false,"epic delegation requires confirmed issue scope");
@@ -31238,7 +31369,7 @@ test("human-only campaigns can confirm scope and separately approve closure with
       if(m.type==="github_issue_closure") return {type:"github_issue_closure_result",requestId:m.requestId,sessionId:m.sessionId,ok:true,inspection:{repository:"team/repo",issue:123,title:"Epic",url:"https://github.com/team/repo/issues/123",state:"OPEN",forgeDigest:"a".repeat(64),openPullRequests:[]}};
       throw new Error("unexpected command");
     };
-    await svc.campaignIssueScopeSeedSettled(id);
+    await proposeSeedEpic(svc, db, hub, id, "Orchestrate epic #123.", 123);
     const proposed=await svc.proposeCampaignIssueScope(id,{requestId:"confirm",expectedRevision:0,additions:[{repository:"team/repo",number:123}],removals:[],explanation:"Include epic"});
     assert.ok(proposed.ok && proposed.data,proposed.error);
     assert.equal(proposed.data.authority,"human");
@@ -31342,7 +31473,7 @@ test("GitLab campaign scope and issue closure require a v249 runner and then rea
       }
       throw new Error("unexpected fixture command");
     };
-    await svc.campaignIssueScopeSeedSettled(id);
+    await proposeSeedEpic(svc, db, hub, id, "Orchestrate epic #123.", 123, repository);
     const current = await svc.campaignIssueScope(id);
     assert.ok(current.ok && current.data, current.error);
     assert.equal(current.data.repository, repository);
