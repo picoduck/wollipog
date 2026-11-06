@@ -99,17 +99,17 @@ export function sessionHeaderStatusSummary(session: SessionStatusSource, context
   // secondary (a worktree switch, a passive delivery) keeps the summary as it is.
   const followUpsOnly = needs.length > 0 && needs.every((condition) => condition.kind === "follow_up");
   if (awaitingPrompt && (needs.length === 0 ? summary.secondary === null : followUpsOnly) && stuckFullControlCampaign(session)) {
-    const stuck: SessionCondition = { kind: "lifecycle", meta: statusMeta("session", "campaign_stuck"),
+    const stuck: SessionCondition = { kind: "campaign", meta: statusMeta("session", "campaign_stuck"),
       description: CAMPAIGN_STUCK_DESCRIPTION, needsYou: true };
     return { primary, secondary: stuck, more: needs.length, conditions: [stuck, ...summary.conditions] };
   }
   if (needs.length > 0 || summary.secondary !== null) return summary;
   const campaign: SessionCondition | null = cleanupFullControlCampaign(session)
-    ? { kind: "lifecycle", meta: statusMeta("session", "campaign_needs_cleanup"), description: CAMPAIGN_CLEANUP_DESCRIPTION, needsYou: false }
+    ? { kind: "campaign", meta: statusMeta("session", "campaign_needs_cleanup"), description: CAMPAIGN_CLEANUP_DESCRIPTION, needsYou: false }
     : completedFullControlCampaign(session)
-      ? { kind: "lifecycle", meta: statusMeta("session", "campaign_complete"), description: CAMPAIGN_COMPLETE_DESCRIPTION, needsYou: false }
+      ? { kind: "campaign", meta: statusMeta("session", "campaign_complete"), description: CAMPAIGN_COMPLETE_DESCRIPTION, needsYou: false }
       : activeFullControlCampaign(session)
-        ? { kind: "lifecycle", meta: statusMeta("session", "campaign_active"), description: CAMPAIGN_ACTIVE_DESCRIPTION, needsYou: false }
+        ? { kind: "campaign", meta: statusMeta("session", "campaign_active"), description: CAMPAIGN_ACTIVE_DESCRIPTION, needsYou: false }
         : null;
   if (!campaign) return summary;
   if (completed) {

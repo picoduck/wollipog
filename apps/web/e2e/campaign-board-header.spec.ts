@@ -155,6 +155,29 @@ test("the header's Session Status explains the campaign state, never a prompt th
   await capture(page, "popover-active-1280-light");
 });
 
+for (const [name, patch, before] of [
+  ["Campaign Stuck", { ...fullControl("stuck") }, ["Campaign Stuck", "Awaiting Prompt", "Ready for Review"]],
+  ["Completed with Campaign Complete", { ...fullControl("verified_complete"), status: "completed" }, ["Completed", "Campaign Complete"]],
+] as const) {
+  test(`an open Session Status keeps exactly the current rows as a request replaces ${name}`, async ({ page }) => {
+    const status = await openRoot(page, 1280, "light", patch);
+    await status.click();
+    const rows = page.getByRole("dialog", { name: "Session Status" }).locator(".session-status-row .status");
+    await expect.poll(() => rows.allTextContents()).toEqual(before);
+    // A question for the person arrives while the popover stays open.
+    await page.evaluate(() => {
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+        pendingApproval: { requestId: "campaign-question", kind: "question", title: "Which release?", options: [],
+          questions: [{ id: "release", question: "Which release?", options: [{ label: "Now" }, { label: "Later" }] }] },
+        attention: { version: 1, meaningfulAt: Date.now(), humanActions: [{ requestId: "campaign-question", rank: 3, requestedAt: Date.now() }],
+          result: null, acknowledgedRevision: null },
+      } as never);
+    });
+    await expect.poll(() => rows.allTextContents()).toEqual(["Answer Required", before[0] === "Completed" ? "Completed" : "Awaiting Prompt"]);
+    await expect(rows.filter({ hasText: /^Campaign (Stuck|Complete)$/ })).toHaveCount(0);
+  });
+}
+
 test("a Custom campaign root's header and an older control plane's root keep Awaiting Prompt", async ({ page }) => {
   // A Custom root: its result is the person's to review.
   let status = await openRoot(page, 1280, "light", { orchestratorPolicy: { control: { mode: "custom" } } });

@@ -577,6 +577,10 @@ export type SessionConditionKind =
   /** A wait the session is deliberately in (#1280, #4249): a wait_session or wait_pull_request
    * call, healthy or Stalled by its liveness contract, or a parked merge-queue watch. */
   | "session_wait"
+  /** An at-rest Full Control root's campaign state in its session header (#2938): Campaign Active,
+   * Campaign Complete, Complete, Needs Cleanup or Campaign Stuck. Its own kind, so it never shares a
+   * popover row's identity with the lifecycle beside it. */
+  | "campaign"
   /** The session lifecycle, including Stop Pending and Stop Failed. */
   | "follow_up"
   | "lifecycle";

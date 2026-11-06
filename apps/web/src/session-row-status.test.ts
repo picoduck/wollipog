@@ -331,11 +331,14 @@ test("an active or complete Full Control root's header shows the campaign state 
     assert.equal(summary.primary.meta.pulse, false, `${status} never reads as running`);
     // The popover lists the campaign state in place of the lifecycle, so nothing says it waits for a prompt.
     assert.equal(summary.conditions.some((condition) => condition.meta.label === "Awaiting Prompt"), false, status);
-    assert.equal(summary.conditions.filter((condition) => condition.kind === "lifecycle").length, 1, status);
+    assert.deepEqual(summary.conditions.map((condition) => condition.kind).filter((kind) => kind === "lifecycle" || kind === "campaign"), ["campaign"], status);
     // The header and the root's row read the same campaign state.
     assert.equal(sessionRowStatus(root(status)).badge?.meta.label, label, status);
     // A Completed root keeps its lifecycle and shows the campaign state beside it, as its row does.
     assert.deepEqual(header(root(status, { status: "completed" })), ["Completed", label, 0], `${status}, completed`);
+    // Each popover row has its own identity: the campaign state is never a second lifecycle row.
+    const completedKinds = sessionHeaderStatusSummary(root(status, { status: "completed" })).conditions.map((condition) => condition.kind);
+    assert.equal(new Set(completedKinds).size, completedKinds.length, `${status}, completed`);
   }
   // A summary row carries only the server's status and the root's own stored control.
   assert.deepEqual(header(session({ status: "idle", attention, fullControlCampaignStatus: "active",
@@ -346,6 +349,8 @@ test("an active or complete Full Control root's header shows the campaign state 
   assert.deepEqual(header(root("stuck")), ["Awaiting Prompt", "Campaign Stuck", 1]);
   assert.equal(stuck.secondary?.meta.tone, "warning");
   assert.equal(stuck.secondary?.needsYou, true);
+  assert.deepEqual(stuck.conditions.map((condition) => condition.kind), ["campaign", "lifecycle", "follow_up"],
+    "Campaign Stuck is its own popover row beside the lifecycle");
   assert.equal(sessionRowStatus(root("stuck")).badge?.meta.label, "Campaign Stuck", "the row agrees");
   assert.deepEqual(header(root("stuck", { attention: { ...attention, result: null } })), ["Awaiting Prompt", "Campaign Stuck", 0]);
 
