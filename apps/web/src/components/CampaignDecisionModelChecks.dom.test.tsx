@@ -303,14 +303,14 @@ test("a typed check shows its answers as a short checklist beside the server's v
     }));
     assert.deepEqual(lines(lists[0]!), [
       { standing: "satisfies", claim: "Satisfies 'Count Matches'",
-        detail: "Answered yes with 96% confidence. The owner asked for one more; one is proposed." },
-      { standing: "satisfies", claim: "Issue 140 Satisfies 'UI Only'", detail: "Answered satisfies with 90% confidence. It rewords the Settings footer." },
+        detail: "Yes (96% confidence). The owner asked for one more; one is proposed." },
+      { standing: "satisfies", claim: "Issue 140 Satisfies 'UI Only'", detail: "Satisfies (90% confidence). It rewords the Settings footer." },
       { standing: "violates", claim: "Issue 140 Violates 'Skip Security'",
-        detail: "Answered violates with 92% confidence; this answer decided the verdict. It is labeled security." },
+        detail: "Violates (92% confidence); this answer decided the verdict. It is labeled security." },
     ]);
     // An answer below the threshold reads as unsure, whatever its value.
     assert.deepEqual(lines(lists[1]!)[1], { standing: "unsure", claim: "Issue 141 Unsure About 'UI Only'",
-      detail: "Answered satisfies with 55% confidence; this answer decided the verdict. A layout bug, but the label is area/sidebar, not area/ui." });
+      detail: "Satisfies (55% confidence); this answer decided the verdict. A layout bug, but the label is area/sidebar, not area/ui." });
     assert.ok(lines(lists[2]!).every((line) => line.standing === "satisfies"));
     const refused = lists[0]!.closest("li.campaign-screen-item")!;
     assert.equal(facts(refused).Verdict, "Doesn't Fit Your Selection");

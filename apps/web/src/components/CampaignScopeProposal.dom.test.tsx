@@ -138,7 +138,8 @@ test("a checked proposal shows the Decision Model's verdict and each typed quest
       "Deterministic checks, then the Decision Model couldn't confirm issues the Orchestrator chose, constraints it read and operations it withholds, so it needs your approval.");
     assert.match(verdictRow(earlier!)!.querySelector("dd")!.textContent!, /^Uncertain The answer can't be settled/u);
     const lines = [...earlier!.querySelectorAll(".decision-answer")].map((node) => node.textContent);
-    assert.match(lines[1]!, /Unsure About 'team\/repo#31 Slow sync — open'Answered cannot tell with 60% confidence; this answer decided the verdict\./u);
+    assert.match(lines[1]!, /Unsure About 'team\/repo#31 Slow sync — open'Can't tell \(60% confidence\); this answer decided the verdict\./u);
+    assert.match(lines[0]!, /Satisfies 'Count Matches Your Message'Consistent \(95% confidence\)\./u);
   } finally { await unmount(); }
 });
 

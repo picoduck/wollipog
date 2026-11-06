@@ -169,8 +169,9 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
     const answers = latest.getByRole("list", { name: "Answers" }).getByRole("listitem");
     await expect(answers).toHaveCount(12);
     await expect(answers.filter({ hasText: "Unsure About 'team/repo#152 Composer Hint Overlaps Send — UI only'" }))
-      .toContainText("Answered cannot tell with 55% confidence; this answer decided the verdict.");
-    await expect(answers.filter({ hasText: "Satisfies 'Count Matches Your Message'" })).toContainText("93% confidence");
+      .toContainText("Can't tell (55% confidence); this answer decided the verdict.");
+    await expect(answers.filter({ hasText: "Satisfies 'Count Matches Your Message'" })).toContainText("Consistent (93% confidence)");
+    await expect(answers.filter({ hasText: "Satisfies 'team/repo#123 Composer Epic'" })).toContainText("Asked for (93% confidence)");
     await expect(section.getByRole("article", { name: "Earlier Proposal 1" }).getByRole("heading", { level: 4 })).toContainText("Replaced");
     const geometry = await section.evaluate((element) => ({ client: element.clientWidth, scroll: element.scrollWidth }));
     expect(geometry.scroll).toBeLessThanOrEqual(geometry.client + 1);
