@@ -3399,7 +3399,7 @@ function multiRepositoryProject(f: ReturnType<typeof fixture>) {
         failure: "not_repository", error: CAMPAIGN_LAUNCH_INSPECTION_ERRORS.not_repository };
   };
   const project = f.db.createProject({ name: "Multi", scope: f.scope });
-  const add = (runnerId: string, workspaceId: string) => f.db.addProjectLocation(project.id, { runnerId, workspaceId });
+  const add = (runnerId: string, workspaceId: string) => f.db.addProjectLocation(project.id, { runnerId, workspaceId, addedByUserId: f.human.userId });
   const launchLocation = add("r", "w");
   const other = add("r2", "a");
   const twin = add("r2", "b");
@@ -4599,6 +4599,69 @@ test("a reviewed enable settles a Location that was waiting for Include in Campa
     assert.equal(c.policy().pendingLocations?.some((item) => item.locationId === third.id) ?? false, false, "no longer waiting");
     assert.equal(f.db.campaignProjection(c.rootId)!.repositoryBoundary!.pendingLocations.length, 0);
   } finally { await server.close(); await c.server.close(); f.db.close(); }
+});
+
+for (const [who, addedByUserId] of [["another person", "usr_other"], ["nobody on record", undefined]] as const) {
+  test(`a Location ${who} added that a launch found offline waits on reconnect, and only Include in Campaign adds it (#4117)`, async () => {
+    const f = fixture();
+    const p = multiRepositoryProject(f);
+    // Its adder is what the reconnect looks at: set it before the launch inspects the Project.
+    f.db.raw().prepare("UPDATE project_locations SET added_by_user_id=? WHERE id=?").run(addedByUserId ?? null, p.offline.id);
+    const { server } = await app(f);
+    const { preflight: checked } = await preflight(server, p.body);
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...p.body, requestId: "launch-offline-adder", preflightDigest: checked!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    await server.close();
+    const rootId = admitted.json().id as string;
+    const locations = new CampaignLocations({ db: f.db, hub: f.hub, synchronize: (id) => f.sessions.synchronizeCampaignIssueScope(id),
+      settle: (before, revoked, owner, now) => f.sessions.settleCampaignBoundaryChange(before, revoked, owner, now), log: { warn() {} } });
+    const policy = () => f.db.getSession(rootId)!.orchestratorPolicy!;
+    const boundary = () => (policy().control as Extract<CampaignControl, { mode: "full_control" }>).boundary;
+    try {
+      assert.equal(policy().excludedLocations!.find((item) => item.locationId === p.offline.id)!.failure, "runner_offline");
+      const before = boundary().revision;
+      f.hub.isRunnerOnline = () => true;
+      await locations.runnerReconnected("offline");
+      assert.equal(boundary().revision, before, "reconnecting widens nothing");
+      assert.equal(boundary().repositories!.some((entry) => entry.locationIds.includes(p.offline.id)), false);
+      assert.equal(policy().excludedLocations!.some((item) => item.locationId === p.offline.id), false);
+      assert.deepEqual(policy().pendingLocations!.map((item) => [item.locationId, item.reason]), [[p.offline.id, "added_by_other"]]);
+      // A later reconnect changes nothing, and the owner's Include adds it after inspecting it.
+      await locations.runnerReconnected("offline");
+      assert.equal(boundary().revision, before);
+      const included = await locations.include(rootId, p.offline.id, f.human);
+      assert.equal(included.ok, true);
+      assert.ok(boundary().repositories!.some((entry) => entry.locationIds.includes(p.offline.id)));
+      assert.equal(policy().pendingLocations?.length ?? 0, 0);
+    } finally { f.db.close(); }
+  });
+}
+
+test("a Location someone else added before a Custom campaign is enabled waits after reconnecting, too (#4117)", async () => {
+  const f = fixture();
+  saveBudget(f, savedBudget);
+  const p = multiRepositoryProject(f);
+  f.db.raw().prepare("UPDATE project_locations SET added_by_user_id='usr_other' WHERE id=?").run(p.offline.id);
+  const { server } = await app(f);
+  try {
+    const rootId = customCampaign(f, "enable-offline-other");
+    f.db.raw().prepare("UPDATE sessions SET project_id=?, project_location_id=? WHERE id=?").run(p.project.id, p.launchLocation.id, rootId);
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${rootId}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload: {} });
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    const enabled = await server.inject({ method: "POST", url: `/api/sessions/${rootId}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    const locations = new CampaignLocations({ db: f.db, hub: f.hub, synchronize: (id) => f.sessions.synchronizeCampaignIssueScope(id),
+      settle: (before, revoked, owner, now) => f.sessions.settleCampaignBoundaryChange(before, revoked, owner, now), log: { warn() {} } });
+    f.hub.isRunnerOnline = () => true;
+    await locations.runnerReconnected("offline");
+    const policy = f.db.getSession(rootId)!.orchestratorPolicy!;
+    const boundary = (policy.control as Extract<CampaignControl, { mode: "full_control" }>).boundary;
+    assert.equal(boundary.repositories!.some((entry) => entry.locationIds.includes(p.offline.id)), false);
+    assert.ok(policy.pendingLocations!.some((item) => item.locationId === p.offline.id));
+  } finally { await server.close(); f.db.close(); }
 });
 
 test("a waiting Location a reviewed enable can't read keeps waiting: reconnecting never joins it, and only Include in Campaign does (#4117)", async () => {
