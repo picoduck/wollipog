@@ -100,6 +100,10 @@ test("a Custom root proposes the issues its person's first message asks for, nev
     assert.match(text, /Never add an issue the message only mentions as background, context, an example or something to avoid, and never one you chose/);
     assert.match(text, /Propose no additions when the message asks for no issue work/);
     assert.match(text, /wait for their scope approval or Continue Without an Epic without proposing again/);
+    // Only this session's own repository's issues become its numbers; another's waits for the person (#4118).
+    assert.match(text, /otherwise issues of this session's own repository become the campaign's issue numbers/);
+    assert.match(text, /a proposal with any issue outside this session's repository becomes one scope change the person approves, so nothing in it is granted until they do/);
+    assert.doesNotMatch(text, /otherwise the issues become the campaign's issue numbers/);
   }
 });
 

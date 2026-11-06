@@ -20,15 +20,27 @@ check (`scope_check`) against the person's own words then decides it:
 |---|---|---|---|
 | Admitted: one issue the runner reads members for | `seeded`: the issue is `issueScopeProposalEpic`, and the scope inspection starts from its members | None | Waits for the person's scope approval |
 | Admitted: issues (one issue without members included), each one the runner reads as an issue of the campaign repository, from a message the owner wrote | `none` | The proposed issues | Proceeds |
+| Admitted: issues with any in another repository of the campaign's list | `owner`, with one scope change of the whole proposal for the person to approve | None until they approve | Waits for that approval |
 | Admitted: no issues (the message names none to work on) | `none` | None | Proceeds |
 | Refused by a floor or the check | Still `pending`: the Orchestrator revises | None | Waits |
 | Uncertain or failed, a fourth distinct check, an older root runner, or issues from a message the owner didn't write | `owner`: no seed | None | Waits for the person's scope approval |
 
 The model may only narrow or confirm. The floors run first, with no model call: a number the message
 doesn't write (as digits, inside a `#`-written range, or inside a bare-digit range right after "issue"
-or "issues"), another repository's issue, a pull request or an issue the Orchestrator chose is refused,
-granting no part of the proposal. The check always runs, so an empty proposal or one that adds every
-referenced issue can't skip it.
+or "issues"), a number written only for another repository, an issue in a repository the campaign
+doesn't hold, a pull request or an issue the Orchestrator chose is refused, granting no part of the
+proposal. The check always runs, so an empty proposal or one that adds every referenced issue can't
+skip it.
+
+A message may also name issues in another repository of the campaign's list, such as
+`Fix owner/app#12 and owner/api#40`. Each such number must be written qualified by its repository, and
+is read through a Location of that repository, never the root's runner. Once admitted, the whole
+proposal, its launch-repository issues included, becomes one scope change for the person to approve:
+a first-message grant holds only launch-repository numbers, and a person approves every other change to
+a Custom scope. The seed is `owner`, so delegation waits for that approval, and **Continue Without an
+Epic** stays available. One issue in another repository that has members is an epic, so nothing is
+created for it and its scope is the person's. If no Location of a named repository is online, the
+proposal is refused by name, nothing changes, and the seed stays `pending`.
 
 `createSession` is synchronous and the proposal comes later, so a campaign is created with no issue
 numbers. Until the proposal is admitted, delegation waits and every GitHub write on an issue takes the
@@ -156,7 +168,10 @@ approval is invalidated. A legacy campaign with no saved repository stays unveri
 
 - **Changes.** `request_campaign_issue_scope_change` accepts refs in any campaign repository. A ref in
   any other repository is refused with the fixed code `repository_outside_boundary`, decided from the
-  stored boundary before any runner call. Its sentence tells the Orchestrator to ask the owner to
+  stored boundary before any runner call, whatever the lineage and for a Custom seed too. The one
+  exception is a Custom campaign that has recorded no repository yet, such as one in a one-repository
+  Project: there's nothing stored to refuse from, so it first asks its own runner which repository it's
+  in. That read names no proposed issue. The sentence tells the Orchestrator to ask the owner to
   include a Project Location of that repository, then retry; otherwise to report that the work needs a
   repository with no Location in the Project. The launch repository's part is verified through the
   campaign runner as before. Each other repository's part is verified through the first online Location
@@ -164,6 +179,17 @@ approval is invalidated. A legacy campaign with no saved repository stays unveri
   repository. If any repository has no Location online, the whole request is refused naming it and
   nothing changes. The approval snapshot keeps the launch repository's numbers at the top level and
   lists every other repository the scope holds or the change touches under `otherRepositories`.
+- **Which runner a scope change needs.** Every scope change needs the root's runner online, even one
+  touching only another repository whose Location is online. The change reads the root's checkout to
+  confirm it's still the campaign's repository, and the root's session is what holds the scope. While
+  that runner is disconnected, the request is refused naming the launch repository, and nothing changes.
+  Campaign Status shows the saved scope meanwhile. Another Location of the launch repository can't stand
+  in, because it can't confirm the root's own checkout.
+- **Stored selection grants.** A selection grant stored before #4282 still fills from the launch
+  repository only (`selection_launch_repository_only`), and no new one is written. The check that
+  admitted it read one repository, so filling it from another would grant more than the owner's words
+  were checked for. The owner can add such an issue from Campaign Status, and an Orchestrator's proposal
+  has no such floor.
 - **Orchestrator proposals.** An Orchestrator's scope proposal (#4282) may add issues in any campaign
   repository. Each other repository's issues are read through its first online Location with their
   state, labels and title (a v318 runner; an older one is refused by name), and each floor answers for
@@ -616,8 +642,8 @@ add the issue:
   grant's count and floors and the Decision Model's `scope_review` then admit it, refuse it or leave
   it to the owner, as described under the selection route above.
 - `unavailable`: no one can change the scope right now, and the sentence says why: a participating
-  runner below the scope-change protocol, or an active Orchestrator participant in another
-  repository workspace. The root leaves the issue open and reports it.
+  runner below the scope-change protocol, or an active Orchestrator participant outside every Location
+  of the campaign's repositories. The root leaves the issue open and reports it.
 
 A scope refusal reads saved state only. It does not synchronize scope, inspect the issue, create a
 decision, post a comment or close anything, and it logs `campaign_issue_closure_refused` with the

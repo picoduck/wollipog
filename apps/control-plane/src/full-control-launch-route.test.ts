@@ -3,7 +3,7 @@ import { test } from "node:test";
 import Fastify from "fastify";
 import {
   CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CONTROLLED_REVIEW_PROFILE, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, WORKFLOW_DECISION_CATEGORIES,
-  campaignWorkflowOwner, SCOPE_GRANT_DEFAULT_SELECTION_COUNT, SCOPE_PROPOSAL_ANSWER_ID, SCOPE_PROPOSAL_APPROVE_LABEL,
+  campaignScopeHolds, campaignWorkflowOwner, SCOPE_GRANT_DEFAULT_SELECTION_COUNT, SCOPE_PROPOSAL_ANSWER_ID, SCOPE_PROPOSAL_APPROVE_LABEL,
   type CampaignIssueFacts, type CampaignIssueScopeRequest, type CampaignIssueScopeSnapshot, type FullControlScopeGrant, type CampaignLaunchInspectionResult, type CampaignLaunchPreflight, type CampaignLaunchProposal, type ControlledReviewCapability,
   isOwnerQuestionRequest, pendingRequests, presentOwnerQuestionRequest, scopeProposalMaterial, scopeProposalOfRequest,
   type CampaignWorkItemDetail, type ControlPlaneToRunner, type ExecutionTargetDefinition, type CreateSessionRequest, type FullControlFirstMessageScope, type FullControlLaunchRequest, type GithubIssueClosureSnapshot, type RunnerMetadata, type RunnerRuntimeInfo,
@@ -16,6 +16,7 @@ import { DECISION_MAX_ATTEMPTS, type DecisionRuntime } from "./decision-runtime.
 import { OrchestratorSettings, resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { authorizeFullControl, boundaryWithScopedEpics, campaignBoundaryCurrent, campaignControlForRunner, campaignRepositoryLimits, campaignScopeRepositories, evaluateCampaignAuthority } from "./campaign-authority.js";
 import { repositoryOutsideBoundary } from "./campaign-issue-scope.js";
+import { campaignSeedHoldsDelegation } from "./campaign-issue-scope-seed.js";
 import { firstMessageBoundary, firstMessageDigest, firstMessageObjective } from "./campaign-launch-admission.js";
 import { campaignBehaviorValues } from "./campaign-behavior.js";
 import { randomUUID } from "node:crypto";
@@ -2518,7 +2519,7 @@ test("a selection proposal's deterministic floors refuse in order, each with its
     };
 
     await refusedWith([45], { code: "selection_additions_only" }, { removals: [{ repository: "owner/repo", number: 12 }] });
-    await refusedWith([{ repository: "other/repo", number: 40 }], { code: "repository_outside_boundary" });
+    await refusedWith([{ repository: "other/repo", number: 40 }], { code: "repository_outside_boundary", repository: "other/repo" });
     await refusedWith([45, 41], { code: "not_an_issue", issue: 41 });
     // A closed issue is refused as closed before its Human Required label is read.
     await refusedWith([42], { code: "issue_not_open", issue: 42 });
@@ -3766,8 +3767,15 @@ test("a scope holds issues in every boundary repository, each verified through a
     assert.deepEqual([view.repository, view.issueNumbers], ["owner/repo", [7, 12]], "older clients still read the launch repository");
 
     // Removing other/repo#12 leaves owner/repo#12.
+    routed.length = 0;
     const removal = await propose("remove-other-12", [], [["other/repo", 12]]);
     assert.equal(removal.ok, true, removal.error ?? "");
+    // Its repository is read through its own Location, and no runner is asked about the number, which
+    // needs no verifying to leave. The root's runner only confirms its own checkout.
+    assert.deepEqual(routed.filter(({ message }) => message.type === "campaign_launch_inspect" || message.type === "campaign_issue_scope").map(({ runnerId, message }) => [runnerId, message.type,
+      message.type === "campaign_launch_inspect" ? message.workspacePath : null,
+      message.type === "campaign_launch_inspect" ? message.issueNumbers : message.type === "campaign_issue_scope" && message.operation === "inspect" ? message.issues ?? [] : null]),
+    [["r", "campaign_issue_scope", null, []], ["r2", "campaign_launch_inspect", "/fixture/two/other", []], ["r", "campaign_issue_scope", null, []]]);
     assert.equal(approve(removal.data!.occurrenceId).ok, true);
     assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issues, [{ repository: "other/repo", number: 40 },
       { repository: "owner/repo", number: 7 }, { repository: "owner/repo", number: 12 }]);
@@ -4193,13 +4201,27 @@ test("a Custom campaign starts with its Project's verified repositories, and a p
     assert.deepEqual(campaignScopeRepositories(f.db.getSession(id)!).map((entry) => entry.repository), ["owner/repo", "other/repo"]);
 
     // The list grants nothing: the same request a person approves today, now possible in this repository.
+    const sentBefore = f.sent.length;
     const proposed = await f.sessions.proposeCampaignIssueScope(id, { requestId: randomUUID(), expectedRevision: 0,
       additions: [{ repository: "other/repo", number: 40 }], removals: [], explanation: "Fix this one too." }, () => true);
     assert.equal(proposed.ok, true, proposed.error ?? "");
     assert.equal(proposed.data!.authority, "human");
+    // It's verified through that repository's own named Location, never the root's runner.
+    assert.deepEqual(f.sent.slice(sentBefore).filter((message) => message.type === "campaign_launch_inspect").map((message) =>
+      message.type === "campaign_launch_inspect" ? [message.workspacePath, message.issueNumbers] : null), [["/fixture/two/other", [40]]]);
+    assert.equal(f.sent.slice(sentBefore).some((message) => message.type === "campaign_issue_scope" && message.operation === "inspect" && message.issues?.includes(40)), false);
     assert.equal(f.db.getSession(id)!.orchestratorPolicy!.issueScope, undefined, "nothing joins before a person approves");
     assert.equal((await f.sessions.proposeCampaignIssueScope(id, { requestId: randomUUID(), expectedRevision: 0,
       additions: [{ repository: "third/repo", number: 1 }], removals: [], explanation: "Not in this Project." }, () => true)).errorDetails?.code, "repository_outside_boundary");
+    // A third repository's refusal changed nothing, so the person's approval still applies.
+    const earlier = await f.sessions.proposeCampaignIssueScope(id, { requestId: randomUUID(), expectedRevision: 0,
+      additions: [{ repository: "other/repo", number: 40 }], removals: [], explanation: "Fix this one too." }, () => true);
+    assert.equal(earlier.ok, true, earlier.error ?? "");
+    const applied = f.sessions.resolveWorkflowDecision(id, id, earlier.data!.occurrenceId, { outcome: "approve" }, "human", { kind: "human", id: f.human.userId }, () => true);
+    assert.equal(applied.ok, true, applied.error ?? "");
+    const approvedScope = f.db.getSession(id)!.orchestratorPolicy!.issueScope!;
+    assert.deepEqual([approvedScope.repository, approvedScope.issueNumbers, approvedScope.issues], ["owner/repo", [], [{ repository: "other/repo", number: 40 }]]);
+    assert.equal(approvedScope.revision, 1);
 
     // A Project with one repository records nothing, so its campaign reads as it always has.
     const single = f.db.createProject({ name: "One", scope: f.scope });
@@ -4214,6 +4236,313 @@ test("a Custom campaign starts with its Project's verified repositories, and a p
     // A list an approved addition recorded first is never replaced.
     assert.equal(f.db.recordCustomCampaignRepositories(id, { projectId: p.project.id, projectLocationId: p.launchLocation.id },
       [{ repository: "owner/repo", locationIds: [p.launchLocation.id] }], [], Date.now()), false);
+  } finally { await server.close(); f.db.close(); }
+});
+
+/** A Custom campaign in a Project with `owner/repo` and `other/repo`, created from `prompt`, once it
+ * has recorded its list. Every message to any runner is in `routed`. */
+async function customFirstMessage(prompt: string, options: { oneRepository?: boolean } = {}) {
+  const f = fixture();
+  const p = multiRepositoryProject(f);
+  const routed: Array<{ runnerId: string; message: ControlPlaneToRunner }> = [];
+  const send = f.hub.sendToRunner.bind(f.hub);
+  f.hub.sendToRunner = (runnerId, frame) => {
+    routed.push({ runnerId, message: frame });
+    return send(runnerId, frame);
+  };
+  const otherFacts = new Map<number, Partial<CampaignIssueFacts>>();
+  const otherEpics = new Map<number, number[]>();
+  const inspect = f.state.inspect;
+  f.state.inspect = (frame) => {
+    const answer = inspect(frame);
+    if (!answer?.ok) return answer;
+    return { ...answer, ...(frame.facts ? { issueFacts: frame.issueNumbers.map((number): CampaignIssueFacts => ({ number, kind: "issue", state: "open",
+      labels: [], assignees: [], title: `Other ${number}`, bodyExcerpt: "", ...otherFacts.get(number) })) } : {}),
+    ...(frame.epic !== undefined ? { candidates: [{ issue: { repository: "other/repo", number: frame.epic }, title: "Epic", source: "umbrella" as const },
+      ...(otherEpics.get(frame.epic) ?? []).map((number) => ({ issue: { repository: "other/repo", number }, title: "Member", source: "sub_issue" as const }))] } : {}) };
+  };
+  const { server } = await app(f);
+  const single = options.oneRepository ? f.db.createProject({ name: "One", scope: f.scope }) : null;
+  const location = single ? f.db.addProjectLocation(single.id, { runnerId: "r", workspaceId: "w", addedByUserId: f.human.userId }) : p.launchLocation;
+  const created = f.sessions.createSession({ ...request, projectId: single?.id ?? p.project.id, projectLocationId: location.id, prompt }, undefined, f.scope,
+    false, false, false, { defaultOwnerUserId: f.human.userId });
+  assert.ok(created.ok && created.data, created.error ?? "created");
+  const id = created.data.id;
+  const policy = () => f.db.getSession(id)!.orchestratorPolicy!;
+  for (let attempt = 0; attempt < 200 && !options.oneRepository && !policy().repositories; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  f.db.appendEvent(id, { kind: "user_message", text: prompt }, Date.now());
+  f.db.updateSessionStatus(id, "running", Date.now());
+  routed.length = 0;
+  let requestNumber = 0;
+  /** The Orchestrator proposes these issues as the ones the person named. */
+  const propose = (issues: Array<[string, number]>) => f.sessions.proposeCampaignSeedScope(id, { requestId: `seed-${++requestNumber}`, expectedRevision: 0, removals: [],
+    additions: issues.map(([repository, number]) => ({ repository, number })), explanation: "How I read the person's message.",
+    proposal: { issues: issues.map(([repository, number]) => ({ repository, number, origin: "owner_named" as const, rationale: `The message names #${number}.` })),
+      requestedCount: null, constraints: [], withheldOperations: [] } });
+  const approve = (occurrenceId: string) => f.sessions.resolveWorkflowDecision(id, id, occurrenceId, { outcome: "approve" }, "human", { kind: "human", id: f.human.userId }, () => true);
+  const humanDecisions = () => f.db.pendingWorkflowDecisionsForController(id).filter((decision) => decision.authority === "human");
+  const reads = () => routed.filter(({ message }) => message.type === "campaign_launch_inspect" || message.type === "campaign_issue_scope");
+  return { f, p, server, id, routed, otherFacts, otherEpics, policy, propose, approve, humanDecisions, reads };
+}
+
+test("a Custom first message names issues in any repository of its list: each is read through its own Location, and a person approves the whole proposal (#4118)", async () => {
+  const c = await customFirstMessage("Fix owner/repo#12 and other/repo#40.");
+  try {
+    assert.equal(c.policy().issueScopeSeed!.state, "pending");
+    const proposed = await c.propose([["owner/repo", 12], ["other/repo", 40]]);
+    assert.equal(proposed?.ok, true, proposed?.error ?? "");
+    assert.equal(proposed!.data!.seedProposal.outcome, "owner");
+    assert.match(proposed!.data!.message, /approves these issues in Campaign Status/u);
+    // Each repository was read through its own place, and the root's runner never saw #40.
+    const asked = c.reads().map(({ runnerId, message }) => message.type === "campaign_launch_inspect" ? [runnerId, message.workspacePath, message.issueNumbers]
+      : message.type === "campaign_issue_scope" && message.operation === "inspect" ? [runnerId, null, message.issues ?? []] : null);
+    assert.ok(asked.some((read) => JSON.stringify(read) === JSON.stringify(["r2", "/fixture/two/other", [40]])), JSON.stringify(asked));
+    assert.equal(asked.some((read) => read?.[0] === "r" && (read[2] as number[]).includes(40)), false, JSON.stringify(asked));
+    assert.equal(asked.some((read) => read?.[0] === "r2" && (read[2] as number[]).includes(12)), false, JSON.stringify(asked));
+    // Nothing is granted yet, not even the launch issue, and delegation waits for the person.
+    assert.equal(c.policy().issueNumbers, undefined);
+    assert.equal(c.policy().issueScope, undefined);
+    assert.equal(c.policy().issueScopeSeed!.state, "owner");
+    assert.equal(campaignSeedHoldsDelegation(c.policy()), true);
+    const [decision] = c.humanDecisions();
+    assert.ok(decision, "one person-owned scope change");
+    assert.equal(c.humanDecisions().length, 1);
+    const snapshot = decision.resourceSnapshot as CampaignIssueScopeSnapshot;
+    assert.deepEqual([snapshot.repository, snapshot.additions, snapshot.otherRepositories],
+      ["owner/repo", [12], [{ repository: "other/repo", before: [], additions: [40], removals: [] }]]);
+    assert.equal(c.approve(decision.occurrenceId).ok, true);
+    const scope = c.policy().issueScope!;
+    assert.deepEqual([scope.repository, scope.issueNumbers, scope.issues], ["owner/repo", [12],
+      [{ repository: "other/repo", number: 40 }, { repository: "owner/repo", number: 12 }]]);
+    assert.equal(campaignSeedHoldsDelegation(c.policy()), false);
+  } finally { await c.server.close(); c.f.db.close(); }
+  // The same number in two repositories is two issues, not a duplicate.
+  const twin = await customFirstMessage("Fix owner/repo#5 and other/repo#5.");
+  try {
+    const proposed = await twin.propose([["owner/repo", 5], ["other/repo", 5]]);
+    assert.equal(proposed?.ok, true, proposed?.error ?? "");
+    const snapshot = twin.humanDecisions()[0]!.resourceSnapshot as CampaignIssueScopeSnapshot;
+    assert.deepEqual([snapshot.additions, snapshot.otherRepositories![0]!.additions], [[5], [5]]);
+  } finally { await twin.server.close(); twin.f.db.close(); }
+});
+
+test("a Custom first message's other-repository floors refuse by name and change nothing, and an epic there is the person's own (#4118)", async () => {
+  const refusedWith = async (prompt: string, issues: Array<[string, number]>, code: string, setup: (c: Awaited<ReturnType<typeof customFirstMessage>>) => void = () => {}) => {
+    const c = await customFirstMessage(prompt);
+    try {
+      setup(c);
+      const result = await c.propose(issues);
+      assert.equal(result?.errorDetails?.code, code, `${prompt}: ${result?.error ?? "no error"}`);
+      assert.equal(c.policy().issueScopeSeed!.state, "pending", prompt);
+      assert.equal(c.policy().issueNumbers, undefined, prompt);
+      assert.equal(c.humanDecisions().length, 0, prompt);
+      return result!;
+    } finally { await c.server.close(); c.f.db.close(); }
+  };
+  // A bare number means the launch repository, so it never names another repository's issue.
+  assert.equal((await refusedWith("Fix #40.", [["other/repo", 40]], "owner_named_not_in_message")).errorDetails?.repository, "other/repo");
+  await refusedWith("Fix other/repo#40.", [["other/repo", 40]], "issue_not_open", (c) => c.otherFacts.set(40, { state: "closed" }));
+  await refusedWith("Fix other/repo#40.", [["other/repo", 40]], "not_an_issue", (c) => c.otherFacts.set(40, { kind: "pull_request" }));
+  // No Location of that repository online: the refusal names it, and the seed waits for a retry.
+  const offline = await refusedWith("Fix owner/repo#12 and other/repo#40.", [["owner/repo", 12], ["other/repo", 40]], "repository_unverified", (c) => {
+    const online = c.f.hub.isRunnerOnline;
+    c.f.hub.isRunnerOnline = (runnerId) => runnerId !== "r2" && online(runnerId);
+  });
+  assert.match(offline.error!, /No Location of other\/repo is online/u);
+  // One issue there with members is an epic: never approved as a number, so its scope is the person's.
+  const epic = await customFirstMessage("Work through other/repo#40.");
+  try {
+    epic.otherEpics.set(40, [41, 42]);
+    const result = await epic.propose([["other/repo", 40]]);
+    assert.equal(result?.ok, true, result?.error ?? "");
+    assert.equal(result!.data!.seedProposal.outcome, "owner");
+    assert.equal(epic.policy().issueScopeSeed!.state, "owner");
+    assert.equal(epic.humanDecisions().length, 0, "the person chooses its scope; no change is proposed for it");
+    assert.equal(epic.policy().issueScopeProposalEpic, undefined, "the seeded epic is the launch repository's alone");
+  } finally { await epic.server.close(); epic.f.db.close(); }
+});
+
+test("`Fix #12` in a repository campaign of several means the launch entry, and applies there (#4118)", async () => {
+  // In Custom, the launch repository's numbers are still the first-message grant, with no person step.
+  const custom = await customFirstMessage("Fix #12.");
+  try {
+    const proposed = await custom.propose([["owner/repo", 12]]);
+    assert.equal(proposed?.ok, true, proposed?.error ?? "");
+    assert.equal(proposed!.data!.seedProposal.outcome, "issues_granted");
+    assert.deepEqual(custom.policy().issueNumbers, [12]);
+    assert.equal(custom.humanDecisions().length, 0);
+    assert.equal(custom.reads().some(({ message }) => message.type === "campaign_launch_inspect" && message.issueNumbers?.includes(12)), false,
+      "no other Location is asked about a launch repository's number");
+  } finally { await custom.server.close(); custom.f.db.close(); }
+  // In Full Control it applies to the launch repository's entry.
+  const { f, server, propose, apply, id } = await multiRepositoryProposals("Fix #12.");
+  try {
+    const proposed = await propose([named(12)]);
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(apply(proposed.data!.occurrenceId).ok, true);
+    const scope = f.db.getSession(id)!.orchestratorPolicy!.issueScope!;
+    assert.deepEqual([scope.repository, scope.issueNumbers, scope.issues], ["owner/repo", [12], [{ repository: "owner/repo", number: 12 }]]);
+    assert.deepEqual((await f.sessions.campaignIssueScope(id)).data!.repositories, [{ repository: "owner/repo", issueNumbers: [12], state: "verified" },
+      { repository: "other/repo", issueNumbers: [], state: "verified" }]);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a repository outside the campaign's is refused before any runner call, whatever the lineage, and a campaign with none recorded sends only a repository read (#4118)", async () => {
+  // Full Control, with and without selection lineage, as the owner and as the Orchestrator. This
+  // campaign has no selection to fill, so nothing but the stored boundary could answer.
+  const { f, server, id, routed } = await multiRepositoryCampaign();
+  try {
+    routed.length = 0;
+    const change = (lineage?: { kind: "selection" }) => ({ requestId: randomUUID(), expectedRevision: f.db.getSession(id)!.orchestratorPolicy!.issueScope!.revision,
+      additions: [{ repository: "third/repo", number: 1 }], removals: [], explanation: "Outside.", ...(lineage ? { lineage } : {}) });
+    for (const result of [await f.sessions.proposeCampaignIssueScope(id, change({ kind: "selection" }), () => true, f.human),
+      await f.sessions.proposeCampaignIssueScope(id, change({ kind: "selection" }), () => true),
+      await f.sessions.proposeCampaignIssueScope(id, change(), () => true),
+      await f.sessions.proposeCampaignIssueScope(id, { ...change({ kind: "selection" }), removals: undefined as unknown as [] }, () => true)]) {
+      assert.equal(result.errorDetails?.code, "repository_outside_boundary", result.error ?? "");
+      assert.match(result.error!, /request_campaign_repository_addition/u);
+    }
+    assert.deepEqual(routed, [], "no runner was asked anything");
+  } finally { await server.close(); f.db.close(); }
+  // Custom with its list: the ordinary route and a pending seed.
+  const listed = await customFirstMessage("Fix third/repo#1.");
+  try {
+    const seed = await listed.propose([["third/repo", 1]]);
+    assert.equal(seed?.errorDetails?.code, "repository_outside_boundary");
+    assert.match(seed!.error!, /request_campaign_repository_addition/u);
+    assert.equal(listed.policy().issueScopeSeed!.state, "pending");
+    const ordinary = await listed.f.sessions.proposeCampaignIssueScope(listed.id, { requestId: randomUUID(), expectedRevision: 0,
+      additions: [{ repository: "third/repo", number: 1 }], removals: [], explanation: "Outside." }, () => true);
+    assert.equal(ordinary.errorDetails?.code, "repository_outside_boundary");
+    assert.deepEqual(listed.routed, [], "no runner was asked anything");
+  } finally { await listed.server.close(); listed.f.db.close(); }
+  // A Custom campaign that recorded no repository has nothing stored to refuse from. All it sends is
+  // one read of its own repository, naming neither the proposed issue nor its repository.
+  const lone = await customFirstMessage("Fix third/repo#1.", { oneRepository: true });
+  try {
+    assert.equal(lone.policy().repositories, undefined);
+    const seed = await lone.propose([["third/repo", 1]]);
+    assert.equal(seed?.errorDetails?.code, "repository_outside_boundary");
+    const ordinary = await lone.f.sessions.proposeCampaignIssueScope(lone.id, { requestId: randomUUID(), expectedRevision: 0,
+      additions: [{ repository: "third/repo", number: 1 }], removals: [], explanation: "Outside." }, () => true);
+    assert.equal(ordinary.errorDetails?.code, "repository_outside_boundary");
+    const sent = lone.reads();
+    assert.equal(sent.length, 2);
+    for (const { runnerId, message } of sent) {
+      assert.equal(runnerId, "r");
+      assert.ok(message.type === "campaign_issue_scope" && message.operation === "inspect");
+      assert.deepEqual([message.issues, message.epic], [undefined, undefined], "nothing proposed reaches a runner");
+    }
+    // Its own repository, named explicitly for an epic, isn't mistaken for an outside one.
+    assert.equal((await lone.f.sessions.campaignIssueScope(lone.id, 40, () => true, false, "third/repo")).errorDetails?.code, "repository_outside_boundary");
+    assert.equal((await lone.f.sessions.campaignIssueScope(lone.id, 40, () => true, false, "owner/repo")).ok, true);
+  } finally { await lone.server.close(); lone.f.db.close(); }
+});
+
+test("with the root's runner offline, every scope change is refused naming the launch repository, even one touching only another repository (#4118)", async () => {
+  const { f, server, id, routed, propose } = await multiRepositoryCampaign();
+  try {
+    const online = f.hub.isRunnerOnline;
+    f.hub.isRunnerOnline = (runnerId) => runnerId !== "r" && online(runnerId);
+    const before = f.db.getSession(id)!.orchestratorPolicy!.issueScope!;
+    routed.length = 0;
+    const refused = await propose("other-only", [["other/repo", 40]]);
+    assert.equal(refused.ok, false);
+    assert.match(refused.error!, /owner\/repo/u);
+    assert.match(refused.error!, /even one touching only another repository/u);
+    assert.deepEqual(routed, [], "nothing is read");
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope, before);
+    // Campaign Status still shows the saved scope, and says why it can't verify it.
+    const view = (await f.sessions.campaignIssueScope(id)).data!;
+    assert.deepEqual([view.supported, view.runnerDisconnected], [false, true]);
+    assert.deepEqual(view.issueNumbers, [7, 12]);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a repository refused as outside joins through an approved addition, and the same change is then accepted (#4118, #4117)", async () => {
+  const f = fixture();
+  const c = await repositoryAdditionCampaign(f);
+  // The third repository's Location reads the issue it's asked about.
+  const inspect = f.state.inspect;
+  f.state.inspect = (message) => {
+    const answer = inspect(message);
+    return answer?.ok ? { ...answer, issueNumbers: message.issueNumbers } : answer;
+  };
+  try {
+    const scope = () => f.db.getSession(c.rootId)!.orchestratorPolicy!.issueScope!;
+    const change = () => ({ requestId: randomUUID(), expectedRevision: scope().revision, additions: [{ repository: "third/repo", number: 5 }], removals: [],
+      explanation: "The follow-up lives in third/repo." });
+    const refused = await f.sessions.proposeCampaignIssueScope(c.rootId, change(), () => true, f.human);
+    assert.equal(refused.errorDetails?.code, "repository_outside_boundary");
+    assert.match(refused.error!, /request_campaign_repository_addition/u);
+    const requested = await c.request("add-third");
+    assert.equal(requested.status, 201, requested.error ?? "");
+    assert.equal(c.resolve(requested.data!.occurrenceId, "approve", { kind: "human", id: f.human.userId }).ok, true);
+    assert.equal((await c.additions.execute(c.rootId, requested.data!.occurrenceId, requested.data!.resourceDigest, c.orchestrator)).ok, true);
+    const accepted = await f.sessions.proposeCampaignIssueScope(c.rootId, change(), () => true, f.human);
+    assert.equal(accepted.ok, true, accepted.error ?? "");
+    const applied = c.resolve(accepted.data!.occurrenceId, "approve", { kind: "human", id: f.human.userId });
+    assert.equal(applied.ok, true, applied.error ?? "");
+    assert.equal(campaignScopeHolds(scope(), { repository: "third/repo", number: 5 }), true);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a participant restarts in another boundary repository's Location; outside the launch repository a runner before v313 is refused (#4118)", async () => {
+  const { f, p, server, id, propose, approve } = await multiRepositoryCampaign();
+  try {
+    const proposed = await propose("other-repository", [["other/repo", 40]]);
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(approve(proposed.data!.occurrenceId).ok, true);
+    const register = (protocolVersion: number) => f.db.registerRunner({ runnerId: "r2", hostname: "r2", os: "linux", version: "test", agents: f.db.getRunner("r")!.agents,
+      workspaces: [{ id: "a", name: "r2 a", path: "/fixture/two/other" }, { id: "b", name: "r2 b", path: "/fixture/two/repository" }],
+      runtime: { ...runtime, campaignLaunchInspection: { version: 3 } } }, Date.now(), protocolVersion);
+    register(PROTOCOL_VERSION);
+    // A stopped Orchestrator participant in the other repository's Location.
+    f.db.raw().prepare(`INSERT INTO sessions (id, runner_id, workspace_id, agent_id, title, status, created_at, updated_at, orchestrator_policy, parent_session_id)
+      SELECT 's_api_member', 'r2', 'a', agent_id, 'Member', 'stopped', created_at, updated_at, orchestrator_policy, ? FROM sessions WHERE id=?`).run(id, id);
+    register(RUNNER_CAPABILITY_MIN_PROTOCOL.repositoryQualifiedIssueScope - 1);
+    const old = f.sessions.restart("s_api_member");
+    assert.equal(old.ok, false);
+    assert.equal(old.capabilityRequirement?.requiredRunnerProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.repositoryQualifiedIssueScope);
+    register(PROTOCOL_VERSION);
+    const restarted = f.sessions.restart("s_api_member");
+    assert.equal(restarted.ok, true, restarted.error ?? "");
+    // Outside every campaign repository, there's no version that helps.
+    f.db.raw().prepare("UPDATE sessions SET workspace_id=?, status='stopped' WHERE id='s_api_member'").run(p.plain.workspaceId);
+    f.db.raw().prepare("UPDATE sessions SET runner_id='r' WHERE id='s_api_member'").run();
+    const stray = f.sessions.restart("s_api_member");
+    assert.equal(stray.ok, false);
+    assert.match(stray.error!, /must restart in a Location of one of the campaign's repositories/u);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a stored row without `issues` loads and approves at the same revision, a pending decision from before the upgrade included (#4118)", async () => {
+  const { f, server, id, propose, approve } = await multiRepositoryCampaign();
+  try {
+    const before = f.db.getSession(id)!.orchestratorPolicy!.issueScope!;
+    // The change was asked for before the upgrade: one repository, and no `otherRepositories`.
+    const pending = await propose("before-the-upgrade", [["owner/repo", 13]]);
+    assert.equal(pending.ok, true, pending.error ?? "");
+    assert.equal((pending.data!.resourceSnapshot as CampaignIssueScopeSnapshot).otherRepositories, undefined);
+    // The stored row predates #4118: its numbers, with no `issues`.
+    const stored = JSON.parse((f.db.raw().prepare("SELECT orchestrator_policy FROM sessions WHERE id=?").get(id) as { orchestrator_policy: string }).orchestrator_policy);
+    delete stored.issueScope.issues;
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(stored), id);
+    const view = (await f.sessions.campaignIssueScope(id)).data!;
+    assert.deepEqual([view.revision, view.repository, view.issueNumbers], [before.revision, "owner/repo", [7, 12]]);
+    assert.deepEqual(view.repositories, [{ repository: "owner/repo", issueNumbers: [7, 12], state: "verified" }, { repository: "other/repo", issueNumbers: [], state: "verified" }]);
+    // The pending decision still applies, and the next revision holds the whole scope.
+    const approved = approve(pending.data!.occurrenceId);
+    assert.equal(approved.ok, true, approved.error ?? "");
+    const after = f.db.getSession(id)!.orchestratorPolicy!.issueScope!;
+    assert.equal(after.revision, before.revision + 1);
+    assert.deepEqual(after.issues, [7, 12, 13].map((number) => ({ repository: "owner/repo", number })));
+    // A new change from that row is approved the same way, in another repository too.
+    const next = await propose("after-the-upgrade", [["other/repo", 40]]);
+    assert.equal(next.ok, true, next.error ?? "");
+    assert.equal(approve(next.data!.occurrenceId).ok, true);
+    assert.equal(campaignScopeHolds(f.db.getSession(id)!.orchestratorPolicy!.issueScope!, { repository: "other/repo", number: 40 }), true);
   } finally { await server.close(); f.db.close(); }
 });
 
@@ -4681,7 +5010,7 @@ test("each Orchestrator participant's runner stores only its own Location reposi
     assert.equal(blocked.ok, false);
     assert.match(blocked.error!, /Every active Orchestrator participant must run in a Location of one of the campaign's repositories/u);
     f.db.raw().prepare("DELETE FROM sessions WHERE id='s_stray_member'").run();
-    // A participant in another repository needs a v290 runner.
+    // A participant in another repository needs a v313 runner.
     f.db.registerRunner({ runnerId: "r2", hostname: "r2", os: "linux", version: "test", agents: [],
       workspaces: [{ id: "a", name: "r2 a", path: "/fixture/two/other" }, { id: "b", name: "r2 b", path: "/fixture/two/repository" }],
       runtime: { ...runtime, campaignLaunchInspection: { version: 3 } } }, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.repositoryQualifiedIssueScope - 1);

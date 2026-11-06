@@ -93,8 +93,10 @@ only) establishes the boundary before the Orchestrator's first turn:
   needs none proposes no additions.
 - Deterministic floors run first, in order, and refuse with a fixed code naming the issue: additions
   only (`proposal_additions_only`), in a boundary repository (`repository_outside_boundary`); every
-  owner-named number written in the owner's exact message and not only qualified by another
-  repository (`owner_named_not_in_message`); an open issue, not a pull request (`not_an_issue`,
+  owner-named number written in the owner's exact message for its own repository: qualified by it,
+  or standing alone for the launch repository only (`owner_named_not_in_message`); inside any
+  repository limit the proposal names or the initial scope was admitted with
+  (`repository_constraint_mismatch`); an open issue, not a pull request (`not_an_issue`,
   `issue_not_open`); not already in scope (`already_in_scope`) nor held by another active campaign
   (`other_campaign_scope`); within an explicit Maximum Issues (`capacity_exhausted`; a derived one
   grows to fit the scope plus follow-up room, never past 100); and no Human Required label
@@ -104,7 +106,8 @@ only) establishes the boundary before the Orchestrator's first turn:
   count, the admitted count for a later addition, or 3). Withheld operations only ever narrow the
   launch's.
 - A proposal with nothing checkable beyond owner-named issues (every one written in the message as
-  an issue reference of the campaign repository, `#12`, `owner/repo#12` or its URL, not only as a
+  an issue reference of its own repository, `owner/repo#12` or its URL, or `#12` for the launch
+  repository, not only as a
   bare number such as a count; no Orchestrator-chosen issue, no constraint, no withheld operation,
   and no count other than the named issues') is admitted after
   the floors with no model call: an Orchestrator-owned `campaign_issue_scope` change carrying
