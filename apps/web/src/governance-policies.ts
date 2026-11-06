@@ -54,6 +54,7 @@ export function policyConditionPhrases(conditions: GovernancePolicyConditions | 
   if (conditions.minToolCalls !== undefined) phrases.push(`at least ${countPhrase(conditions.minToolCalls)}`);
   if (conditions.maxToolCalls !== undefined) phrases.push(`at most ${countPhrase(conditions.maxToolCalls)}`);
   if (conditions.escalated !== undefined) phrases.push(conditions.escalated ? "escalated" : "not escalated");
+  if (conditions.issueLabels?.length) phrases.push(`campaign issue labeled ${conditions.issueLabels.join(" or ")}`);
   return phrases;
 }
 

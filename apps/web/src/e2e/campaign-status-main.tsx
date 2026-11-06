@@ -388,8 +388,11 @@ const projectionFor = (rev: number) => campaignProjection(
   },
 );
 
-/** `owners=after` (#4064): the root's question for its owner, and a child's merge handed to them. */
-const ownerScenario = params.get("owners") === "before" || params.get("owners") === "after" ? params.get("owners") as "before" | "after" : null;
+/** `owners=after` (#4064): the root's question for its owner, and a child's merge handed to them.
+ * `owners=rule` (#4137): the child filed its merge with the installed rule that keeps it for the owner. */
+const ownerScenario = ["before", "after", "rule"].includes(params.get("owners") ?? "") ? params.get("owners") as "before" | "after" | "rule" : null;
+const ownerRule = { source: "~/.codex/skills/issue-workflow/SKILL.md",
+  quote: "Never merge a pull request without per-PR user authorization through the structured question tool." };
 const ownerSnapshot = { category: "owner_decision" as const, question: "Which credential design should the provider bridge use?",
   material: "PR picoduck/wollipog#4141 at head 3f9c2e1. Both designs pass CI; the broker adds a helper process the owner would run.",
   recommendedOptionId: "lease", options: [
@@ -409,6 +412,9 @@ const ownerCard: import("@wollipog/protocol").PendingApproval | null = ownerScen
 const ownerProjection = ownerScenario === "after" ? { status: "waiting_human" as const, ownerDecisions: { total: 2, items: [
   { occurrenceId: "workflow_owner_1", sessionId: "s_root", category: "owner_decision" as const, summary: ownerSnapshot.question, handedOff: false, createdAt: NOW - 4 * MINUTE },
   { occurrenceId: "occ_1", sessionId: "s_child_3", category: "pr_merge" as const, summary: "Merge picoduck/wollipog#4141", handedOff: true, createdAt: NOW - 8 * MINUTE },
+] } } : ownerScenario === "rule" ? { status: "waiting_human" as const, ownerDecisions: { total: 1, items: [
+  { occurrenceId: "occ_1", sessionId: "s_child_3", category: "pr_merge" as const, summary: "Merge picoduck/wollipog#4141", handedOff: false,
+    ownerRule, createdAt: NOW - 8 * MINUTE },
 ] } } : {};
 
 /** The root's own Pending Decision cards for the follow-ups past the limit (`followUps=pending`). */
@@ -424,10 +430,26 @@ const followUpCards: import("@wollipog/protocol").PendingApproval[] = params.get
     resourceDigest: "f".repeat(64), policyRevision: 1, authority: "human" as const, status: "pending" as const, createdAt: NOW - 5 * MINUTE },
 })) : [];
 
+/** `selection=1`: the owner's scope approval for the selection the Decision Model was uncertain about (#4103). */
+const selectionCard: import("@wollipog/protocol").PendingApproval | null = params.get("selection") === "1" ? {
+  requestId: "wd_sel_3", occurrenceId: "wd_sel_3", kind: "workflow_decision", title: "Scope Approval Required",
+  options: [{ optionId: "approve", name: "Approve", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }],
+  workflowDecision: { requestId: "selection-141", occurrenceId: "wd_sel_3", sessionId: "s_root", controllingSessionId: "s_root",
+    category: "campaign_issue_scope", resourceKey: "campaign_issue_scope:s_root",
+    resourceSnapshot: { category: "campaign_issue_scope", repository: "team/repo", expectedRevision: 2, before: [130, 131], additions: [141], removals: [],
+      explanation: "A UI regression three users reported this week.", affectedAssignments: [], affectedDecisions: [], activeChildren: [],
+      lineage: { kind: "selection" }, grantReview: { cause: "selection_uncertain", ownerMessage: "Find the 3 highest-priority open issues and fix them",
+        messageDigest: "a".repeat(64), reviewOccurrenceId: "sel_uncertain",
+        reason: "The owner asked for the highest-priority issues but didn't say whether UI regressions count.",
+        selection: { count: 3, defaulted: false, criteria: "highest priority", constraints: ["open"] } } },
+    resourceDigest: "c".repeat(64), policyRevision: 1, authority: "human", status: "pending", createdAt: NOW - 60_000 },
+} : null;
+
 function sessionsFor(rev: number): SessionView[] {
   const root = baseSession({ orchestratorCampaign: projectionFor(rev),
     ...(followUpCards.length ? { pendingApproval: { ...followUpCards[0]!, additionalRequests: followUpCards.slice(1) } } : {}),
-    ...(ownerCard ? { pendingApproval: ownerCard } : {}) });
+    ...(ownerCard ? { pendingApproval: ownerCard } : {}),
+    ...(selectionCard ? { pendingApproval: selectionCard } : {}) });
   const child = baseSession({
     id: "s_child", title: "#2417 Slice 7: Campaign Status Panel", parentSessionId: "s_root",
     ...(scenario === "legacy" ? {} : { campaignMembership: { campaignSessionId: "s_root", currentWorkItemId: "cwi_2", currentAttemptId: "catt_2" } }),
@@ -441,9 +463,9 @@ function sessionsFor(rev: number): SessionView[] {
 const mergeSnapshot = { category: "pr_merge" as const, repository: "picoduck/wollipog", pullRequest: 4141, headSha: "3f9c2e1".padEnd(40, "0"),
   reviewResult: "merge_with_acknowledged_risk" as const, requiredChecks: { headSha: "3f9c2e1".padEnd(40, "0"), status: "passed" as const, checkedAt: NOW - 9 * MINUTE,
     checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }] } };
-const ownerRequests = (owners: "before" | "after"): DescendantRequestView[] => {
+const ownerRequests = (owners: "before" | "after" | "rule"): DescendantRequestView[] => {
   const handed = owners === "after";
-  const evaluation = handed
+  const evaluation = owners !== "before"
     ? { owner: "human" as const, basis: "human_required" as const, reason: "owner_kept" as const, operation: "pr_merge" as const }
     : { owner: "orchestrator" as const, basis: "campaign_delegation" as const, reason: "authorized_operation" as const, operation: "pr_merge" as const };
   const merge: DescendantRequestView = {
@@ -455,7 +477,8 @@ const ownerRequests = (owners: "before" | "after"): DescendantRequestView[] => {
       workflowDecision: { requestId: "merge-4141", occurrenceId: "occ_1", sessionId: "s_child_3", controllingSessionId: "s_root", category: "pr_merge",
         resourceKey: "picoduck/wollipog#4141", resourceSnapshot: mergeSnapshot, resourceDigest: "a".repeat(64), policyRevision: 1,
         authority: evaluation.owner, authorityEvaluation: evaluation, status: "pending", createdAt: NOW - 8 * MINUTE,
-        ...(handed ? { ownerHandoff: { bySessionId: "s_root", at: NOW - 5 * MINUTE, reason: "The owner kept risk consent for this merge." } } : {}) } },
+        ...(handed ? { ownerHandoff: { bySessionId: "s_root", at: NOW - 5 * MINUTE, reason: "The owner kept risk consent for this merge." } } : {}),
+        ...(owners === "rule" ? { ownerRule } : {}) } },
   };
   return ownerCard ? [{ sessionId: "s_root", sessionTitle: "Full Control Campaign", runnerId: "runner-1", runnerOnline: true, eventEpoch: 1,
     createdAt: NOW - 4 * MINUTE, responseOwner: "human", authorityEvaluation: ownerCard.workflowDecision!.authorityEvaluation,
@@ -504,7 +527,8 @@ const LAUNCH_OPERATIONS: import("@wollipog/protocol").CampaignAuthorityOperation
   "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question",
   "tool_approval", "policy_ask"];
 const launchCeilings = (maxIssues: number) => ({ repositories: ["team/repo"], maxIssues, maxIssuesSource: "derived" as const, operations: LAUNCH_OPERATIONS });
-const scopeGrantFixture: import("@wollipog/protocol").FullControlScopeGrant | null = params.get("scope") === "grant" ? {
+// `let`: the owner's selection count change (#4102) replaces it, as the server would.
+let scopeGrantFixture: import("@wollipog/protocol").FullControlScopeGrant | null = params.get("scope") === "grant" ? {
   version: 1, status: "granted", occurrenceId: "dec_fixture", target: SCOPE_GRANT_TARGET,
   reason: "The owner names #123 and #124, cites #126 as background, and asks for the 5 highest-priority open UI issues without merging.",
   namedIssues: [123, 124], dropped: [{ repository: "team/repo", number: 999, reason: "not_in_message" }],
@@ -558,6 +582,35 @@ let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["dec
   { occurrenceId: "why_failed", kind: "closure_reason", promptVersion: "closure_reason.v1", state: "failed", failureClass: "timed_out",
     inputDigests: {}, attempts: [], usage: decisionUsage, createdAt: NOW - 60_000,
     subject: { sessionId: "s_root", surface: "issue_closure", requestId: "team/repo#124" } },
+  // `seed=1`: a Custom campaign's epic seed (#4104 Slice C): one that seeded an epic, and one whose
+  // reading failed, waiting for the owner to approve a scope or continue without an epic.
+  ...(params.get("seed") === "1" ? [
+    { occurrenceId: "seed_read", kind: "scope_grant" as const, promptVersion: "scope_grant.v1", state: "decided" as const, verdict: "grant",
+      reason: "The person names epic #123 and its child issues to orchestrate.", inputDigests: {}, attempts: [], usage: decisionUsage,
+      createdAt: NOW - 420_000, subject: { sessionId: "s_root", surface: "issue_scope_seed" as const, requestId: "issue_scope_seed:a", seed: "seeded" as const } },
+    { occurrenceId: "seed_failed", kind: "scope_grant" as const, promptVersion: "scope_grant.v1", state: "failed" as const,
+      failureClass: "provider_overloaded" as const, inputDigests: {}, attempts: [], usage: decisionUsage, createdAt: NOW - 30_000,
+      subject: { sessionId: "s_root", surface: "issue_scope_seed" as const, requestId: "issue_scope_seed:b", seed: "owner" as const } },
+  ] : []),
+] : params.get("selection") === "1" ? [
+  // `selection=1`: the Decision Model's reviews of selection proposals (#4103): admitted, refused and
+  // waiting for the owner.
+  { occurrenceId: "sel_admitted", kind: "scope_review", promptVersion: "scope_review.v1", state: "decided", verdict: "admit",
+    reason: "Both are open, labeled priority/high, and are the oldest such issues.", inputDigests: {}, attempts: [], usage: decisionUsage,
+    createdAt: NOW - 300_000, selectionProposal: { outcome: "applied", requestOccurrenceId: "wd_sel_1",
+      explanation: "The two oldest open issues labeled priority/high.", issues: [
+        { repository: "team/repo", number: 130, title: "Crash when a session restarts during a merge" },
+        { repository: "team/repo", number: 131, title: "Campaign Status loses its scroll position" }] } },
+  { occurrenceId: "sel_refused", kind: "scope_review", promptVersion: "scope_review.v1", state: "decided", verdict: "refuse",
+    reason: "Issue 140 is a wording change, not one of the highest-priority issues the owner asked for.", inputDigests: {}, attempts: [],
+    usage: decisionUsage, createdAt: NOW - 180_000, selectionProposal: { outcome: "refused",
+      explanation: "Next in the backlog after the priority/high issues.", issues: [
+        { repository: "team/repo", number: 140, title: "Reword the Settings footer" }] } },
+  { occurrenceId: "sel_uncertain", kind: "scope_review", promptVersion: "scope_review.v1", state: "uncertain", verdict: "uncertain",
+    reason: "The owner asked for the highest-priority issues but didn't say whether UI regressions count.", inputDigests: {}, attempts: [],
+    usage: decisionUsage, createdAt: NOW - 60_000, humanRequestId: "wd_sel_3", selectionProposal: { outcome: "waiting_for_owner",
+      requestOccurrenceId: "wd_sel_3", explanation: "A UI regression three users reported this week.", issues: [
+        { repository: "team/repo", number: 141, title: "Sidebar badges overlap on narrow screens" }] } },
 ] : [];
 
 const client = {
@@ -590,11 +643,20 @@ const client = {
     // The first message's scope grant (#4102): named issues with a selection, a defaulted selection
     // count, and the failure route.
     ...(scopeGrantFixture ? { issueNumbers: scopeGrantFixture.namedIssues, revision: 2, outsideScope: [], candidates: [],
-      ...(params.get("scope") === "grant" ? { contextIssueNumbers: [126] } : {}), scopeGrant: scopeGrantFixture } : {}),
+      ...(params.get("scope") === "grant" ? { contextIssueNumbers: [126] } : {}), scopeGrant: scopeGrantFixture, policyRevision: revision } : {}),
     ...(params.get("completedChildren") === "1" && recoveryRecord?.reason === "failed_checks" ? {
       // Disclosed static scope data, not a live mint/approval or supported-profile assertion.
       issueNumbers: [123], revision: 1, canPropose: false, outsideScope: [], candidates: [],
     } : {}) }),
+  // The owner's selection count (#4102): a derived Maximum Issues moves by the change, as the server does.
+  setScopeGrantSelectionCount: async (_id: string, count: number, expectedRevision: number) => {
+    (window as unknown as { __SELECTION_COUNT__: unknown }).__SELECTION_COUNT__ = { count, expectedRevision };
+    const grant = scopeGrantFixture!;
+    const delta = count - grant.selection!.count;
+    scopeGrantFixture = { ...grant, selection: { ...grant.selection!, count, defaulted: false, setByOwner: true },
+      ceilings: { ...grant.ceilings, maxIssues: grant.ceilings.maxIssuesSource === "derived" ? grant.ceilings.maxIssues + delta : grant.ceilings.maxIssues } };
+    return sessionsFor(revision)[0]!;
+  },
   includeCampaignLocation: async (_id: string, locationId: string) => {
     (window as unknown as { __INCLUDED_LOCATION__: unknown }).__INCLUDED_LOCATION__ = locationId;
     included = true;

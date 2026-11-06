@@ -49,7 +49,8 @@ export function epicChecklistMembers(body: string, repository: string): number[]
 }
 
 export function normalizeCampaignIssueScopeSnapshot(input: Record<string, unknown>): CampaignIssueScopeSnapshot | null {
-  if (!validIssueAdmission(input.issueAdmission) || !validIssueLineage(input.lineage) || !validScopeGrantReview(input.grantReview)) return null;
+  if (!validIssueAdmission(input.issueAdmission) || !validIssueLineage(input.lineage) || !validScopeGrantReview(input.grantReview) ||
+      !validSelectionReview(input.selectionReview)) return null;
   if (input.verifiedPublications !== undefined && (!Array.isArray(input.verifiedPublications) || input.verifiedPublications.length > 100 ||
       input.verifiedPublications.some((p) => !p || typeof p !== "object" || Object.keys(p).length !== 2 || typeof p.publicationOccurrenceId !== "string" ||
         !p.publicationOccurrenceId || p.publicationOccurrenceId.length > 256 || !Number.isSafeInteger(p.issue) || p.issue < 1 ||
@@ -86,7 +87,8 @@ export function normalizeCampaignIssueScopeSnapshot(input: Record<string, unknow
     ...(input.lineage === undefined ? {} : { lineage: structuredClone(input.lineage) as CampaignIssueScopeSnapshot["lineage"] }),
     ...(input.issueAdmission === undefined ? {} : { issueAdmission: structuredClone(input.issueAdmission) as CampaignIssueScopeSnapshot["issueAdmission"] }),
     ...(input.verifiedPublications === undefined ? {} : { verifiedPublications: structuredClone(input.verifiedPublications) as CampaignIssueScopeSnapshot["verifiedPublications"] }),
-    ...(input.grantReview === undefined ? {} : { grantReview: structuredClone(input.grantReview) as CampaignIssueScopeSnapshot["grantReview"] }) };
+    ...(input.grantReview === undefined ? {} : { grantReview: structuredClone(input.grantReview) as CampaignIssueScopeSnapshot["grantReview"] }),
+    ...(input.selectionReview === undefined ? {} : { selectionReview: structuredClone(input.selectionReview) as CampaignIssueScopeSnapshot["selectionReview"] }) };
 }
 
 export function validIssueAdmission(value: unknown): boolean {
@@ -102,7 +104,17 @@ export function validIssueAdmission(value: unknown): boolean {
     typeof v.evidenceDigest === "string" && /^[0-9a-f]{64}$/u.test(v.evidenceDigest);
 }
 
-const GRANT_REVIEW_CAUSES = ["grant_failed", "grant_uncertain", "selection"];
+const GRANT_REVIEW_CAUSES = ["grant_failed", "grant_uncertain", "selection", "selection_uncertain", "selection_failed", "selection_unverified"];
+
+/** The exact shape of a selection proposal's `admit` evidence (#4103). */
+export function validSelectionReview(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  return Object.keys(v).length === 4 && typeof v.occurrenceId === "string" && v.occurrenceId.length > 0 && v.occurrenceId.length <= 256 &&
+    typeof v.grantDigest === "string" && /^[0-9a-f]{64}$/u.test(v.grantDigest) && v.verdict === "admit" &&
+    typeof v.reason === "string" && v.reason.length <= 300;
+}
 const boundedText = (value: unknown, max: number) => typeof value === "string" && value.length <= max &&
   !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value);
 
@@ -113,10 +125,11 @@ export function validScopeGrantReview(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const v = value as Record<string, unknown>;
   const s = v.selection as Record<string, unknown> | undefined;
-  return Object.keys(v).every((key) => ["cause", "ownerMessage", "messageDigest", "grantOccurrenceId", "failureClass", "reason", "selection"].includes(key)) &&
+  return Object.keys(v).every((key) => ["cause", "ownerMessage", "messageDigest", "grantOccurrenceId", "reviewOccurrenceId", "failureClass", "reason", "selection"].includes(key)) &&
     GRANT_REVIEW_CAUSES.includes(v.cause as string) && boundedText(v.ownerMessage, 4000) &&
     typeof v.messageDigest === "string" && /^[0-9a-f]{64}$/u.test(v.messageDigest) &&
     (v.grantOccurrenceId === undefined || boundedText(v.grantOccurrenceId, 256) && (v.grantOccurrenceId as string).length > 0) &&
+    (v.reviewOccurrenceId === undefined || boundedText(v.reviewOccurrenceId, 256) && (v.reviewOccurrenceId as string).length > 0) &&
     (v.failureClass === undefined || typeof v.failureClass === "string" && /^[a-z_]{1,64}$/u.test(v.failureClass)) &&
     (v.reason === undefined || boundedText(v.reason, 300)) &&
     (s === undefined || Boolean(s && typeof s === "object" && !Array.isArray(s) && Object.keys(s).length === 4 &&
@@ -128,6 +141,7 @@ export function validIssueLineage(value: unknown): boolean {
   if (value === undefined) return true;
   if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
+  if (v.kind === "selection") return Object.keys(v).length === 1;
   return Object.keys(v).length === 2 && (v.kind === "epic" && Number.isSafeInteger(v.epic) && (v.epic as number) > 0 ||
     v.kind === "follow_up" && typeof v.publicationOccurrenceId === "string" && v.publicationOccurrenceId.length > 0 && v.publicationOccurrenceId.length <= 256);
 }

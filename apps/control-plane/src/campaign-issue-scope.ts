@@ -3,7 +3,7 @@ import { boundedIssueNumbers, campaignIssueLimitsRequirement, campaignIssueScope
   type CampaignIssueScopeRequest, type CampaignIssueScopeSnapshot, type CampaignIssueScopeView, type SessionView, type WorkflowDecisionView, isTerminal } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import { issueClosureActiveChildren } from "./github-issue-closure.js";
-import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
+import { campaignSeedHoldsDelegation } from "./campaign-issue-scope-seed.js";
 
 export function scopeParticipants(db: ControlPlaneDb, root: SessionView): SessionView[] {
   return [root, ...db.campaignDescendantIds(root.id).flatMap((id) => { const s = db.getSession(id); return s?.orchestratorPolicy && !s.archived && !isTerminal(s.status) ? [s] : []; })];
@@ -61,10 +61,20 @@ export function scopeView(db: ControlPlaneDb, root: SessionView, repository: str
   const context = first && first.state !== "pending" ? (first.contextIssueNumbers ?? []).filter((n) => !numbers.includes(n)) : [];
   // The scope grant the first message established (#4102), for Campaign Status's Scope Grant section.
   const grant = first && first.state !== "pending" ? first.grant : undefined;
+  // Its ceilings as the current authorization holds them: a later reauthorization can set Maximum
+  // Issues explicitly, and only a limit both the grant and that authorization derived moves.
+  const control = root.orchestratorPolicy?.control;
+  const issues = control?.mode === "full_control" ? control.boundary.issueAuthority : undefined;
+  const derivedNow = Boolean(grant && first && first.state !== "pending" && first.derivedLimits?.maxIssues === true &&
+    grant.ceilings.maxIssuesSource === "derived");
+  const scopeGrant = grant && issues
+    ? { ...grant, ceilings: { ...grant.ceilings, maxIssues: issues.maxIssues, maxIssuesSource: derivedNow ? "derived" as const : "explicit" as const } }
+    : grant;
   return { campaignSessionId: root.id, repository, issueNumbers: numbers, revision: root.orchestratorPolicy?.issueScope?.revision ?? 0,
     ...(root.orchestratorPolicy?.issueScope ? { authorization: root.orchestratorPolicy.issueScope } : {}),
     supported: !requirement, ...(requirement ? compatibilityFields(requirement) : {}), canPropose: false,
-    ...(context.length ? { contextIssueNumbers: context } : {}), ...(grant ? { scopeGrant: grant } : {}),
+    ...(context.length ? { contextIssueNumbers: context } : {}),
+    ...(scopeGrant ? { scopeGrant, policyRevision: root.parentControlPolicy?.revision ?? 0 } : {}),
     ...(unverifiedWork.length ? { unverifiedWork } : {}), outsideScope };
 }
 
@@ -125,6 +135,6 @@ function scopeChangeAffectsDecision(db: ControlPlaneDb, rootId: string, reposito
   return decision.sessionId === rootId || db.initialUserMessageText(decision.sessionId) === null || !unrelated.has(decision.sessionId);
 }
 
-export function campaignNeedsEpicScope(db: ControlPlaneDb, root: SessionView): boolean {
-  return !root.orchestratorPolicy?.issueScope && (root.orchestratorPolicy?.issueScopeProposalEpic !== undefined || initialCampaignEpic(db.initialUserMessageText(root.id) ?? "") !== null);
+export function campaignNeedsEpicScope(root: SessionView): boolean {
+  return campaignSeedHoldsDelegation(root.orchestratorPolicy);
 }

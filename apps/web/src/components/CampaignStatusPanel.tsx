@@ -60,6 +60,7 @@ import { CampaignIssueScopePanel } from "./CampaignIssueScopePanel.js";
 import { CampaignFollowUpLimit } from "./CampaignFollowUpLimit.js";
 import { CampaignDecisions } from "./CampaignDecisions.js";
 import { CampaignDecisionModelChecks } from "./CampaignDecisionModelChecks.js";
+import { OwnerRuleFactRows } from "./requests/WorkflowDecisionSummary.js";
 import { CampaignRepositories } from "./CampaignRepositories.js";
 import { CampaignRecoveryNotice } from "./CampaignRecoveryNotice.js";
 import { Notice } from "./Notice.js";
@@ -264,6 +265,8 @@ function AvailableCampaignStatus({
                 canClassify={availability.role === "campaign"}
                 refreshKey={data.summary.campaign}
                 onOpenSession={onOpenSession}
+                findRequest={findRequest}
+                onOpenRequest={onOpenRequest}
               />
               {data.summary.campaign?.handoffs && (
                 <CampaignHandoffs
@@ -299,7 +302,8 @@ function AvailableCampaignStatus({
                   canInclude={availability.role === "campaign"}
                 />
               )}
-              <CampaignIssueScopePanel session={session} campaignId={availability.campaignSessionId} />
+              <CampaignIssueScopePanel session={session} campaignId={availability.campaignSessionId}
+                policyRevision={availability.role === "campaign" ? data.summary.campaign?.policyRevision : undefined} />
               <CampaignDecisions campaignId={availability.campaignSessionId} />
               <CampaignWorkList
                 data={data}
@@ -348,15 +352,16 @@ function CampaignOwnerDecisions({ ownerDecisions, now, findRequest, onOpenReques
             <li key={item.occurrenceId}>
               <dl className="facts">
                 <div>
-                  <dt>{item.handedOff ? "Handed to You" : "Owner Decision"}</dt>
+                  <dt>{item.ownerRule ? "Kept by Rule" : item.handedOff ? "Handed to You" : "Owner Decision"}</dt>
                   <dd>
                     {item.summary}
                     <span className="campaign-status-meta">
-                      {item.handedOff ? "Handed over by the Orchestrator" : "Asked by the Orchestrator"}{" "}
+                      {item.ownerRule ? "Requested under a rule" : item.handedOff ? "Handed over by the Orchestrator" : "Asked by the Orchestrator"}{" "}
                       <RecordedTime at={item.createdAt} now={now} />
                     </span>
                   </dd>
                 </div>
+                {item.ownerRule && <OwnerRuleFactRows rule={item.ownerRule} />}
               </dl>
               {requestKey && <button type="button" className="btn sm" aria-label={`Open Request: ${item.summary}`}
                 onClick={() => onOpenRequest(requestKey)}>Open Request</button>}

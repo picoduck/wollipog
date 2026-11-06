@@ -1,14 +1,26 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { PROTOCOL_VERSION, type ResourceScope, type RunnerMetadata } from "@wollipog/protocol";
+import {
+  DEFAULT_ORCHESTRATOR_DEFAULTS,
+  PROTOCOL_VERSION,
+  type AgentDefinition,
+  type ResourceScope,
+  type RunnerMetadata,
+} from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import type { AgentPrincipal } from "./identity.js";
+import { childHarnessAgents, childModelMachines } from "./orchestrator-settings.js";
 
 // #2940: an agent delegated as one user gets that user's member access to runners and their
 // workspaces, and nothing else. The live route path is covered end to end by
 // apps/runner/src/full-control-runner-access.integration.test.ts; this pins the edges.
 
 const now = 1_000;
+const MODEL = "claude-opus-5-5";
+const CLAUDE: AgentDefinition = { id: "claude", name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code",
+  context: { kind: "native" }, available: true, authStatus: "authenticated",
+  capabilities: { models: [{ id: MODEL, default: true }], effortLevels: ["high"], slashCommands: [],
+    permissionModes: ["default", "orchestrator"], supportsImages: true, supportsApprovals: true } };
 
 function fixture() {
   const db = ControlPlaneDb.open(":memory:");
@@ -23,7 +35,7 @@ function fixture() {
   db.createIdentityTeam({ teamId: "team_peer", organizationId: org, name: "Peer", memberUserIds: ["usr_peer"], now });
   const register = (runnerId: string, scope: ResourceScope) => {
     const meta: RunnerMetadata = { runnerId, hostname: runnerId, os: "linux", version: "test",
-      workspaces: [{ id: "w", name: "W", path: `/w/${runnerId}` }], agents: [] };
+      workspaces: [{ id: "w", name: "W", path: `/w/${runnerId}` }], agents: [CLAUDE] };
     db.registerRunner(meta, now, PROTOCOL_VERSION, scope);
   };
   const user = (userId: string): ResourceScope => ({ organizationId: org, owner: { kind: "user", userId } });
@@ -65,6 +77,34 @@ test("an agent delegated as a member reaches that member's runners and workspace
     assert.deepEqual(f.db.listRunnersForPrincipal(member).find((runner) => runner.runnerId === "org-runner")!.workspaces, []);
     // A delegation that claims another organization reaches nothing.
     assert.equal(f.db.canAccessRunner({ ...member, organizationId: "org_other" }, "other-org-runner"), false);
+  } finally { f.db.close(); }
+});
+
+// #3676: get_campaign derives childHarnessAgents and childModelMachines from exactly the runners the
+// root's credential can list. Every runner here is online, so a runner its Human cannot use is
+// left out because access refuses it, not because it is offline.
+test("a user-delegated root's campaign lists eligible agents on the runners its Human can use, and loses them with the membership", () => {
+  const f = fixture();
+  try {
+    const policy = { childHarnessMatch: "harness" as const, behavior: { ...DEFAULT_ORCHESTRATOR_DEFAULTS.behavior,
+      childHarness: { agentId: "claude", driver: "claude-code" as const, context: { kind: "native" as const } }, childModel: MODEL } };
+    const member = f.agent(f.user("usr_member"));
+    const machines = (principal: AgentPrincipal) => {
+      const runners = f.db.listRunnersForPrincipal(principal);
+      assert.ok(runners.every((runner) => runner.status === "online"));
+      return {
+        agents: childHarnessAgents(policy, runners)?.map(({ runnerId, agentId }) => [runnerId, agentId]),
+        models: childModelMachines(policy, runners)?.map(({ runnerId, supported }) => [runnerId, supported]),
+      };
+    };
+    const reachable = ["member-runner", "member-team-runner", "org-runner"];
+    assert.deepEqual(machines(member), {
+      agents: reachable.map((runnerId) => [runnerId, "claude"]),
+      models: reachable.map((runnerId) => [runnerId, true]),
+    });
+    // Access is evaluated when the campaign is read: suspending the Human drops the shared runners.
+    f.db.updateIdentityMember({ organizationId: f.org, userId: "usr_member", displayName: "usr_member", role: "operator", status: "suspended", now });
+    assert.deepEqual(machines(member), { agents: [["member-runner", "claude"]], models: [["member-runner", true]] });
   } finally { f.db.close(); }
 });
 

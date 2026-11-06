@@ -94,6 +94,16 @@ only) establishes the boundary before the Orchestrator's first turn:
   Selection Count (with Defaulted or Capped), Selection Criteria, Selection Constraints, Maximum
   Issues, Repository, Operations, any operations the message withheld, numbers not granted and why,
   the Decision Model, and its reason or failure.
+- On the campaign's own Campaign Status, the owner can change a granted selection's count with
+  Change Count (`POST /api/sessions/:id/orchestrator-campaign/scope-grant/selection-count`, Human
+  only, compare-and-set on the policy revision, `setScopeGrantSelectionCount`). Only the person who
+  authorized the current boundary can change it, and the boundary is re-minted around the new count
+  in one transaction, as the Follow-Up Limit is. While the current authorization derived Maximum
+  Issues, it moves by exactly the change, up to the 100-issue ceiling and never below the issues the
+  campaign already holds or 1. An explicit Maximum Issues never moves, so the count must fit what it
+  leaves after the named issues. The count is then shown as Set by You instead of Defaulted. Like
+  any boundary change, saving revokes every unconsumed decision, and the Orchestrator asks again.
+  A grant without a selection, or one that failed or was uncertain, has no count to change.
 - After launch, Campaign Status's Authorized Issue Scope shows the derived scope as Authorized
   Issues and the context references as Context-Only References (less any the scope has since
   added). Nothing new is asked before launch. The owner can select a context reference and remove

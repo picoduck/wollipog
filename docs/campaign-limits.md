@@ -44,6 +44,16 @@ closing the provider. The runner sends its final checkpoint only after retiremen
 checkpoint, or a reconnect inventory without the session, releases the slot after a Stop,
 verification with Stop and Archive, archival or provider exit, without reloading history and even
 when its final usage has not settled yet. A pending, provisional or unretired stop keeps the slot.
+A provider that exits by itself with a non-zero code is reported `failed` at once, but it has retired
+only when its driver proves that every process it started, descendants included, is gone; the runner
+then reports the checkpoint (#3788). A driver that cannot prove that keeps the slot until a shutdown
+proves it. The runner records each retirement in progress durably: until it is proven,
+no runner process, a restarted one included, attests a final checkpoint for that generation. A
+runner shutdown that interrupts a retirement proves it only once every provider process tree is
+reaped; it then stores the checkpoint, and the restarted runner's negotiated session snapshots deliver
+it. A shutdown without that proof, or a runner that crashes, leaves the slot held. Each provider
+of a generation needs its own proof, a relaunch under the same generation keeps the fence, and
+nothing a later runner process proves lifts a fence an earlier process left.
 Its unspent reservation stays outstanding until its usage settles. Every campaign read settles ended workers whose hydrated history covers
 their checkpoint, so a campaign that held slots or reservations for already-ended workers is
 repaired on its next read or startup without changing its allowance.

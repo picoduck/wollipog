@@ -1,9 +1,39 @@
 # Campaign Issue Scope
 
 Campaign issue authority is independent of the campaign work ledger. Initial explicit issue lists retain
-their existing finite authorization. Epic wording and requests for an issue's children seed membership
+their existing finite authorization. An epic a Custom campaign's first message names seeds membership
 proposals, never automatic authorization. An epic campaign cannot create delegated sessions until
 its issue scope is authorized. Custom campaigns require the existing human approval.
+
+The epic seed comes from the Decision Model, not from a regular expression (#4104, see
+[Custom Epic Seed](decision-model.md#custom-epic-seed-issue_scope_seed-4104)). A first message that
+writes a digit string but names no explicit issue list gets a pending seed (`issueScopeSeed`), and
+delegation waits while it is pending. The first message is the launch prompt or, for a campaign
+launched without one, the person's first prompt; any other first message is recorded as `none`, so no
+later message counts as the first. One `scope_grant` reading then decides it:
+
+| Reading | Seed | Delegation |
+|---|---|---|
+| Exactly one named issue, no range or selection, and the runner reads members for it | `seeded`: the issue is `issueScopeProposalEpic`, and the scope inspection starts from its members | Waits for the person's scope approval |
+| No issue named, several, a range or a selection, or a named issue without members | `none` | Proceeds |
+| Failed, uncertain, a floor dropped the named issue, or the runner couldn't read it | `owner`: no seed | Waits for the person's scope approval |
+
+A seed left pending with no reading in flight (a control-plane restart) settles as `owner`, with its
+reading recorded as failed. A message without digits makes no Decision call.
+
+A Custom campaign whose first message was recorded before the seed existed has no seed: the build
+before #4216 held it by matching that message against a regular expression on every check, and stored
+nothing. So that it doesn't lose its hold on upgrade (#4258), its recorded first message gets the seed
+it would get now. That happens the first time it tries to delegate or its issue scope is read, through
+the same `scope_grant` reading and the same table. Nothing is matched against the text. A later
+message never counts as the first.
+
+Approving a scope needs at least one issue, and a campaign whose message names none would otherwise
+wait forever. So the owner may also release an `owner` seed: **Continue Without an Epic** on its
+Epic Seed row in Campaign Status (the classification route, `orchestrator`). The seed becomes `none`.
+Releasing seeds, scopes and grants nothing, and a `seeded` epic cannot be released. Once a scope is
+approved, the seed holds nothing: its row reads as approved (`scoped` in the decisions response) and
+offers no release.
 
 Campaign Status exposes Authorized Issue Scope, revision, and recorded work outside authority. A campaign
 owner can inspect an epic's umbrella and members, select candidates, and request exact additions/removals.
@@ -82,18 +112,20 @@ Campaign Status lists it as recorded work outside authority, but:
   (`request_campaign_issue_scope_change`). A refused scope change cannot be routed around by
   recommitting the item and dispatching it again; only the campaign owner can then add the issue.
   An item that tracks no issue is unaffected.
-- A merge that would close an issue outside the current scope is never Orchestrator-owned. A GitHub
+- A merge that would close an issue outside the current scope is never Orchestrator-owned. A
   `pr_merge` whose `intendedClosures` name such an issue is refused before any decision is created,
   and the refusal names each one; write "Refs #N" for an issue that must stay open, or add the issue
-  to the scope first. On a v242 runner the declared closures are exactly what GitHub would close
-  (closing keywords and linked issues): the runner reads them before the request and again before
-  arming, and any difference is refused (#3713). A merge whose closures are all in scope, or that
-  closes nothing, keeps its ownership.
+  to the scope first. On a current runner the declared closures are exactly what the forge would
+  close: for GitHub (v242, #3713) its closing keywords and linked issues; for GitLab (v295, #3762)
+  its closing pattern on the description and GitLab's own `closes_issues` list. The runner reads
+  them before the request and again before arming, and any difference, or a forge it cannot read, is
+  refused. A merge whose closures are all in scope, or that closes nothing, keeps its ownership: a
+  GitLab merge is then owned exactly like a GitHub one.
 - A merge whose closures nothing reads is never assumed to close nothing. A GitHub merge from a
-  runner older than v242, and a GitLab merge request (whose closing references are not read at
-  all), are human-owned (`unverified_closures`) whatever they declare: an unread pull request that
-  declares an in-scope closure could still close an unscoped issue. A declared unscoped closure is
-  still refused, as above.
+  runner older than v242, and a GitLab merge from a runner older than v295, are human-owned
+  (`unverified_closures`) whatever they declare, and their decision cards say "Not checked": an
+  unread pull request that declares an in-scope closure could still close an unscoped issue. A
+  declared unscoped closure is still refused, as above.
 - Retargeting a work item that has an open attempt at an issue outside the scope, through
   `record_campaign_plan` or `update_campaign_work_item`, is refused like a dispatch. Linking an accepted follow-up's published issue to its item stays allowed, because that
   record must precede the issue's scope addition; its merge still cannot close the issue unscoped.
@@ -175,6 +207,48 @@ still in scope, published payload matching exactly, and scope plus reservations 
 The admission evidence names which kind it was. Each Orchestrator refusal returns a fixed sentence
 and a bounded `code`, such as `publication_approver_not_owner`, `origin_outside_scope` or
 `lineage_missing`. A campaign owner can still propose any change from Campaign Status.
+
+When the owner's first message asked the campaign to choose issues (a scope grant with a selection,
+#4102), the Orchestrator proposes the issues it chose with `lineage: {kind: "selection"}` and its
+ranking as the `explanation` (#4103); under such a grant a proposal without lineage takes the same
+route, and selection lineage under a grant without a selection is refused as `selection_not_granted`.
+A selection proposal adds issues only (`selection_additions_only`). Deterministic floors then run in
+order, and the first that fails refuses the proposal with its code and no Decision Model call:
+
+1. `repository_outside_boundary`: every addition is in a repository in the campaign's boundary.
+2. `not_an_issue`, `issue_not_open`: a v291 runner reads each number with `facts` and reports it as
+   an open issue, not a pull request.
+3. `already_in_scope`: none is in this scope.
+4. `other_campaign_scope`: no other active root campaign names it in its scope or holds a committed
+   work item for it.
+5. `selection_count_exhausted`, `capacity_exhausted`: the issues applied selection changes already
+   added plus this proposal stay within the grant's selection count, counted once and never given
+   back by a removal, and the scope plus publication reservations stay within Maximum Issues.
+6. `human_required_label`: no enabled Human Required ask rule with `conditions.issueLabels` (matched
+   case-insensitively, narrowed only by organization, machine, workspace and agent selectors) names
+   one of the issue's labels. Such a rule never matches a tool request.
+
+A runner older than v291 reports no facts, so floors 2 and 6 stay unverified and the proposal goes to
+the owner as `grantReview.cause: "selection_unverified"`, with no model call.
+
+A proposal that passes every floor gets the Decision Model's `scope_review` (`docs/decision-model.md`):
+
+- `admit`: the server sets `issueAdmission` from the evidence (the review occurrence, the digest of
+  the grant it read, the verdict) and records it as `selectionReview`. The scope change is then
+  Orchestrator-owned and applied like an epic-lineage admission, with no human step.
+- `refuse`: the proposal is refused as `selection_refused`, with the model's reason in
+  `errorDetails.reason`. No request is created; the Orchestrator may propose another issue.
+- `uncertain`, retries exhausted or a non-transient failure: exactly one owner-owned scope approval
+  with `grantReview.cause` `selection_uncertain` or `selection_failed`, its `reviewOccurrenceId`, and
+  the uncertain reason or failure class beside the proposal, its rationale and the grant. Approving it
+  revokes every outstanding decision, as every human Full Control scope approval does (#3915).
+
+One review covers the campaign, the scope revision, the grant and the set of additions. Repeating the
+same additions at the same revision, whatever the rationale says, returns the same verdict, the same
+owner request or the same scope change: a retry can neither admit twice nor ask the owner twice, and
+a reworded rationale is not a second review. Campaign Status lists every reviewed proposal in
+Decision Model Checks with its issues, rationale, verdict, reason and outcome.
+
 The server binds lineage evidence, rationale, expected revision, affected assignments, related
 active children and affected grants into the snapshot. Root standing authorization resolves and
 consumes that exact occurrence atomically; the grants it lists and their evidence receipts are

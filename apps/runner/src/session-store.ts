@@ -129,6 +129,10 @@ export interface SessionMeta {
   controlPlaneLaunchId?: string;
   campaignBudgetDispatch?: import("@wollipog/protocol").CampaignBudgetDispatch;
   campaignBudgetCheckpoint?: import("@wollipog/protocol").CampaignBudgetUsageCheckpoint;
+  /** The campaign generation of a provider whose retirement began but is not yet proven (#3788).
+   * It outlives a runner restart, so a restarted runner, which holds no provider of the session,
+   * still attests no final checkpoint for a provider an interrupted shutdown may have left running. */
+  retiringProviderGeneration?: string;
   /** Human-correlated two-phase role change. Retiring/prepared fence every provider submission. */
   roleConversion?: {
     command: import("@wollipog/protocol").PrepareSessionRoleMessage;
@@ -4466,7 +4470,8 @@ export function metaToSnapshot(
     seq: m.seq,
     historyEpoch: m.logEpoch ?? 0,
     ...(runnerSupportsProtocol(controlPlaneProtocolVersion,"campaignBudgetAdmission") &&
-        ["completed","failed","stopped"].includes(m.status) && m.campaignBudgetCheckpoint?.generation===m.campaignBudgetDispatch?.generation
+        ["completed","failed","stopped"].includes(m.status) && m.campaignBudgetCheckpoint?.generation===m.campaignBudgetDispatch?.generation &&
+        (m.retiringProviderGeneration===undefined || m.retiringProviderGeneration!==m.campaignBudgetDispatch?.generation)
       ? {campaignBudgetCheckpoint:m.campaignBudgetCheckpoint}:{}),
     createdAt: m.createdAt,
     updatedAt: m.updatedAt,

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   READ_FILE_CAP,
-  bestFuzzyFiles,
+  bestFuzzyMatches,
   createWorkspaceReference,
   inspectWorkspaceReferenceDiff,
   listSessionFiles,
@@ -246,6 +246,74 @@ test("a fuzzy search keeps the best 50 matches, not the first 50 found, and name
   }
 });
 
+test("a fuzzy search with directories ranks folders and files together inside the session root (#4129)", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-search-fuzzy-dirs-"));
+  const outside = mkdtempSync(join(tmpdir(), "wollipog-search-fuzzy-dirs-outside-"));
+  try {
+    mkdirSync(join(root, "apps", "web", "src", "components"), { recursive: true });
+    mkdirSync(join(root, "docs", "sdtsx-notes"), { recursive: true });
+    mkdirSync(join(root, ".git", "sdtsx-objects"), { recursive: true });
+    mkdirSync(join(root, "node_modules", "sdtsx-dependency"), { recursive: true });
+    mkdirSync(join(outside, "sdtsx-secret"));
+    writeFileSync(join(root, "apps", "web", "src", "components", "SessionDetail.tsx"), "");
+    writeFileSync(join(root, "docs", "sdtsx-notes", "readme.md"), "");
+    writeFileSync(join(root, "docs", "unrelated.md"), "");
+    let linked = true;
+    try {
+      symlinkSync(outside, join(root, "sdtsx-outside-link"), "dir");
+    } catch {
+      linked = false;
+    }
+
+    const found = await searchWorkspaceReferences(NATIVE, root, "sdtsx", undefined, true);
+    assert.equal(found.match, "fuzzy");
+    assert.equal(found.fuzzyWithDirectories, true);
+    assert.equal(found.truncated, false);
+    assert.equal(found.limit, undefined);
+    assert.deepEqual(found.results, [
+      { path: "docs/sdtsx-notes", isDirectory: true },
+      { path: "apps/web/src/components/SessionDetail.tsx", isDirectory: false },
+      { path: "docs/sdtsx-notes/readme.md", isDirectory: false },
+    ], "the folder named like the query ranks first; .git, node_modules and the symlink stay out");
+    if (!linked) t.diagnostic("symlinks unavailable; the escape case was not exercised");
+
+    const folders = await searchWorkspaceReferences(NATIVE, root, "comp", "fuzzy", true);
+    assert.deepEqual(folders.results[0], { path: "apps/web/src/components", isDirectory: true },
+      "fuzzyWithDirectories takes precedence over a files-only `match`");
+
+    const files = await searchWorkspaceReferences(NATIVE, root, "sdtsx", "fuzzy");
+    assert.equal(files.fuzzyWithDirectories, undefined, "Go to File's search is unchanged");
+    assert.ok(files.results.every((candidate) => !candidate.isDirectory));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("a fuzzy search with directories keeps the best 50 and names the cap that cut it (#4129)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-search-fuzzy-dirs-cap-"));
+  try {
+    for (let index = 0; index < 60; index += 1) mkdirSync(join(root, `m-${String(index).padStart(2, "0")}-t`));
+    mkdirSync(join(root, "deep", "er", "mt"), { recursive: true });
+    const found = await searchWorkspaceReferences(NATIVE, root, "mt", undefined, true);
+    assert.equal(found.results.length, 50);
+    assert.deepEqual(found.results[0], { path: "deep/er/mt", isDirectory: true }, "visited last, it still ranks first");
+    assert.ok(found.results.every((candidate) => candidate.isDirectory));
+    assert.equal(found.truncated, true);
+    assert.equal(found.limit, "results");
+
+    const visit = nativeWorkspaceVisit(root, 10);
+    const visitBound = bestFuzzyMatches(visit, "mt", { directories: true });
+    assert.ok(visitBound.results.length > 0);
+    assert.ok(visitBound.results.every((candidate) => visit.entries.some((entry) => entry.path === candidate.path)),
+      "only the visited entries are scored");
+    assert.equal(visitBound.truncated, true);
+    assert.equal(visitBound.limit, "entries");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 /** `src/a.ts` and `notes.txt` beside two `node_modules` directories, one nested. A file that is
  * merely named `node_modules` is kept: only directories are skipped. */
 function makeDependencyFixture(): string {
@@ -287,27 +355,27 @@ test("native search skips node_modules directories without counting them against
   }
 });
 
-test("bestFuzzyFiles bounds its total alignment work and still ranks every match", () => {
+test("bestFuzzyMatches bounds its total alignment work and still ranks every match", () => {
   const entries = [
     { path: "src/sidebar-details.tsx", isDirectory: false },
     { path: "apps/web/src/components/SessionDetail.tsx", isDirectory: false },
     { path: "src/unrelated.ts", isDirectory: false },
   ];
-  const unbounded = bestFuzzyFiles({ entries, truncated: false }, "sdtsx");
-  const spent = bestFuzzyFiles({ entries, truncated: false }, "sdtsx", 0);
+  const unbounded = bestFuzzyMatches({ entries, truncated: false }, "sdtsx");
+  const spent = bestFuzzyMatches({ entries, truncated: false }, "sdtsx", { alignmentBudget: 0 });
   assert.deepEqual(spent.results.map((candidate) => candidate.path).sort(), unbounded.results.map((candidate) => candidate.path).sort(),
     "a spent budget changes how finely matches are scored, never which paths match");
   assert.equal(spent.results.length, 2);
 });
 
-test("bestFuzzyFiles reports the visit cap ahead of the result cap", () => {
+test("bestFuzzyMatches reports the visit cap ahead of the result cap", () => {
   const entries = Array.from({ length: 60 }, (_, index) => ({ path: `src/item-${index}.ts`, isDirectory: false }));
-  const visitBound = bestFuzzyFiles({ entries, truncated: true }, "item");
+  const visitBound = bestFuzzyMatches({ entries, truncated: true }, "item");
   assert.equal(visitBound.results.length, 50);
   assert.equal(visitBound.limit, "entries");
   assert.equal(visitBound.truncated, true);
 
-  const complete = bestFuzzyFiles({ entries: entries.slice(0, 50), truncated: false }, "item");
+  const complete = bestFuzzyMatches({ entries: entries.slice(0, 50), truncated: false }, "item");
   assert.equal(complete.truncated, false);
   assert.equal(complete.limit, undefined);
   assert.deepEqual(complete.results.map((candidate) => candidate.path).slice(0, 2), ["src/item-0.ts", "src/item-1.ts"],
@@ -476,13 +544,22 @@ test("WSL fuzzy search ranks the same bounded traversal and names a capped visit
   const visit = parseWslWorkspaceVisit(listing);
   assert.deepEqual(visit.entries[1], { path: "src/sidebar.ts", isDirectory: false }, "a CRLF row loses its CR");
   assert.equal(visit.truncated, false);
-  const found = bestFuzzyFiles(visit, "sdtsx");
+  const found = bestFuzzyMatches(visit, "sdtsx");
   assert.deepEqual(found.results.map((candidate) => candidate.path), ["src/components/SessionDetail.tsx"]);
   assert.equal(found.truncated, false);
 
-  const capped = bestFuzzyFiles(parseWslWorkspaceVisit(listing, 3), "s");
+  const capped = bestFuzzyMatches(parseWslWorkspaceVisit(listing, 3), "s");
   assert.equal(capped.limit, "entries");
   assert.deepEqual(capped.results.map((candidate) => candidate.path), ["src/sidebar.ts", "src/components/SessionDetail.tsx"]);
+
+  // The composer's picker (#4129) scores the folder rows of that same traversal too.
+  const withDirectories = bestFuzzyMatches(visit, "src", { directories: true });
+  assert.deepEqual(withDirectories.results[0], { path: "src", isDirectory: true });
+  assert.equal(withDirectories.fuzzyWithDirectories, true);
+  const cappedWithDirectories = bestFuzzyMatches(parseWslWorkspaceVisit(listing, 3), "s", { directories: true });
+  assert.equal(cappedWithDirectories.limit, "entries");
+  assert.deepEqual(cappedWithDirectories.results.map((candidate) => candidate.path).sort(),
+    ["src", "src/components/SessionDetail.tsx", "src/sidebar.ts"]);
 });
 
 test("the WSL search script prunes node_modules before its bounded listing counts it (#4095)", (t) => {

@@ -358,6 +358,34 @@ test("a failed pricing refresh answers 200 with its reason, and a second one ins
   db.close();
 });
 
+test("neither the usage response nor Refresh Rates repeats the configured source's URL credentials (#4173)", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const sourceUrl = "https://u:p@host.example/rates.json?key=v";
+  const fetched: string[] = [];
+  const service = new UsageRateTableService({
+    sourceUrl,
+    cachePath: null,
+    log: () => {},
+    fetchDocument: async (url) => {
+      fetched.push(url);
+      return { "gpt-5.5-codex": { input_cost_per_token: 0.00000125, output_cost_per_token: 0.00001 } };
+    },
+  });
+  const app = Fastify();
+  registerUsageRoutes(app, db, () => human("viewer"), undefined, service);
+
+  const refreshed = await app.inject({ method: "POST", url: "/api/usage/pricing/refresh" });
+  const usage = await app.inject({ method: "GET", url: "/api/usage" });
+  assert.deepEqual(fetched, [sourceUrl]);
+  for (const response of [refreshed, usage]) {
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().pricing.source, "https://host.example/rates.json");
+    assert.doesNotMatch(response.body, /u:p@|key=v/);
+  }
+  await app.close();
+  db.close();
+});
+
 test("the daily budget is readable by members, writable by admins, and per-user windows are scoped by role", async () => {
   const db = ControlPlaneDb.open(":memory:");
   const principals = new Map<string, AuthPrincipal>([["viewer", human("viewer")], ["admin", human("admin")]]);

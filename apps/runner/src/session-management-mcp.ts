@@ -1,4 +1,5 @@
 import { RETIRED_REVIEW_TOOL_NAMES, REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
+import { normalizeWorkflowDecisionOwnerRule, WORKFLOW_DECISION_OWNER_RULE_QUOTE_MAX_CHARS, WORKFLOW_DECISION_OWNER_RULE_SOURCE_MAX_CHARS } from "@wollipog/protocol";
 import { sessionCredentialRefusal } from "./session-credential-error.js";
 /** Shared session-management tools for the session-scoped CLI and MCP server. */
 
@@ -565,9 +566,10 @@ async function mergeReviewEvidenceCompatibilityError(args: Json, deps: McpDeps):
       "Update Wollipog before citing a review session; this citation was not submitted."), required, actual);
 }
 
-/** A pre-v242 control plane drops intendedClosures without checking GitHub (#3713). */
-async function intendedClosuresCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
-  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.githubMergeClosingReferences;
+/** A pre-v242 control plane drops intendedClosures without checking GitHub (#3713), and a pre-v295
+ * one refuses them on a GitLab merge, which it does not check (#3762). */
+async function intendedClosuresCompatibilityError(deps: McpDeps, gitlab = false): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL[gitlab ? "gitlabMergeClosingReferences" : "githubMergeClosingReferences"];
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
     const result = await cpFetch(deps, "GET", "/api/compatibility");
@@ -704,6 +706,24 @@ async function ownerDecisionCompatibilityError(deps: McpDeps): Promise<ToolResul
     ? null
     : controlPlaneUpdateRequired(needsNewerWollipog("Owner decisions need",
       "Update Wollipog; nothing reached the owner."), required, actual);
+}
+
+/** A pre-v296 control plane ignores `ownerRule` (#4137), so the decision would keep the owner its
+ * policy names and the Orchestrator could decide a gate its owner kept. Refuse before sending. */
+async function ownerRuleCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule;
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const result = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!result.ok) {
+      return controlPlaneUpdateRequired(wollipogSupportUnverified("owner rules", result.message), required);
+    }
+    actual = result.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= required
+    ? null
+    : controlPlaneUpdateRequired(needsNewerWollipog("Owner rules (ownerRule) need",
+      "Nothing was requested. Tell your Orchestrator which gate the rule keeps for a person, so it can hand the decision to the owner, or update Wollipog."), required, actual);
 }
 
 /** Bounds the fence probe so it cannot push a create call toward the harness's tool timeout. */
@@ -1158,13 +1178,16 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
         mergeMethod: { type: "string", enum: ["merge_train", "merge"] },
         squash: { type: "boolean" },
         removeSourceBranch: { type: "boolean" },
-        // GitHub only (#3713): the issues this merge should close; omit it when it must close none.
+        // The issues this merge should close (#3713; GitLab since #3762); omit it when it must close none.
         intendedClosures: {
           type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 512 },
-          description: "GitHub only: every issue this merge is meant to close, as #N, owner/repo#N, or an issue URL. " +
+          description: "Every issue this merge is meant to close: on GitHub as #N, owner/repo#N, or an issue URL; on GitLab " +
+            "as #N, group/project#N, <host>/group/project#N, or an issue URL on that instance. " +
             "Omit it when the merge must close no issue. Before the decision is created and again before it is armed, " +
-            "the runner reads what GitHub would close (closing keywords in the description, even negated as in " +
-            "\"does not close #N\", and issues linked by hand); any difference is refused with each reference and its line.",
+            "the runner reads what the forge would close: on GitHub, closing keywords in the description, even negated as in " +
+            "\"does not close #N\", and issues linked by hand; on GitLab, its closing pattern on the description (also " +
+            "\"closing\", \"implements\" and every reference in a list such as \"Closes #1, #2 and #3\") and GitLab's own " +
+            "list, which covers the title and commits. Any difference is refused with each reference and its line.",
         },
       },
       required: ["category", "repository", "pullRequest", "headSha", "reviewResult", "requiredChecks"],
@@ -1390,13 +1413,14 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_campaign_issue_scope_change",
-    description: "Propose exact repository-qualified issue additions/removals at the current scope revision. Custom requires a human. A human-established Full Control issue boundary admits verified epic or exact published follow-up lineage within its limits. Resolution atomically applies and consumes scope; do not consume it yourself. Pending, denied, stale and replayed requests never widen authority.",
+    description: "Propose exact repository-qualified issue additions/removals at the current scope revision. Custom requires a human. A human-established Full Control issue boundary admits verified epic or exact published follow-up lineage within its limits. When the owner's first message asked the campaign to choose issues (a selection grant), propose the issues you chose with lineage {kind:\"selection\"} and your ranking as the explanation, additions only: the server refuses, with a fixed code and no model call, an issue outside the campaign's repositories, a pull request, a closed issue, one already in scope, one in another active campaign's scope, one past the selection count or Maximum Issues, and one with a Human Required label; otherwise the owner decides. Resolution atomically applies and consumes scope; do not consume it yourself. Pending, denied, stale and replayed requests never widen authority.",
     inputSchema: { type: "object", properties: {
       requestId: { type: "string" }, expectedRevision: { type: "integer", minimum: 0 }, explanation: { type: "string", minLength: 1, maxLength: 4000 },
       additions: { type: "array", maxItems: 100, items: { type: "object", properties: { repository: { type: "string" }, number: { type: "integer", minimum: 1 } }, required: ["repository", "number"], additionalProperties: false } },
       removals: { type: "array", maxItems: 100, items: { type: "object", properties: { repository: { type: "string" }, number: { type: "integer", minimum: 1 } }, required: ["repository", "number"], additionalProperties: false } },
       lineage: { oneOf: [ { type: "object", properties: { kind: { const: "epic" }, epic: { type: "integer", minimum: 1 } }, required: ["kind", "epic"], additionalProperties: false },
-        { type: "object", properties: { kind: { const: "follow_up" }, publicationOccurrenceId: { type: "string" } }, required: ["kind", "publicationOccurrenceId"], additionalProperties: false } ] },
+        { type: "object", properties: { kind: { const: "follow_up" }, publicationOccurrenceId: { type: "string" } }, required: ["kind", "publicationOccurrenceId"], additionalProperties: false },
+        { type: "object", properties: { kind: { const: "selection" } }, required: ["kind"], additionalProperties: false } ] },
     }, required: ["requestId", "expectedRevision", "explanation", "additions", "removals"], additionalProperties: false },
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
@@ -2425,21 +2449,39 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_workflow_decision",
-    description: "Create an explicit typed workflow gate bound to this session, its controlling Orchestrator, the current human-owned policy revision, and an exact resource snapshot. Generic questions and approvals cannot satisfy this gate. A GitHub pr_merge is created only when the issues GitHub would close on merge are exactly its intendedClosures; reference an issue that must stay open as \"Refs #N\".",
+    description: "Create an explicit typed workflow gate bound to this session, its controlling Orchestrator, the current human-owned policy revision, and an exact resource snapshot. Generic questions and approvals cannot satisfy this gate. A pr_merge is created only when the issues the forge would close on merge are exactly its intendedClosures (GitHub, and GitLab from v295); reference an issue that must stay open as \"Refs #N\".",
     inputSchema: {
       type: "object",
       properties: {
         requestId: { type: "string", description: "Caller-owned idempotency key" },
         resourceKey: { type: "string", description: "Stable action target; a new occurrence supersedes older unconsumed occurrences, except a person-owned follow-up publication, which is never replaced: wait for it, consume it, or withdraw it first" },
         resourceSnapshot: WORKFLOW_DECISION_RESOURCE_SCHEMA,
+        ownerRule: {
+          type: "object",
+          description: "When an installed skill or user-authored instruction keeps this gate for a person, name it here: the decision is created human-owned under any mode or grant, so only the owner decides it, and its card shows the rule. It can never give the Orchestrator a decision. Requires control plane v296.",
+          properties: {
+            source: { type: "string", minLength: 1, maxLength: WORKFLOW_DECISION_OWNER_RULE_SOURCE_MAX_CHARS,
+              description: "The file that keeps the gate, such as ~/.claude/skills/issue-workflow/SKILL.md; letters, digits and ._~/\\@+:- without spaces" },
+            quote: { type: "string", minLength: 1, maxLength: WORKFLOW_DECISION_OWNER_RULE_QUOTE_MAX_CHARS,
+              description: "The requirement quoted from that file, on one line" },
+          },
+          required: ["source", "quote"],
+          additionalProperties: false,
+        },
       },
       required: ["requestId", "resourceKey", "resourceSnapshot"],
       additionalProperties: false,
     },
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      if (args?.ownerRule !== undefined) {
+        const rule = normalizeWorkflowDecisionOwnerRule(args.ownerRule);
+        if (!rule.ok) return errorResult(rule.message);
+        const compatibilityError = await ownerRuleCompatibilityError(deps);
+        if (compatibilityError) return compatibilityError;
+      }
       if (args?.resourceSnapshot?.category === "pr_merge" && args.resourceSnapshot.intendedClosures !== undefined) {
-        const compatibilityError = await intendedClosuresCompatibilityError(deps);
+        const compatibilityError = await intendedClosuresCompatibilityError(deps, args.resourceSnapshot.mergeMethod !== undefined);
         if (compatibilityError) return compatibilityError;
       }
       const evidenceCompatibilityError = await mergeReviewEvidenceCompatibilityError(args, deps);
@@ -2448,7 +2490,8 @@ export const TOOLS: McpTool[] = [
         deps,
         "POST",
         `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/workflow-decisions`,
-        { requestId: args?.requestId, resourceKey: args?.resourceKey, resourceSnapshot: args?.resourceSnapshot },
+        { requestId: args?.requestId, resourceKey: args?.resourceKey, resourceSnapshot: args?.resourceSnapshot,
+          ...(args?.ownerRule !== undefined ? { ownerRule: args.ownerRule } : {}) },
         // A merge is created only after the control plane reads the pull request through this runner.
         args?.resourceSnapshot?.category === "pr_merge" ? Math.max(deps.requestTimeoutMs ?? CP_TIMEOUT_MS, MERGE_DECISION_TIMEOUT_MS) : undefined,
       );
@@ -2516,7 +2559,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "consume_workflow_decision",
-    description: "Immediately before the approved external action begins, consume its one-shot authorization using the exact current resource snapshot. PR merge approvals instead arm one canonical enqueue command pinned to the approved head (gh pr merge with --match-head-commit, after the runner reads again which issues GitHub would close: any the snapshot's intendedClosures does not list revoke the approval; for a GitLab merge request, one glab api merge-train or merge call with sha=, which the runner first checks against GitLab: a stale head, or a direct merge where the project runs merge trains, is refused) and are consumed when its matching runner permission is delivered, or, when no permission prompt occurs (Claude Code in auto or Full Access), by reconcile_workflow_decision after the PR reads MERGED. Revoked, changed, replayed, stale, or superseded grants fail closed.",
+    description: "Immediately before the approved external action begins, consume its one-shot authorization using the exact current resource snapshot. PR merge approvals instead arm one canonical enqueue command pinned to the approved head (gh pr merge with --match-head-commit, after the runner reads again which issues GitHub would close: any the snapshot's intendedClosures does not list revoke the approval; for a GitLab merge request, one glab api merge-train or merge call with sha=, which the runner first checks against GitLab: a stale head, or a direct merge where the project runs merge trains, is refused, and, as on GitHub, a closure the snapshot's intendedClosures does not list revokes the approval) and are consumed when its matching runner permission is delivered, or, when no permission prompt occurs (Claude Code in auto or Full Access), by reconcile_workflow_decision after the PR reads MERGED. Revoked, changed, replayed, stale, or superseded grants fail closed.",
     inputSchema: {
       type: "object",
       properties: {

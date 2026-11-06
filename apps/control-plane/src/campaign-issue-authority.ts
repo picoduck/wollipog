@@ -108,7 +108,10 @@ export type CampaignScopeAdmissionFailure =
   | "capacity_exhausted" | "lineage_missing" | "epic_not_authorized" | "epic_members_unverified"
   | "follow_ups_not_authorized" | "follow_up_not_single" | "publication_not_found" | "publication_not_consumed"
   | "publication_already_admitted" | "publication_unapproved" | "publication_approved_under_earlier_boundary" | "publication_approver_not_owner"
-  | "publication_authority_changed" | "recommendation_not_found" | "recommendation_not_accepted" | "resulting_issue_mismatch" | "origin_outside_scope" | "payload_mismatch";
+  | "publication_authority_changed" | "recommendation_not_found" | "recommendation_not_accepted" | "resulting_issue_mismatch" | "origin_outside_scope" | "payload_mismatch"
+  // Selection lineage (#4103): its deterministic floors, in the order they run.
+  | "selection_not_granted" | "selection_additions_only" | "repository_outside_boundary" | "not_an_issue" | "issue_not_open"
+  | "already_in_scope" | "other_campaign_scope" | "selection_count_exhausted" | "human_required_label";
 
 const HUMAN_SCOPE_ROUTE = "ask the campaign owner to propose this change from Campaign Status";
 
@@ -137,6 +140,19 @@ export const CAMPAIGN_SCOPE_ADMISSION_REFUSALS: Readonly<Record<CampaignScopeAdm
   resulting_issue_mismatch: { status: 409, message: "Record the verified published issue on exactly one accepted recommendation before admitting scope" },
   origin_outside_scope: { status: 409, message: "The published follow-up's authorized origins were removed from scope" },
   payload_mismatch: { status: 409, message: "The published issue does not match the exact approved payload." },
+  selection_not_granted: { status: 403, message: "Selection lineage needs a scope grant in which the owner's first message asked the campaign to choose " +
+    `issues, and this campaign's grant has none. Name a human-authorized epic or the consumed publication of an accepted follow-up, or ${HUMAN_SCOPE_ROUTE}.` },
+  selection_additions_only: { status: 400, message: "A selection proposal adds issues only; propose removals as their own change." },
+  repository_outside_boundary: { status: 403, message: "A proposed issue is not in a repository in this campaign's boundary; " +
+    "propose issues from the campaign's own repositories." },
+  not_an_issue: { status: 409, message: "A proposed number is a pull request, not an issue; propose issues only." },
+  issue_not_open: { status: 409, message: "A proposed issue is closed; propose open issues only." },
+  already_in_scope: { status: 409, message: "A proposed issue is already in this campaign's scope." },
+  other_campaign_scope: { status: 409, message: "A proposed issue is in another active campaign's scope or work; choose another issue." },
+  selection_count_exhausted: { status: 409, message: "This proposal would select more issues than the owner's selection count allows. " +
+    "Only the owner can change that count, in Campaign Status; an Orchestrator can't." },
+  human_required_label: { status: 403, message: "A proposed issue has a label that a Human Required rule names, so only the campaign owner " +
+    "can add it; choose another issue or ask the owner to propose it from Campaign Status." },
 };
 
 /** The accepted recommendation a consumed publication delivered as `issue`. A bounded grant names it.
