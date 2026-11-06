@@ -943,6 +943,8 @@ function ownerQuestionAnswerPrompt(decision: WorkflowDecisionView, snapshot: Own
     ...(answered && option ? [`They chose option ${decisionLiteral(option.optionId)}: ${decisionLiteral(option.label)}.`] : []),
     ...(answered && decision.childMessage ? [option ? "They added, in their own words:" : "Their answer, in their own words:",
       decision.childMessage] : []),
+    // A credential-screen Decline (#4104) says why the question was dismissed.
+    ...(decision.status === "denied" && decision.childMessage ? [decision.childMessage] : []),
     answered
       ? "Act on this answer. It grants no authority: an exact action that needs an approval still needs an Owner Approval or authority the campaign already delegates."
       : "Continue with your best judgment, taking the conservative option, or ask again with request_owner_decision if it truly blocks you.",
@@ -1266,8 +1268,17 @@ export function normalizeWorkflowDecisionSnapshot(
     if (Object.keys(value).some((key) => !["category", "question", "options", "recommendedOptionId", "material", "kind"].includes(key))) {
       return fail("an owner decision has only a question, options, a recommended option, material and a kind");
     }
-    return ok({ category, ...question.data, ...(typeof value.material === "string" ? { material: value.material } : {}),
-      ...(ownerQuestion ? { kind: "question" as const } : {}) });
+    const normalized = { category: "owner_decision" as const, ...question.data, ...(typeof value.material === "string" ? { material: value.material } : {}),
+      ...(ownerQuestion ? { kind: "question" as const } : {}) };
+    // An Owner Question is answered by the label the owner sees, so each must name one option, the
+    // recommended one's marked label included (#4270 review).
+    if (ownerQuestion) {
+      const labels = ownerQuestionAgentQuestions({ ...normalized, kind: "question" })[0]!.options.map((option) => option.label);
+      if (new Set(labels).size !== labels.length) {
+        return fail("owner question options must have distinct labels, counting the recommended option's \"(Recommended)\" mark");
+      }
+    }
+    return ok(normalized);
   }
   if (!WORKFLOW_DECISION_CATEGORIES.includes(category as typeof WORKFLOW_DECISION_CATEGORIES[number])) {
     return fail("unknown workflow decision category");
@@ -13071,7 +13082,10 @@ export class SessionsService {
    * it answerable. The answer reaches the root as its prompt, exactly as typed.
    */
   answerOwnerQuestion(sessionId: string, occurrenceId: string, answers: Record<string, string | string[]>,
-    action: "submit" | "dismiss", actor: GovernanceActor): ServiceResult<SessionView> {
+    action: "submit" | "dismiss", actor: GovernanceActor,
+    /** #4104: the owner's Decline classification of a question the Decision Model could not screen,
+     * which dismisses it with this message. */
+    credentialScreenDecline?: { message: string }): ServiceResult<SessionView> {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== sessionId || decision.controllingSessionId !== sessionId ||
         !isOwnerQuestionSnapshot(decision.resourceSnapshot)) return fail("owner question not found", 404);
@@ -13082,8 +13096,10 @@ export class SessionsService {
     if (decision.authority !== "human" || actor.kind !== "human" || !actor.id || !this.db.campaignOwnerUser(sessionId, actor.id)) {
       return fail("Only the campaign's owner can answer an owner question", 403);
     }
-    // A question the Decision Model could not screen is classified first, never answered (#4104).
-    if (decision.authorityEvaluation?.reason === "credential_screen_review") {
+    // A question the Decision Model could not screen is classified first, never answered (#4104):
+    // only its owner's Decline, which dismisses it, settles it from there.
+    if (credentialScreenDecline && action !== "dismiss") return fail("a declined question cannot be answered", 400);
+    if (decision.authorityEvaluation?.reason === "credential_screen_review" && !credentialScreenDecline) {
       return fail("Classify this question first: Decline, or Let the Orchestrator Answer. Nobody answers it until then.", 409);
     }
     const root = this.db.getSession(sessionId);
@@ -13095,7 +13111,7 @@ export class SessionsService {
     const now = Date.now();
     const oweResume = this.workflowDecisionResumeOwed(root);
     const resolved = this.db.resolveWorkflowDecision(occurrenceId, "human", answer ? "approved" : "denied", now,
-      answer?.selectedOptionId, undefined, undefined, answer?.text, oweResume);
+      answer?.selectedOptionId, undefined, undefined, answer?.text ?? credentialScreenDecline?.message, oweResume);
     if (!resolved) return fail("this owner question was answered concurrently", 409);
     this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
     this.recordWorkflowDecisionAudit(resolved, answer ? "answered" : "denied", actor, now);
@@ -13451,7 +13467,10 @@ export class SessionsService {
       if (resolution?.outcome === "approve" && index < 0) return fail("answer an owner question from its question card", 400);
       const answered = this.answerOwnerQuestion(childSessionId, occurrenceId,
         index < 0 ? {} : { [OWNER_QUESTION_ANSWER_ID]: ownerQuestionAgentQuestions(snapshot)[0]!.options[index]!.label },
-        index < 0 ? "dismiss" : "submit", actor);
+        index < 0 ? "dismiss" : "submit", actor,
+        internal?.credentialScreenDecline && resolution.outcome === "deny"
+          ? { message: resolution.childMessage ?? "Full Control declined this question as a request for credentials, sign-in or access." }
+          : undefined);
       return answered.ok ? ok(this.db.workflowDecisionByOccurrence(occurrenceId)!) : failAs(answered);
     }
     if (decision?.category === "automation_creation") {

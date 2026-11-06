@@ -35,7 +35,10 @@ function harness(options: { runnerProtocol?: number } = {}) {
   hub.isRunnerOnline = () => true; hub.sessionChangedById = () => {};
   hub.sendToRunner = (_runner, message) => { toRunner.push(message); return true; };
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
-  svc.setDecisionRuntime(fakeScreenRuntime(db, () => ({ verdict: "discusses" })).runtime);
+  // A fake Decision Model: `uncertain` for request texts a test lists, `discusses` otherwise.
+  const uncertain = new Set<string>();
+  svc.setDecisionRuntime(fakeScreenRuntime(db, (request) =>
+    [...uncertain].some((text) => JSON.stringify(request).includes(text)) ? { verdict: "uncertain" } : { verdict: "discusses" }).runtime);
   const control = { mode: "full_control" as const, objective: "Implement #100",
     operations: ["implementation_question", "pr_merge", "question", "tool_approval", "policy_ask"] as Array<"implementation_question" | "pr_merge" | "question" | "tool_approval" | "policy_ask">,
     delegatablePolicyIds: [] };
@@ -60,8 +63,49 @@ function harness(options: { runnerProtocol?: number } = {}) {
   ];
   const answer = (decision: WorkflowDecisionView, answers: Record<string, string>, actor: { kind: "human" | "agent"; id: string } = owner) =>
     svc.answerQuestion("root", decision.occurrenceId, answers, actor, "submit", undefined, decision.occurrenceId);
-  return { db, svc, principal, owner, control, material, askQuestion, askApproval, card, prompts, answer, toRunner };
+  return { db, svc, principal, owner, control, material, askQuestion, askApproval, card, prompts, answer, toRunner, uncertain };
 }
+
+test("the owner's Decline of an Owner Question the screen could not settle dismisses it and tells the root (#4270 review)", async () => {
+  const h = harness();
+  try {
+    h.uncertain.add("Which credential design should the provider bridge use?");
+    const asked = await h.askQuestion();
+    assert.ok(asked.ok && asked.data, asked.error ?? "created");
+    assert.equal(asked.data.authorityEvaluation?.reason, "credential_screen_review");
+    assert.equal(presentOwnerQuestionRequest(h.card(asked.data)!).kind, "workflow_decision", "it is classified on its own card first");
+    assert.equal(h.answer(asked.data, { [OWNER_QUESTION_ANSWER_ID]: "Broker Process" }).status, 409, "nobody answers it before it is classified");
+    const screen = h.db.raw().prepare("SELECT occurrence_id FROM decision_occurrences").all() as Array<{ occurrence_id: string }>;
+    const screenId = screen.map((row) => row.occurrence_id).find((id) => h.db.campaignDecisionSubject(id)?.requestId === "credential-design")!;
+    const declined = h.svc.classifyCampaignDecision("root", screenId, { classification: "decline" }, h.owner);
+    assert.ok(declined.ok, declined.error ?? "declined");
+    const resolved = h.db.workflowDecisionByOccurrence(asked.data.occurrenceId)!;
+    assert.equal(resolved.status, "denied");
+    assert.equal(h.card(asked.data), undefined, "its card leaves the root");
+    const prompt = h.prompts("root").find((text) => text.includes(asked.data!.occurrenceId))!;
+    assert.match(prompt, /dismissed your owner question/u);
+    assert.match(prompt, /classified it as a request for credentials/u);
+  } finally { h.db.close(); }
+});
+
+test("an Owner Question's options must read as distinct labels, its Recommended mark included (#4270 review)", async () => {
+  const h = harness();
+  try {
+    const duplicate = await h.svc.createOwnerDecision("root", { requestId: "d", resourceKey: "d", kind: "question", question: "Which one?",
+      options: [{ optionId: "a", label: "Same" }, { optionId: "b", label: "Same" }] });
+    assert.equal(duplicate.ok, false);
+    assert.match(duplicate.error!, /distinct labels/u);
+    const collision = await h.svc.createOwnerDecision("root", { requestId: "c", resourceKey: "c", kind: "question", question: "Which one?",
+      recommendedOptionId: "a", options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "A (Recommended)" }] });
+    assert.equal(collision.ok, false, "a recommended label cannot collide with another option's label");
+    // Distinct labels resolve to their own option, the second included.
+    const distinct = await h.svc.createOwnerDecision("root", { requestId: "ok", resourceKey: "ok", kind: "question", question: "Which one?",
+      recommendedOptionId: "a", options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] });
+    assert.ok(distinct.ok && distinct.data);
+    assert.ok(h.answer(distinct.data, { [OWNER_QUESTION_ANSWER_ID]: "B" }).ok);
+    assert.equal(h.db.workflowDecisionByOccurrence(distinct.data.occurrenceId)!.selectedOptionId, "b");
+  } finally { h.db.close(); }
+});
 
 test("an Owner Question is presented as an agent question with Markdown background, Recommended, Other and a note (#4270)", async () => {
   const h = harness();
