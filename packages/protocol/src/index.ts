@@ -959,6 +959,12 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      only to a v308 control plane; a v308 control plane reads it only from a v308 root runner, and
 //      an older runner's proposal takes the owner route, and one that can't report issue facts is
 //      refused. (304 to 306 are claimed by open pull requests.)
+// 310: campaign control metadata carries its own authoritative ordering (#3363). A campaign
+//      issue scope synchronization, and an Orchestrator launch policy, add `controlRevision`: the
+//      campaign root's policy revision the control was read at. A runner keeps the newest control
+//      it was sent and never lets a delayed or reordered update replace it with an older one, even
+//      within one issue-scope revision. A pre-v310 runner is never sent the field and keeps
+//      replacing control with each synchronization.
 // 312: the Decision Model checks a scope proposal's stated constraints (#4282). A proposal that
 //      states anything checkable is asked the `scope_check` kind's typed questions in one call (the
 //      count, named versus merely mentioned, each stated constraint per chosen issue, omissions and
@@ -1557,6 +1563,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * Custom campaign's first-message reading granted to its live Orchestrator. Sent only to a v302
    * runner; an older one gets the numbers at the provider's next launch, as before. */
   campaignIssueNumberGrant: 302,
+  /** v310 orders campaign control metadata by `controlRevision` (#3363). */
+  campaignControlRevision: 310,
 } as const;
 
 /* ========================================================================== */
@@ -3046,6 +3054,8 @@ export interface OrchestratorLaunchPolicy extends OrchestratorExecutionDefaults 
   issueScope?: CampaignIssueScope;
   /** Server-synchronized diagnostic boundary; never a provider permission grant. */
   control?: CampaignControl;
+  /** v310 (#3363): the campaign root's policy revision `control` was read at, which orders it. */
+  controlRevision?: number;
 }
 
 export interface OrchestratorDefaults {
@@ -5639,7 +5649,10 @@ export type CampaignIssueScopeMessage = {
        /** v291 (#4103): also report `issueFacts` for each of `issues`. */
        facts?: true } |
      { operation: "publication_inspect"; sanitizedTitle: string; sanitizedBody: string; labels: string[] } |
-     { operation: "synchronize"; scope: CampaignIssueScope; control?: CampaignControl } |
+     { operation: "synchronize"; scope: CampaignIssueScope; control?: CampaignControl;
+       /** v310 (#3363): the campaign root's policy revision `control` was read at. A runner never
+        * replaces a control it holds at a newer revision. Sent only with `control`. */
+       controlRevision?: number } |
      /** v302 (#4269): the issue numbers a Custom campaign's first-message reading granted, for its
       * live root Orchestrator `campaignSessionId` (always the addressed session). It may only set
       * numbers on a session holding none and no issue scope; it never widens, scopes or re-targets. */
