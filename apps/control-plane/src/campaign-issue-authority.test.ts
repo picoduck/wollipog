@@ -2781,7 +2781,10 @@ test("#3915 adding an issue leaves unrelated decisions as they were and revokes 
     assert.equal(h.state.executes, 1);
     assert.equal(synchronizedRevision, 2);
     assert.ok(closure.resourceSnapshot.category === "issue_closure");
-    assert.deepEqual(dispatched, { ...closure.resourceSnapshot, scopeRevision: 2 },
+    // The excluded children are for the approver only (#3237); the runner receives the binding.
+    const { excludedChildren, ...binding } = closure.resourceSnapshot;
+    assert.ok(excludedChildren?.length, "the closure records the children it excludes");
+    assert.deepEqual(dispatched, { ...binding, scopeRevision: 2 },
       "the approved closure is dispatched unchanged except for the revision the runner was synchronized to");
     assert.notEqual(h.db.workflowDecisionByOccurrence(closure.occurrenceId)!.issueClosureResult?.outcome, "refused");
   } finally { h.db.close(); }

@@ -3,7 +3,7 @@ import { normalizeWorkflowDecisionOwnerRule, WORKFLOW_DECISION_OWNER_RULE_QUOTE_
 import { sessionCredentialRefusal } from "./session-credential-error.js";
 /** Shared session-management tools for the session-scoped CLI and MCP server. */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import {
@@ -24,6 +24,10 @@ import {
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
   OWNER_DECISION_LIMITS,
+  SESSION_WAIT_PROGRESS_REPORT_MS,
+  type SessionWaitKind,
+  type SessionWaitReport,
+  type SessionWaitReportTarget,
   type SessionStatus,
   type UiEvidenceReviewDelivery,
 } from "@wollipog/protocol";
@@ -37,6 +41,7 @@ import {
   PULL_REQUEST_WAIT_MAX_INTERVAL_MS,
   PULL_REQUEST_WAIT_MAX_TIMEOUT_MS,
   PULL_REQUEST_WAIT_MIN_INTERVAL_MS,
+  PULL_REQUEST_WAIT_READ_GRACE_MS,
   waitForPullRequest,
 } from "./pull-request-wait.js";
 import { readMediaFileForAttach } from "./session-artifact-file.js";
@@ -275,6 +280,69 @@ async function cpFetch(
     return { ok: false, message: `HTTP ${res.status}: ${detail}`, status: res.status };
   }
   return { ok: true, data };
+}
+
+/** How long one wait report may take: a slow control plane never holds the wait itself. */
+const WAIT_REPORT_TIMEOUT_MS = 5_000;
+
+/** One wait call's progress reports (#1280, #4249). */
+export interface WaitProgressReporter {
+  /** A successful poll. Sends at most one report per SESSION_WAIT_PROGRESS_REPORT_MS, the first
+   * only once the call has waited that long, so a short wait is never reported at all. */
+  poll(): void;
+  /** The call returned, failed or was cancelled: remove the wait if anything was reported. */
+  end(): Promise<void>;
+}
+
+/**
+ * Report a `wait_session` or `wait_pull_request` call to the control plane, so the waiting session
+ * reads Waiting rather than only Running, and a wait whose polls stop reads Stalled. Best effort: a
+ * failed report never changes the wait's own result. A control plane that refuses the report (an
+ * older one has no route; a session outside a turn cannot report) stops reports for that call.
+ * Durations, never timestamps, cross the wire, so the runner's clock offset does not matter.
+ */
+export function waitProgressReporter(deps: McpDeps, kind: SessionWaitKind, target: SessionWaitReportTarget,
+  timeoutMs: number, intervalMs: number): WaitProgressReporter {
+  // A device-token CLI call has no session to show the wait on.
+  if (!deps.selfSessionId || deps.actorHeader === null) return { poll() {}, async end() {} };
+  const now = deps.now ?? Date.now;
+  const waitId = `wait_${randomUUID().replaceAll("-", "")}`;
+  const startedAt = now();
+  // The wait's own cancellation must not cancel the report of its end.
+  const reportDeps: McpDeps = { ...deps, signal: undefined };
+  let lastSentAt: number | null = null;
+  let refused = false;
+  let inFlight: Promise<void> | null = null;
+  const send = (state: SessionWaitReport["state"]) => {
+    const at = now();
+    const report: SessionWaitReport = {
+      waitId, kind, state, target,
+      elapsedMs: Math.max(0, at - startedAt),
+      remainingMs: Math.max(0, startedAt + timeoutMs - at),
+      intervalMs,
+    };
+    return cpFetch(reportDeps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/waits`, report,
+      WAIT_REPORT_TIMEOUT_MS);
+  };
+  return {
+    poll() {
+      if (refused || inFlight) return;
+      const at = now();
+      if (at - startedAt < SESSION_WAIT_PROGRESS_REPORT_MS) return;
+      if (lastSentAt !== null && at - lastSentAt < SESSION_WAIT_PROGRESS_REPORT_MS) return;
+      lastSentAt = at;
+      inFlight = send("active").then((result) => {
+        // A 4xx is a refusal that repeating cannot change; a transport failure may pass.
+        if (!result.ok && result.status !== undefined && result.status >= 400 && result.status < 500) refused = true;
+      }, () => undefined).finally(() => { inFlight = null; });
+    },
+    async end() {
+      if (inFlight) await inFlight;
+      if (lastSentAt === null || refused) return;
+      refused = true;
+      await send("ended").catch(() => undefined);
+    },
+  };
 }
 
 async function cancellableSleep(deps: McpDeps, milliseconds: number): Promise<boolean> {
@@ -2872,27 +2940,35 @@ export const TOOLS: McpTool[] = [
         Math.max(50, Number.isFinite(args.intervalMs) ? Math.floor(args.intervalMs) : 500));
       const now = deps.now ?? Date.now;
       const deadline = now() + timeoutMs;
+      // Polls back off to MAX_WAIT_SESSION_INTERVAL_MS, the interval progress is bounded by (#1280).
+      const reporter = waitProgressReporter(deps, "wait_session",
+        { kind: "session", sessionId: args.sessionId, states: [...wanted] }, timeoutMs, MAX_WAIT_SESSION_INTERVAL_MS);
       let session: Json;
-      do {
-        const r = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(args.sessionId)}`);
-        if (!r.ok) return errorResult(r.message);
-        // cpFetch reports a 2xx whose body could not be read as ok with no data; that read, like
-        // one cancelled mid-body, is a failure and must never become a timeout result.
-        if (deps.signal?.aborted) return errorResult("request cancelled");
-        session = r.data?.session;
-        if (typeof session?.status !== "string") {
-          return errorResult(`control plane returned no session status for ${args.sessionId}`);
-        }
-        if (wanted.has(session.status)) {
-          return textResult({ outcome: "reached", reached: session.status, session: mapSession(session) });
-        }
-        const remaining = deadline - now();
-        if (remaining <= 0) break;
-        if (!await cancellableSleep(deps, Math.min(intervalMs, remaining))) {
-          return errorResult("request cancelled");
-        }
-        intervalMs = nextWaitSessionIntervalMs(intervalMs);
-      } while (now() <= deadline);
+      try {
+        do {
+          const r = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(args.sessionId)}`);
+          if (!r.ok) return errorResult(r.message);
+          // cpFetch reports a 2xx whose body could not be read as ok with no data; that read, like
+          // one cancelled mid-body, is a failure and must never become a timeout result.
+          if (deps.signal?.aborted) return errorResult("request cancelled");
+          session = r.data?.session;
+          if (typeof session?.status !== "string") {
+            return errorResult(`control plane returned no session status for ${args.sessionId}`);
+          }
+          if (wanted.has(session.status)) {
+            return textResult({ outcome: "reached", reached: session.status, session: mapSession(session) });
+          }
+          reporter.poll();
+          const remaining = deadline - now();
+          if (remaining <= 0) break;
+          if (!await cancellableSleep(deps, Math.min(intervalMs, remaining))) {
+            return errorResult("request cancelled");
+          }
+          intervalMs = nextWaitSessionIntervalMs(intervalMs);
+        } while (now() <= deadline);
+      } finally {
+        await reporter.end();
+      }
       // An elapsed timeout is the expected end of a bounded wait, not a failed call (#3269).
       return textResult({
         outcome: "timeout",
@@ -2934,35 +3010,51 @@ export const TOOLS: McpTool[] = [
       const ref = parsePullRequestRef(args?.pullRequest, args?.repository);
       if ("error" in ref) return errorResult(ref.error);
       if (args?.headSha !== undefined && typeof args.headSha !== "string") return errorResult("headSha must be a string");
-      if (campaignRepositoryLocation(ref.repository)?.forge === "gitlab") {
-        const waited = await waitForMergeRequest({
+      // The waiter's own clamps, so the reported deadline and progress bound match the call (#1280).
+      const integer = (value: unknown, fallback: number, min: number, max: number) =>
+        Math.min(max, Math.max(min, typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : fallback));
+      const reporter = waitProgressReporter(deps, "wait_pull_request",
+        { kind: "pull_request", repository: ref.repository, number: ref.number },
+        integer(args?.timeoutMs, PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS, 1, PULL_REQUEST_WAIT_MAX_TIMEOUT_MS) +
+          (deps.pullRequestReadGraceMs ?? PULL_REQUEST_WAIT_READ_GRACE_MS),
+        integer(args?.intervalMs, PULL_REQUEST_WAIT_DEFAULT_INTERVAL_MS, PULL_REQUEST_WAIT_MIN_INTERVAL_MS,
+          PULL_REQUEST_WAIT_MAX_INTERVAL_MS));
+      const onObservation = () => reporter.poll();
+      try {
+        if (campaignRepositoryLocation(ref.repository)?.forge === "gitlab") {
+          const waited = await waitForMergeRequest({
+            ...ref,
+            ...(typeof args?.headSha === "string" ? { headSha: args.headSha.trim().toLowerCase() } : {}),
+            ...(Number.isFinite(args?.timeoutMs) ? { timeoutMs: args.timeoutMs } : {}),
+            ...(Number.isFinite(args?.intervalMs) ? { intervalMs: args.intervalMs } : {}),
+          }, {
+            glab: deps.glab ?? contextGlabRunner({ kind: "native" }, process.cwd()),
+            ...(deps.now ? { now: deps.now } : {}),
+            ...(deps.sleep ? { sleep: deps.sleep } : {}),
+            ...(deps.signal ? { signal: deps.signal } : {}),
+            ...(deps.pullRequestReadGraceMs !== undefined ? { readGraceMs: deps.pullRequestReadGraceMs } : {}),
+            onObservation,
+          });
+          return waited.ok ? textResult(waited.summary) : errorResult(waited.error);
+        }
+        const result = await waitForPullRequest({
           ...ref,
           ...(typeof args?.headSha === "string" ? { headSha: args.headSha.trim().toLowerCase() } : {}),
           ...(Number.isFinite(args?.timeoutMs) ? { timeoutMs: args.timeoutMs } : {}),
           ...(Number.isFinite(args?.intervalMs) ? { intervalMs: args.intervalMs } : {}),
+          returnOnAnyFailure: args?.returnOnAnyFailure === true,
         }, {
-          glab: deps.glab ?? contextGlabRunner({ kind: "native" }, process.cwd()),
+          gh: deps.gh ?? contextGhRunner({ kind: "native" }, process.cwd()),
           ...(deps.now ? { now: deps.now } : {}),
           ...(deps.sleep ? { sleep: deps.sleep } : {}),
           ...(deps.signal ? { signal: deps.signal } : {}),
           ...(deps.pullRequestReadGraceMs !== undefined ? { readGraceMs: deps.pullRequestReadGraceMs } : {}),
+          onObservation,
         });
-        return waited.ok ? textResult(waited.summary) : errorResult(waited.error);
+        return result.ok ? textResult(result.summary) : errorResult(result.error);
+      } finally {
+        await reporter.end();
       }
-      const result = await waitForPullRequest({
-        ...ref,
-        ...(typeof args?.headSha === "string" ? { headSha: args.headSha.trim().toLowerCase() } : {}),
-        ...(Number.isFinite(args?.timeoutMs) ? { timeoutMs: args.timeoutMs } : {}),
-        ...(Number.isFinite(args?.intervalMs) ? { intervalMs: args.intervalMs } : {}),
-        returnOnAnyFailure: args?.returnOnAnyFailure === true,
-      }, {
-        gh: deps.gh ?? contextGhRunner({ kind: "native" }, process.cwd()),
-        ...(deps.now ? { now: deps.now } : {}),
-        ...(deps.sleep ? { sleep: deps.sleep } : {}),
-        ...(deps.signal ? { signal: deps.signal } : {}),
-        ...(deps.pullRequestReadGraceMs !== undefined ? { readGraceMs: deps.pullRequestReadGraceMs } : {}),
-      });
-      return result.ok ? textResult(result.summary) : errorResult(result.error);
     },
   },
   {

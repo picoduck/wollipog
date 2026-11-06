@@ -298,15 +298,21 @@ function followUpAdmissionSession(rebinding = false): SessionView {
   } };
 }
 
-/** `refused`: the last approved closure was refused, so this request shows why (#4059). */
+/** `refused`: the last approved closure was refused, so this request shows why (#4059). The
+ * `excluded` query parameter picks the excluded children (#3237): one by default, `none` for an
+ * empty list, or `old` for a snapshot from a release that did not record them. */
 function issueClosureSession(refused = false): SessionView {
   const base = evidenceSession();
+  const excluded = query.get("excluded");
+  const excludedChildren = excluded === "old" ? {} : { excludedChildren: excluded === "none" ? [] : [{ sessionId: "other-child",
+    title: "Fix the <b>Settings</b> Sync Race", reason: { attemptedIssues: [{ repository: "team/repo", number: 131 }],
+      attemptedIssueCount: 1, attemptedWithoutIssue: 0, linkedWorkItems: 0 } }] };
   const snapshot = { category: "issue_closure" as const, repository: "team/repo", issue: 123,
     title: "Obsolete Task", url: "https://github.com/team/repo/issues/123", forgeDigest: "a".repeat(64),
     reason: "not_planned" as const, explanation: "The replacement design makes this task obsolete.",
     evidence: ["Replacement issue #124 covers the current design."], comment: "Retired in favor of #124.",
     openPullRequests: [{ number: 77, title: "Earlier Implementation", url: "https://github.com/team/repo/pull/77", headSha: "b".repeat(40) }],
-    activeChildren: [{ sessionId: "child", title: "Implement Issue 123", assignmentDigest: "c".repeat(64) }],
+    activeChildren: [{ sessionId: "child", title: "Implement Issue 123", assignmentDigest: "c".repeat(64) }], ...excludedChildren,
     ...(refused ? { previousRefusal: { occurrenceId: "wd_occ_closure_1", completedAt: Date.UTC(2026, 10, 1, 17, 32),
       refusal: githubIssueClosureRefusal("closing_reference_changed", { pullRequests: [77] }) } } : {}),
   };

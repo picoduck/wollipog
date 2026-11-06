@@ -18,6 +18,33 @@ test("issue closure summary displays exact action, evidence, comment, and curren
   assert.ok(markup.includes('href="https://github.com/team/repo/issues/123"'));
 });
 
+test("an issue closure card shows the children it excludes, apart from the bound ones (#3237)", () => {
+  const snapshot = { category: "issue_closure" as const, repository: "team/repo", issue: 123, title: "Obsolete task",
+    url: "https://github.com/team/repo/issues/123", forgeDigest: "a".repeat(64), reason: "completed" as const,
+    explanation: "Delivered.", evidence: ["Merged PR 80."], openPullRequests: [],
+    activeChildren: [{ sessionId: "bound", title: "Implement Issue 123", assignmentDigest: "c".repeat(64) }] };
+  const term = (markup: string, label: string) => {
+    const match = new RegExp(`<dt>${label}</dt><dd>(.*?)</dd></div>`, "u").exec(markup);
+    assert.ok(match, label);
+    return match[1]!;
+  };
+  const markup = renderToStaticMarkup(<IssueClosureSummary snapshot={{ ...snapshot, excludedChildren: [{ sessionId: "excluded",
+    title: "Fix <b>Other</b> Issue", reason: { attemptedIssues: [{ repository: "team/repo", number: 124 }], attemptedIssueCount: 1,
+      attemptedWithoutIssue: 0, linkedWorkItems: 0 } }] }} />);
+  assert.equal(term(markup, "Active Child Assignments"), "<ul><li>Implement Issue 123</li></ul>");
+  // A child's title is untrusted text; the reason comes from ledger facts.
+  assert.equal(term(markup, "Excluded Children"), "<ul><li>Fix &lt;b&gt;Other&lt;/b&gt; Issue: " +
+    "Every work-item attempt is on #124, which has never tracked this issue and has no follow-up links.</li></ul>");
+  assert.ok(markup.includes("so their activity does not revoke this approval"));
+  const empty = renderToStaticMarkup(<IssueClosureSummary snapshot={{ ...snapshot, excludedChildren: [] }} />);
+  assert.equal(term(empty, "Excluded Children"), "None");
+  assert.ok(!empty.includes("does not revoke this approval"));
+  // A snapshot from an earlier release did not record the list.
+  const old = renderToStaticMarkup(<IssueClosureSummary snapshot={snapshot} />);
+  assert.equal(term(old, "Excluded Children"), "Not Recorded");
+  assert.ok(!old.includes("does not revoke this approval"));
+});
+
 test("an issue closure request shows why the last approved closure was refused (#4059)", () => {
   const snapshot = { category: "issue_closure" as const, repository: "team/repo", issue: 123, title: "Obsolete task",
     url: "https://github.com/team/repo/issues/123", forgeDigest: "a".repeat(64), reason: "completed" as const,
