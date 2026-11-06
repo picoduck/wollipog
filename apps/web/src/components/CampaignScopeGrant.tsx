@@ -57,7 +57,13 @@ const refs = (repository: string, numbers: readonly number[]) => numbers.length 
 /** Campaign Status's Scope Grant section (#4102): what the owner's first message granted, the hard
  * ceilings around it, and the Decision Model that read it with its reason. With `edit`, the owner
  * can change the selection count; the server checks the person and the policy revision. */
-export function CampaignScopeGrantSection({ grant, edit }: { grant: FullControlScopeGrant; edit?: SelectionCountEdit }) {
+export function CampaignScopeGrantSection({ grant, edit, ceilingsShown = false }: {
+  grant: FullControlScopeGrant;
+  edit?: SelectionCountEdit;
+  /** The Full Control section shows the boundary's Maximum Issues and operations (#2940); then this
+   * section leaves those two rows out instead of repeating them. */
+  ceilingsShown?: boolean;
+}) {
   const headingId = useId();
   const repository = grant.ceilings.repositories[0] ?? "";
   const selection = grant.selection;
@@ -80,9 +86,9 @@ export function CampaignScopeGrantSection({ grant, edit }: { grant: FullControlS
       </> : "None"}</dd></div>
       {selection && <div><dt>Selection Criteria</dt><dd>{selection.criteria || "None Stated"}</dd></div>}
       {selection && <div><dt>Selection Constraints</dt><dd>{selection.constraints.length ? selection.constraints.join("; ") : "None Stated"}</dd></div>}
-      <div><dt>Maximum Issues</dt><dd>{grant.ceilings.maxIssues} <StatusBadge noDot label={grant.ceilings.maxIssuesSource === "explicit" ? "Set by You" : "Derived"} /></dd></div>
+      {!ceilingsShown && <div><dt>Maximum Issues</dt><dd>{grant.ceilings.maxIssues} <StatusBadge noDot label={grant.ceilings.maxIssuesSource === "explicit" ? "Set by You" : "Derived"} /></dd></div>}
       <div><dt>Repository</dt><dd>{grant.ceilings.repositories.join(", ")}</dd></div>
-      <div><dt>Operations</dt><dd>{grant.ceilings.operations.length ? grant.ceilings.operations.map(operationLabel).join(", ") : "None"}</dd></div>
+      {!ceilingsShown && <div><dt>Operations</dt><dd>{grant.ceilings.operations.length ? grant.ceilings.operations.map(operationLabel).join(", ") : "None"}</dd></div>}
       {grant.ceilings.removedOperations?.length ? <div><dt>Withheld by Your Message</dt><dd>{grant.ceilings.removedOperations.map(operationLabel).join(", ")}</dd></div> : null}
       {grant.dropped?.length ? <div><dt>Not Granted</dt><dd>{grant.dropped.map((d) => `${d.repository}#${d.number} (${DROP_REASONS[d.reason]})`).join(", ")}</dd></div> : null}
       <div><dt>Decision Model</dt><dd>{target ? `${target.model} (${target.effort}) · ${target.harnessName} on ${target.machineName}` : "None Available"}</dd></div>

@@ -867,7 +867,7 @@ Humans can inspect, resolve epic candidates, and request changes in Campaign Sta
 Scope changes preserve conversation and work history. Removals display affected assignments and revoke
 outstanding action decisions; issue closure retains its separate exact decision. Every active
 Orchestrator participant must run in a Location of one of the campaign's repositories, and stores only
-its own repository's issues; one outside the launch repository needs protocol v305. Updates require protocol v208
+its own repository's issues; one outside the launch repository needs protocol v309. Updates require protocol v208
 on the control plane and participating runners; unsupported peers must be updated and reconnected.
 The authoritative revision is persisted on both sides, delivered on reconnect and restart, and checked
 again by closure execution. An offline or unsynchronized runner cannot execute a revised closure.

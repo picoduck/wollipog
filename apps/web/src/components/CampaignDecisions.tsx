@@ -2,6 +2,7 @@ import React, { useEffect, useId, useState } from "react";
 import type { CampaignDecisionsResponse } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { effortLabel } from "../format.js";
+import { DecisionAnswerChecklist } from "./DecisionAnswerChecklist.js";
 import { decisionCostText, decisionModelName, decisionOutcomeText, isDecisionModelCheck, verdictLabel } from "./decision-model.js";
 
 const SHOWN = 10;
@@ -57,6 +58,12 @@ export function CampaignDecisions({ campaignId }: { campaignId: string }) {
                   {decision.reason && <span className="campaign-status-meta">{decision.reason}</span>}
                 </dd>
               </div>
+              {decision.typedAnswers && (
+                <div>
+                  <dt>Answers</dt>
+                  <dd><DecisionAnswerChecklist typed={decision.typedAnswers} /></dd>
+                </div>
+              )}
               {decision.target && (
                 <div>
                   <dt>Model</dt>

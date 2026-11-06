@@ -8,6 +8,7 @@ import { api } from "../api.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { CampaignDecisionModelChecks } from "./CampaignDecisionModelChecks.js";
 import { CampaignDecisions } from "./CampaignDecisions.js";
+import { TYPED_ADMITTED, TYPED_REFUSED, TYPED_UNCERTAIN } from "../e2e/decision-model-fixtures.js";
 
 const dom = new Window({ url: "http://localhost/" });
 // Campaign Status › Decision Model refreshes on a repeating timer.
@@ -266,6 +267,79 @@ test("a member session sees the checks but never the classification buttons", as
     const item = view.container.querySelector("li")!;
     assert.equal(facts(item).Verdict, "Uncertain");
     assert.deepEqual([...item.querySelectorAll("button")].map((node) => node.textContent), ["Open Session"]);
+  } finally {
+    view.unmount();
+    api.campaignDecisions = read;
+  }
+});
+
+test("a typed check shows its answers as a short checklist beside the server's verdict and reason (#4283)", async () => {
+  const read = api.campaignDecisions;
+  const decisions = [
+    decision("sel_refused", { kind: "scope_review", promptVersion: "scope_review.v2", verdict: "refuse", subject: undefined,
+      reason: "Issue 140 violates 'Skip Security'.", typedAnswers: TYPED_REFUSED,
+      selectionProposal: { outcome: "refused", explanation: "Next in the backlog.",
+        issues: [{ repository: "team/repo", number: 140, title: "Reword the Settings footer" }] } }),
+    decision("sel_uncertain", { kind: "scope_review", promptVersion: "scope_review.v2", state: "uncertain", verdict: "uncertain", subject: undefined,
+      reason: "Issue 141 on 'UI Only' is below the 80% confidence threshold.", typedAnswers: TYPED_UNCERTAIN }),
+    decision("dec_typed_call", { kind: "probe", verdict: "confirm", subject: undefined,
+      reason: "Every answer is satisfied with at least 80% confidence.", typedAnswers: TYPED_ADMITTED }),
+    decision("dec_legacy", { kind: "probe", verdict: "confirm", subject: undefined, reason: "Listed in the boundary." }),
+  ];
+  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions, usage: { ...usage, calls: decisions.length, unpricedCalls: 0 } });
+  const view = await render(<>
+    <CampaignDecisionModelChecks sessionId="root-1" canClassify refreshKey={1} onOpenSession={() => {}} />
+    <CampaignDecisions campaignId="root-1" />
+  </>);
+  try {
+    const lists = [...view.container.querySelectorAll("ul[aria-label='Answers']")];
+    assert.equal(lists.length, 3, "only typed decisions show answers; a single-verdict decision keeps its form");
+    const lines = (list: Element) => [...list.querySelectorAll("li")].map((item) => ({
+      standing: item.getAttribute("data-standing"),
+      claim: item.querySelector(".decision-answer-claim")?.textContent,
+      detail: item.querySelector(".campaign-status-meta")?.textContent,
+    }));
+    assert.deepEqual(lines(lists[0]!), [
+      { standing: "satisfies", claim: "Satisfies 'Count Matches'",
+        detail: "Answered yes with 96% confidence. The owner asked for one more; one is proposed." },
+      { standing: "satisfies", claim: "Issue 140 Satisfies 'UI Only'", detail: "Answered satisfies with 90% confidence. It rewords the Settings footer." },
+      { standing: "violates", claim: "Issue 140 Violates 'Skip Security'",
+        detail: "Answered violates with 92% confidence; this answer decided the verdict. It is labeled security." },
+    ]);
+    // An answer below the threshold reads as unsure, whatever its value.
+    assert.deepEqual(lines(lists[1]!)[1], { standing: "unsure", claim: "Issue 141 Unsure About 'UI Only'",
+      detail: "Answered satisfies with 55% confidence; this answer decided the verdict. A layout bug, but the label is area/sidebar, not area/ui." });
+    assert.ok(lines(lists[2]!).every((line) => line.standing === "satisfies"));
+    const refused = lists[0]!.closest("li.campaign-screen-item")!;
+    assert.equal(facts(refused).Verdict, "Doesn't Fit Your Selection");
+    assert.equal(facts(refused).Reason, "Issue 140 violates 'Skip Security'.");
+    assert.ok(facts(refused).Answers?.startsWith("Answers count at 80% confidence or more."));
+    // Every icon is decorative; the claim carries the standing in words.
+    assert.ok([...view.container.querySelectorAll(".decision-answer-icon")].every((icon) => icon.getAttribute("aria-hidden") === "true"));
+  } finally {
+    view.unmount();
+    api.campaignDecisions = read;
+  }
+});
+
+test("a typed check names a parameterized question by its complete parameter, never only its shortened label (#4283)", async () => {
+  const read = api.campaignDecisions;
+  const shared = "Only issues in the web dashboard that change no stored data and touch none of the session, runner or account paths, and ";
+  const parameter = `${shared}only if no reviewer has marked them security-sensitive.`;
+  const question = TYPED_REFUSED.questions.find((candidate) => candidate.items)!;
+  const typed = {
+    ...TYPED_REFUSED,
+    questions: TYPED_REFUSED.questions.map((candidate) => candidate === question
+      ? { ...candidate, label: `${shared.slice(0, 119)}…`, parameter } : candidate),
+  };
+  const decisions = [decision("dec_long", { kind: "probe", verdict: "confirm", subject: undefined, reason: "Checked.", typedAnswers: typed })];
+  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions, usage: { ...usage, calls: 1, unpricedCalls: 0 } });
+  const view = await render(<CampaignDecisions campaignId="root-1" />);
+  try {
+    const claims = [...view.container.querySelectorAll("ul[aria-label='Answers'] .decision-answer-claim")].map((claim) => claim.textContent);
+    const item = question.items![0]!.label;
+    assert.ok(claims.includes(`${item} Satisfies '${parameter}'`), `claims: ${JSON.stringify(claims)}`);
+    assert.ok(claims.every((claim) => !claim?.includes("…")), "no claim falls back to the shortened label");
   } finally {
     view.unmount();
     api.campaignDecisions = read;

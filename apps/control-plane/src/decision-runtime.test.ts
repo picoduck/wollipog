@@ -10,6 +10,7 @@ import type {
   RunDecisionMessage,
   RunDecisionResultMessage,
 } from "@wollipog/protocol";
+import { DECISION_OUTPUT_MAX_BYTES } from "@wollipog/protocol";
 import { ControlPlaneDb, type DecisionOccurrenceRecord } from "./db.js";
 import {
   DECISION_KINDS,
@@ -390,15 +391,16 @@ test("runner results are sanitized to the Decision boundary", () => {
     retryAfterMs: -5,
   }), { type: "run_decision_result", requestId: "r", ok: false, errorClass: "provider_failed" });
   assert.deepEqual(sanitizeRunDecisionResult({
-    type: "run_decision_result", requestId: "r", ok: true, outputText: "x".repeat(9 * 1024),
+    type: "run_decision_result", requestId: "r", ok: true, outputText: "x".repeat(DECISION_OUTPUT_MAX_BYTES + 1),
   }), { type: "run_decision_result", requestId: "r", ok: false, errorClass: "invalid_output" });
   const view = decisionOccurrenceView({
     occurrenceId: "dec_x", organizationId: ORG, campaignSessionId: null, occurrenceKey: null, kind: "probe",
     promptVersion: "probe.v1", inputDigests: {}, inputDigest: "d", state: "pending", verdict: null, reason: null,
-    failureClass: null, fields: {}, target: null, humanRouteClaimedAt: null, humanRoutedAt: null, humanRequestId: null,
-    createdAt: 1, decidedAt: null,
+    failureClass: null, fields: {}, typedAnswers: null, target: null, humanRouteClaimedAt: null, humanRoutedAt: null,
+    humanRequestId: null, createdAt: 1, decidedAt: null,
   }, []);
   assert.equal(view.usage.costUsd, 0);
+  assert.equal("typedAnswers" in view, false, "a single-verdict occurrence keeps its form");
 });
 
 test("a routing claim interrupted by a restart is routed again and links the one existing request", async () => {

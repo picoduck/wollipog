@@ -4,6 +4,7 @@ import type {
   DecisionKind,
   DecisionModelResolvedTarget,
   DecisionOccurrenceView,
+  DecisionTypedAnswersView,
   RunDecisionMessage,
   RunDecisionResultMessage,
 } from "@wollipog/protocol";
@@ -13,17 +14,21 @@ import {
   DECISION_OUTPUT_MAX_BYTES,
   DECISION_TRANSIENT_ERROR_CLASSES,
   DECISION_TRANSPORT_MARGIN_MS,
+  runnerSupportsProtocol,
 } from "@wollipog/protocol";
 import type { ControlPlaneDb, DecisionAttemptRecord, DecisionOccurrenceRecord } from "./db.js";
 import {
+  assertDecisionKind,
   DECISION_KINDS,
   decisionInputDigests,
-  decisionOutputSchema,
   decisionRequestDigest,
-  renderDecisionInput,
+  prepareDecision,
   validateDecisionOutput,
   type DecisionInputs,
+  type DecisionKindDefinition,
+  type PreparedDecision,
 } from "./decision-kinds.js";
+import { deriveTypedVerdict, validateTypedAnswers } from "./decision-questions.js";
 import type { DecisionAutomaticHarness, DecisionModelSettings } from "./decision-model-settings.js";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
 import { priceUsage, type RateTable } from "./usage-pricing.js";
@@ -92,6 +97,8 @@ export interface DecisionRuntimeOptions {
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
+  /** The kinds this runtime runs. Tests add typed kinds; production uses DECISION_KINDS. */
+  kinds?: Readonly<Record<string, DecisionKindDefinition>>;
 }
 
 const TRANSIENT = new Set<DecisionErrorClass>(DECISION_TRANSIENT_ERROR_CLASSES);
@@ -203,6 +210,7 @@ export function decisionOccurrenceView(
     },
     createdAt: occurrence.createdAt,
     ...(occurrence.decidedAt !== null ? { decidedAt: occurrence.decidedAt } : {}),
+    ...(occurrence.typedAnswers ? { typedAnswers: occurrence.typedAnswers } : {}),
   };
 }
 
@@ -221,17 +229,21 @@ export class DecisionRuntime {
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly random: () => number;
+  private readonly kinds: Readonly<Record<string, DecisionKindDefinition>>;
 
   constructor(private readonly options: DecisionRuntimeOptions) {
     this.now = options.now ?? Date.now;
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.random = options.random ?? Math.random;
+    this.kinds = options.kinds ?? DECISION_KINDS;
+    for (const definition of Object.values(this.kinds)) assertDecisionKind(definition);
   }
 
   async decide(request: DecisionRequest): Promise<DecisionOutcome> {
-    const definition = DECISION_KINDS[request.kind];
+    const definition = Object.hasOwn(this.kinds, request.kind) ? this.kinds[request.kind] : undefined;
     if (!definition) throw new Error(`unknown decision kind ${String(request.kind)}`);
-    const rendered = renderDecisionInput(definition, request.inputs);
+    const prepared = prepareDecision(definition, request.inputs);
+    const rendered = prepared.rendered;
     const { occurrence, created } = this.options.db.createDecisionOccurrence({
       occurrenceId: `dec_${randomUUID()}`,
       organizationId: request.organizationId,
@@ -249,7 +261,7 @@ export class DecisionRuntime {
     const running = this.inflight.get(occurrence.occurrenceId);
     if (running) return running;
     const work = (async () => {
-      if (occurrence.state === "pending") await this.attempt(occurrence, rendered, request);
+      if (occurrence.state === "pending") await this.attempt(occurrence, definition, prepared, request);
       return this.outcome(occurrence.occurrenceId, request);
     })();
     this.inflight.set(occurrence.occurrenceId, work);
@@ -287,9 +299,14 @@ export class DecisionRuntime {
     return priced.costSource === "unpriced" ? null : priced.costUsd;
   }
 
-  private async attempt(occurrence: DecisionOccurrenceRecord, rendered: string, request: DecisionRequest): Promise<void> {
+  private async attempt(
+    occurrence: DecisionOccurrenceRecord,
+    definition: DecisionKindDefinition,
+    prepared: PreparedDecision,
+    request: DecisionRequest,
+  ): Promise<void> {
     const { db } = this.options;
-    const definition = DECISION_KINDS[occurrence.kind as DecisionKind];
+    const { rendered, outputSchema } = prepared;
     // A control plane that restarted mid-occurrence closes the attempts it lost and continues inside
     // the same attempt budget and time bound; it never starts the count again.
     const previous = db.listDecisionAttempts(occurrence.occurrenceId);
@@ -307,17 +324,23 @@ export class DecisionRuntime {
       : "timed_out";
     const resolution = this.options.settings.resolve(occurrence.organizationId, request.automaticHarness ?? null);
     if (resolution.target) db.recordDecisionTarget(occurrence.occurrenceId, resolution.target);
-    if (!resolution.ok) {
+    // A typed call goes only to a runner that accepts its schema and output (#4283). An older runner
+    // is non-transient like any other incapable target: it never receives the call.
+    const preflightFailure: DecisionErrorClass | null = !resolution.ok
+      ? resolution.errorClass
+      : prepared.questions && !runnerSupportsProtocol(db.getRunner(resolution.target.runnerId)?.protocolVersion, "typedDecisionQuestions")
+        ? "runner_incapable"
+        : null;
+    if (!resolution.ok || preflightFailure) {
       // A missing runner, harness, model or credential is non-transient: one audited attempt that
       // never reached a provider, then the person-owned route. Never a silent pass.
       attempt++;
       db.startDecisionAttempt(occurrence.occurrenceId, attempt, `decision_preflight_${randomUUID()}`, this.now());
-      db.finishDecisionAttempt(occurrence.occurrenceId, attempt, { latencyMs: 0, errorClass: resolution.errorClass, costUsd: null });
-      this.fail(occurrence.occurrenceId, resolution.errorClass);
+      db.finishDecisionAttempt(occurrence.occurrenceId, attempt, { latencyMs: 0, errorClass: preflightFailure!, costUsd: null });
+      this.fail(occurrence.occurrenceId, preflightFailure!);
       return;
     }
     const target: DecisionModelResolvedTarget = resolution.target;
-    const outputSchema = decisionOutputSchema(definition);
     while (attempt < DECISION_MAX_ATTEMPTS) {
       const remaining = deadline - this.now();
       if (remaining < DECISION_MIN_ATTEMPT_MS + DECISION_TRANSPORT_MARGIN_MS) break;
@@ -342,9 +365,8 @@ export class DecisionRuntime {
         { type: "run_decision_result" as const, requestId, ok: false, errorClass: "invalid_output" as const };
       // An answer after the occurrence's bound is late, whatever it says: it never settles a verdict.
       const late = this.now() > deadline;
-      const validated = !late && result.ok && result.outputText !== undefined
-        ? validateDecisionOutput(definition, result.outputText)
-        : null;
+      const answered = !late && result.ok && result.outputText !== undefined ? result.outputText : null;
+      const validated = answered === null ? null : this.validate(definition, prepared, answered);
       const errorClass: DecisionErrorClass | null = validated
         ? null
         : late ? "timed_out" : result.ok ? "invalid_output" : knownClass(result.errorClass);
@@ -364,6 +386,7 @@ export class DecisionRuntime {
           verdict: validated.verdict,
           reason: validated.reason,
           fields: validated.fields,
+          ...(validated.typedAnswers ? { typedAnswers: validated.typedAnswers } : {}),
           now: this.now(),
         });
         return;
@@ -377,6 +400,21 @@ export class DecisionRuntime {
       if (db.getDecisionOccurrence(occurrence.occurrenceId)?.state !== "pending") return;
     }
     this.fail(occurrence.occurrenceId, lastClass);
+  }
+
+  /** Validate one attempt's output. A typed kind's answers are validated strictly and its verdict is
+   * derived here from them; the model's output never names a verdict. Null means invalid output. */
+  private validate(definition: DecisionKindDefinition, prepared: PreparedDecision, outputText: string): {
+    verdict: string;
+    reason: string;
+    fields: Record<string, unknown>;
+    typedAnswers?: DecisionTypedAnswersView;
+  } | null {
+    if (!prepared.questions || !definition.typed) return validateDecisionOutput(definition, outputText);
+    const answers = validateTypedAnswers(prepared.questions, outputText);
+    if (!answers) return null;
+    const derived = deriveTypedVerdict(definition.typed, prepared.questions, answers);
+    return { verdict: derived.verdict, reason: derived.reason, fields: {}, typedAnswers: derived.typedAnswers };
   }
 
   private async outcome(occurrenceId: string, request: DecisionRequest): Promise<DecisionOutcome> {

@@ -940,17 +940,27 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      policy changes leave it pending. A v303 runner sends the field only to a v303 control plane;
 //      a v303 control plane accepts it only from a v303 root runner. (299-301 are claimed by open
 //      pull requests.)
-// 305: repository-qualified campaign issue scope (#4118). The control plane stores the scope as
+// 307: typed Decision questions (#4283). A Decision kind may ask a list of typed questions
+//      (boolean, choice or score, optionally one answer per item) in one `run_decision` call whose
+//      output schema requires one answer per question and item, each with a value, a confidence and
+//      a short evidence string. The control plane derives the verdict from the answers with the
+//      kind's fixed rule and confidence threshold, records them on the occurrence, and projects
+//      `DecisionOccurrenceView.typedAnswers`. A v307 runner accepts the larger schema and output
+//      (DECISION_SCHEMA_MAX_CHARS, DECISION_OUTPUT_MAX_BYTES); a typed call is never sent to an older
+//      runner, which records a non-transient `runner_incapable` failure and takes the person route.
+//      Older dashboards ignore the field. (304 to 306 are claimed by open pull requests.)
+// 309: repository-qualified campaign issue scope (#4118). The control plane stores the scope as
 //      `issues`, `{ repository, number }` pairs across the boundary's repositories, and sends each
 //      participating runner only its own Location repository's numbers, in the earlier shape. A
-//      v305 runner accepts that part when its origin is any repository of the boundary, not only
-//      the launch one. An Orchestrator participant in another boundary repository needs v305;
+//      v309 runner accepts that part when its origin is any repository of the boundary, not only
+//      the launch one. An Orchestrator participant in another boundary repository needs v309;
 //      one-repository campaigns are unchanged for older runners. (This change first claimed 290,
-//      293, 299, 301 and 304, which no released version uses; 299, 300 and 304 are claimed by open
-//      pull requests.)
-export const PROTOCOL_VERSION = 305;
+//      293, 299, 301, 304 and 305, which no released version uses; 300, 304 and 308 are claimed by
+//      open pull requests.)
+export const PROTOCOL_VERSION = 309;
 
 export * from "./campaign-authority.js";
+export * from "./decision-questions.js";
 export * from "./workflow-decision-owner-rule.js";
 export * from "./owner-question.js";
 export * from "./closing-references.js";
@@ -986,11 +996,12 @@ export type { CampaignLaunchInspectionFailure } from "./campaign-control-launch.
 export type {
   CampaignLaunchProposal, FullControlLaunchRequest, FullControlLaunchOverrides, FullControlEnableRequest, PreparedCampaignLaunch,
   CampaignLaunchInspectionMessage, CampaignLaunchInspectionCancelMessage, CampaignLaunchInspectionResult,
-  CampaignLaunchPreflight, CampaignLaunchCapability, CampaignLaunchCapabilityId, CampaignLaunchSummary,
+  CampaignLaunchPreflight, CampaignLaunchCapability, CampaignLaunchCapabilityId, CampaignLaunchSummary, CampaignLaunchDisclosure,
 } from "./campaign-control-launch.js";
 export {
   CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CAMPAIGN_EVIDENCE_PROVIDER_DISCLOSURE_REVISION,
   CAMPAIGN_SESSION_ARTIFACT_DISCLOSURE_REVISION, campaignSessionArtifactDestinationId, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE,
+  campaignLaunchDisclosure, validCampaignLaunchDisclosure,
 } from "./campaign-control-launch.js";
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
@@ -1086,7 +1097,7 @@ import type {
 } from "./campaign-work-ledger.js";
 export type { ConversationHandoffDraft, InPlaceHandoffTurn } from "./conversation-handoff.js";
 import { pendingRequests, prioritizedPendingRequests } from "./worker-attention.js";
-import { isOwnerQuestionRequest } from "./owner-question.js";
+import { isOwnerQuestionCard, isOwnerQuestionRequest } from "./owner-question.js";
 export {
   attentionRequestRank,
   pendingRequests,
@@ -1467,6 +1478,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionNamingDriftCodes: 97,
   /** v285 runners host tool-less, schema-constrained Decision calls (`run_decision`, #4101). */
   decisionModel: 285,
+  /** v307 runners accept a typed-question Decision call's larger schema and output (#4283). */
+  typedDecisionQuestions: 307,
   sessionAgentControl: 100,
   sessionAgentControlReasoningEffort: 138,
   sessionOrchestration: 109,
@@ -1532,8 +1545,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * Custom campaign's first-message reading granted to its live Orchestrator. Sent only to a v302
    * runner; an older one gets the numbers at the provider's next launch, as before. */
   campaignIssueNumberGrant: 302,
-  /** v305 synchronizes its own repository's part of a multi-repository issue scope (#4118). */
-  repositoryQualifiedIssueScope: 305,
+  /** v309 synchronizes its own repository's part of a multi-repository issue scope (#4118). */
+  repositoryQualifiedIssueScope: 309,
 } as const;
 
 /* ========================================================================== */
@@ -3101,6 +3114,10 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   /** Project Locations the launch inspection left out of the repository boundary (#4117), each with
    * its fixed reason. Server-owned and informational: it grants nothing. */
   excludedLocations?: import("./project-location-inspection.js").CampaignExcludedLocation[];
+  /** What the Full Control launch or enable that set `control` disclosed about capabilities and
+   * evidence (#2940). Server-owned and informational: it grants nothing, a revoke to Custom drops
+   * it, and a campaign authorized before it existed has none. */
+  launchDisclosure?: import("./campaign-control-launch.js").CampaignLaunchDisclosure;
   /** Locations other people added mid-campaign, waiting for the owner's Include in Campaign (#4117). */
   pendingLocations?: import("./project-location-inspection.js").CampaignPendingLocation[];
   /** The Locations that joined the boundary after launch, newest last, bounded (#4117). */
@@ -3344,6 +3361,14 @@ export interface OrchestratorCampaignProjection {
   /** Full Control only: the request classes that still come to the Human for this campaign
    * (#2940), today at most `human_required_rules` while such a rule exists. */
   fullControlHumanRequired?: import("./campaign-authority.js").FullControlRequestClass[];
+  /** Full Control only, with `control` (#2940): the capabilities and evidence handling its launch or
+   * enable recorded. Absent when the authorization predates the record or the server doesn't keep
+   * it; Campaign Status then reads it as not recorded. A snapshot, never a live capability check:
+   * `uiEvidenceReview` and `videoEvidenceReview` are the live facts. */
+  launchDisclosure?: import("./campaign-control-launch.js").CampaignLaunchDisclosure;
+  /** Full Control only, with a first-message scope grant (#2940, #4102): whether the boundary's
+   * Maximum Issues is still derived, so it moves with the grant's selection count, or explicit. */
+  maxIssuesSource?: "derived" | "explicit";
   /** v275: unfinished committed work items handed to `human` or `external`, oldest handoff first
    * (#4070). The owner's to-do list; omitted when there are none. Bounded by
    * CAMPAIGN_HANDOFFS_LIMIT; `total` is the full count. */
@@ -5071,8 +5096,9 @@ function singleSessionAttentionStatus(
       description: `${requests.length} unresolved requests: ${approvals} approvals, ${questions} questions, ${authentication} authentication requests; ${children} belong to child agents. Open Agents to inspect each request.`,
     };
   }
-  if (isOwnerQuestionRequest(pending)) {
-    // An Owner Question (#4270) is the Orchestrator asking the person, not an approval it waits on.
+  if (isOwnerQuestionCard(pending)) {
+    // An Owner Question (#4270), stored or as the session detail presents it, is the Orchestrator
+    // asking the person, not an approval it waits on.
     return {
       kind: "input_required",
       label: "Needs Your Input",
@@ -7636,8 +7662,12 @@ export const DECISION_PREPARATION_BUDGET_MS = 4_000;
 export const DECISION_CLEANUP_BUDGET_MS = 1_000;
 /** Extra time the control plane waits on the runner round trip beyond the attempt budget. */
 export const DECISION_TRANSPORT_MARGIN_MS = DECISION_CLEANUP_BUDGET_MS + 1_000;
-/** Largest structured output, in UTF-8 bytes, a runner returns. */
-export const DECISION_OUTPUT_MAX_BYTES = 8 * 1024;
+/** Largest structured output, in UTF-8 bytes, a runner returns. A v307 runner allows 32 KiB so one
+ * call can carry every typed answer (#4283); older runners stop at 8 KiB and never receive a typed
+ * call. */
+export const DECISION_OUTPUT_MAX_BYTES = 32 * 1024;
+/** Largest output schema, in JSON characters, a v307 runner accepts (older runners: 8,000). */
+export const DECISION_SCHEMA_MAX_CHARS = 32_000;
 /** Largest rendered input, in characters, the control plane sends for one call. */
 export const DECISION_INPUT_MAX_CHARS = 48_000;
 
@@ -7720,6 +7750,9 @@ export interface DecisionOccurrenceView {
   usage: DecisionUsageView;
   createdAt: number;
   decidedAt?: number;
+  /** v307 (#4283): a typed occurrence's questions and answers; the verdict above is the server's
+   * derivation from them. Absent on single-verdict occurrences. */
+  typedAnswers?: import("./decision-questions.js").DecisionTypedAnswersView;
 }
 
 export interface DecisionModelTestResult {

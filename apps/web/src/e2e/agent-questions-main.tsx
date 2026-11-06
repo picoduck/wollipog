@@ -18,6 +18,8 @@ import { ResolverGallery, SignInResolverGallery } from "./resolver-gallery.js";
 import { setQuestionResponseStyle, useQuestionResponseStyle } from "../question-response-style.js";
 import { useSessionReadingKeys } from "../useSessionReadingKeys.js";
 import { useFollowTail } from "../useFollowTail.js";
+import { SessionStatusIndicators } from "../components/common.js";
+import { withPresentedOwnerQuestions } from "../owner-question-presentation.js";
 import "../styles.css";
 
 interface AnswerCall {
@@ -209,21 +211,27 @@ const ownerDecision: OwnerDecisionSnapshot = {
     { optionId: "stop", label: "Stop and Report", description: "Fail the child's step at once." },
   ],
 };
-const ownerQuestionSet = ownerQuestionAgentQuestions({ ...ownerDecision, kind: "question" });
+const ownerQuestionSnapshot = { ...ownerDecision, kind: "question" as const };
+const ownerQuestionSet = ownerQuestionAgentQuestions(ownerQuestionSnapshot);
 const ownerRaw = params.get("set") === "owner-raw";
-function ownerRawCard(requestId: string): PendingApproval {
+const ownerQuestion = params.get("set") === "owner-question";
+/** The owner decision card as the control plane stores it: an Owner Approval (`owner-raw`), or the
+ * Owner Question clients present as a question card (`owner-question`). */
+function ownerRawCard(requestId: string, snapshot: OwnerDecisionSnapshot = ownerDecision): PendingApproval {
   const occurrenceId = `${params.get("epoch") ?? "occurrence"}:${requestId}`;
+  const question = snapshot.kind === "question";
   return {
-    kind: "workflow_decision", requestId: occurrenceId, occurrenceId, requestedAt: askedAt, title: "Owner Decision Required", async: true,
+    kind: "workflow_decision", requestId: occurrenceId, occurrenceId, requestedAt: askedAt,
+    title: question ? "Owner Question" : "Owner Decision Required", async: true,
     options: [
-      ...ownerDecision.options.map((option) => ({ optionId: option.optionId, name: option.label, description: option.description, kind: "allow_once" as const })),
-      { optionId: "__workflow_deny__", name: "Do Not Proceed", kind: "reject_once" as const },
+      ...snapshot.options.map((option) => ({ optionId: option.optionId, name: option.label, description: option.description, kind: "allow_once" as const })),
+      { optionId: "__workflow_deny__", name: question ? "Dismiss Question" : "Do Not Proceed", kind: "reject_once" as const },
     ],
-    context: { toolName: "Typed Workflow Decision", input: JSON.stringify(ownerDecision, null, 2) },
+    context: { toolName: "Typed Workflow Decision", input: JSON.stringify(snapshot, null, 2) },
     workflowDecision: { occurrenceId, requestId, sessionId: "agent-question-session", controllingSessionId: "agent-question-session",
       resourceKey: "bridge-retry", category: "owner_decision", status: "pending", authority: "human", policyRevision: 1,
       resourceDigest: "digest", createdAt: askedAt, authorityEvaluation: { owner: "human", reason: "owner_kept" },
-      resourceSnapshot: ownerDecision } as unknown as WorkflowDecisionView,
+      resourceSnapshot: snapshot } as unknown as WorkflowDecisionView,
   };
 }
 
@@ -445,6 +453,12 @@ function Fixture() {
     pendingApproval: request ?? undefined,
   }) as SessionView, [request]);
   useQuestionDraftRetirement(session);
+  // The session header's badges (#4270): from the Owner Question card the control plane stores, as the
+  // session detail presents it, on a root that keeps working while it waits.
+  const ownerStatusSession = useMemo(() => ownerQuestion ? withPresentedOwnerQuestions({
+    id: SESSION_ID, runnerId: "runner-1", title: "Agent Questions", status: "running",
+    pendingApproval: resolved ? undefined : ownerRawCard(requestId, ownerQuestionSnapshot),
+  } as SessionView) : null, [requestId, resolved]);
 
   // Reading back and Show Where Asked work as in a session: the reader follows its tail, and a reveal
   // pauses it, so the dock takes its strip.
@@ -513,6 +527,9 @@ function Fixture() {
       <main id="question-frame" className="app" style={{ display: "block", height: "100dvh" }}>
         <SessionShell>
         <section className="session-detail expanded" style={{ height: "100%" }}>
+          {ownerStatusSession && (
+            <header className="session-bar"><SessionStatusIndicators session={ownerStatusSession} /></header>
+          )}
           <div className="detail-columns">
             <div className="detail-chat">
               <div className="chat-reading">
