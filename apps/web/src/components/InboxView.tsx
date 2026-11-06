@@ -1,5 +1,5 @@
 import { lazy, Suspense, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { prioritizedPendingRequests, providerSupportsConversationFork, type BoardColumn, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
+import { presentOwnerQuestionRequest, prioritizedPendingRequests, providerSupportsConversationFork, type BoardColumn, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
 import { archiveAndStopMessage, archiveResultMessage, archiveResultTone, sessionArchiveRequiresStop } from "../archive-actions.js";
 import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
 import {
@@ -1354,7 +1354,9 @@ export function InboxView({
         if (reads.get(sessionId) === pending) reads.delete(sessionId);
       }
     }
-    const approval = targetSession ? prioritizedPendingRequests(targetSession.pendingApproval)[0] : undefined;
+    // An Owner Question (#4270) triages as a question: A opens it in the session, D dismisses it.
+    const first = targetSession ? prioritizedPendingRequests(targetSession.pendingApproval)[0] : undefined;
+    const approval = first ? presentOwnerQuestionRequest(first) : undefined;
     if (!targetSession || !approval) return;
     // Opening a question to read it stays available; answering and deciding do not (#1857).
     const refusal = approval.kind === "question" && intent === "approve"

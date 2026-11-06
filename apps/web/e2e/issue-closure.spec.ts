@@ -24,6 +24,23 @@ for (const width of [1440, 390]) {
     await expect(record).not.toContainText(/→|\bdeny\b/);
   });
 
+  test(`an issue closure shows the children it excludes, apart from the bound ones, at ${width}px (#3237)`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const fact = (label: string) => page.getByRole("region", { name: "Issue Closure Details" }).locator("dl.facts > div")
+      .filter({ has: page.getByRole("term").filter({ hasText: new RegExp(`^${label}$`, "u") }) }).getByRole("definition");
+    await page.goto("/request-surfaces-e2e.html?scenario=issue-closure");
+    await expect(fact("Active Child Assignments")).toHaveText("Implement Issue 123");
+    // The title renders as text; the reason is derived from ledger facts.
+    await expect(fact("Excluded Children")).toHaveText("Fix the <b>Settings</b> Sync Race: "
+      + "Every work-item attempt is on #131, which has never tracked this issue and has no follow-up links.");
+    await expect(page.getByText("so their activity does not revoke this approval", { exact: false })).toBeVisible();
+    await page.goto("/request-surfaces-e2e.html?scenario=issue-closure&excluded=none");
+    await expect(fact("Excluded Children")).toHaveText("None");
+    await page.goto("/request-surfaces-e2e.html?scenario=issue-closure&excluded=old");
+    await expect(fact("Excluded Children")).toHaveText("Not Recorded");
+    await expect(page.locator(".request-dock .request-card-foot").getByRole("button", { name: /^Approve/u })).toBeEnabled();
+  });
+
   test(`a renewed issue closure shows why the last approval was refused at ${width}px (#4059)`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/request-surfaces-e2e.html?scenario=issue-closure-refused");

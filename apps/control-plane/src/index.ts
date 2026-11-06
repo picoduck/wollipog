@@ -1,5 +1,5 @@
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
-import { projectCampaignHandoffsForUi } from "./campaign-status-compatibility.js";
+import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
 import { mediaSessionMutationAllowed } from "./media-session-route-policy.js";
 import { MEDIA_SESSION_PURPOSE_ERROR } from "./prepared-media-session-runtime.js";
 import { DELEGATED_IMAGE_REVIEWER_ERROR, delegatedImageReviewerMutationAllowed } from "./delegated-image-reviews.js";
@@ -15,7 +15,7 @@ import { AutomationCreationService } from "./automation-creation.js";
  */
 
 import os from "node:os";
-import { handoffDestinationError, locationSwitchRole, sessionRole, withRepositoryMismatchGuidance, type SessionConfig, type ReviewSessionRequest, type SessionReviewJobRequest, type SetCampaignFollowUpLimitRequest } from "@wollipog/protocol";
+import { handoffDestinationError, locationSwitchRole, sessionRole, withRepositoryMismatchGuidance, type SessionConfig, type ReviewSessionRequest, type SessionReviewJobRequest, type SetCampaignFollowUpLimitRequest, type SetScopeGrantSelectionCountRequest } from "@wollipog/protocol";
 import { writeSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -115,6 +115,7 @@ import {
   type CreateProjectRequest,
   type UpdateProjectRequest,
   type AddProjectLocationRequest,
+  type ProjectLocationView,
   type CreateProjectLocationRequest,
   type MoveProjectLocationRequest,
   type RenameProjectLocationRequest,
@@ -255,6 +256,7 @@ import { registerOrchestratorSettingsRoutes } from "./orchestrator-settings-rout
 import { registerReviewSettingsRoutes } from "./review-settings-route.js";
 import { ReviewSettingsService } from "./review-settings.js";
 import { registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
+import { CampaignLocations, registerCampaignLocationRoutes } from "./campaign-locations.js";
 import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosures.js";
 import { composeHostingVideoEvidence, registerHostingVideoEvidenceRoutes } from "./hosting-video-evidence.js";
 import { registerRunnerAttestationRoute } from "./runner-attestation-route.js";
@@ -1089,6 +1091,10 @@ registerOrchestratorSettingsRoutes(app, orchestratorSettings, requestPrincipal);
 registerReviewSettingsRoutes(app, new ReviewSettingsService(db), requestPrincipal);
 registerFullControlLaunchRoutes(app, { db, hub, sessions: svc, settings: orchestratorSettings, requestPrincipal, evidenceDisclosures: evidenceAuthorityDisclosures,
   videoCertification: (runnerId) => videoEvidence.launchCertification(runnerId) });
+const campaignLocations = new CampaignLocations({ db, hub, synchronize: (rootId) => svc.synchronizeCampaignIssueScope(rootId),
+  settle: (before, revoked, owner, now) => svc.settleCampaignBoundaryChange(before, revoked, owner, now),
+  log: { warn: (message) => app.log.warn(message) } });
+registerCampaignLocationRoutes(app, { campaignLocations, requestPrincipal });
 registerHostingVideoEvidenceRoutes(app, { video: videoEvidence, requestPrincipal });
 registerArtifactUploadSettingsRoutes(app, db, hub, requestPrincipal);
 
@@ -1140,6 +1146,11 @@ registerCampaignStatusRoutes(app, {
 hub.observeSessions({
   changed: (sessionId) => campaignWorkObservations.sessionChanged(sessionId),
   removed: (sessionId) => campaignWorkObservations.sessionRemoved(sessionId),
+});
+// A turn that ends takes its tracked waits along (#1280).
+hub.observeSessions({
+  changed: (sessionId) => svc.sessionWaitLifecycleChanged(sessionId),
+  removed: (sessionId) => { db.sessionWaits.clear(sessionId); },
 });
 
 registerPromptImageRoutes(app, {
@@ -1255,7 +1266,7 @@ app.addHook("preSerialization", (req, _reply, payload, done) => {
   const protocol = parseUiProtocolVersion(req.query) ?? parseUiProtocolVersion({
     protocolVersion: req.headers["x-wollipog-ui-protocol"],
   });
-  done(null, projectCampaignHandoffsForUi(projectBackgroundRetryExhaustionForUi(payload, protocol), protocol));
+  done(null, projectCampaignStatusForUi(projectBackgroundRetryExhaustionForUi(payload, protocol), protocol));
 });
 // @fastify/websocket installs one `upgrade` listener on the underlying HTTP server. Register it
 // exactly once: sibling registrations make both listeners claim every socket and eventually turn
@@ -1509,6 +1520,8 @@ app.register(async (instance) => {
         for (const projectId of db.projectIdsForRunner(runnerId)) hub.projectChangedById(projectId);
         // If this runner is a box's runner (connected through the SSH tunnel), flip it online.
         orchestrator.onRunnerRegistered(runnerId, credential.credentialId);
+        // Campaign Locations excluded only while this runner was away are inspected again (#4117).
+        void campaignLocations.runnerReconnected(runnerId);
         if (runnerSupportsProtocol(msg.protocolVersion, "campaignIssueScopeChanges")) {
           for (const campaign of db.campaignIssueScopeRootsForRunner(runnerId)) {
             void svc.synchronizeCampaignIssueScope(campaign.id);
@@ -1599,6 +1612,7 @@ app.register(async (instance) => {
       case "campaign_launch_inspection_result":
       case "gitlab_merge_preflight_result":
       case "github_merge_preflight_result":
+      case "gitlab_merge_closures_result":
       case "forge_decision_action_result":
         if (runnerId) hub.resolveRunnerRequest(msg, runnerId);
         break;
@@ -2605,13 +2619,16 @@ app.post("/api/projects/:id/locations", async (req, reply) => {
   if (!db.canAccessWorkspace(principal, body.runnerId, body.workspaceId)) {
     return reply.code(404).send({ error: "workspace not found" });
   }
+  let added: ProjectLocationView;
   try {
-    db.addProjectLocation(id, body);
+    added = db.addProjectLocation(id, { runnerId: body.runnerId, workspaceId: body.workspaceId, addedByUserId: principal.userId });
   } catch (error) {
     return reply.code(400).send({ error: (error as Error).message });
   }
   const project = db.getProject(id)!;
   hub.projectChanged(project);
+  // Campaigns in this Project inspect it in the background (#4117); the response never waits.
+  void campaignLocations.locationAdded(added.id, principal);
   return { project: db.getProjectForPrincipal(principal, id)! };
 });
 
@@ -2643,8 +2660,9 @@ app.post("/api/projects/:id/locations/new", async (req, reply) => {
     return reply.code(browsed.status).send({ error: message });
   }
   if (!browsed.data?.path) return reply.code(502).send({ error: "the runner did not return the selected directory" });
+  let created: { id: string };
   try {
-    db.createProjectWorkspace(id, runnerId, { name, path: browsed.data.path }, Date.now(), requested.scope);
+    created = db.createProjectWorkspace(id, runnerId, { name, path: browsed.data.path }, Date.now(), requested.scope, principal.userId);
   } catch (error) {
     const message = (error as Error).message;
     // The code tells Add Location this refusal apart: after a lost reply, the retry is refused this
@@ -2656,6 +2674,8 @@ app.post("/api/projects/:id/locations/new", async (req, reply) => {
   const project = db.getProject(id)!;
   hub.runnerChanged(runnerId);
   hub.projectChanged(project);
+  const createdLocation = db.findProjectLocationForProject(id, runnerId, created.id);
+  if (createdLocation) void campaignLocations.locationAdded(createdLocation.id, principal);
   return reply.code(201).send({ project: db.getProjectForPrincipal(principal, id)! });
 });
 
@@ -2676,14 +2696,16 @@ app.post("/api/projects/:id/locations/move", async (req, reply) => {
   const affectedSessionIds = db.listSessions({ includeArchived: true })
     .filter((session) => session.projectLocationId === location.id)
     .map((session) => session.id);
+  let moved: ProjectLocationView | null;
   try {
-    db.moveProjectLocation(location.id, id);
+    moved = db.moveProjectLocation(location.id, id, Date.now(), principal.userId);
   } catch (error) {
     return reply.code(400).send({ error: (error as Error).message });
   }
   hub.projectChangedById(sourceProjectId);
   hub.projectChangedById(id);
   for (const sessionId of affectedSessionIds) hub.sessionChangedById(sessionId);
+  if (moved && sourceProjectId !== id) void campaignLocations.locationAdded(moved.id, principal);
   return { project: db.getProjectForPrincipal(principal, id)! };
 });
 
@@ -3797,14 +3819,17 @@ app.get("/api/sessions/:id/file", async (req, reply) => {
 
 app.get("/api/sessions/:id/workspace-references/search", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const q = req.query as { q?: unknown; match?: unknown };
+  const q = req.query as { q?: unknown; match?: unknown; fuzzyWithDirectories?: unknown };
   if (typeof q.q !== "string" || !q.q.trim() || q.q.length > 256) {
     return reply.code(400).send({ error: "q must contain 1-256 characters" });
   }
   if (q.match !== undefined && q.match !== "fuzzy") {
     return reply.code(400).send({ error: "match must be fuzzy when given" });
   }
-  const r = await svc.searchWorkspaceReferences(id, q.q, q.match);
+  if (q.fuzzyWithDirectories !== undefined && q.fuzzyWithDirectories !== "true") {
+    return reply.code(400).send({ error: "fuzzyWithDirectories must be true when given" });
+  }
+  const r = await svc.searchWorkspaceReferences(id, q.q, q.match, q.fuzzyWithDirectories === "true");
   if (!r.ok) return reply.code(r.status).send(failureBody(r));
   return r.data;
 });
@@ -4324,9 +4349,10 @@ app.get("/api/sessions", async (req,reply) => {
     protocolVersion: req.headers["x-wollipog-ui-protocol"],
   });
   const supportsRetryExhaustion = principal?.kind === "agent" || runnerSupportsProtocol(uiProtocol, "backgroundRetryExhaustion");
-  const supportsHandoffs = principal?.kind === "agent" || runnerSupportsProtocol(uiProtocol, "campaignHandoffs");
+  // Agent principals read every campaign status (#4146); a dashboard reads the ones it knows.
+  const campaignStatusProtocol = principal?.kind === "agent" ? PROTOCOL_VERSION : uiProtocol;
   return reply.type("application/json").send(principal
-    ? db.sessionListJsonForPrincipal(principal,includeArchived,supportsRetryExhaustion,supportsHandoffs)
+    ? db.sessionListJsonForPrincipal(principal,includeArchived,supportsRetryExhaustion,campaignStatusProtocol)
     : '{"sessions":[]}');
 });
 
@@ -4424,6 +4450,18 @@ app.post("/api/sessions/:id/orchestrator-campaign/behavior", async (req, reply) 
   if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
   return respond(reply, svc.setCampaignBehavior(id, req.body, { kind: "human", id: humanActorId(req) },
     (behavior, exactRow) => orchestratorSettings.campaignBehaviorError(human, behavior, exactRow)));
+});
+
+// #4146: Campaign Status's **Delete Merged Branches**. Wollipog performs the campaign's approved
+// merged_branch_deletion decisions it still can, through the existing forge action and its checks;
+// a person who can read the root and each requester asks. It approves nothing, so a branch without
+// an approved deletion keeps its exact command. No agent allowlist entry exists for this endpoint.
+app.post("/api/sessions/:id/orchestrator-campaign/cleanup/delete-merged-branches", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const human = requestHuman(req);
+  if (!human) return reply.code(403).send({ error: "only an authenticated human may ask Wollipog to delete merged branches" });
+  if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
+  return respond(reply, await svc.deleteApprovedMergedBranches(id, (sessionId) => db.canAccessSession(human, sessionId)));
 });
 
 app.get("/api/sessions/:id/orchestrator-campaign", async (req, reply) => {
@@ -4594,6 +4632,13 @@ app.post("/api/sessions/:id/pull-request-watch", async (req, reply) => {
   if (!principal) return reply;
   return respond(reply, svc.requestPullRequestWatch(id, req.body, (sessionId) => db.canAccessSession(principal, sessionId)));
 });
+// Tracked waits (#1280, #4249): only the session's own credential reports its wait calls.
+app.post("/api/sessions/:id/waits", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = sessionReviewRequester(req, reply, id);
+  if (!principal) return reply;
+  return respond(reply, svc.reportSessionWait(id, req.body, (sessionId) => db.canAccessSession(principal, sessionId)));
+});
 app.get("/api/sessions/:id/review-sessions", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   if (!canReadSessionReviews(req, id)) return reply.code(404).send({ error: "session not found" });
@@ -4634,6 +4679,15 @@ app.post("/api/sessions/:id/orchestrator-campaign/follow-up-limit", async (req, 
   const principal = requestPrincipal(req);
   if (principal?.kind !== "human") return reply.code(403).send({ error: "authenticated human authorization is required" });
   return respond(reply, svc.setCampaignFollowUpLimit(id, req.body as SetCampaignFollowUpLimitRequest, principal));
+});
+
+// The scope grant's selection count (#4102): the same human-only compare-and-set, re-minting the
+// boundary. No agent allowlist entry exists for this endpoint.
+app.post("/api/sessions/:id/orchestrator-campaign/scope-grant/selection-count", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "human") return reply.code(403).send({ error: "authenticated human authorization is required" });
+  return respond(reply, svc.setScopeGrantSelectionCount(id, req.body as SetScopeGrantSelectionCountRequest, principal));
 });
 
 app.post("/api/sessions/:id/orchestrator-campaign/plan", async (req, reply) => {
@@ -7350,6 +7404,15 @@ const heldResultTimer = setInterval(() => {
   }
 }, 5_000);
 heldResultTimer.unref();
+// Tracked waits are classified on the control plane's clock and published when that changes (#1280).
+const sessionWaitTimer = setInterval(() => {
+  try {
+    svc.maintainSessionWaits(Date.now());
+  } catch (error) {
+    app.log.warn({ error: error instanceof Error ? error.message : String(error) }, "tracked wait sweep deferred");
+  }
+}, 5_000);
+sessionWaitTimer.unref();
 const sessionCommandRetryTimer = setInterval(() => {
   try {
     svc.retryDueSessionCommands(Date.now());
@@ -7464,6 +7527,7 @@ app.addHook("onClose", async () => {
   clearInterval(usagePricingTimer);
   clearInterval(sessionReminderTimer);
   clearInterval(heldResultTimer);
+  clearInterval(sessionWaitTimer);
   clearInterval(sessionCommandRetryTimer);
   clearInterval(sessionStopMaintenanceTimer);
   clearInterval(backgroundPushRetryTimer);

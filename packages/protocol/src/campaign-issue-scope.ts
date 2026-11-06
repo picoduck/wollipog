@@ -1,8 +1,93 @@
-import type { CampaignIssueScopeSnapshot } from "./index.js";
-import { campaignRepositoryLocation } from "./campaign-work-ledger.js";
+import type { CampaignIssueScope, CampaignIssueScopeRepositoryChange, CampaignIssueScopeSnapshot } from "./index.js";
+import { validScopeProposal, type CampaignScopeProposal } from "./scope-proposal.js";
+import { campaignRepositoryLocation, type CampaignIssueRef } from "./campaign-work-ledger.js";
+
+/** The most issues one campaign scope holds, across all of its repositories (#4118). */
+export const CAMPAIGN_ISSUE_SCOPE_MAX = 100;
 
 export function boundedIssueNumbers(value: unknown): value is number[] {
-  return Array.isArray(value) && value.length <= 100 && value.every((n) => Number.isSafeInteger(n) && n > 0) && new Set(value).size === value.length;
+  return Array.isArray(value) && value.length <= CAMPAIGN_ISSUE_SCOPE_MAX && value.every((n) => Number.isSafeInteger(n) && n > 0) && new Set(value).size === value.length;
+}
+
+const byIssue = (a: CampaignIssueRef, b: CampaignIssueRef) =>
+  a.repository < b.repository ? -1 : a.repository > b.repository ? 1 : a.number - b.number;
+
+/** Repository-qualified issues in canonical form: lower-case repositories, sorted by repository
+ * then number, each pair once. Null when any entry is malformed or the list exceeds the bound.
+ * The same number in two repositories is two entries with separate authority. */
+export function canonicalCampaignIssues(value: unknown): CampaignIssueRef[] | null {
+  if (!Array.isArray(value) || value.length > CAMPAIGN_ISSUE_SCOPE_MAX) return null;
+  const seen = new Set<string>();
+  const issues: CampaignIssueRef[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw) || Object.keys(raw).some((key) => key !== "repository" && key !== "number") ||
+        typeof raw.repository !== "string" || !campaignRepositoryLocation(raw.repository) ||
+        !Number.isSafeInteger(raw.number) || raw.number < 1) return null;
+    const issue = { repository: raw.repository.toLowerCase(), number: raw.number as number };
+    const key = `${issue.repository}#${issue.number}`;
+    if (seen.has(key)) return null;
+    seen.add(key);
+    issues.push(issue);
+  }
+  return issues.sort(byIssue);
+}
+
+/** A scope's repository-qualified issues (#4118). A scope stored before #4118 holds only the
+ * launch repository's numbers, and reads as those numbers in that repository. */
+export function campaignScopeIssues(scope: Pick<CampaignIssueScope, "repository" | "issueNumbers" | "issues">): CampaignIssueRef[] {
+  return scope.issues ? scope.issues.map((issue) => ({ ...issue }))
+    : scope.issueNumbers.map((number) => ({ repository: scope.repository.toLowerCase(), number })).sort(byIssue);
+}
+
+/** The scope's numbers in one repository, ascending. */
+export function campaignScopeNumbers(scope: Pick<CampaignIssueScope, "repository" | "issueNumbers" | "issues">, repository: string): number[] {
+  const wanted = repository.toLowerCase();
+  return campaignScopeIssues(scope).filter((issue) => issue.repository === wanted).map((issue) => issue.number).sort((a, b) => a - b);
+}
+
+/** Whether the scope authorizes this exact repository-qualified issue. */
+export function campaignScopeHolds(scope: Pick<CampaignIssueScope, "repository" | "issueNumbers" | "issues">, issue: CampaignIssueRef): boolean {
+  const repository = issue.repository.toLowerCase();
+  return campaignScopeIssues(scope).some((held) => held.repository === repository && held.number === issue.number);
+}
+
+/** A scope holding exactly `issues`, with `issueNumbers` derived for its launch `repository`. */
+export function campaignScopeWithIssues<T extends CampaignIssueScope>(scope: T, issues: readonly CampaignIssueRef[]): T {
+  const canonical = canonicalCampaignIssues(issues);
+  if (!canonical) throw new Error("Campaign issue scope holds a malformed or oversized issue list");
+  const repository = scope.repository.toLowerCase();
+  return { ...scope, issueNumbers: canonical.filter((issue) => issue.repository === repository).map((issue) => issue.number), issues: canonical };
+}
+
+/** The part of a scope one runner stores and checks (#4118): its own Location's repository and
+ * that repository's numbers, in the shape runners read before #4118. For the launch repository of
+ * a one-repository scope this is the stored scope without `issues`, exactly as before. */
+export function campaignScopeForRepository(scope: CampaignIssueScope, repository: string): CampaignIssueScope {
+  const { issues: _issues, ...rest } = scope;
+  return { ...rest, repository: repository.toLowerCase(), issueNumbers: campaignScopeNumbers(scope, repository) };
+}
+
+/** Every repository part of a scope change: the launch repository first, then the others. */
+export function campaignScopeChangeGroups(snapshot: Pick<CampaignIssueScopeSnapshot, "repository" | "before" | "additions" | "removals" | "otherRepositories">): CampaignIssueScopeRepositoryChange[] {
+  return [{ repository: snapshot.repository, before: [...snapshot.before], additions: [...snapshot.additions], removals: [...snapshot.removals] },
+    ...(snapshot.otherRepositories ?? []).map((group) => ({ ...group, before: [...group.before], additions: [...group.additions], removals: [...group.removals] }))];
+}
+
+/** The repository-qualified issues a scope change ends with. */
+export function campaignScopeChangeResult(snapshot: Pick<CampaignIssueScopeSnapshot, "repository" | "before" | "additions" | "removals" | "otherRepositories">): CampaignIssueRef[] {
+  return campaignScopeChangeGroups(snapshot).flatMap((group) => [...group.before.filter((n) => !group.removals.includes(n)), ...group.additions]
+    .map((number) => ({ repository: group.repository, number }))).sort(byIssue);
+}
+
+/** The repository-qualified issues a scope change starts from. */
+export function campaignScopeChangeBefore(snapshot: Pick<CampaignIssueScopeSnapshot, "repository" | "before" | "additions" | "removals" | "otherRepositories">): CampaignIssueRef[] {
+  return campaignScopeChangeGroups(snapshot).flatMap((group) => group.before.map((number) => ({ repository: group.repository, number }))).sort(byIssue);
+}
+
+/** Validates one repository's part of a scope change, as the launch repository's is validated. */
+function validScopeChangeGroup(group: { before: unknown; additions: unknown; removals: unknown }): boolean {
+  return boundedIssueNumbers(group.before) && boundedIssueNumbers(group.additions) && boundedIssueNumbers(group.removals) &&
+    !group.additions.some((n) => (group.before as number[]).includes(n)) && !group.removals.some((n) => !(group.before as number[]).includes(n));
 }
 
 /** Whether `url` is the exact web address of issue (or pull/merge request) `number` in a campaign
@@ -49,18 +134,49 @@ export function epicChecklistMembers(body: string, repository: string): number[]
 }
 
 export function normalizeCampaignIssueScopeSnapshot(input: Record<string, unknown>): CampaignIssueScopeSnapshot | null {
-  if (!validIssueAdmission(input.issueAdmission) || !validIssueLineage(input.lineage) || !validScopeGrantReview(input.grantReview)) return null;
+  if (!validIssueAdmission(input.issueAdmission) || !validIssueLineage(input.lineage) || !validScopeGrantReview(input.grantReview) ||
+      !validSelectionReview(input.selectionReview) || !validScopeOwnerReview(input.ownerReview) || !validScopeProposal(input.scopeProposal)) return null;
+  // A proposal is never also a grant review, a selection review or an owner review, and only an
+  // admitted one carries an admission (#4282).
+  const proposal = input.scopeProposal as CampaignScopeProposal | undefined;
+  if (proposal && (input.grantReview !== undefined || input.selectionReview !== undefined || input.ownerReview !== undefined ||
+      input.lineage !== undefined || (proposal.route === "admitted") !== (input.issueAdmission !== undefined))) return null;
+  // An owner review is the owner's decision (#4267): it never carries an admission, a grant review or lineage.
+  if (input.ownerReview !== undefined && (input.issueAdmission !== undefined || input.grantReview !== undefined ||
+      input.selectionReview !== undefined || input.lineage !== undefined)) return null;
   if (input.verifiedPublications !== undefined && (!Array.isArray(input.verifiedPublications) || input.verifiedPublications.length > 100 ||
       input.verifiedPublications.some((p) => !p || typeof p !== "object" || Object.keys(p).length !== 2 || typeof p.publicationOccurrenceId !== "string" ||
         !p.publicationOccurrenceId || p.publicationOccurrenceId.length > 256 || !Number.isSafeInteger(p.issue) || p.issue < 1 ||
         !Array.isArray(input.additions) || !input.additions.includes(p.issue)) ||
       new Set(input.verifiedPublications.map((p) => p.publicationOccurrenceId)).size !== input.verifiedPublications.length)) return null;
-  if (typeof input.repository !== "string" || !campaignRepositoryLocation(input.repository) ||
-      !Number.isSafeInteger(input.expectedRevision) || (input.expectedRevision as number) < 0 ||
+  if (typeof input.repository !== "string" || !campaignRepositoryLocation(input.repository)) return null;
+  const launch = input.repository.toLowerCase();
+  // Each other repository appears once, never as the launch repository, with a valid change.
+  const others: CampaignIssueScopeRepositoryChange[] = [];
+  if (input.otherRepositories !== undefined) {
+    if (!Array.isArray(input.otherRepositories) || !input.otherRepositories.length || input.otherRepositories.length > 50) return null;
+    for (const raw of input.otherRepositories) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw) ||
+          Object.keys(raw).some((key) => !["repository", "before", "additions", "removals"].includes(key)) ||
+          typeof raw.repository !== "string" || !campaignRepositoryLocation(raw.repository) || !validScopeChangeGroup(raw)) return null;
+      const repository = raw.repository.toLowerCase();
+      if (repository === launch || others.some((group) => group.repository === repository)) return null;
+      others.push({ repository, before: [...raw.before].sort((a, b) => a - b), additions: [...raw.additions].sort((a, b) => a - b),
+        removals: [...raw.removals].sort((a, b) => a - b) });
+    }
+    others.sort((a, b) => a.repository < b.repository ? -1 : 1);
+  }
+  const changes = others.reduce((total, group) => total + group.additions.length + group.removals.length, 0);
+  const after = others.reduce((total, group) => total + group.before.length + group.additions.length - group.removals.length, 0);
+  if (!Number.isSafeInteger(input.expectedRevision) || (input.expectedRevision as number) < 0 ||
+      !validScopeChangeGroup(input as { before: unknown; additions: unknown; removals: unknown }) ||
       !boundedIssueNumbers(input.before) || !boundedIssueNumbers(input.additions) || !boundedIssueNumbers(input.removals) ||
-      (!input.additions.length && !input.removals.length) ||
-      input.additions.some((n) => (input.before as number[]).includes(n)) || input.removals.some((n) => !(input.before as number[]).includes(n)) ||
-      input.before.length + input.additions.length - input.removals.length > 100 ||
+      // Only an initial proposal may admit no issues: it opens dispatch for work that needs none.
+      (!input.additions.length && !input.removals.length && !changes && !proposal?.initial) ||
+      // A proposal's issues are the launch repository's additions, until proposals name repositories.
+      (proposal && (changes || input.removals.length || proposal.issues.length !== input.additions.length ||
+        proposal.issues.some((issue) => !(input.additions as number[]).includes(issue.number)))) ||
+      input.before.length + input.additions.length - input.removals.length + after > CAMPAIGN_ISSUE_SCOPE_MAX ||
       typeof input.explanation !== "string" || !input.explanation.trim() || input.explanation.length > 4000 ||
       !Array.isArray(input.affectedAssignments) || input.affectedAssignments.length > 100 ||
       !Array.isArray(input.affectedDecisions) || input.affectedDecisions.length > 1000 ||
@@ -78,15 +194,23 @@ export function normalizeCampaignIssueScopeSnapshot(input: Record<string, unknow
   for (const raw of input.affectedAssignments) {
     if (!raw || typeof raw !== "object" || typeof raw.sessionId !== "string" || !raw.sessionId || raw.sessionId.length > 256 ||
         !Number.isSafeInteger(raw.issue) || raw.issue < 1) return null;
-    affectedAssignments.push({ sessionId: raw.sessionId, issue: raw.issue });
+    // Only an assignment in another repository names it; the launch repository's stays implicit.
+    if (raw.repository !== undefined && (typeof raw.repository !== "string" ||
+        !others.some((group) => group.repository === raw.repository.toLowerCase()))) return null;
+    affectedAssignments.push({ sessionId: raw.sessionId, issue: raw.issue,
+      ...(raw.repository === undefined ? {} : { repository: (raw.repository as string).toLowerCase() }) });
   }
-  return { category: "campaign_issue_scope", repository: input.repository.toLowerCase(), expectedRevision: input.expectedRevision as number,
+  return { category: "campaign_issue_scope", repository: launch, expectedRevision: input.expectedRevision as number,
     before: [...input.before].sort((a,b) => a-b), additions: [...input.additions].sort((a,b) => a-b), removals: [...input.removals].sort((a,b) => a-b),
+    ...(others.length ? { otherRepositories: others } : {}),
     explanation: input.explanation, affectedAssignments, activeChildren, affectedDecisions: [...input.affectedDecisions] as string[],
     ...(input.lineage === undefined ? {} : { lineage: structuredClone(input.lineage) as CampaignIssueScopeSnapshot["lineage"] }),
     ...(input.issueAdmission === undefined ? {} : { issueAdmission: structuredClone(input.issueAdmission) as CampaignIssueScopeSnapshot["issueAdmission"] }),
     ...(input.verifiedPublications === undefined ? {} : { verifiedPublications: structuredClone(input.verifiedPublications) as CampaignIssueScopeSnapshot["verifiedPublications"] }),
-    ...(input.grantReview === undefined ? {} : { grantReview: structuredClone(input.grantReview) as CampaignIssueScopeSnapshot["grantReview"] }) };
+    ...(input.grantReview === undefined ? {} : { grantReview: structuredClone(input.grantReview) as CampaignIssueScopeSnapshot["grantReview"] }),
+    ...(input.selectionReview === undefined ? {} : { selectionReview: structuredClone(input.selectionReview) as CampaignIssueScopeSnapshot["selectionReview"] }),
+    ...(input.ownerReview === undefined ? {} : { ownerReview: structuredClone(input.ownerReview) as CampaignIssueScopeSnapshot["ownerReview"] }),
+    ...(proposal === undefined ? {} : { scopeProposal: structuredClone(proposal) }) };
 }
 
 export function validIssueAdmission(value: unknown): boolean {
@@ -102,7 +226,17 @@ export function validIssueAdmission(value: unknown): boolean {
     typeof v.evidenceDigest === "string" && /^[0-9a-f]{64}$/u.test(v.evidenceDigest);
 }
 
-const GRANT_REVIEW_CAUSES = ["grant_failed", "grant_uncertain", "selection"];
+const GRANT_REVIEW_CAUSES = ["grant_failed", "grant_uncertain", "selection", "selection_uncertain", "selection_failed", "selection_unverified"];
+
+/** The exact shape of a selection proposal's `admit` evidence (#4103). */
+export function validSelectionReview(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  return Object.keys(v).length === 4 && typeof v.occurrenceId === "string" && v.occurrenceId.length > 0 && v.occurrenceId.length <= 256 &&
+    typeof v.grantDigest === "string" && /^[0-9a-f]{64}$/u.test(v.grantDigest) && v.verdict === "admit" &&
+    typeof v.reason === "string" && v.reason.length <= 300;
+}
 const boundedText = (value: unknown, max: number) => typeof value === "string" && value.length <= max &&
   !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value);
 
@@ -113,10 +247,11 @@ export function validScopeGrantReview(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const v = value as Record<string, unknown>;
   const s = v.selection as Record<string, unknown> | undefined;
-  return Object.keys(v).every((key) => ["cause", "ownerMessage", "messageDigest", "grantOccurrenceId", "failureClass", "reason", "selection"].includes(key)) &&
+  return Object.keys(v).every((key) => ["cause", "ownerMessage", "messageDigest", "grantOccurrenceId", "reviewOccurrenceId", "failureClass", "reason", "selection"].includes(key)) &&
     GRANT_REVIEW_CAUSES.includes(v.cause as string) && boundedText(v.ownerMessage, 4000) &&
     typeof v.messageDigest === "string" && /^[0-9a-f]{64}$/u.test(v.messageDigest) &&
     (v.grantOccurrenceId === undefined || boundedText(v.grantOccurrenceId, 256) && (v.grantOccurrenceId as string).length > 0) &&
+    (v.reviewOccurrenceId === undefined || boundedText(v.reviewOccurrenceId, 256) && (v.reviewOccurrenceId as string).length > 0) &&
     (v.failureClass === undefined || typeof v.failureClass === "string" && /^[a-z_]{1,64}$/u.test(v.failureClass)) &&
     (v.reason === undefined || boundedText(v.reason, 300)) &&
     (s === undefined || Boolean(s && typeof s === "object" && !Array.isArray(s) && Object.keys(s).length === 4 &&
@@ -124,10 +259,24 @@ export function validScopeGrantReview(value: unknown): boolean {
       boundedText(s.criteria, 300) && Array.isArray(s.constraints) && s.constraints.length <= 10 && s.constraints.every((c) => boundedText(c, 200))));
 }
 
+/** The exact shape of an owner review (#4267): server-derived, bounded, and with nothing outside it.
+ * A Maximum Issues increase is positive and stays within the 100-issue ceiling. */
+export function validScopeOwnerReview(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  const m = v.maxIssuesIncrease as Record<string, unknown> | undefined;
+  return Object.keys(v).every((key) => key === "cause" || key === "maxIssuesIncrease") && v.cause === "lineage_missing" &&
+    (m === undefined || Boolean(m && typeof m === "object" && !Array.isArray(m) && Object.keys(m).length === 2 &&
+      Number.isSafeInteger(m.from) && (m.from as number) >= 1 && Number.isSafeInteger(m.increase) && (m.increase as number) >= 1 &&
+      (m.from as number) + (m.increase as number) <= 100));
+}
+
 export function validIssueLineage(value: unknown): boolean {
   if (value === undefined) return true;
   if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
+  if (v.kind === "selection") return Object.keys(v).length === 1;
   return Object.keys(v).length === 2 && (v.kind === "epic" && Number.isSafeInteger(v.epic) && (v.epic as number) > 0 ||
     v.kind === "follow_up" && typeof v.publicationOccurrenceId === "string" && v.publicationOccurrenceId.length > 0 && v.publicationOccurrenceId.length <= 256);
 }

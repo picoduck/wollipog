@@ -413,6 +413,23 @@ export function createApiClient(transport: ApiTransport) {
   testSessionNamingCustomModel: () =>
     req<SessionNamingConnectionTestResult>("/api/session-naming/custom-model/test", { method: "POST" }),
 
+  /** The organization's Decision Model (#4101). Every member reads it; administrators change it. */
+  decisionModelSettings: () => req<import("@wollipog/protocol").DecisionModelSettingsView>("/api/decision-model"),
+
+  configureDecisionModel: (input: import("@wollipog/protocol").ConfigureDecisionModelRequest) =>
+    req<import("@wollipog/protocol").DecisionModelSettingsView>("/api/decision-model", {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }),
+
+  useAutomaticDecisionModel: () =>
+    req<import("@wollipog/protocol").DecisionModelSettingsView>("/api/decision-model", { method: "DELETE" }),
+
+  /** One fixed probe decision through the full runtime: its verdict, attempts and latency. */
+  testDecisionModel: () =>
+    req<import("@wollipog/protocol").DecisionModelTestResult>("/api/decision-model/test", { method: "POST" }),
+
+
   /** Refetches the model rate table ahead of its daily TTL so newly released models get priced. */
   refreshUsagePricing: () => req<{ pricing: UsagePricingStatus }>("/api/usage/pricing/refresh", { method: "POST" }),
   subscriptionUsage: () => req<SubscriptionUsageResponse>("/api/usage/subscriptions"),
@@ -1173,6 +1190,26 @@ export function createApiClient(transport: ApiTransport) {
       method: "POST",
       body: JSON.stringify({ acceptedFollowUps, expectedRevision }),
     }),
+  /** Campaign Status's Delete Merged Branches (#4146): Wollipog performs the campaign's approved
+   * merged-branch deletions it still can, through the existing forge action. It approves nothing. */
+  deleteCampaignMergedBranches: (id: string) =>
+    req<{ performed: number; refused: number }>(
+      `/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/cleanup/delete-merged-branches`,
+      { method: "POST", body: "{}" },
+    ),
+  /** Authenticated Human-only change to a Full Control scope grant's selection count (#4102).
+   * Compare-and-set on the campaign's policy revision. */
+  setScopeGrantSelectionCount: (id: string, count: number, expectedRevision: number) =>
+    req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/scope-grant/selection-count`, {
+      method: "POST",
+      body: JSON.stringify({ count, expectedRevision }),
+    }),
+  /** The campaign owner's Include in Campaign of a Project Location someone else added (#4117).
+   * The server inspects the Location first; a failing one is listed as excluded instead. */
+  includeCampaignLocation: (id: string, locationId: string) =>
+    req<{ joined: boolean; revision: number }>(
+      `/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/locations/${encodeURIComponent(locationId)}/include`,
+      { method: "POST" }),
   setParentControl: (id: string, mode: ParentControlMode) =>
     req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/parent-control`, {
       method: "POST",
@@ -1609,15 +1646,25 @@ export function createApiClient(transport: ApiTransport) {
       `/api/sessions/${encodeURIComponent(sessionId)}/file?${new URLSearchParams({ path }).toString()}`,
     ),
 
-  /** `match` is echoed only when the runner and control plane applied it (#1263). */
-  searchWorkspaceReferences: (sessionId: string, query: string, match?: WorkspaceReferenceSearchMatch) =>
+  /** `match` is echoed only when the runner and control plane applied it (#1263). The composer's
+   * `"fuzzy_with_directories"` (#4129) asks for folders too and is echoed as `match: "fuzzy"` with
+   * `fuzzyWithDirectories`; older components answer it with substring results. */
+  searchWorkspaceReferences: (
+    sessionId: string,
+    query: string,
+    mode?: WorkspaceReferenceSearchMatch | "fuzzy_with_directories",
+  ) =>
     req<{
       results: WorkspaceReferenceCandidate[];
       truncated: boolean;
       match?: WorkspaceReferenceSearchMatch;
+      fuzzyWithDirectories?: boolean;
       limit?: WorkspaceReferenceSearchLimit;
     }>(
-      `/api/sessions/${encodeURIComponent(sessionId)}/workspace-references/search?${new URLSearchParams({ q: query, ...(match ? { match } : {}) }).toString()}`,
+      `/api/sessions/${encodeURIComponent(sessionId)}/workspace-references/search?${new URLSearchParams({
+        q: query,
+        ...(mode === "fuzzy_with_directories" ? { fuzzyWithDirectories: "true" } : mode ? { match: mode } : {}),
+      }).toString()}`,
     ),
 
   createWorkspaceReference: (sessionId: string, target: CreateWorkspaceReferenceRequest) =>

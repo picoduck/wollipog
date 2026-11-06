@@ -107,6 +107,12 @@ reported. One sweep ran two commits behind and produced three findings in a file
 twelve files that had merely moved on. The primary checkout is not fast-forwarded on a schedule,
 and Phase 1 forbids this run from pulling it.
 
+The same applies to the harness itself. When HEAD is behind, check
+`git diff --stat HEAD origin/main -- .agents/skills/codebase-maintenance/`. If it lists changes,
+reread this file and the job file with `git show origin/main:<path>` and follow the `origin/main`
+versions for the rest of the run, and say so in Tree State. A coverage sweep on 2026-11-05 started
+185 commits behind and first read a job file without its failing-test triage rule (#3895).
+
 When a job needs to execute code and the shared checkout is dirty or differs from `origin/main`,
 pin `git rev-parse origin/main` and create a detached analysis worktree with
 `git worktree add --detach <scratch>/tree <baseline-sha>`. This is an analysis-only exception to

@@ -404,13 +404,15 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
         });
         const completed = inventory.every((job) => job.status === "completed");
         const checkoutVerified = Boolean(identity && inventory.slice(0, -1).every((job) => job.checkoutVerified));
-        const stepPassed = (job, name) => job.steps.some((step) => step.name === name && step.conclusion === "success");
+        const stepPassed = (job, name) => Boolean(job?.steps.some((step) => step.name === name && step.conclusion === "success"));
+        const namedJob = (name) => inventory.find((job) => job.name === prefix + name);
+        const browserJobs = inventory.filter((job) => /^Browser End-to-End Tests \(\d+\)$/.test(job.name.slice(prefix.length)));
         const testsVerified = CORE_STEPS.every((name) => stepPassed(inventory[0], name)) &&
-          inventory.slice(1, 6).every((job) => stepPassed(job, "Remote-Instance Browser End-to-End Tests")) &&
-          stepPassed(inventory[1], "Rendered Production Browser Smoke") &&
-          stepPassed(inventory[6], "WebKit Browser End-to-End Tests") &&
-          stepPassed(inventory[7], "Compare the Diff Against the Settings-Rows Paths") &&
-          stepPassed(inventory[8], "Compare Against the Committed win32 Baselines") &&
+          browserJobs.every((job) => stepPassed(job, "Remote-Instance Browser End-to-End Tests")) &&
+          stepPassed(namedJob("Browser End-to-End Tests (1)"), "Rendered Production Browser Smoke") &&
+          stepPassed(namedJob("WebKit End-to-End Tests"), "WebKit Browser End-to-End Tests") &&
+          stepPassed(namedJob("Settings-Rows win32 Baselines / Detect Settings-Rows Changes"), "Compare the Diff Against the Settings-Rows Paths") &&
+          stepPassed(namedJob("Settings-Rows win32 Baselines / Compare win32 Settings-Rows Baselines"), "Compare Against the Committed win32 Baselines") &&
           UNIT_SHARDS.every((name) => stepPassed(inventory.find((job) => job.name === prefix + name), "Unit Tests")) &&
           stepPassed(inventory.find((job) => job.name === prefix + "Delegated Pipeline Recovery"), "Verify Recorded-Boundary Pipeline Recovery") &&
           stepPassed(inventory.at(-1), "Require Every Job to Have Succeeded");

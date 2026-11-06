@@ -11,6 +11,7 @@ import {
   DECISION_INPUT_MAX_CHARS,
   DECISION_OUTPUT_MAX_BYTES,
   DECISION_PREPARATION_BUDGET_MS,
+  DECISION_SCHEMA_MAX_CHARS,
   decisionAgentFailureClass,
 } from "@wollipog/protocol";
 import { JsonRpcPeer } from "./jsonrpc.js";
@@ -25,7 +26,8 @@ import { killTree, spawnAgent, type AgentProcess, type SpawnAgentOptions, type S
 
 const MIN_TIMEOUT_MS = 250;
 const INSTRUCTIONS_MAX_CHARS = 8_000;
-const SCHEMA_MAX_CHARS = 8_000;
+/** A typed-question call (#4283) carries one schema entry per question and item. */
+const SCHEMA_MAX_CHARS = DECISION_SCHEMA_MAX_CHARS;
 /** Claude's JSON envelope carries usage and metadata around the structured output. */
 const CLAUDE_ENVELOPE_MAX_BYTES = 256 * 1024;
 const DEFAULT_MAX_CONCURRENT = 3;

@@ -19,6 +19,8 @@ import {
   CAMPAIGN_WORK_REVISION_CHANGED,
   CAMPAIGN_WORK_VERIFICATION_ID_PREFIX,
   campaignRepositoryLocation,
+  ISSUE_CLOSURE_EXCLUSION_ISSUES_MAX,
+  type IssueClosureExclusionReason,
   type AdjudicateCampaignRecommendationRequest,
   type AgentHarnessIdentity,
   type CampaignAttempt,
@@ -882,10 +884,44 @@ export class CampaignWorkLedgerStore {
     `).all(campaignId, repository, JSON.stringify(issueNumbers)) as Array<{ session_id: string }>).map((row) => row.session_id));
   }
 
+  /** Campaigns with a committed work item for this issue (#4103). */
+  campaignsWithCommittedIssue(repository: string, issue: number): string[] {
+    return (this.stmt(`SELECT DISTINCT campaign_session_id FROM campaign_work_items
+      WHERE lower(issue_repository)=lower(?) AND issue_number=? AND commitment='committed'`)
+      .all(repository, issue) as Array<{ campaign_session_id: string }>).map((row) => row.campaign_session_id);
+  }
+
   /** Sessions an issue closure may leave out: those {@link sessionsUnrelatedToIssues} proves
    * unrelated to the one issue being closed. */
   issueClosureExcludableSessions(campaignId: string, repository: string, issueNumber: number): Set<string> {
     return this.sessionsUnrelatedToIssues(campaignId, repository, [issueNumber]);
+  }
+
+  /** The ledger facts behind an exclusion (#3237), read from the same history
+   * {@link sessionsUnrelatedToIssues} decides from: the issues every item the session has attempted
+   * has ever tracked, how many of those items never tracked one, and how many items it reaches only
+   * through follow-up lineage, in either direction. It states facts and decides nothing: a caller
+   * asks only about sessions that function already excluded. */
+  issueClosureExclusionReason(sessionId: string): IssueClosureExclusionReason {
+    const attempted = `SELECT DISTINCT work_item_id FROM campaign_work_attempts WHERE session_id=?1`;
+    const issues = this.stmt(`SELECT DISTINCT issue_repository, issue_number FROM campaign_work_item_issue_history
+      WHERE work_item_id IN (${attempted}) ORDER BY issue_repository, issue_number`)
+      .all(sessionId) as Array<{ issue_repository: string; issue_number: number }>;
+    const { without } = this.stmt(`SELECT COUNT(*) AS without FROM (${attempted}) item WHERE NOT EXISTS
+      (SELECT 1 FROM campaign_work_item_issue_history history WHERE history.work_item_id=item.work_item_id)`)
+      .get(sessionId) as { without: number };
+    const { linked } = this.stmt(`
+      WITH RECURSIVE reach(work_item_id) AS (
+        ${attempted}
+        UNION
+        SELECT edge.result_work_item_id FROM reach JOIN campaign_work_lineage_edges edge ON edge.origin_work_item_id=reach.work_item_id
+        UNION
+        SELECT edge.origin_work_item_id FROM reach JOIN campaign_work_lineage_edges edge ON edge.result_work_item_id=reach.work_item_id)
+      SELECT COUNT(*) AS linked FROM reach WHERE work_item_id NOT IN (${attempted})`).get(sessionId) as { linked: number };
+    return {
+      attemptedIssues: issues.slice(0, ISSUE_CLOSURE_EXCLUSION_ISSUES_MAX).map((row) => ({ repository: row.issue_repository, number: row.issue_number })),
+      attemptedIssueCount: issues.length, attemptedWithoutIssue: without, linkedWorkItems: linked,
+    };
   }
 
   /* ------------------------------ Dependencies ------------------------------ */

@@ -21,6 +21,12 @@ fetched remote default branch before releasing implementation. A bootstrap promp
 recorded work-item assignment.
 Do not claim atomic creation, omit required protected admission, or update the hosting stack to
 make an unavailable interface appear. Report an unsupported mandatory path during preflight.
+Full Control launches with no preflight form or question (#2940), so the root Orchestrator posts
+this preflight as its first report, after `get_campaign` and before its first child: objective and
+issue scope, permitted follow-ups and operations, limits, evidence destination and reviewer
+provider, Human Required exceptions, unsupported or degraded capabilities, and each unresolved
+mandatory human rule with its exact source and typed route to the owner. It asks nothing and waits
+for nobody; the shipped authority reference lists what it names.
 
 Installed or user-authored workflows are independent instructions. Name any unresolved mandatory
 human rule with its exact file, quoted requirement and affected action before proceeding to that
@@ -30,6 +36,22 @@ require user payload review. Those instructions are not changed by this reposito
 policy. Do not edit installed skills or live provider configuration to remove the conflict.
 Explicitly authorized repository policy alignment must itself pass normal review and merge gates.
 Committed wording never overrides the current session's higher-priority instructions.
+
+When such a rule keeps a gate for a person, the gate reaches the owner as a typed request, never
+only as prose (#4137):
+
+- The child still files the exact typed decision, such as `pr_merge`, with
+  `request_workflow_decision` and names the rule in `ownerRule` (`source`: the file; `quote`: the
+  requirement, on one line), or with `wollipog decision request ... --owner-rule-source <path>
+  --owner-rule-quote <text>`. The occurrence is created human-owned (`owner_kept`) under any mode
+  or grant, reaches the owner's Inbox and Campaign Status under Waiting for You with the rule, and
+  later requests for the same resource stay the owner's. The rule only narrows authority.
+- The root hands any occurrence already filed without the rule to the owner with
+  `hand_workflow_decision_to_owner`.
+- For a gate with no typed category, the root uses `request_owner_decision` with `kind: "approval"`.
+- For a design choice, clarification or preference, the root asks an Owner Question:
+  `request_owner_decision` with `kind: "question"`, answered in the owner's own words.
+- Nobody ends a turn with such a gate only in prose.
 
 ## Worktree Bases and Checkout Maintenance
 
@@ -104,8 +126,11 @@ close, fix or resolve (any tense, even negated as in "does not close" or hyphena
 "auto-close") directly before an issue reference that must stay open, in a PR description, title or
 commit message. Code spans do not close an issue, but paraphrase rather than rely on them. Check a
 draft with `wollipog pr closures --file <draft>` and an open PR with `wollipog pr closures <url>`. A
-GitHub `pr_merge` decision is refused unless its `intendedClosures` lists exactly what the merge
-would close (#3713). Delivery comments compare every
+`pr_merge` decision is refused unless its `intendedClosures` lists exactly what the merge would close
+(#3713). The rule covers GitLab merge requests too (#3762), whose closing pattern is wider: it also
+accepts implement and "-ing" forms ("closing", "implements"), closes every reference in a list after
+one keyword, reads code and the title, and may differ per instance, so GitLab's own list of the issues
+a merge request closes decides where it disagrees with Wollipog's match. Delivery comments compare every
 acceptance criterion and cite the actual merge commit; report remaining original work candidly.
 
 Use `wollipog review session run` (MCP `request_review_session`) for your own pushed PR's required

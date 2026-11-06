@@ -39,10 +39,12 @@ function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
-/** The issues a description and GitHub's links would close, one entry per issue, in issue order. */
-export function pullRequestClosures(description: string, repository: string, linked: readonly string[]): PullRequestClosure[] {
+/** The issues a description and the forge's own list would close, one entry per issue, in issue
+ * order. `find` reads the description: GitHub's keywords, or GitLab's closing pattern (#3762). */
+export function pullRequestClosures(description: string, repository: string, linked: readonly string[],
+  find: typeof findClosingReferences = findClosingReferences): PullRequestClosure[] {
   const closures = new Map<string, PullRequestClosure>();
-  for (const found of findClosingReferences(description, repository)) {
+  for (const found of find(description, repository)) {
     if (!closures.has(found.issue)) closures.set(found.issue, { issue: found.issue, sources: ["description"], excerpt: found.excerpt });
   }
   for (const issue of linked) {
@@ -125,7 +127,7 @@ const CHECKS_QUERY = `query($owner:String!,$name:String!,$number:Int!){
 // GitHub's CheckConclusionState values that count as passing, as `summarizeCheckRollup` reads them.
 const PASSING_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
 
-/** v292 (#4119): read every check reported for the pull request's head, how many of them GitHub
+/** v315 (#4119): read every check reported for the pull request's head, how many of them GitHub
  * marks required, and whether its merge state is clean. Fails closed: an unexpected answer, another
  * head, or more checks than one page holds proves nothing. */
 export async function inspectPullRequestChecks(

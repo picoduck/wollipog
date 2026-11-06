@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { campaignPublicationSafe, campaignPublicationTitle, type CampaignPublicationAdmissionFailure, type SessionView, type GithubIssueClosureSnapshot,
+import { campaignPublicationSafe, campaignPublicationTitle, campaignScopeIssues, type CampaignPublicationAdmissionFailure, type SessionView, type GithubIssueClosureSnapshot,
   type WorkflowDecisionResourceSnapshot, type CampaignWorkItemDetail, type CampaignPullRequestRef, type CampaignRecommendation,
   ISSUE_CLOSURE_DELIVERY_GAPS_MAX, issueClosureDeliveryGap, type IssueClosureDeliveryGap, type IssueClosureDeliveryGapCode,
   type IssueClosureEpicMembers } from "@wollipog/protocol";
@@ -27,6 +27,13 @@ export function campaignScopeTargetFailureMessage(reason: unknown): string {
     default:
       return "Campaign scope requires a valid local or SSH host execution target belonging to its runner. Container and cloud targets are not supported.";
   }
+}
+
+/** How many issues the campaign holds across every repository (#4118): the size Maximum Issues
+ * limits. `issueNumbers` is only the launch repository's part. */
+export function heldCampaignIssues(root: Pick<SessionView, "orchestratorPolicy">): number {
+  const policy = root.orchestratorPolicy;
+  return policy?.issueScope ? campaignScopeIssues(policy.issueScope).length : policy?.issueNumbers?.length ?? 0;
 }
 
 export function issueBoundary(root: SessionView) {
@@ -96,19 +103,27 @@ export function publicationEvidenceCheck(db: ControlPlaneDb, root: SessionView,
   const grants = db.campaignPublicationReservations(root.id);
   if (grants.some((d) => d.status === "consumed" && d.resourceSnapshot.category === snapshot.category && d.resourceSnapshot.recommendationId === snapshot.recommendationId)) return failed("recommendation_spent");
   const reservations = reservedPublicationSlots(db, root, undefined, snapshot.recommendationId);
-  if ((root.orchestratorPolicy?.issueNumbers?.length ?? 0) + reservations >= db.campaignIssueLimit(root.id, boundary.issueAuthority.maxIssues)) {
+  if (heldCampaignIssues(root) + reservations >= db.campaignIssueLimit(root.id, boundary.issueAuthority.maxIssues)) {
     return failed("capacity_exhausted");
   }
   return { evidence: { recommendation, origins, scopeRevision: boundary.issueScopeRevision, boundaryRevision: boundary.revision } };
 }
 
 /** Why the server refused an Orchestrator's own Full Control scope change (#2940). Each code names
- * the one condition that failed and maps to a fixed sentence; neither carries issue or payload text. */
+ * the one condition that failed and maps to a fixed sentence; neither carries issue or payload text.
+ * Additions without any lineage are not refused: they become the owner's typed approval (#4267). */
 export type CampaignScopeAdmissionFailure =
-  | "capacity_exhausted" | "lineage_missing" | "epic_not_authorized" | "epic_members_unverified"
+  | "capacity_exhausted" | "epic_not_authorized" | "epic_members_unverified"
   | "follow_ups_not_authorized" | "follow_up_not_single" | "publication_not_found" | "publication_not_consumed"
   | "publication_already_admitted" | "publication_unapproved" | "publication_approved_under_earlier_boundary" | "publication_approver_not_owner"
-  | "publication_authority_changed" | "recommendation_not_found" | "recommendation_not_accepted" | "resulting_issue_mismatch" | "origin_outside_scope" | "payload_mismatch";
+  | "publication_authority_changed" | "recommendation_not_found" | "recommendation_not_accepted" | "resulting_issue_mismatch" | "origin_outside_scope" | "payload_mismatch"
+  // Selection lineage (#4103): its deterministic floors, in the order they run.
+  | "selection_not_granted" | "selection_additions_only" | "repository_outside_boundary" | "not_an_issue" | "issue_not_open"
+  | "already_in_scope" | "other_campaign_scope" | "selection_count_exhausted" | "human_required_label"
+  // The Orchestrator's own scope proposal (#4282): its floors beyond those above.
+  | "owner_named_not_in_message" | "proposal_additions_only" | "proposal_count_exceeded" | "requested_count_not_in_message"
+  // The Decision Model's constraint check of that proposal (#4282) refused it.
+  | "constraint_check_refused";
 
 const HUMAN_SCOPE_ROUTE = "ask the campaign owner to propose this change from Campaign Status";
 
@@ -117,8 +132,6 @@ export const CAMPAIGN_SCOPE_ADMISSION_REFUSALS: Readonly<Record<CampaignScopeAdm
   capacity_exhausted: { status: 409, message: "Scope and publication reservations exceed this campaign's Maximum Issues, the issue limit " +
     "its Full Control authorization set. Only the person who authorized Full Control can raise it: in Campaign Status, raise the " +
     "Follow-Up Limit, which raises Maximum Issues by as much, or choose No Limit. Ask that person; an Orchestrator can't raise it." },
-  lineage_missing: { status: 403, message: "Scope additions require authorized epic or exact related-publication lineage; incidental references cannot grant scope. " +
-    `Name a human-authorized epic or the consumed publication of an accepted follow-up, or ${HUMAN_SCOPE_ROUTE}.` },
   epic_not_authorized: { status: 403, message: `The named epic is not one this campaign's Full Control boundary authorizes; ${HUMAN_SCOPE_ROUTE}.` },
   epic_members_unverified: { status: 409, message: "Additions are not verified members of a human-authorized epic" },
   follow_ups_not_authorized: { status: 403, message: `This campaign's Full Control boundary does not authorize related follow-ups; ${HUMAN_SCOPE_ROUTE}.` },
@@ -137,6 +150,28 @@ export const CAMPAIGN_SCOPE_ADMISSION_REFUSALS: Readonly<Record<CampaignScopeAdm
   resulting_issue_mismatch: { status: 409, message: "Record the verified published issue on exactly one accepted recommendation before admitting scope" },
   origin_outside_scope: { status: 409, message: "The published follow-up's authorized origins were removed from scope" },
   payload_mismatch: { status: 409, message: "The published issue does not match the exact approved payload." },
+  selection_not_granted: { status: 403, message: "Selection lineage needs a scope grant in which the owner's first message asked the campaign to choose " +
+    `issues, and this campaign's grant has none. Name a human-authorized epic or the consumed publication of an accepted follow-up, or ${HUMAN_SCOPE_ROUTE}.` },
+  selection_additions_only: { status: 400, message: "A selection proposal adds issues only; propose removals as their own change." },
+  repository_outside_boundary: { status: 403, message: "A proposed issue is not in a repository in this campaign's boundary; " +
+    "propose issues from the campaign's own repositories." },
+  not_an_issue: { status: 409, message: "A proposed number is a pull request, not an issue; propose issues only." },
+  issue_not_open: { status: 409, message: "A proposed issue is closed; propose open issues only." },
+  already_in_scope: { status: 409, message: "A proposed issue is already in this campaign's scope." },
+  other_campaign_scope: { status: 409, message: "A proposed issue is in another active campaign's scope or work; choose another issue." },
+  selection_count_exhausted: { status: 409, message: "This proposal would select more issues than the owner's selection count allows. " +
+    "Only the owner can change that count, in Campaign Status; an Orchestrator can't." },
+  human_required_label: { status: 403, message: "A proposed issue has a label that a Human Required rule names, so only the campaign owner " +
+    "can add it; choose another issue or ask the owner to propose it from Campaign Status." },
+  owner_named_not_in_message: { status: 409, message: "A proposed issue is marked as named by the owner, but the owner's message doesn't " +
+    "write its number for this campaign's repository. Mark it as your own choice, with your rationale, or leave it out." },
+  proposal_additions_only: { status: 400, message: "A scope proposal adds issues only; propose removals as their own change." },
+  proposal_count_exceeded: { status: 409, message: "The proposal chooses more issues than the owner's count allows: the count the owner " +
+    "stated, the campaign's admitted count, or 3 when the owner stated none. Choose fewer issues." },
+  requested_count_not_in_message: { status: 409, message: "The proposal's count isn't written in the owner's message, as digits or a " +
+    "word. Give the count the owner wrote, or null when the message states none." },
+  constraint_check_refused: { status: 409, message: "The Decision Model found that this proposal doesn't stay within what the owner's " +
+    "message allows. Revise it and propose again; proposing the same issues with another rationale gets the same answer." },
 };
 
 /** The accepted recommendation a consumed publication delivered as `issue`. A bounded grant names it.

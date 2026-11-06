@@ -1,6 +1,6 @@
 import {
-  campaignAuthorityPreflight, resolveCampaignAuthority, runnerSupportsProtocol, validCampaignControl,
-  type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope, type CredentialScreenFact,
+  campaignAuthorityPreflight, campaignBoundaryRepositories, campaignScopeHolds, resolveCampaignAuthority, runnerSupportsProtocol, validCampaignControl,
+  type CampaignAuthorityEvaluation, type CampaignBoundaryRepository, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope, type CredentialScreenFact,
   type ParentControlPolicy, type PendingApproval, type SessionView, type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
 import type { HumanPrincipal } from "./identity.js";
@@ -36,6 +36,15 @@ export function campaignControlForRunner(control: CampaignControl, protocolVersi
       runnerSupportsProtocol(protocolVersion, "campaignRepositoryBoundary")) return control;
   const { repositories: _repositories, ...boundary } = control.boundary;
   return { mode: "full_control", boundary };
+}
+
+/** The authoritative order of the runner's copy of a campaign's control (#3363): the campaign
+ * root's policy revision, which every control change advances, so a runner can refuse a delayed
+ * update within one issue-scope revision. A pre-v310 runner is never sent it and keeps replacing
+ * control with each synchronization, as before. */
+export function campaignControlRevisionForRunner(revision: number | undefined, protocolVersion: number | null | undefined): { controlRevision?: number } {
+  return revision !== undefined && Number.isSafeInteger(revision) && revision >= 0 &&
+    runnerSupportsProtocol(protocolVersion, "campaignControlRevision") ? { controlRevision: revision } : {};
 }
 
 /** The boundary a Human's own approval of an issue scope establishes (#2940): the same grants,
@@ -78,8 +87,27 @@ export function campaignBoundaryCurrent(controller: Pick<SessionView, "orchestra
  * must name it, so a scope the server is still synchronizing never admits more than either says. */
 export function campaignIssueInScope(policy: SessionView["orchestratorPolicy"], issue: { repository: string; number: number }): boolean {
   const scope = policy?.issueScope;
-  return Boolean(scope && scope.repository.toLowerCase() === issue.repository.toLowerCase() &&
-    scope.issueNumbers.includes(issue.number) && policy?.issueNumbers?.includes(issue.number));
+  if (!scope || !campaignScopeHolds(scope, issue)) return false;
+  // The launch repository's numbers are also what its runner enforces; both must hold the issue.
+  return issue.repository.toLowerCase() !== scope.repository.toLowerCase() || Boolean(policy?.issueNumbers?.includes(issue.number));
+}
+
+/** The campaign's launch repository: its Full Control boundary's, or the one its scope recorded.
+ * Empty when neither is known, as for a legacy campaign that never saved one (#2664). */
+export function campaignLaunchRepository(root: Pick<SessionView, "orchestratorPolicy">): string {
+  const control = root.orchestratorPolicy?.control;
+  return (control?.mode === "full_control" ? control.boundary.repository : root.orchestratorPolicy?.issueScope?.repository ?? "").toLowerCase();
+}
+
+/** The repositories the campaign's issue scope may hold, the launch repository first (#4118): a
+ * Full Control boundary's entries, each with its verified Locations in order. A Custom campaign
+ * stores no repository list yet, so its one entry is the launch repository its scope recorded. */
+export function campaignScopeRepositories(root: Pick<SessionView, "orchestratorPolicy">): CampaignBoundaryRepository[] {
+  const control = root.orchestratorPolicy?.control;
+  if (control?.mode === "full_control") return campaignBoundaryRepositories(control.boundary)
+    .map((entry) => ({ repository: entry.repository.toLowerCase(), locationIds: entry.locationIds }));
+  const launch = campaignLaunchRepository(root);
+  return launch ? [{ repository: launch, locationIds: [] }] : [];
 }
 
 /** Under Full Control the issue scope bounds what the Orchestrator may deliver (#4062): a child is
@@ -93,10 +121,11 @@ export function campaignDispatchScopeRefusal(policy: SessionView["orchestratorPo
 }
 
 /** Under Full Control a merge may close only issues in the campaign's current issue scope (#4062).
- * A GitHub merge's `intendedClosures` are exactly what GitHub would close: a v242 runner reads that
- * before the merge is requested and again before it is armed, and a mismatch refuses it (#3713).
- * Nothing reads a GitLab merge's closures, or a GitHub merge's from an older runner, so such a merge
- * is never assumed to close nothing, and its declaration proves nothing either: it is the person's. */
+ * A merge's `intendedClosures` are exactly what the forge would close: the child's runner reads that
+ * before the merge is requested and again before it is armed, and a mismatch or an unreadable forge
+ * refuses it (#3713 for GitHub from v242, #3762 for GitLab from v295). A merge from an older runner
+ * is not read, so it is never assumed to close nothing, and its declaration proves nothing either:
+ * it is the person's. */
 function mergeClosureScope(policy: SessionView["orchestratorPolicy"], protocol: number | null | undefined,
   snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>): Pick<CampaignAuthorityEvaluation, "reason" | "unscopedClosures"> | null {
   const declared = snapshot.intendedClosures ?? [];
@@ -105,7 +134,8 @@ function mergeClosureScope(policy: SessionView["orchestratorPolicy"], protocol: 
     return !campaignIssueInScope(policy, { repository: reference.slice(0, separator), number: Number(reference.slice(separator + 1)) });
   });
   if (unscoped.length) return { reason: "outside_issue_scope", unscopedClosures: unscoped };
-  const read = snapshot.mergeMethod === undefined && runnerSupportsProtocol(protocol, "githubMergeClosingReferences");
+  const read = runnerSupportsProtocol(protocol,
+    snapshot.mergeMethod === undefined ? "githubMergeClosingReferences" : "gitlabMergeClosingReferences");
   return read ? null : { reason: "unverified_closures" };
 }
 

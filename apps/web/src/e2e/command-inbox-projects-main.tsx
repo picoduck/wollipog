@@ -379,6 +379,30 @@ function initialModel(): FixtureModel {
     initial.projects[0]!.unarchivedSessionCount = 4;
     initial.projects[0]!.totalSessionCount = 4;
   }
+  if (SCENARIO === "campaign-activity") {
+    // Four at-rest Full Control roots (#4146), as summaries: one waiting on a merge queue with a wake
+    // registered, one delivered with a merged branch still on the remote, one delivered with nothing
+    // owed, and one idle with an unmerged pull request and nothing scheduled. `legacy=1` sends what a
+    // control plane before v297 reported for the same facts.
+    const legacy = FIXTURE_QUERY.get("legacy") === "1";
+    const base = Date.now() - 3000;
+    const make = (id: string, title: string, at: number, current: OrchestratorCampaignStatus, older: OrchestratorCampaignStatus) => ({
+      ...session(id, title, "alpha", "alpha-workspace"), projection: "summary" as const, status: "idle" as const,
+      role: "orchestrator" as const, createdAt: base, updatedAt: base + at, lastEventAt: base + at,
+      attention: { version: 1 as const, meaningfulAt: base + at, humanActions: [],
+        result: { revision: `${id}-result`, at: base + at, owner: "human" as const },
+        acknowledgedRevision: null } as NonNullable<SessionView["attention"]>,
+      fullControlCampaignStatus: legacy ? older : current,
+    });
+    initial.sessions = [
+      make("session-queue", "Waiting on the Merge Queue", 400, "active", "active"),
+      make("session-cleanup", "Delivered, Merged Branch Left", 300, "complete_needs_cleanup", "active"),
+      make("session-complete", "Delivered, Nothing Owed", 200, "verified_complete", "verified_complete"),
+      make("session-stuck", "Unmerged Pull Request, Nothing Running", 100, "stuck", "blocked"),
+    ];
+    initial.projects[0]!.unarchivedSessionCount = 4;
+    initial.projects[0]!.totalSessionCount = 4;
+  }
   if (SCENARIO === "inbox-live-scroll") {
     initial.sessions = Array.from({ length: 36 }, (_, index) => {
       const value = session(

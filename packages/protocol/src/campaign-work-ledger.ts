@@ -160,8 +160,9 @@ export interface CampaignWorkItemBlocker {
 }
 
 /** v275 (#4070): the Orchestrator's record that the agent work on an item is done and its next step
- * belongs to `responsibleActor`. Only a `human` or `external` handoff lets a campaign finish as
- * `complete_with_handoffs`; one to `orchestrator` or `child` still blocks it. Assigning the item
+ * belongs to `responsibleActor`. Only a `human` or `external` handoff lets a campaign finish, as
+ * `complete_needs_cleanup` listing it under `cleanup` (v297, #4146; `complete_with_handoffs` from
+ * older control planes); one to `orchestrator` or `child` still blocks it. Assigning the item
  * again clears it. It describes; it never closes an issue, merges, or publishes. */
 export interface CampaignWorkItemHandoff {
   responsibleActor: CampaignResponsibleActor;

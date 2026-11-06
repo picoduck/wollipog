@@ -135,6 +135,37 @@ handoff is revoked when anyone tries to use it. Both routes need a v281 root run
 plane, exist only for a Full Control root, and refuse a question that asks for a credential value.
 Custom campaigns are unchanged.
 
+Owner Questions (#4270, v303) are the same route for a question that authorizes nothing: a design
+choice, clarification or preference. `request_owner_decision` with `kind: "question"` stores an
+`owner_decision` whose snapshot reads `kind: "question"`, with 0 to 12 suggested options. Clients
+present its card as an agent question (`presentOwnerQuestionRequest`): the question, its material as
+Markdown context, the suggested options with the recommended one marked, an Other choice and a
+free-text answer, then an optional note when there are options. The owner answers through the
+session's question route; the control plane resolves the decision itself (`answerOwnerQuestion`),
+stores the chosen option and the owner's own words, and delivers both to the root as a Wollipog Owner
+Answer prompt. Only the campaign's owner answers it; agents, children and other people are refused,
+and a refused attempt leaves it pending. Because it grants nothing, it is not bound to the policy
+revision it was asked under: scope, boundary and policy changes, and a runner reconnect, leave it
+pending and answerable, while an Owner Approval is revoked as before. It ends only when the owner
+answers or dismisses it, the root withdraws it, or a newer owner decision under the same key
+replaces it. A pre-v303 root runner keeps the approval form, and a v303 runner sends `kind` only to a
+v303 control plane.
+
+An owner rule (#4137, v296) is the requester's route for the same thing. `request_workflow_decision`
+accepts an optional `ownerRule` (`source`: the installed or user-authored file, at most 256 ASCII
+path characters; `quote`: the requirement, one line of at most 1000 characters without control or
+invisible formatting characters). Oversize or malformed values are refused, never truncated. The
+occurrence is created human-owned with reason `owner_kept`, in any mode and under any grant or
+category; the database write forces `authority='human'` whenever a rule is stored. Only the
+controller's owner resolves it, it cannot be handed over again, the Orchestrator cannot withdraw it
+as a review round extension, and a credential-screen classification keeps it the person's. Its
+stored rule counts as an owner-kept occurrence for `ownerKeptTargets`, so every later request for
+the same resource under that controller is human-owned too and carries the matched rule forward;
+reusing a requestId with a different rule is refused. Campaign Status lists it under Waiting for
+You (`ownerDecisions[].ownerRule`) and the Request Card shows the source and quote as plain text. A
+runner refuses the field against an older control plane, which would silently drop it. A request
+without the field keeps its policy routing.
+
 The root's own pending typed workflow decisions never park its provider, so they never stop a
 standing response to another request. A real NDJSON fixture verifies that both callbacks settle and the provider
 continues. No stopped-provider recovery is introduced here; that remains #2938.
@@ -146,7 +177,10 @@ Only `allow_once` options can grant tool access through Full Control. Unknown, d
 and Human Required rules cannot be admitted to `delegatablePolicyIds`; an ordinary ask left out of
 that list is still an Orchestrator decision (class `undelegated_policy_asks`), while a listed one
 carries no class. `conditions.humanRequired: true` is valid only for ask rules and prevents
-delegation, including an otherwise matching workflow command admission. A hard deny always wins.
+delegation, including an otherwise matching workflow command admission. A Human Required ask rule
+may instead name `conditions.issueLabels` (#4103): it never matches a tool request, and it keeps an
+Orchestrator from admitting an issue with one of those labels into its own scope through a selection,
+which stays the owner's to add (see `docs/campaign-issue-scope.md`). A hard deny always wins.
 Current rules are checked again before an agent resolves a tool approval. Current Human Required,
 deny, unknown and withdrawn asks also feed every request projection, so ownership cannot lag a
 policy edit. Persistent options never become eligible.
@@ -262,7 +296,7 @@ unverified tool effect is declined whatever it names, so it is not screened.
   owner classifies it (**Decline** or **Let Me Answer**) before any of its options can be chosen,
   and it stays the owner's either way.
 
-Each verdict, its reason and failure class appear in Campaign Status under Question Screen, beside
+Each verdict, its reason and failure class appear in Campaign Status under Decision Model Checks, beside
 the request it affected. The evaluation carries only the content-safe `credentialScreen` fact
 (state, verdict, failure class, occurrence); the reason stays in the Decision audit.
 

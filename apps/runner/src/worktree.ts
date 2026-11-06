@@ -33,6 +33,7 @@ import type {
 } from "@wollipog/protocol";
 import type { WorktreeHookSnapshot } from "./worktree-setup.js";
 import { runContextCommand } from "./context-command.js";
+import { oversizedTurnDiffSummary } from "./history-event-bound.js";
 import {
   captureWorktreeTree,
   isMissingGitRepositoryError,
@@ -43,6 +44,8 @@ import {
 import { canIgnoreRunnerDataDirDirectorySyncError } from "./runner-data-dir.js";
 
 const MIN_FREE_BYTES = 512 * 1024 * 1024;
+/** The most a per-turn diff read may buffer. A larger diff is summarized without being read. */
+const TURN_DIFF_READ_MAX_BYTES = 64 * 1024 * 1024;
 const nativeContext: AgentContext = { kind: "native" };
 type StatfsResult = Awaited<ReturnType<typeof statfs>>;
 let statfsRunner: (path: string) => Promise<StatfsResult> = statfs;
@@ -98,6 +101,9 @@ export interface WorktreeHandle {
   /** True only when this create call materialized the linked worktree. A healthy registered
    * worktree is returned with false so a losing launch cannot reap durable user changes. */
   created?: boolean;
+  /** The ref a newly created worktree started from when it was not the primary checkout's HEAD:
+   * the fetched remote default branch, because HEAD was strictly behind it (#4288). */
+  baseRef?: string;
 }
 
 /** A session-requested worktree keeps its user-selected Git identity instead of deriving either
@@ -956,13 +962,14 @@ export async function fetchRemoteDefaultBase(
   repoPath: string,
   options: WorktreeOptions = {},
   remote = "origin",
+  budget: { attempts: number; stepMs: number } = { attempts: 3, stepMs: 120_000 },
 ): Promise<{ ref: string; branch: string }> {
   const context = options.context ?? nativeContext;
   safeGitArgument(remote, "Git remote");
   // Preserve each step's existing 120-second allowance, shared across up to three attempts and
   // 500/1,000 ms backoff. Both steps together stay within a 240-second configured budget.
   async function retryStep<T>(phase: SessionWorktreeProgressPhase, step: string, run: (timeoutMs: number) => Promise<T>): Promise<T> {
-    const deadline = performance.now() + 120_000;
+    const deadline = performance.now() + budget.stepMs;
     let lastError: unknown;
     for (let attempt = 0; ; attempt++) {
       options.onProgress?.(phase);
@@ -973,7 +980,7 @@ export async function fetchRemoteDefaultBase(
       } catch (error) {
         lastError = error;
         const backoffMs = 500 * (attempt + 1);
-        if (attempt === 2 || deadline - performance.now() <= backoffMs) {
+        if (attempt >= budget.attempts - 1 || deadline - performance.now() <= backoffMs) {
           const detail = error instanceof Error ? error.message : String(error);
           throw new Error(`Failed ${step} after ${attempt + 1} attempt${attempt === 0 ? "" : "s"}. Retry, or pass an explicit base ref to skip remote default-branch lookup and fetch. Git error: ${detail}`, { cause: error });
         }
@@ -1428,8 +1435,42 @@ export async function createWorktree(repoPath: string, sessionId: string, option
     // exact session root, so clear it before `git worktree add` rather than failing every restart.
     await removeExternalDirectory(context, repoPath, path, options);
   }
-  await command(context, repoPath, ["worktree", "add", "-B", branch, path, "HEAD"], 120_000);
-  return { path, branch, created: true };
+  const fresher = await staleHeadRemoteBase(repoPath, options);
+  await command(context, repoPath, ["worktree", "add", "-B", branch, path, fresher?.commit ?? "HEAD"], 120_000);
+  return { path, branch, created: true, ...(fresher ? { baseRef: fresher.ref } : {}) };
+}
+
+/**
+ * The freshly fetched remote default branch, but only when the primary checkout's HEAD is strictly
+ * behind it (#4288). A session worktree started from a stale local default branch makes its first
+ * turn's diff carry every upstream change the agent then pulls in. Starting at the remote tip
+ * instead loses nothing: HEAD is an ancestor of it. Any other HEAD (local commits, a diverged or
+ * unrelated branch) is the person's deliberate starting point and is kept, as is HEAD whenever the
+ * remote cannot be resolved or fetched quickly; this never makes worktree creation fail.
+ */
+async function staleHeadRemoteBase(
+  repoPath: string,
+  options: WorktreeOptions,
+): Promise<{ ref: string; commit: string } | null> {
+  const context = options.context ?? nativeContext;
+  try {
+    // A repository without an origin knows of nothing fresher; skip the network entirely.
+    await command(context, repoPath, ["remote", "get-url", "origin"]);
+  } catch {
+    return null;
+  }
+  try {
+    const remote = await fetchRemoteDefaultBase(repoPath, options, "origin", { attempts: 2, stepMs: 30_000 });
+    const head = (await command(context, repoPath, ["rev-parse", "--verify", "HEAD^{commit}"])).trim();
+    const tip = (await command(context, repoPath,
+      ["rev-parse", "--verify", "--end-of-options", `refs/remotes/${remote.ref}^{commit}`])).trim();
+    if (!/^[a-f0-9]{40,64}$/u.test(head) || !/^[a-f0-9]{40,64}$/u.test(tip) || head === tip) return null;
+    // Exits non-zero (and so falls back to HEAD) unless HEAD is an ancestor of the remote tip.
+    await command(context, repoPath, ["merge-base", "--is-ancestor", head, tip]);
+    return { ref: remote.ref, commit: tip };
+  } catch {
+    return null;
+  }
 }
 
 export function sameWorktreePath(context: AgentContext, left: string, right: string): boolean {
@@ -2788,11 +2829,31 @@ export async function captureTurnDiff(
   worktreePath: string,
   baseTree: string,
   options: WorktreeOptions = {},
+  readMaxBytes = TURN_DIFF_READ_MAX_BYTES,
 ): Promise<{ diff: string; tree: string } | null> {
   const context = options.context ?? nativeContext;
+  let tree: string;
   try {
-    const tree = await withGitExecutionContext(context, () => captureWorktreeTree(worktreePath));
-    return { diff: await command(context, worktreePath, ["diff", baseTree, tree, "--"]), tree };
+    tree = await withGitExecutionContext(context, () => captureWorktreeTree(worktreePath));
+  } catch {
+    return null;
+  }
+  try {
+    const diff = await runContextCommand(context, "git", ["diff", baseTree, tree, "--"],
+      { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: readMaxBytes });
+    return { diff: diff.stdout, tree };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return null;
+  }
+  // Too large to read at all (#4288). The turn still advances to this tree, so the next turn's diff
+  // does not repeat the same range; history keeps a summary naming the size and file count.
+  try {
+    const names = await command(context, worktreePath, ["diff", "--name-only", "-z", baseTree, tree, "--"]);
+    const files = names.split("\0").filter(Boolean).length;
+    return {
+      diff: oversizedTurnDiffSummary({ bytes: readMaxBytes, atLeast: true, files, shownFiles: 0 }),
+      tree,
+    };
   } catch {
     return null;
   }

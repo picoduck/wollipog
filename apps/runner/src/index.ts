@@ -2651,6 +2651,15 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       }).then(sendUp));
       break;
     }
+    case "gitlab_merge_closures": {
+      // The child's own glab login and environment, as its agent would run the merge (#3762).
+      runCommandTask("gitlab_merge_closures", sessions.gitlabMergeClosures(msg, {
+        agentEnv: (meta) => meta.adopted && !meta.agentId
+          ? adoptedLaunchEnvironment(meta)
+          : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context),
+      }).then(sendUp));
+      break;
+    }
     case "forge_decision_action": {
       // The child's own gh and git logins and environment, as its agent would run the action (#4067).
       runCommandTask("forge_decision_action", sessions.forgeDecisionAction(msg, {
@@ -4054,7 +4063,9 @@ async function handleSearchWorkspaceReferences(msg: SearchWorkspaceReferencesReq
       error: targetError ?? "unknown session" });
   }
   try {
-    const found = await searchWorkspaceReferences(target.context, target.root, msg.query, msg.match);
+    const found = await searchWorkspaceReferences(
+      target.context, target.root, msg.query, msg.match, msg.fuzzyWithDirectories === true,
+    );
     sendUp({ type: "search_workspace_references_result", requestId: msg.requestId, ok: true, ...found });
   } catch (err) {
     sendUp({ type: "search_workspace_references_result", requestId: msg.requestId, ok: false, error: errText(err) });
@@ -4579,6 +4590,12 @@ function shutdown(exitCode = 0): void {
       try {
         if (sessionsCleanlyShutDown) {
           const providerBoundaryEmpty = providerContainmentEmpty();
+          // The same proof lets a Stop that shutdown interrupted release its campaign slot after restart (#3788).
+          try {
+            sessions.recordShutdownRetirementCheckpoints(processTreesReaped && providerBoundaryEmpty);
+          } catch (error) {
+            log(`shutdown retirement proof failed: ${errText(error)}`);
+          }
           if (!providerBoundaryEmpty) log("provider-HOME boundary is still populated or uninspectable; a detached provider review controller can retain ownership until its work finishes");
           if (!await sessions.releaseProviderHomeLeasesAfterShutdown(processTreesReaped && providerBoundaryEmpty)) {
             log("process-tree cleanup was incomplete — retaining provider-home lease; inspect the preceding survivor diagnostic before restarting this runner");

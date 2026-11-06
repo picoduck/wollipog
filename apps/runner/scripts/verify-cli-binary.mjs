@@ -1,10 +1,11 @@
 /** Exercise the packaged SEA through the same invocation name as install-runner.ps1. */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import { removeTemporaryRoot } from "./remove-temporary-root.mjs";
 
 const binary = resolve(process.argv[2] ?? "");
 assert.match(basename(binary), /^wollipog-runner-/u, "pass the packaged runner binary");
@@ -95,5 +96,5 @@ try {
   console.log("Packaged CLI dispatch smoke passed");
 } finally {
   await new Promise((resolveClose) => server.close(resolveClose));
-  rmSync(root, { recursive: true, force: true });
+  removeTemporaryRoot(root);
 }

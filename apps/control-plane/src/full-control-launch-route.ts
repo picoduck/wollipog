@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
-  PROJECT_LOCATION_INSPECTION_FAILURES, supportsPacedVideoReviewPeer, humanRequiredRulesExist, runnerSupportsProtocol,
+  PROJECT_LOCATION_INSPECTION_FAILURES, supportsPacedVideoReviewPeer, humanRequiredRulesExist, runnerSupportsProtocol, campaignLaunchDisclosure,
   type CampaignLaunchInspectionResult, type CampaignIssueScope, type PreparedCampaignLaunch, type ProjectLocationInspection,
 } from "@wollipog/protocol";
 import type { AuthPrincipal } from "./identity.js";
@@ -13,8 +13,9 @@ import type { EvidenceAuthorityDisclosures } from "./evidence-authority.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
 import { authorizeFullControl } from "./campaign-authority.js";
 import { evaluateUiEvidenceReviewClient } from "./ui-evidence-review.js";
-import { campaignLaunchDigest, campaignLaunchPreflight, derivedLaunchLimits, firstMessageLaunch, launchSessionRequest, parseFullControlEnableRequest,
-  parseFullControlLaunchRequest, type VideoLaunchCertification } from "./campaign-launch-admission.js";
+import { campaignLaunchDigest, campaignLaunchPreflight, derivedLaunchLimits, firstMessageLaunch, fullControlRootPlacementRefusal, launchSessionRequest,
+  parseFullControlEnableRequest, parseFullControlLaunchRequest, type VideoLaunchCertification } from "./campaign-launch-admission.js";
+import { executionTargetsForRunner } from "./execution-targets.js";
 
 /** Human-only Full Control launch. Preflight is read-only; admission needs the exact reviewed
  * digest and creates the root, its scope, authority and allowance in one atomic step. There is no
@@ -55,6 +56,11 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
       candidate.runnerId === body.runnerId && candidate.workspaces.some((workspace) => workspace.id === body.workspaceId));
     const runner = currentRunner();
     if (!runner) return reply.code(404).send({ error: "runner workspace not found" });
+    // The person's Run On and Harness choices are forwarded to the root, never swapped for the host
+    // default; one an Orchestrator can't run on is refused in words before anything is inspected.
+    const placementRefusal = fullControlRootPlacementRefusal(body,
+      runner.executionTargets ?? executionTargetsForRunner(runner, db.boxIdForRunner(runner.runnerId) !== null));
+    if (placementRefusal) return reply.code(409).send({ error: `Full Control launch is blocked: ${placementRefusal}` });
     // The simple request names a workspace; resolve its exact Project Location so saved Project
     // defaults apply. Without one accessible Location the root is an explicit no-Project session.
     if (body.projectLocationId === undefined && body.projectId !== null) {
@@ -199,6 +205,8 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
       ...creationContext,
       humanCampaignLaunch: { principal, requestId: body.requestId!, digest: preflight.digest, control, issueScope,
         ...(preflight.summary.excludedLocations?.length ? { excludedLocations: preflight.summary.excludedLocations } : {}),
+        // What the reviewed preflight disclosed, for Campaign Status after launch (#2940).
+        launchDisclosure: campaignLaunchDisclosure(preflight, "launch", now),
         ...(firstMessageLaunch(body) ? { firstMessage: { derivedLimits: derivedLaunchLimits(body.overrides) } } : {}),
         ...(evidence.envelope && evidence.provider?.reviewer.model ? { evidenceAuthority: {
           destinationConfigurationId: evidence.destination.configurationId,
@@ -263,6 +271,11 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
         ...(rootLimits.maxToolCalls != null ? { maxToolCalls: rootLimits.maxToolCalls } : {}) },
       useWorktree: session.useWorktree, executionTarget: (session.executionTarget ?? { adapter: "host" }) as PreparedCampaignLaunch["executionTarget"], policy, scope };
     const issueScope = policy.issueScope;
+    // The issues a Custom campaign's first message names come only from the Decision Model's reading
+    // of it (#4259): while that reading runs, nothing is derived, and enabling waits for it.
+    if (!issueScope && sessions.campaignFirstMessageReadingPending(id)) {
+      return reply.code(409).send({ error: "The Decision Model is still reading this campaign's first message for its issues. Try again in a moment." });
+    }
     // A campaign with no issue scope yet gets the one a launch would derive: its repository and the
     // issues its first message names. With no message yet, the next one is the task.
     const derived = issueScope ? null : await sessions.campaignScopeFromFirstMessage(id);
@@ -314,7 +327,8 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
         destinationDisclosureRevision: evidence.destination.disclosureRevision,
         providers: [{ providerId: evidence.provider.providerId, disclosureRevision: evidence.provider.disclosureRevision,
           reviewers: [{ driver: evidence.provider.reviewer.driver as "claude-code" | "codex-app-server", modelId: evidence.provider.reviewer.model }] }],
-      } } : {}) }, revision, principal, derived ?? undefined, derivedLaunchLimits(body.overrides));
+      } } : {}) }, revision, principal, derived ?? undefined, derivedLaunchLimits(body.overrides),
+      campaignLaunchDisclosure(preflight, "enable", Date.now()));
     if (!result.ok || !result.data) return reply.code(result.status).send({ error: result.error ?? "Full Control was not enabled" });
     return result.data;
   });

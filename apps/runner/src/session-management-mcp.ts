@@ -1,8 +1,9 @@
 import { RETIRED_REVIEW_TOOL_NAMES, REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
+import { normalizeWorkflowDecisionOwnerRule, WORKFLOW_DECISION_OWNER_RULE_QUOTE_MAX_CHARS, WORKFLOW_DECISION_OWNER_RULE_SOURCE_MAX_CHARS } from "@wollipog/protocol";
 import { sessionCredentialRefusal } from "./session-credential-error.js";
 /** Shared session-management tools for the session-scoped CLI and MCP server. */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import {
@@ -23,6 +24,10 @@ import {
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
   OWNER_DECISION_LIMITS,
+  SESSION_WAIT_PROGRESS_REPORT_MS,
+  type SessionWaitKind,
+  type SessionWaitReport,
+  type SessionWaitReportTarget,
   type SessionStatus,
   type UiEvidenceReviewDelivery,
 } from "@wollipog/protocol";
@@ -36,6 +41,7 @@ import {
   PULL_REQUEST_WAIT_MAX_INTERVAL_MS,
   PULL_REQUEST_WAIT_MAX_TIMEOUT_MS,
   PULL_REQUEST_WAIT_MIN_INTERVAL_MS,
+  PULL_REQUEST_WAIT_READ_GRACE_MS,
   waitForPullRequest,
 } from "./pull-request-wait.js";
 import { readMediaFileForAttach } from "./session-artifact-file.js";
@@ -274,6 +280,69 @@ async function cpFetch(
     return { ok: false, message: `HTTP ${res.status}: ${detail}`, status: res.status };
   }
   return { ok: true, data };
+}
+
+/** How long one wait report may take: a slow control plane never holds the wait itself. */
+const WAIT_REPORT_TIMEOUT_MS = 5_000;
+
+/** One wait call's progress reports (#1280, #4249). */
+export interface WaitProgressReporter {
+  /** A successful poll. Sends at most one report per SESSION_WAIT_PROGRESS_REPORT_MS, the first
+   * only once the call has waited that long, so a short wait is never reported at all. */
+  poll(): void;
+  /** The call returned, failed or was cancelled: remove the wait if anything was reported. */
+  end(): Promise<void>;
+}
+
+/**
+ * Report a `wait_session` or `wait_pull_request` call to the control plane, so the waiting session
+ * reads Waiting rather than only Running, and a wait whose polls stop reads Stalled. Best effort: a
+ * failed report never changes the wait's own result. A control plane that refuses the report (an
+ * older one has no route; a session outside a turn cannot report) stops reports for that call.
+ * Durations, never timestamps, cross the wire, so the runner's clock offset does not matter.
+ */
+export function waitProgressReporter(deps: McpDeps, kind: SessionWaitKind, target: SessionWaitReportTarget,
+  timeoutMs: number, intervalMs: number): WaitProgressReporter {
+  // A device-token CLI call has no session to show the wait on.
+  if (!deps.selfSessionId || deps.actorHeader === null) return { poll() {}, async end() {} };
+  const now = deps.now ?? Date.now;
+  const waitId = `wait_${randomUUID().replaceAll("-", "")}`;
+  const startedAt = now();
+  // The wait's own cancellation must not cancel the report of its end.
+  const reportDeps: McpDeps = { ...deps, signal: undefined };
+  let lastSentAt: number | null = null;
+  let refused = false;
+  let inFlight: Promise<void> | null = null;
+  const send = (state: SessionWaitReport["state"]) => {
+    const at = now();
+    const report: SessionWaitReport = {
+      waitId, kind, state, target,
+      elapsedMs: Math.max(0, at - startedAt),
+      remainingMs: Math.max(0, startedAt + timeoutMs - at),
+      intervalMs,
+    };
+    return cpFetch(reportDeps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/waits`, report,
+      WAIT_REPORT_TIMEOUT_MS);
+  };
+  return {
+    poll() {
+      if (refused || inFlight) return;
+      const at = now();
+      if (at - startedAt < SESSION_WAIT_PROGRESS_REPORT_MS) return;
+      if (lastSentAt !== null && at - lastSentAt < SESSION_WAIT_PROGRESS_REPORT_MS) return;
+      lastSentAt = at;
+      inFlight = send("active").then((result) => {
+        // A 4xx is a refusal that repeating cannot change; a transport failure may pass.
+        if (!result.ok && result.status !== undefined && result.status >= 400 && result.status < 500) refused = true;
+      }, () => undefined).finally(() => { inFlight = null; });
+    },
+    async end() {
+      if (inFlight) await inFlight;
+      if (lastSentAt === null || refused) return;
+      refused = true;
+      await send("ended").catch(() => undefined);
+    },
+  };
 }
 
 async function cancellableSleep(deps: McpDeps, milliseconds: number): Promise<boolean> {
@@ -565,9 +634,10 @@ async function mergeReviewEvidenceCompatibilityError(args: Json, deps: McpDeps):
       "Update Wollipog before citing a review session; this citation was not submitted."), required, actual);
 }
 
-/** A pre-v242 control plane drops intendedClosures without checking GitHub (#3713). */
-async function intendedClosuresCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
-  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.githubMergeClosingReferences;
+/** A pre-v242 control plane drops intendedClosures without checking GitHub (#3713), and a pre-v295
+ * one refuses them on a GitLab merge, which it does not check (#3762). */
+async function intendedClosuresCompatibilityError(deps: McpDeps, gitlab = false): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL[gitlab ? "gitlabMergeClosingReferences" : "githubMergeClosingReferences"];
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
     const result = await cpFetch(deps, "GET", "/api/compatibility");
@@ -688,22 +758,56 @@ function forgeActionSummary(decision: unknown): string {
   }
 }
 
+/** The operations a scope proposal may withhold (#4282): a Full Control boundary's own. */
+const CAMPAIGN_SCOPE_PROPOSAL_OPERATIONS = ["implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication",
+  "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"] as const;
+
+/** Whether the control plane reports at least `required`; an unreadable version counts as no. */
+async function controlPlaneSupports(deps: McpDeps, required: number): Promise<boolean> {
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const result = await cpFetch(deps, "GET", "/api/compatibility");
+    actual = result.ok ? result.data?.protocolVersion : undefined;
+  }
+  return Number.isInteger(actual) && actual! >= required;
+}
+
 /** A pre-v281 control plane has no owner-decision routes (#4064). Refuse by name: nothing reached
- * the owner, and the decision keeps the owner it had. */
-async function ownerDecisionCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
-  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions;
+ * the owner, and the decision keeps the owner it had. A pre-v303 control plane would ignore an Owner
+ * Question's `kind` (#4270) and ask it as an approval, so a question needs v303. */
+async function ownerDecisionCompatibilityError(deps: McpDeps, question = false): Promise<ToolResult | null> {
+  const required = question ? RUNNER_CAPABILITY_MIN_PROTOCOL.ownerQuestions : RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions;
+  const noun = question ? "owner questions" : "owner decisions";
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
     const result = await cpFetch(deps, "GET", "/api/compatibility");
     if (!result.ok) {
-      return controlPlaneUpdateRequired(wollipogSupportUnverified("owner decisions", result.message), required);
+      return controlPlaneUpdateRequired(wollipogSupportUnverified(noun, result.message), required);
     }
     actual = result.data?.protocolVersion;
   }
   return Number.isInteger(actual) && actual! >= required
     ? null
-    : controlPlaneUpdateRequired(needsNewerWollipog("Owner decisions need",
+    : controlPlaneUpdateRequired(needsNewerWollipog(question ? "Owner questions need" : "Owner decisions need",
       "Update Wollipog; nothing reached the owner."), required, actual);
+}
+
+/** A pre-v296 control plane ignores `ownerRule` (#4137), so the decision would keep the owner its
+ * policy names and the Orchestrator could decide a gate its owner kept. Refuse before sending. */
+async function ownerRuleCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule;
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const result = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!result.ok) {
+      return controlPlaneUpdateRequired(wollipogSupportUnverified("owner rules", result.message), required);
+    }
+    actual = result.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= required
+    ? null
+    : controlPlaneUpdateRequired(needsNewerWollipog("Owner rules (ownerRule) need",
+      "Nothing was requested. Tell your Orchestrator which gate the rule keeps for a person, so it can hand the decision to the owner, or update Wollipog."), required, actual);
 }
 
 /** Bounds the fence probe so it cannot push a create call toward the harness's tool timeout. */
@@ -1163,13 +1267,16 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
         mergeMethod: { type: "string", enum: ["merge_train", "merge"] },
         squash: { type: "boolean" },
         removeSourceBranch: { type: "boolean" },
-        // GitHub only (#3713): the issues this merge should close; omit it when it must close none.
+        // The issues this merge should close (#3713; GitLab since #3762); omit it when it must close none.
         intendedClosures: {
           type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 512 },
-          description: "GitHub only: every issue this merge is meant to close, as #N, owner/repo#N, or an issue URL. " +
+          description: "Every issue this merge is meant to close: on GitHub as #N, owner/repo#N, or an issue URL; on GitLab " +
+            "as #N, group/project#N, <host>/group/project#N, or an issue URL on that instance. " +
             "Omit it when the merge must close no issue. Before the decision is created and again before it is armed, " +
-            "the runner reads what GitHub would close (closing keywords in the description, even negated as in " +
-            "\"does not close #N\", and issues linked by hand); any difference is refused with each reference and its line.",
+            "the runner reads what the forge would close: on GitHub, closing keywords in the description, even negated as in " +
+            "\"does not close #N\", and issues linked by hand; on GitLab, its closing pattern on the description (also " +
+            "\"closing\", \"implements\" and every reference in a list such as \"Closes #1, #2 and #3\") and GitLab's own " +
+            "list, which covers the title and commits. Any difference is refused with each reference and its line.",
         },
       },
       required: ["category", "repository", "pullRequest", "headSha", "reviewResult", "requiredChecks"],
@@ -1383,7 +1490,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "get_campaign_issue_scope",
-    description: "Inspect the root campaign's authorized repository-qualified issue scope, revision, outside-scope work, and optional epic membership candidates. Native sub-issues and leading checklist entries in member sections are proposals only; dependencies and incidental references grant no authority. GitLab issues are supported from runner protocol v249: a GitLab epic is an ordinary issue of the same project whose member checklist (#N or same-project issue URLs) names its members; GitLab epics and issue links are not read. Use before delegating an epic and after any human scope change.",
+    description: "Inspect the root campaign's authorized repository-qualified issue scope, grouped by repository under `repositories` (every campaign repository, the launch repository first, with whether one of its Locations is online), its revision, outside-scope work, and optional epic membership candidates. Native sub-issues and leading checklist entries in member sections are proposals only; dependencies and incidental references grant no authority. GitLab issues are supported from runner protocol v249: a GitLab epic is an ordinary issue of the same project whose member checklist (#N or same-project issue URLs) names its members; GitLab epics and issue links are not read. Use before delegating an epic and after any human scope change.",
     inputSchema: { type: "object", properties: { epic: { type: "integer", minimum: 1 } }, additionalProperties: false },
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
@@ -1395,19 +1502,34 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_campaign_issue_scope_change",
-    description: "Propose exact repository-qualified issue additions/removals at the current scope revision. Custom requires a human. A human-established Full Control issue boundary admits verified epic or exact published follow-up lineage within its limits. Resolution atomically applies and consumes scope; do not consume it yourself. Pending, denied, stale and replayed requests never widen authority.",
+    description: "Propose exact repository-qualified issue additions/removals at the current scope revision, in any of the campaign's repositories; the same number in two repositories is two issues. Each repository is verified through one of its own online Locations. A repository outside the campaign is refused with repository_outside_boundary before any runner call. Under Full Control whose owner's first message started the campaign, you read that message and propose its scope (#4282): your first campaign action is the initial proposal, and nothing is dispatched until it is admitted. A proposal adds issues only in the launch repository for now. Send the issues as additions with `proposal`: for each issue whether the owner named it (owner_named: its number is in the owner's message) or you chose it (orchestrator_chosen), with a one-line rationale; `requestedCount`, the number the owner asked for or null; `constraints`, each checkable limit you read (\"open\", \"UI only\", \"skip anything labeled security\"), never ranking criteria such as priority, which are your call; and `withheldOperations`, operations the message rules out (\"don't merge\" withholds pr_merge). A task that needs no issues proposes no additions. Deterministic floors refuse, naming the issue: an owner-named number the message doesn't write, an issue outside the campaign's repositories, a pull request, a closed issue, one already in scope or held by another campaign, one past an explicit Maximum Issues, and one with a Human Required label; revise and propose again. A proposal of only owner-named issues the message writes as issue references (#12, owner/repo#12 or a URL), with nothing else to check, returns an Orchestrator-owned change: resolve it with resolve_descendant_workflow_decision and your own session ID. Anything else goes to the Decision Model's constraint check, which checks only what the owner's words allow, never priority: its admit returns an Orchestrator-owned change, its refusal (constraint_check_refused) names the question and issue so you revise, and when it is uncertain or fails the proposal becomes the owner's one approval, asked as an Owner Question; proposing the same issues again returns the recorded outcome. A stated count must be written in the message, and chosen issues stay within it (3 when none is stated; later additions within the admitted count). Custom requires a human. A human-established Full Control issue boundary admits verified epic or exact published follow-up lineage within its limits. When the owner's first message asked the campaign to choose issues (a selection grant), propose the issues you chose with lineage {kind:\"selection\"} and your ranking as the explanation, additions only: the server refuses, with a fixed code and no model call, an issue outside the campaign's repositories, a pull request, a closed issue, one already in scope, one in another active campaign's scope, one past the selection count or Maximum Issues, and one with a Human Required label; otherwise the owner decides. Under Full Control, additions without lineage that no grant admits become the owner's one typed approval, stating any Maximum Issues increase they need; tell the owner to approve it, and a repeat while it is pending returns the same request. Resolution atomically applies and consumes scope; do not consume it yourself. Pending, denied, stale and replayed requests never widen authority.",
     inputSchema: { type: "object", properties: {
       requestId: { type: "string" }, expectedRevision: { type: "integer", minimum: 0 }, explanation: { type: "string", minLength: 1, maxLength: 4000 },
       additions: { type: "array", maxItems: 100, items: { type: "object", properties: { repository: { type: "string" }, number: { type: "integer", minimum: 1 } }, required: ["repository", "number"], additionalProperties: false } },
       removals: { type: "array", maxItems: 100, items: { type: "object", properties: { repository: { type: "string" }, number: { type: "integer", minimum: 1 } }, required: ["repository", "number"], additionalProperties: false } },
       lineage: { oneOf: [ { type: "object", properties: { kind: { const: "epic" }, epic: { type: "integer", minimum: 1 } }, required: ["kind", "epic"], additionalProperties: false },
-        { type: "object", properties: { kind: { const: "follow_up" }, publicationOccurrenceId: { type: "string" } }, required: ["kind", "publicationOccurrenceId"], additionalProperties: false } ] },
+        { type: "object", properties: { kind: { const: "follow_up" }, publicationOccurrenceId: { type: "string" } }, required: ["kind", "publicationOccurrenceId"], additionalProperties: false },
+        { type: "object", properties: { kind: { const: "selection" } }, required: ["kind"], additionalProperties: false } ] },
+      proposal: { type: "object", description: "Under Full Control (#4282): how you read the owner's message. Its issues are exactly the additions.",
+        properties: {
+          issues: { type: "array", maxItems: 100, items: { type: "object", properties: {
+            repository: { type: "string" }, number: { type: "integer", minimum: 1 },
+            origin: { type: "string", enum: ["owner_named", "orchestrator_chosen"] },
+            rationale: { type: "string", minLength: 1, maxLength: 500 } }, required: ["repository", "number", "origin", "rationale"], additionalProperties: false } },
+          requestedCount: { type: ["integer", "null"], minimum: 1, maximum: 100 },
+          constraints: { type: "array", maxItems: 10, items: { type: "string", minLength: 1, maxLength: 200 } },
+          withheldOperations: { type: "array", items: { type: "string", enum: [...CAMPAIGN_SCOPE_PROPOSAL_OPERATIONS] } },
+        }, required: ["issues", "requestedCount", "constraints", "withheldOperations"], additionalProperties: false },
     }, required: ["requestId", "expectedRevision", "explanation", "additions", "removals"], additionalProperties: false },
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
       const compatibility = await campaignIssueScopeCompatibilityError(deps);
       if (compatibility) return compatibility;
-      const result = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/campaign/issue-scope/proposals`, args, deps.requestTimeoutMs ?? 150_000);
+      // A pre-v308 control plane reads no proposal (#4282); it keeps its own first-message grant, so
+      // the proposal is left out rather than sent to be ignored.
+      const body = args.proposal !== undefined && !await controlPlaneSupports(deps, RUNNER_CAPABILITY_MIN_PROTOCOL.campaignScopeProposals)
+        ? Object.fromEntries(Object.entries(args).filter(([key]) => key !== "proposal")) : args;
+      const result = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/campaign/issue-scope/proposals`, body, deps.requestTimeoutMs ?? 150_000);
       return result.ok ? textResult({ decision: result.data }) : errorResult(result.message);
     },
   },
@@ -1657,7 +1779,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "get_campaign",
-    description: "Read this Orchestrator's effective campaign behavior, current typed-decision owners and policy revision, applicable limits (limits.costBudgetUsd is this Orchestrator session's own budget, never a campaign-wide one), follow-up counts, child completion state, and credential-free compatibility information. Status complete_with_handoffs is terminal like verified_complete: the agent work is done and every unfinished item is handed to a person or an outside party, listed in handoffs. Under Stop and Archive, cleanupWorktrees names each retained child worktree and its pending, deferred, or safety-refused reason; older runners still require explicit cleanup.",
+    description: "Read this Orchestrator's effective campaign behavior, current typed-decision owners and policy revision, applicable limits (limits.costBudgetUsd is this Orchestrator session's own budget, never a campaign-wide one), follow-up counts, child completion state, and credential-free compatibility information. Status active means work is actually running (activity.live). An idle campaign reads complete_needs_cleanup (terminal like verified_complete: delivered, with housekeeping such as a merged branch on the remote or an item handed to a person, each listed in cleanup with its exact action) or stuck (unfinished work, nothing scheduled; listed in stuck). Older hosts report complete_with_handoffs and blocked instead. Under Stop and Archive, cleanupWorktrees names each retained child worktree and its pending, deferred, or safety-refused reason; older runners still require explicit cleanup.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     handler: async (_args, deps) => {
       if (!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator session identity");
@@ -1803,7 +1925,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "update_campaign_work_item",
-    description: "Update one work item in the campaign ledger: title, issue, dispatch state, queue position, dependencies (work item ids), commitment (committed, cancelled, or scope_removed with a reason), reported stage, blocker, next action, handoff, or endAttempt (abandoned or failed). null clears a field. Reported stages are claims, not observations: merged does not mark the item delivered (record_campaign_work_item_delivery does, from checked evidence). A handoff says the agent work is done and names who acts next, why, and the next action: once every unfinished item is handed to human or external and nothing else is pending, the campaign finishes as complete_with_handoffs and lists them for the owner. A handoff to orchestrator or child still blocks that; assigning the item again clears it. Grants no authority.",
+    description: "Update one work item in the campaign ledger: title, issue, dispatch state, queue position, dependencies (work item ids), commitment (committed, cancelled, or scope_removed with a reason), reported stage, blocker, next action, handoff, or endAttempt (abandoned or failed). null clears a field. Reported stages are claims, not observations: merged does not mark the item delivered (record_campaign_work_item_delivery does, from checked evidence). A handoff says the agent work is done and names who acts next, why, and the next action: once every unfinished item is handed to human or external and nothing else is pending, the campaign finishes as complete_needs_cleanup (complete_with_handoffs on older hosts) and lists them for the owner. A handoff to orchestrator or child still blocks that; assigning the item again clears it. Grants no authority.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2430,21 +2552,39 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_workflow_decision",
-    description: "Create an explicit typed workflow gate bound to this session, its controlling Orchestrator, the current human-owned policy revision, and an exact resource snapshot. Generic questions and approvals cannot satisfy this gate. A GitHub pr_merge is created only when the issues GitHub would close on merge are exactly its intendedClosures; reference an issue that must stay open as \"Refs #N\".",
+    description: "Create an explicit typed workflow gate bound to this session, its controlling Orchestrator, the current human-owned policy revision, and an exact resource snapshot. Generic questions and approvals cannot satisfy this gate. A pr_merge is created only when the issues the forge would close on merge are exactly its intendedClosures (GitHub, and GitLab from v295); reference an issue that must stay open as \"Refs #N\".",
     inputSchema: {
       type: "object",
       properties: {
         requestId: { type: "string", description: "Caller-owned idempotency key" },
         resourceKey: { type: "string", description: "Stable action target; a new occurrence supersedes older unconsumed occurrences, except a person-owned follow-up publication, which is never replaced: wait for it, consume it, or withdraw it first" },
         resourceSnapshot: WORKFLOW_DECISION_RESOURCE_SCHEMA,
+        ownerRule: {
+          type: "object",
+          description: "When an installed skill or user-authored instruction keeps this gate for a person, name it here: the decision is created human-owned under any mode or grant, so only the owner decides it, and its card shows the rule. It can never give the Orchestrator a decision. Requires control plane v296.",
+          properties: {
+            source: { type: "string", minLength: 1, maxLength: WORKFLOW_DECISION_OWNER_RULE_SOURCE_MAX_CHARS,
+              description: "The file that keeps the gate, such as ~/.claude/skills/issue-workflow/SKILL.md; letters, digits and ._~/\\@+:- without spaces" },
+            quote: { type: "string", minLength: 1, maxLength: WORKFLOW_DECISION_OWNER_RULE_QUOTE_MAX_CHARS,
+              description: "The requirement quoted from that file, on one line" },
+          },
+          required: ["source", "quote"],
+          additionalProperties: false,
+        },
       },
       required: ["requestId", "resourceKey", "resourceSnapshot"],
       additionalProperties: false,
     },
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      if (args?.ownerRule !== undefined) {
+        const rule = normalizeWorkflowDecisionOwnerRule(args.ownerRule);
+        if (!rule.ok) return errorResult(rule.message);
+        const compatibilityError = await ownerRuleCompatibilityError(deps);
+        if (compatibilityError) return compatibilityError;
+      }
       if (args?.resourceSnapshot?.category === "pr_merge" && args.resourceSnapshot.intendedClosures !== undefined) {
-        const compatibilityError = await intendedClosuresCompatibilityError(deps);
+        const compatibilityError = await intendedClosuresCompatibilityError(deps, args.resourceSnapshot.mergeMethod !== undefined);
         if (compatibilityError) return compatibilityError;
       }
       const evidenceCompatibilityError = await mergeReviewEvidenceCompatibilityError(args, deps);
@@ -2453,7 +2593,8 @@ export const TOOLS: McpTool[] = [
         deps,
         "POST",
         `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/workflow-decisions`,
-        { requestId: args?.requestId, resourceKey: args?.resourceKey, resourceSnapshot: args?.resourceSnapshot },
+        { requestId: args?.requestId, resourceKey: args?.resourceKey, resourceSnapshot: args?.resourceSnapshot,
+          ...(args?.ownerRule !== undefined ? { ownerRule: args.ownerRule } : {}) },
         // A merge is created only after the control plane reads the pull request through this runner.
         args?.resourceSnapshot?.category === "pr_merge" ? Math.max(deps.requestTimeoutMs ?? CP_TIMEOUT_MS, MERGE_DECISION_TIMEOUT_MS) : undefined,
       );
@@ -2521,7 +2662,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "consume_workflow_decision",
-    description: "Immediately before the approved external action begins, consume its one-shot authorization using the exact current resource snapshot. PR merge approvals instead arm one canonical enqueue command pinned to the approved head (gh pr merge with --match-head-commit, after the runner reads again which issues GitHub would close: any the snapshot's intendedClosures does not list revoke the approval; for a GitLab merge request, one glab api merge-train or merge call with sha=, which the runner first checks against GitLab: a stale head, or a direct merge where the project runs merge trains, is refused) and are consumed when its matching runner permission is delivered, or, when no permission prompt occurs (Claude Code in auto or Full Access), by reconcile_workflow_decision after the PR reads MERGED. Revoked, changed, replayed, stale, or superseded grants fail closed.",
+    description: "Immediately before the approved external action begins, consume its one-shot authorization using the exact current resource snapshot. PR merge approvals instead arm one canonical enqueue command pinned to the approved head (gh pr merge with --match-head-commit, after the runner reads again which issues GitHub would close: any the snapshot's intendedClosures does not list revoke the approval; for a GitLab merge request, one glab api merge-train or merge call with sha=, which the runner first checks against GitLab: a stale head, or a direct merge where the project runs merge trains, is refused, and, as on GitHub, a closure the snapshot's intendedClosures does not list revokes the approval) and are consumed when its matching runner permission is delivered, or, when no permission prompt occurs (Claude Code in auto or Full Access), by reconcile_workflow_decision after the PR reads MERGED. Revoked, changed, replayed, stale, or superseded grants fail closed.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2676,16 +2817,20 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_owner_decision",
-    description: "Full Control root Orchestrator only: give your campaign's owner a decision they kept for themselves (for example a credential design, risk consent to merge a pull request, publishing follow-ups, or closing an epic), as a typed request with explicit options. Put everything the owner needs in material: links, the exact head SHA, check state and what each option does. It waits in the owner's Inbox and Campaign Status without stopping your turn or any other work; only the owner can answer it, never you or a child. Their chosen option (or Do Not Proceed) comes back to you as a Wollipog Workflow Decision prompt, and get_workflow_decision reads it at any time. A newer request under the same resourceKey replaces an unanswered one; withdraw_workflow_decision withdraws it. Full Control never asks anyone for credentials or sign-in, so a request for a value is refused. Requires control plane v281.",
+    description: "Full Control root Orchestrator only: ask your campaign's owner something only they can decide. " +
+      "Use kind \"question\" (an Owner Question) for a design choice, clarification or preference: the owner sees it as a normal question, with your 0 to 12 suggested options (mark one with recommendedOptionId) plus a free-text answer, and can answer in their own words. It grants nothing, and scope, boundary or policy changes never revoke it. " +
+      "Use kind \"approval\" (the default, an Owner Approval) only for an exact action the owner kept that has no typed category, with 2 to 12 explicit options; for a gate that has one (a child's pr_merge, an issue closure, a publication) use the typed decision or hand_workflow_decision_to_owner instead. " +
+      "Put everything the owner needs in material, as Markdown: links, the exact head SHA, check state and what each option does. It waits in the owner's Inbox and Campaign Status without stopping your turn or any other work; only the owner can answer it, never you or a child. A question's answer (the option chosen, their own words, or both) comes back as a Wollipog Owner Answer prompt; an approval's chosen option (or Do Not Proceed) as a Wollipog Workflow Decision prompt; get_workflow_decision reads either at any time. A newer request under the same resourceKey replaces an unanswered one; withdraw_workflow_decision withdraws it. Full Control never asks anyone for credentials or sign-in, so a request for a value is refused. Requires control plane v281, and v303 for kind \"question\".",
     inputSchema: {
       type: "object",
       properties: {
         requestId: { type: "string", minLength: 1, maxLength: 256 },
         resourceKey: { type: "string", minLength: 1, maxLength: 512 },
+        kind: { type: "string", enum: ["question", "approval"] },
         question: { type: "string", minLength: 1, maxLength: OWNER_DECISION_LIMITS.question },
         options: {
           type: "array",
-          minItems: OWNER_DECISION_LIMITS.minOptions,
+          minItems: OWNER_DECISION_LIMITS.minQuestionOptions,
           maxItems: OWNER_DECISION_LIMITS.maxOptions,
           items: {
             type: "object",
@@ -2707,12 +2852,19 @@ export const TOOLS: McpTool[] = [
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("a session identity is required");
       if (args?.sessionId !== undefined) return errorResult("an owner decision is self-scoped and does not accept sessionId");
-      const compatibilityError = await ownerDecisionCompatibilityError(deps);
+      const { requestId, resourceKey, question, options, recommendedOptionId, material, kind } = args ?? {};
+      if (kind !== undefined && kind !== "question" && kind !== "approval") return errorResult("kind must be question or approval");
+      // An approval offers the owner an exact choice; only a question (#4270) may suggest fewer than two.
+      if (kind !== "question" && (!Array.isArray(options) || options.length < OWNER_DECISION_LIMITS.minOptions)) {
+        return errorResult(`an Owner Approval needs ${OWNER_DECISION_LIMITS.minOptions} to ${OWNER_DECISION_LIMITS.maxOptions} options; ` +
+          "ask a design or clarification question with kind \"question\" instead");
+      }
+      const compatibilityError = await ownerDecisionCompatibilityError(deps, kind === "question");
       if (compatibilityError) return compatibilityError;
-      const { requestId, resourceKey, question, options, recommendedOptionId, material } = args ?? {};
       const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/owner-decisions`, {
         requestId, resourceKey, question, options,
         ...(recommendedOptionId !== undefined ? { recommendedOptionId } : {}), ...(material !== undefined ? { material } : {}),
+        ...(kind === "question" ? { kind } : {}),
       });
       return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
     },
@@ -2834,27 +2986,35 @@ export const TOOLS: McpTool[] = [
         Math.max(50, Number.isFinite(args.intervalMs) ? Math.floor(args.intervalMs) : 500));
       const now = deps.now ?? Date.now;
       const deadline = now() + timeoutMs;
+      // Polls back off to MAX_WAIT_SESSION_INTERVAL_MS, the interval progress is bounded by (#1280).
+      const reporter = waitProgressReporter(deps, "wait_session",
+        { kind: "session", sessionId: args.sessionId, states: [...wanted] }, timeoutMs, MAX_WAIT_SESSION_INTERVAL_MS);
       let session: Json;
-      do {
-        const r = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(args.sessionId)}`);
-        if (!r.ok) return errorResult(r.message);
-        // cpFetch reports a 2xx whose body could not be read as ok with no data; that read, like
-        // one cancelled mid-body, is a failure and must never become a timeout result.
-        if (deps.signal?.aborted) return errorResult("request cancelled");
-        session = r.data?.session;
-        if (typeof session?.status !== "string") {
-          return errorResult(`control plane returned no session status for ${args.sessionId}`);
-        }
-        if (wanted.has(session.status)) {
-          return textResult({ outcome: "reached", reached: session.status, session: mapSession(session) });
-        }
-        const remaining = deadline - now();
-        if (remaining <= 0) break;
-        if (!await cancellableSleep(deps, Math.min(intervalMs, remaining))) {
-          return errorResult("request cancelled");
-        }
-        intervalMs = nextWaitSessionIntervalMs(intervalMs);
-      } while (now() <= deadline);
+      try {
+        do {
+          const r = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(args.sessionId)}`);
+          if (!r.ok) return errorResult(r.message);
+          // cpFetch reports a 2xx whose body could not be read as ok with no data; that read, like
+          // one cancelled mid-body, is a failure and must never become a timeout result.
+          if (deps.signal?.aborted) return errorResult("request cancelled");
+          session = r.data?.session;
+          if (typeof session?.status !== "string") {
+            return errorResult(`control plane returned no session status for ${args.sessionId}`);
+          }
+          if (wanted.has(session.status)) {
+            return textResult({ outcome: "reached", reached: session.status, session: mapSession(session) });
+          }
+          reporter.poll();
+          const remaining = deadline - now();
+          if (remaining <= 0) break;
+          if (!await cancellableSleep(deps, Math.min(intervalMs, remaining))) {
+            return errorResult("request cancelled");
+          }
+          intervalMs = nextWaitSessionIntervalMs(intervalMs);
+        } while (now() <= deadline);
+      } finally {
+        await reporter.end();
+      }
       // An elapsed timeout is the expected end of a bounded wait, not a failed call (#3269).
       return textResult({
         outcome: "timeout",
@@ -2896,35 +3056,51 @@ export const TOOLS: McpTool[] = [
       const ref = parsePullRequestRef(args?.pullRequest, args?.repository);
       if ("error" in ref) return errorResult(ref.error);
       if (args?.headSha !== undefined && typeof args.headSha !== "string") return errorResult("headSha must be a string");
-      if (campaignRepositoryLocation(ref.repository)?.forge === "gitlab") {
-        const waited = await waitForMergeRequest({
+      // The waiter's own clamps, so the reported deadline and progress bound match the call (#1280).
+      const integer = (value: unknown, fallback: number, min: number, max: number) =>
+        Math.min(max, Math.max(min, typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : fallback));
+      const reporter = waitProgressReporter(deps, "wait_pull_request",
+        { kind: "pull_request", repository: ref.repository, number: ref.number },
+        integer(args?.timeoutMs, PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS, 1, PULL_REQUEST_WAIT_MAX_TIMEOUT_MS) +
+          (deps.pullRequestReadGraceMs ?? PULL_REQUEST_WAIT_READ_GRACE_MS),
+        integer(args?.intervalMs, PULL_REQUEST_WAIT_DEFAULT_INTERVAL_MS, PULL_REQUEST_WAIT_MIN_INTERVAL_MS,
+          PULL_REQUEST_WAIT_MAX_INTERVAL_MS));
+      const onObservation = () => reporter.poll();
+      try {
+        if (campaignRepositoryLocation(ref.repository)?.forge === "gitlab") {
+          const waited = await waitForMergeRequest({
+            ...ref,
+            ...(typeof args?.headSha === "string" ? { headSha: args.headSha.trim().toLowerCase() } : {}),
+            ...(Number.isFinite(args?.timeoutMs) ? { timeoutMs: args.timeoutMs } : {}),
+            ...(Number.isFinite(args?.intervalMs) ? { intervalMs: args.intervalMs } : {}),
+          }, {
+            glab: deps.glab ?? contextGlabRunner({ kind: "native" }, process.cwd()),
+            ...(deps.now ? { now: deps.now } : {}),
+            ...(deps.sleep ? { sleep: deps.sleep } : {}),
+            ...(deps.signal ? { signal: deps.signal } : {}),
+            ...(deps.pullRequestReadGraceMs !== undefined ? { readGraceMs: deps.pullRequestReadGraceMs } : {}),
+            onObservation,
+          });
+          return waited.ok ? textResult(waited.summary) : errorResult(waited.error);
+        }
+        const result = await waitForPullRequest({
           ...ref,
           ...(typeof args?.headSha === "string" ? { headSha: args.headSha.trim().toLowerCase() } : {}),
           ...(Number.isFinite(args?.timeoutMs) ? { timeoutMs: args.timeoutMs } : {}),
           ...(Number.isFinite(args?.intervalMs) ? { intervalMs: args.intervalMs } : {}),
+          returnOnAnyFailure: args?.returnOnAnyFailure === true,
         }, {
-          glab: deps.glab ?? contextGlabRunner({ kind: "native" }, process.cwd()),
+          gh: deps.gh ?? contextGhRunner({ kind: "native" }, process.cwd()),
           ...(deps.now ? { now: deps.now } : {}),
           ...(deps.sleep ? { sleep: deps.sleep } : {}),
           ...(deps.signal ? { signal: deps.signal } : {}),
           ...(deps.pullRequestReadGraceMs !== undefined ? { readGraceMs: deps.pullRequestReadGraceMs } : {}),
+          onObservation,
         });
-        return waited.ok ? textResult(waited.summary) : errorResult(waited.error);
+        return result.ok ? textResult(result.summary) : errorResult(result.error);
+      } finally {
+        await reporter.end();
       }
-      const result = await waitForPullRequest({
-        ...ref,
-        ...(typeof args?.headSha === "string" ? { headSha: args.headSha.trim().toLowerCase() } : {}),
-        ...(Number.isFinite(args?.timeoutMs) ? { timeoutMs: args.timeoutMs } : {}),
-        ...(Number.isFinite(args?.intervalMs) ? { intervalMs: args.intervalMs } : {}),
-        returnOnAnyFailure: args?.returnOnAnyFailure === true,
-      }, {
-        gh: deps.gh ?? contextGhRunner({ kind: "native" }, process.cwd()),
-        ...(deps.now ? { now: deps.now } : {}),
-        ...(deps.sleep ? { sleep: deps.sleep } : {}),
-        ...(deps.signal ? { signal: deps.signal } : {}),
-        ...(deps.pullRequestReadGraceMs !== undefined ? { readGraceMs: deps.pullRequestReadGraceMs } : {}),
-      });
-      return result.ok ? textResult(result.summary) : errorResult(result.error);
     },
   },
   {

@@ -1,21 +1,11 @@
-import React, { useId } from "react";
-import type { CampaignAuthorityOperation, CampaignScopeGrantReview, DecisionErrorClass, FullControlScopeGrant, ScopeGrantDropReason } from "@wollipog/protocol";
+import React, { useId, useState } from "react";
+import { campaignOperationLabel, type CampaignAuthorityOperation, type CampaignScopeGrantReview, type DecisionErrorClass, type FullControlScopeGrant,
+  type ScopeGrantDropReason } from "@wollipog/protocol";
+import { useApi } from "../api-context.js";
 import { Notice } from "./Notice.js";
 import { StatusBadge } from "./StatusBadge.js";
+import { BusyButton } from "./ui/BusyButton.js";
 
-/** The operations a Full Control launch can grant, in Title Case. */
-const OPERATION_LABELS: Partial<Record<CampaignAuthorityOperation, string>> = {
-  implementation_question: "Implementation Questions",
-  pr_merge: "PR Merge",
-  merged_branch_deletion: "Merged Branch Deletion",
-  follow_up_issue_publication: "Follow-Up Issue Publication",
-  ui_evidence_approval: "UI Evidence Approval",
-  issue_closure: "Issue Closure",
-  campaign_issue_scope: "Issue Scope Changes",
-  question: "Questions",
-  tool_approval: "Tool Approvals",
-  policy_ask: "Policy Asks",
-};
 
 const DROP_REASONS: Record<ScopeGrantDropReason, string> = {
   not_in_message: "not written in the message",
@@ -42,8 +32,9 @@ const FAILURE_SENTENCES: Partial<Record<DecisionErrorClass, string>> = {
   refused: "The Decision Model's provider refused the request.",
 };
 
+/** The operations a Full Control launch can grant, in Title Case (one map with the Owner Question's). */
 export function operationLabel(operation: CampaignAuthorityOperation): string {
-  return OPERATION_LABELS[operation] ?? operation;
+  return campaignOperationLabel(operation);
 }
 
 export function scopeGrantFailureSentence(failureClass: DecisionErrorClass | undefined): string {
@@ -53,8 +44,15 @@ export function scopeGrantFailureSentence(failureClass: DecisionErrorClass | und
 const refs = (repository: string, numbers: readonly number[]) => numbers.length ? numbers.map((n) => `${repository}#${n}`).join(", ") : "None";
 
 /** Campaign Status's Scope Grant section (#4102): what the owner's first message granted, the hard
- * ceilings around it, and the Decision Model that read it with its reason. */
-export function CampaignScopeGrantSection({ grant }: { grant: FullControlScopeGrant }) {
+ * ceilings around it, and the Decision Model that read it with its reason. With `edit`, the owner
+ * can change the selection count; the server checks the person and the policy revision. */
+export function CampaignScopeGrantSection({ grant, edit, ceilingsShown = false }: {
+  grant: FullControlScopeGrant;
+  edit?: SelectionCountEdit;
+  /** The Full Control section shows the boundary's Maximum Issues and operations (#2940); then this
+   * section leaves those two rows out instead of repeating them. */
+  ceilingsShown?: boolean;
+}) {
   const headingId = useId();
   const repository = grant.ceilings.repositories[0] ?? "";
   const selection = grant.selection;
@@ -72,19 +70,74 @@ export function CampaignScopeGrantSection({ grant }: { grant: FullControlScopeGr
       <div><dt>Selection Count</dt><dd>{selection ? <>
         {selection.count}
         {selection.defaulted && <> <StatusBadge noDot tone="info" label="Defaulted" title="Your message didn't give a count." /></>}
+        {selection.setByOwner && <> <StatusBadge noDot label="Set by You" /></>}
         {selection.capped && <> <StatusBadge noDot tone="warning" label="Capped by Maximum Issues" /></>}
       </> : "None"}</dd></div>
       {selection && <div><dt>Selection Criteria</dt><dd>{selection.criteria || "None Stated"}</dd></div>}
       {selection && <div><dt>Selection Constraints</dt><dd>{selection.constraints.length ? selection.constraints.join("; ") : "None Stated"}</dd></div>}
-      <div><dt>Maximum Issues</dt><dd>{grant.ceilings.maxIssues} <StatusBadge noDot label={grant.ceilings.maxIssuesSource === "explicit" ? "Set at Launch" : "Derived"} /></dd></div>
+      {!ceilingsShown && <div><dt>Maximum Issues</dt><dd>{grant.ceilings.maxIssues} <StatusBadge noDot label={grant.ceilings.maxIssuesSource === "explicit" ? "Set by You" : "Derived"} /></dd></div>}
       <div><dt>Repository</dt><dd>{grant.ceilings.repositories.join(", ")}</dd></div>
-      <div><dt>Operations</dt><dd>{grant.ceilings.operations.length ? grant.ceilings.operations.map(operationLabel).join(", ") : "None"}</dd></div>
+      {!ceilingsShown && <div><dt>Operations</dt><dd>{grant.ceilings.operations.length ? grant.ceilings.operations.map(operationLabel).join(", ") : "None"}</dd></div>}
       {grant.ceilings.removedOperations?.length ? <div><dt>Withheld by Your Message</dt><dd>{grant.ceilings.removedOperations.map(operationLabel).join(", ")}</dd></div> : null}
       {grant.dropped?.length ? <div><dt>Not Granted</dt><dd>{grant.dropped.map((d) => `${d.repository}#${d.number} (${DROP_REASONS[d.reason]})`).join(", ")}</dd></div> : null}
       <div><dt>Decision Model</dt><dd>{target ? `${target.model} (${target.effort}) · ${target.harnessName} on ${target.machineName}` : "None Available"}</dd></div>
       <div><dt>{grant.status === "failed" ? "Failure" : "Reason"}</dt><dd>{grant.status === "failed" ? scopeGrantFailureSentence(grant.failureClass) : grant.reason ?? "None Given"}</dd></div>
     </dl>
+    {edit && selection && grant.status === "granted" && <SelectionCountEditor grant={grant} count={selection.count} edit={edit} />}
   </section>;
+}
+
+/** What the owner's selection count control needs: the campaign, its policy revision for the
+ * compare-and-set, and a callback once the change is saved. */
+export interface SelectionCountEdit {
+  campaignId: string;
+  policyRevision: number;
+  onSaved: () => void;
+}
+
+function SelectionCountEditor({ grant, count, edit }: { grant: FullControlScopeGrant; count: number; edit: SelectionCountEdit }) {
+  const api = useApi();
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(String(count));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const explicit = grant.ceilings.maxIssuesSource === "explicit";
+  const save = async () => {
+    if (busy) return;
+    const next = Number(value.trim());
+    if (!/^[0-9]+$/u.test(value.trim()) || next > 100) {
+      setError("Enter a whole number from 0 to 100.");
+      return;
+    }
+    setBusy(true); setError(null);
+    try {
+      await api.setScopeGrantSelectionCount(edit.campaignId, next, edit.policyRevision);
+      setEditing(false);
+      edit.onSaved();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not change the selection count.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (!editing) {
+    return <div><button className="btn sm" type="button" onClick={() => { setValue(String(count)); setError(null); setEditing(true); }}>Change Count</button></div>;
+  }
+  return <fieldset className="field">
+    <legend>Change Selection Count</legend>
+    <label className="field">
+      <span>Issues to Select</span>
+      <input type="text" inputMode="numeric" value={value} disabled={busy} onChange={(event) => setValue(event.target.value)} />
+    </label>
+    <p>{explicit
+      ? `The Maximum Issues you set (${grant.ceilings.maxIssues}) stays as it is, so the count must fit within it.`
+      : "Maximum Issues moves by the same amount."} Saving re-authorizes Full Control. Any request or approval the Orchestrator hasn't used yet is withdrawn, and it asks again.</p>
+    {error && <Notice tone="danger" role="alert" title="Couldn't Change the Selection Count">{error}</Notice>}
+    <div>
+      <BusyButton className="btn sm" busy={busy} progress="Saving count…" onClick={() => void save()}>Save Count</BusyButton>{" "}
+      <button className="btn ghost sm" type="button" disabled={busy} onClick={() => setEditing(false)}>Cancel</button>
+    </div>
+  </fieldset>;
 }
 
 /** The grant context on the owner's one typed scope approval (#4102): their own message and why the
@@ -92,14 +145,21 @@ export function CampaignScopeGrantSection({ grant }: { grant: FullControlScopeGr
 export function ScopeGrantReviewFacts({ review }: { review: CampaignScopeGrantReview }) {
   const why = review.cause === "selection"
     ? "Your first message asked the campaign to choose issues. You approve its choice until the Decision Model reviews selections."
-    : review.cause === "grant_uncertain"
-      ? "The Decision Model couldn't tell which issues your first message asks for, so there is no grant to check this proposal against."
-      : `${scopeGrantFailureSentence(review.failureClass)} There is no grant to check this proposal against.`;
+    : review.cause === "selection_uncertain"
+      ? "Your first message asked the campaign to choose issues. These passed every check, but the Decision Model couldn't tell whether they fit what you asked for."
+      : review.cause === "selection_failed"
+        ? `Your first message asked the campaign to choose issues. These passed every check, but the Decision Model's review of them didn't finish: ${scopeGrantFailureSentence(review.failureClass)}`
+        : review.cause === "selection_unverified"
+          ? "Your first message asked the campaign to choose issues. The campaign's machine can't report whether these issues are open or what labels they have, so nothing checked them."
+          : review.cause === "grant_uncertain"
+            ? "The Decision Model couldn't tell which issues your first message asks for, so there is no grant to check this proposal against."
+            : `${scopeGrantFailureSentence(review.failureClass)} There is no grant to check this proposal against.`;
+  const reasonLabel = review.cause === "selection" || review.cause === "selection_unverified" ? "Grant Reason" : "Uncertain Reason";
   return <>
     <p>{why}</p>
     <dl className="facts">
       <div><dt>Your First Message</dt><dd>{review.ownerMessage}</dd></div>
-      {review.reason && <div><dt>{review.cause === "selection" ? "Grant Reason" : "Uncertain Reason"}</dt><dd>{review.reason}</dd></div>}
+      {review.reason && <div><dt>{reasonLabel}</dt><dd>{review.reason}</dd></div>}
       {review.selection && <div><dt>Selection</dt><dd>
         {review.selection.count}{review.selection.defaulted ? " (defaulted)" : ""}
         {review.selection.criteria ? `, ${review.selection.criteria}` : ""}

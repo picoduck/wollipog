@@ -890,17 +890,116 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      worktree of the target repository, carries the provider conversation over and continues.
 //      Snapshots carry `locationSwitch` (pending or failed); the control plane moves the session
 //      row only under a consumed switch naming exactly that Location.
-// 292: Merges in repositories without required checks (#4119). A GitHub merge preflight may ask
+// 291: issue facts for selection scope (#4103). A `campaign_issue_scope` inspection may ask for
+//      `facts`; a v291 runner then answers `issueFacts` for each requested number: whether it is
+//      an issue or a pull request, its state, labels, assignees, title and a bounded body excerpt.
+//      A pull request is reported there instead of failing the read. The control plane's
+//      selection floors read these facts; an older runner reports none, so its selection
+//      proposals take the owner's route.
+// 295: closing patterns in GitLab merges (#3762). A GitLab `pr_merge` snapshot may declare
+//      `intendedClosures`, and requesting or arming it first asks the child's runner for
+//      `gitlab_merge_closures`, which reports every issue the merge would close: GitLab's default
+//      closing pattern on the description, and GitLab's own `closes_issues` list. The control plane
+//      refuses a closure that differs from the declaration and records the check on the decision.
+//      Under Full Control a checked GitLab merge whose closures are all in scope is then owned like a
+//      GitHub one. A pre-v295 child runner is not asked; its decisions carry no check and stay
+//      human-owned under Full Control. (292 to 294 are claimed by pull requests still open.)
+// 296: an owner rule on a typed workflow decision (#4137). request_workflow_decision
+//      (`wollipog decision request --owner-rule-source/--owner-rule-quote`) accepts an optional,
+//      bounded `ownerRule` naming the installed or user-authored file, and the quoted requirement,
+//      that keeps the gate for a person. The occurrence is created human-owned (`owner_kept`)
+//      under any mode, grant or category; later requests for the same resource stay the person's,
+//      and Campaign Status lists it under Waiting for You with the rule. A runner refuses the field
+//      against an older control plane, which would drop it.
+// 297: campaign activity status (#4146). Campaign Active means work is actually running: a turn, a
+//      child, a background job, a pending continuation, a parked pull request with a wake
+//      registered, or the server's own repair. Idle campaigns read `complete_needs_cleanup`
+//      (terminal, with a `cleanup` list naming each item's action), `verified_complete`, or `stuck`
+//      (with the undelivered `stuck` items); the projection's `activity` lists what is live and the
+//      server's one automatic repair of idle leftovers. Dashboards below 297 receive
+//      `complete_needs_cleanup` as `complete_with_handoffs` (below 275 as `waiting_human`) and
+//      `stuck` as `blocked`. (292-294 are claimed by open pull requests.)
+// 298: tracked waits (#1280, #4249). A runner's Wollipog MCP server reports each `wait_session`
+//      and `wait_pull_request` call through POST /api/sessions/:id/waits (start, successful polls,
+//      end), and the control plane projects `SessionView.waits`, classified under the liveness
+//      contract in session-waits.ts. An older control plane refuses the report and the runner
+//      stops reporting that call; an older dashboard ignores the field and shows the lifecycle.
+//      (292, 300, 301 and 302 are claimed by open pull requests.)
+// 302: granted issue numbers reach a live Custom Orchestrator (#4269). When a Custom campaign's
+//      first-message reading grants issue numbers, the control plane sends its v302 runner a
+//      `campaign_issue_scope` `grant_issue_numbers` operation naming the campaign session and those
+//      numbers. The runner sets them on the live launch policy (the routine-write classifier reads
+//      it on each ask) and on the stored launch metadata (the issue-closure checks read it), only for
+//      that live root Orchestrator and only while it holds no issue numbers and no issue scope; the
+//      same numbers again are a no-op. An older runner is never sent it and keeps the next-launch
+//      path. (299 to 301 are claimed by pull requests still open.)
+// 303: Owner Questions (#4270). request_owner_decision takes `kind: "question"`: an owner_decision
+//      whose snapshot reads `kind: "question"` takes 0 to 12 suggested options, is presented as an
+//      agent question with a free-text answer, and is answered through the session's question
+//      route; the answer reaches the root as a prompt. It grants nothing, so scope, boundary and
+//      policy changes leave it pending. A v303 runner sends the field only to a v303 control plane;
+//      a v303 control plane accepts it only from a v303 root runner. (299-301 are claimed by open
+//      pull requests.)
+// 307: typed Decision questions (#4283). A Decision kind may ask a list of typed questions
+//      (boolean, choice or score, optionally one answer per item) in one `run_decision` call whose
+//      output schema requires one answer per question and item, each with a value, a confidence and
+//      a short evidence string. The control plane derives the verdict from the answers with the
+//      kind's fixed rule and confidence threshold, records them on the occurrence, and projects
+//      `DecisionOccurrenceView.typedAnswers`. A v307 runner accepts the larger schema and output
+//      (DECISION_SCHEMA_MAX_CHARS, DECISION_OUTPUT_MAX_BYTES); a typed call is never sent to an older
+//      runner, which records a non-transient `runner_incapable` failure and takes the person route.
+//      Older dashboards ignore the field. (304 to 306 are claimed by open pull requests.)
+// 308: the Orchestrator proposes a Full Control campaign's scope (#4282). The owner's first message
+//      is no longer read into a scope grant: the campaign starts with an empty scope (grant status
+//      `proposal`) and dispatches nothing until the Orchestrator's initial proposal is admitted.
+//      request_campaign_issue_scope_change takes `proposal` (each issue's origin and rationale, the
+//      count, constraints and withheld operations). Deterministic floors run first; a proposal with
+//      nothing checkable beyond owner-named issues is admitted with no model call, and anything else
+//      is the owner's one approval, presented as an Owner Question. A v308 runner sends `proposal`
+//      only to a v308 control plane; a v308 control plane reads it only from a v308 root runner, and
+//      an older runner's proposal takes the owner route, and one that can't report issue facts is
+//      refused. (304 to 306 are claimed by open pull requests.)
+// 310: campaign control metadata carries its own authoritative ordering (#3363). A campaign
+//      issue scope synchronization, and an Orchestrator launch policy, add `controlRevision`: the
+//      campaign root's policy revision the control was read at. A runner keeps the newest control
+//      it was sent and never lets a delayed or reordered update replace it with an older one, even
+//      within one issue-scope revision. A pre-v310 runner is never sent the field and keeps
+//      replacing control with each synchronization.
+// 312: the Decision Model checks a scope proposal's stated constraints (#4282). A proposal that
+//      states anything checkable is asked the `scope_check` kind's typed questions in one call (the
+//      count, named versus merely mentioned, each stated constraint per chosen issue, omissions and
+//      withheld operations; never priority), and the server derives admit, refuse or uncertain. The
+//      recorded proposal carries `constraintCheck`; Campaign Status shows its answers. The call goes
+//      only to a runner with typed Decision questions (v307), and any other outcome is the owner's
+//      one approval. (309 to 311 are claimed by open pull requests.)
+// 313: repository-qualified campaign issue scope (#4118). The control plane stores the scope as
+//      `issues`, `{ repository, number }` pairs across the boundary's repositories, and sends each
+//      participating runner only its own Location repository's numbers, in the earlier shape. A
+//      v313 runner accepts that part when its origin is any repository of the boundary, not only
+//      the launch one. An Orchestrator participant in another boundary repository needs v313;
+//      one-repository campaigns are unchanged for older runners. (This change first claimed 290,
+//      293, 299, 301, 304, 305 and 309, which no released version uses; 292 and 300 are claimed by
+//      open pull requests.)
+// 315: merges in repositories without required checks (#4119). A GitHub merge preflight may ask
 //      for `checks`; the runner then also reads every check reported for the head, how many
 //      GitHub marks required, and whether its merge state is clean, so the control plane can
-//      verify a `pr_merge` snapshot whose `checksBasis` is `all_reported`.
-export const PROTOCOL_VERSION = 292;
+//      verify a `pr_merge` snapshot whose `checksBasis` is `all_reported`. A pre-v315 runner is
+//      never asked, and the basis is refused for it. (This change first claimed 292, which no
+//      released version uses; 314 is claimed by an open pull request.)
+export const PROTOCOL_VERSION = 315;
 
 export * from "./campaign-authority.js";
+export * from "./decision-questions.js";
+export * from "./workflow-decision-owner-rule.js";
+export * from "./owner-question.js";
+export * from "./scope-proposal.js";
 export * from "./closing-references.js";
+export * from "./gitlab-closing-references.js";
 export * from "./issue-closure-refusal.js";
 import type { GithubIssueClosureRefusal, GithubIssueClosureRefusalReason } from "./issue-closure-refusal.js";
 export * from "./issue-closure-delivery-gap.js";
+export * from "./issue-closure-excluded-children.js";
+import type { IssueClosureExcludedChild } from "./issue-closure-excluded-children.js";
 import type { DeliveryVerificationFailure, IssueClosureDeliveryGap, IssueClosureEpicMembers } from "./issue-closure-delivery-gap.js";
 export * from "./campaign-issue-publication.js";
 export * from "./campaign-evidence-authority.js";
@@ -910,8 +1009,10 @@ export * from "./campaign-review-job.js";
 export * from "./session-review-job.js";
 export * from "./review-session.js";
 export * from "./pull-request-watch.js";
+export * from "./session-waits.js";
 export * from "./workspace-removal.js";
 export * from "./forge-decision-action.js";
+export * from "./campaign-activity.js";
 export * from "./review-retirement.js";
 export * from "./video-review-settings.js";
 export * from "./review-contract.js";
@@ -925,16 +1026,19 @@ export type { CampaignLaunchInspectionFailure } from "./campaign-control-launch.
 export type {
   CampaignLaunchProposal, FullControlLaunchRequest, FullControlLaunchOverrides, FullControlEnableRequest, PreparedCampaignLaunch,
   CampaignLaunchInspectionMessage, CampaignLaunchInspectionCancelMessage, CampaignLaunchInspectionResult,
-  CampaignLaunchPreflight, CampaignLaunchCapability, CampaignLaunchCapabilityId, CampaignLaunchSummary,
+  CampaignLaunchPreflight, CampaignLaunchCapability, CampaignLaunchCapabilityId, CampaignLaunchSummary, CampaignLaunchDisclosure,
 } from "./campaign-control-launch.js";
 export {
   CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CAMPAIGN_EVIDENCE_PROVIDER_DISCLOSURE_REVISION,
   CAMPAIGN_SESSION_ARTIFACT_DISCLOSURE_REVISION, campaignSessionArtifactDestinationId, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE,
+  campaignLaunchDisclosure, validCampaignLaunchDisclosure,
 } from "./campaign-control-launch.js";
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
 export const MAX_SKILL_REPORT_REQUESTS = 64;
-export { boundedIssueNumbers, campaignIssueForgeUrl, epicChecklistMembers, normalizeCampaignIssueScopeSnapshot, validIssueAdmission, validIssueLineage } from "./campaign-issue-scope.js";
+export { boundedIssueNumbers, campaignIssueForgeUrl, epicChecklistMembers, normalizeCampaignIssueScopeSnapshot, validIssueAdmission, validIssueLineage,
+  CAMPAIGN_ISSUE_SCOPE_MAX, canonicalCampaignIssues, campaignScopeIssues, campaignScopeNumbers, campaignScopeHolds, campaignScopeWithIssues,
+  campaignScopeForRepository, campaignScopeChangeGroups, campaignScopeChangeResult, campaignScopeChangeBefore } from "./campaign-issue-scope.js";
 export const UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL = 202;
 
 export type ArtifactUploadPreference = "manual" | "wollipog_automatic" | "external_hosting";
@@ -1023,6 +1127,7 @@ import type {
 } from "./campaign-work-ledger.js";
 export type { ConversationHandoffDraft, InPlaceHandoffTurn } from "./conversation-handoff.js";
 import { pendingRequests, prioritizedPendingRequests } from "./worker-attention.js";
+import { isOwnerQuestionCard, isOwnerQuestionRequest } from "./owner-question.js";
 export {
   attentionRequestRank,
   pendingRequests,
@@ -1124,6 +1229,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v275 campaign handoffs and recorded delivery (#4070). Gates the `complete_with_handoffs`
    * status for dashboards and the delivery and handoff ledger writes for runner tools. */
   campaignHandoffs: 275,
+  /** v297 campaign activity status (#4146). Gates `complete_needs_cleanup` and `stuck` for
+   * dashboards; older ones receive `complete_with_handoffs` (or `waiting_human`) and `blocked`. */
+  campaignActivityStatus: 297,
   /** v272 runner watches a parked session's merge-queue entry and the control plane wakes it (#4071).
    * Checked against the runner by the control plane and against the control plane by the runner. */
   pullRequestWatch: 272,
@@ -1283,6 +1391,18 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * and a one-way handoff of an Orchestrator-owned occurrence to that owner. Checked against the
    * root's runner by the control plane and against the control plane by the runner. */
   ownerDecisions: 281,
+  /** v303 (#4270): Owner Questions, `kind: "question"` on request_owner_decision. Checked against
+   * the control plane by the runner, because an older control plane would ignore the field and ask
+   * the question as an approval, and against the root's runner by the control plane. */
+  ownerQuestions: 303,
+  /** v308 (#4282): structured scope proposals, `proposal` on request_campaign_issue_scope_change.
+   * Checked against the control plane by the runner, and against the root's runner by the control
+   * plane, which sends an older runner's proposal to the owner. */
+  campaignScopeProposals: 308,
+  /** v296 (#4137): `ownerRule` on request_workflow_decision. Checked against the control plane by
+   * the runner, because an older control plane ignores the field and would let the Orchestrator
+   * decide a gate its owner kept. */
+  workflowDecisionOwnerRule: 296,
   /** (#4138) A regular session's request_location_switch, checked against the requester's runner by
    * the control plane and against the control plane by the runner. */
   sessionLocationSwitch: 287,
@@ -1293,6 +1413,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   gitlabMergeDecisions: 239,
   /** v242 runner answers `github_merge_preflight`, the closing-reference check of a GitHub merge (#3713). */
   githubMergeClosingReferences: 242,
+  /** v295 runner answers `gitlab_merge_closures`, the closing-pattern check of a GitLab merge (#3762). */
+  gitlabMergeClosingReferences: 295,
   /** v244 runner binds a review session to a GitLab merge request, read with a trusted glab (#3539). */
   gitlabReviewSessions: 244,
   /** v249 runner inspects, closes and scopes GitLab issues with `glab` (#3539). */
@@ -1390,6 +1512,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionNamingDriftCodes: 97,
   /** v285 runners host tool-less, schema-constrained Decision calls (`run_decision`, #4101). */
   decisionModel: 285,
+  /** v307 runners accept a typed-question Decision call's larger schema and output (#4283). */
+  typedDecisionQuestions: 307,
   sessionAgentControl: 100,
   sessionAgentControlReasoningEffort: 138,
   sessionOrchestration: 109,
@@ -1449,8 +1573,18 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   capacityLockDiagnostics: 137,
   /** v288 validates a Full Control boundary's `repositories` list (#4117). */
   campaignRepositoryBoundary: 288,
-  /** v292 reads a pull request's reported checks in the GitHub merge preflight (#4119). */
-  githubMergeChecksBasis: 292,
+  /** v315 reads a pull request's reported checks in the GitHub merge preflight (#4119). */
+  githubMergeChecksBasis: 315,
+  /** v291 reports issue facts (kind, state, labels, assignees) for selection scope (#4103). */
+  campaignIssueFacts: 291,
+  /** v302 (#4269): a `campaign_issue_scope` `grant_issue_numbers` operation hands the issue numbers a
+   * Custom campaign's first-message reading granted to its live Orchestrator. Sent only to a v302
+   * runner; an older one gets the numbers at the provider's next launch, as before. */
+  campaignIssueNumberGrant: 302,
+  /** v310 orders campaign control metadata by `controlRevision` (#3363). */
+  campaignControlRevision: 310,
+  /** v313 synchronizes its own repository's part of a multi-repository issue scope (#4118). */
+  repositoryQualifiedIssueScope: 313,
 } as const;
 
 /* ========================================================================== */
@@ -2940,6 +3074,8 @@ export interface OrchestratorLaunchPolicy extends OrchestratorExecutionDefaults 
   issueScope?: CampaignIssueScope;
   /** Server-synchronized diagnostic boundary; never a provider permission grant. */
   control?: CampaignControl;
+  /** v310 (#3363): the campaign root's policy revision `control` was read at, which orders it. */
+  controlRevision?: number;
 }
 
 export interface OrchestratorDefaults {
@@ -3018,8 +3154,19 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   /** Project Locations the launch inspection left out of the repository boundary (#4117), each with
    * its fixed reason. Server-owned and informational: it grants nothing. */
   excludedLocations?: import("./project-location-inspection.js").CampaignExcludedLocation[];
-  /** Human initial epic request, persisted before runner echo; this is a proposal seed, never authority. */
+  /** What the Full Control launch or enable that set `control` disclosed about capabilities and
+   * evidence (#2940). Server-owned and informational: it grants nothing, a revoke to Custom drops
+   * it, and a campaign authorized before it existed has none. */
+  launchDisclosure?: import("./campaign-control-launch.js").CampaignLaunchDisclosure;
+  /** Locations other people added mid-campaign, waiting for the owner's Include in Campaign (#4117). */
+  pendingLocations?: import("./project-location-inspection.js").CampaignPendingLocation[];
+  /** The Locations that joined the boundary after launch, newest last, bounded (#4117). */
+  locationJoins?: import("./project-location-inspection.js").CampaignLocationJoin[];
+  /** The epic a Custom campaign's first message names, once its seed (below) found one; a proposal
+   * seed, never authority. */
   issueScopeProposalEpic?: number;
+  /** A Custom campaign's epic seed, read from its first message by the Decision Model (#4104). */
+  issueScopeSeed?: CampaignIssueScopeSeed;
   /** Finite GitHub issue-write scope admitted from the initial request or an exact human-approved scope change. */
   issueNumbers?: number[];
   issueScope?: CampaignIssueScope;
@@ -3050,7 +3197,9 @@ export type FullControlFirstMessageScope =
   /** `derivedLimits` beside a grant (#4102) is the current authorization's: every later
    * authorization or revoke replaces it, so a limit a person has since set is never treated as derived. */
   | { state: "established"; messageDigest: string; establishedAt: number; contextIssueNumbers?: number[]; grant?: FullControlScopeGrant;
-      derivedLimits?: FullControlDerivedLimits };
+      derivedLimits?: FullControlDerivedLimits;
+      /** The Orchestrator's admitted initial scope (#4282), once a grant of status `proposal` has one. */
+      initialScope?: import("./scope-proposal.js").FullControlInitialScope };
 
 /** A selection without a stated count gets this many issues, capped by an explicit Maximum Issues (#4102). */
 export const SCOPE_GRANT_DEFAULT_SELECTION_COUNT = 3;
@@ -3074,6 +3223,8 @@ export interface ScopeGrantSelection {
   /** The count the message stated, when it stated one. */
   requestedCount?: number;
   capped?: true;
+  /** The owner set `count` in Campaign Status (#4102), replacing the extracted or defaulted one. */
+  setByOwner?: true;
   criteria: string;
   constraints: string[];
 }
@@ -3088,7 +3239,9 @@ export interface ScopeGrantSelection {
  * is granted or shown; the Orchestrator's scope proposal goes to one typed, person-owned approval. */
 export interface FullControlScopeGrant {
   version: 1;
-  status: "granted" | "uncertain" | "failed";
+  /** `proposal` (#4282): the server read nothing from the message. The scope starts empty and the
+   * Orchestrator proposes it; `namedIssues` is empty and the ceilings are the launch's. */
+  status: "granted" | "uncertain" | "failed" | "proposal";
   /** The audited Decision occurrence; absent only when no Decision Model runtime was available. */
   occurrenceId?: string;
   /** The model's verdict reason, for a granted or uncertain grant. */
@@ -3112,25 +3265,27 @@ export interface FullControlScopeGrant {
   };
 }
 
-/** `blocked` means nothing is progressing without intervention: every unverified child failed,
- * stopped, or is held, or the campaign's own continuation is stalled (see
- * `OrchestratorCampaignProjection.stalled`). `waiting_human` and `verified_complete` take
- * precedence over a stalled continuation.
+/** A campaign's status (#4146; see campaign-activity.ts for the precedence): `waiting_human`
+ * (Waiting for You), `active` (Campaign Active: work is actually running), `complete_needs_cleanup`
+ * (Complete, Needs Cleanup: delivered, idle, housekeeping owed), `verified_complete` (Campaign
+ * Complete) and `stuck` (Campaign Stuck: idle, undelivered, nothing scheduled).
  *
- * v275 `complete_with_handoffs` (#4070) is terminal like `verified_complete`: every child is
- * verified and cleaned up, nothing is pending, and every unfinished committed work item is handed to
- * `human` or `external` (`OrchestratorCampaignProjection.handoffs`). Dashboards older than
- * `campaignHandoffs` receive it as `waiting_human`, never as active work. */
+ * `blocked` and `complete_with_handoffs` are what control planes older than v297 report: `blocked`
+ * meant nothing progressed without intervention, and v275 `complete_with_handoffs` (#4070) was
+ * terminal with every unfinished item handed to a person. A v297 control plane sends them only to
+ * dashboards older than `campaignActivityStatus`, in place of `stuck` and `complete_needs_cleanup`. */
 export type OrchestratorCampaignStatus =
   | "waiting_human"
   | "active"
-  | "blocked"
+  | "complete_needs_cleanup"
   | "verified_complete"
+  | "stuck"
+  | "blocked"
   | "complete_with_handoffs";
 
 /** Statuses after which the campaign takes no more automatic turns and Campaign Elapsed ends. */
 export function campaignStatusTerminal(status: OrchestratorCampaignStatus | null | undefined): boolean {
-  return status === "verified_complete" || status === "complete_with_handoffs";
+  return status === "verified_complete" || status === "complete_needs_cleanup" || status === "complete_with_handoffs";
 }
 
 /** One unfinished work item the campaign handed to a person or an outside party (#4070). */
@@ -3156,6 +3311,9 @@ export interface CampaignOwnerDecision {
   summary: string;
   /** The root handed an Orchestrator-owned occurrence to the owner, rather than asking anew. */
   handedOff: boolean;
+  /** v296 (#4137): the installed or user-authored rule that keeps it for the owner, when the
+   * requester named one. */
+  ownerRule?: import("./workflow-decision-owner-rule.js").WorkflowDecisionOwnerRule;
   createdAt: number;
 }
 
@@ -3211,6 +3369,9 @@ export interface UiEvidenceReviewDelivery {
 export interface OrchestratorCampaignProjection {
   /** Current authorized root control, paired with policyRevision; child snapshots may be stale. */
   control?: CampaignControl;
+  /** The repository boundary's Locations, exclusions and joins (#4117). Omitted for a campaign
+   * whose boundary predates the repository list. */
+  repositoryBoundary?: import("./project-location-inspection.js").CampaignRepositoryBoundaryView;
   budget?: import("./campaign-budget.js").CampaignBudgetView;
   status: OrchestratorCampaignStatus;
   /** Durable content-safe recovery state; control-plane-owned, never an execution grant. */
@@ -3244,6 +3405,14 @@ export interface OrchestratorCampaignProjection {
   /** Full Control only: the request classes that still come to the Human for this campaign
    * (#2940), today at most `human_required_rules` while such a rule exists. */
   fullControlHumanRequired?: import("./campaign-authority.js").FullControlRequestClass[];
+  /** Full Control only, with `control` (#2940): the capabilities and evidence handling its launch or
+   * enable recorded. Absent when the authorization predates the record or the server doesn't keep
+   * it; Campaign Status then reads it as not recorded. A snapshot, never a live capability check:
+   * `uiEvidenceReview` and `videoEvidenceReview` are the live facts. */
+  launchDisclosure?: import("./campaign-control-launch.js").CampaignLaunchDisclosure;
+  /** Full Control only, with a first-message scope grant (#2940, #4102): whether the boundary's
+   * Maximum Issues is still derived, so it moves with the grant's selection count, or explicit. */
+  maxIssuesSource?: "derived" | "explicit";
   /** v275: unfinished committed work items handed to `human` or `external`, oldest handoff first
    * (#4070). The owner's to-do list; omitted when there are none. Bounded by
    * CAMPAIGN_HANDOFFS_LIMIT; `total` is the full count. */
@@ -3287,6 +3456,16 @@ export interface OrchestratorCampaignProjection {
     retained: number;
     items: import("./forge-decision-action.js").CampaignMergedBranch[];
   };
+  /** v297 (#4146): what is live (what keeps the campaign Active) and the server's automatic repair
+   * of idle leftovers. Omitted by older control planes. */
+  activity?: import("./campaign-activity.js").CampaignActivityView;
+  /** v297 (#4146): the housekeeping a delivered campaign still owes, each item with its reason and
+   * the exact action that settles it. Present whenever such items exist; the status is
+   * `complete_needs_cleanup` once nothing is live. Bounded by CAMPAIGN_CLEANUP_ITEMS_LIMIT. */
+  cleanup?: { total: number; items: import("./campaign-activity.js").CampaignCleanupItem[] };
+  /** v297 (#4146): the undelivered work behind `stuck`, each with why nothing is moving where that
+   * is known. Present only while the status is `stuck`. Bounded by CAMPAIGN_STUCK_ITEMS_LIMIT. */
+  stuck?: { total: number; items: import("./campaign-activity.js").CampaignStuckItem[] };
   /** Unverified children held from starting their next turn, with how to clear each (#1650).
    * Bounded; `children.blocked` stays the full count. Omitted when there are none. */
   heldChildren?: Array<{ sessionId: string; holds: SessionHoldView[] }>;
@@ -3306,8 +3485,9 @@ export interface OrchestratorCampaignProjection {
   followUps: { unique: number; duplicates: number };
   /** Present while the latest continuation is `failed` or `missing_result`, so a consumer sees the
    * stall without reading `continuation` (#1352). A failed turn may still have an automatic retry
-   * scheduled; a missing result needs acknowledgement. Where `status` would otherwise be `active`
-   * it reports `blocked`. Projected, like `continuation`, only on the root campaign's own view. */
+   * scheduled; a missing result needs acknowledgement. A stalled continuation is not live work, so
+   * with nothing else live an unfinished campaign reads `stuck` (v297; older control planes report
+   * `blocked`). Projected, like `continuation`, only on the root campaign's own view. */
   stalled?: "continuation_failed" | "continuation_missing_result";
   /** Durable synthetic-turn state. Omitted only when the campaign has never needed a wake-up. */
   continuation?: {
@@ -4951,13 +5131,22 @@ function singleSessionAttentionStatus(
   const pending = requests[0] ?? session.pendingApproval;
   if (requests.length > 1) {
     const children = requests.filter((request) => request.ownerToolUseId).length;
-    const questions = requests.filter((request) => request.kind === "question").length;
+    const questions = requests.filter((request) => request.kind === "question" || isOwnerQuestionRequest(request)).length;
     const authentication = requests.filter((request) => request.kind === "authentication").length;
     const approvals = requests.length - questions - authentication;
     return {
       kind: "input_required",
       label: `${requests.length} Actions Required`,
       description: `${requests.length} unresolved requests: ${approvals} approvals, ${questions} questions, ${authentication} authentication requests; ${children} belong to child agents. Open Agents to inspect each request.`,
+    };
+  }
+  if (isOwnerQuestionCard(pending)) {
+    // An Owner Question (#4270), stored or as the session detail presents it, is the Orchestrator
+    // asking the person, not an approval it waits on.
+    return {
+      kind: "input_required",
+      label: "Needs Your Input",
+      description: "The Orchestrator asked you a question and keeps working while it waits for your answer.",
     };
   }
   if (pending?.kind === "question" && pending.recoveryReason === "provider_restart") {
@@ -5248,9 +5437,32 @@ export interface WorkflowDecisionOption {
 }
 
 /** Authority is independent of ledger membership. Revision zero denotes a legacy initial scope. */
+/**
+ * A Custom campaign's epic seed (#4104). A first message that writes a digit string but names no
+ * explicit issue list is read by the Decision Model's `scope_grant` kind after the session starts.
+ * `pending` holds delegation until that reading settles. `seeded`: the reading named exactly one
+ * issue that the runner verified has members, now `issueScopeProposalEpic`, and the person approves
+ * the scope as before. `none`: it named no epic, so nothing is held. `owner`: the reading failed or
+ * was uncertain, so the person approves the scope with no seed. Nothing is ever parsed from the
+ * text instead, and no state grants anything.
+ */
+export interface CampaignIssueScopeSeed {
+  state: "pending" | "seeded" | "none" | "owner";
+  /** SHA-256 of the exact first message the seed reads. */
+  messageDigest: string;
+  occurrenceId?: string;
+}
+
 export interface CampaignIssueScope {
+  /** The launch Location's repository: the boundary's first entry. */
   repository: string;
+  /** The numbers of `issues` in `repository`, kept for runners and clients that read one
+   * repository (#4118). Always derived from `issues` when it is present. */
   issueNumbers: number[];
+  /** Every authorized issue, repository-qualified (#4118), sorted by repository then number. A
+   * scope stored before #4118 omits it and reads as `issueNumbers` in `repository`. A runner is
+   * sent its own repository's part in the shape above, without this list. */
+  issues?: CampaignIssueRef[];
   revision: number;
   authorizedByUserId: string;
   authorizedAt: number;
@@ -5265,7 +5477,20 @@ export interface CampaignIssueScopeRequest {
   additions: CampaignIssueRef[];
   removals: CampaignIssueRef[];
   explanation: string;
-  lineage?: { kind: "epic"; epic: number } | { kind: "follow_up"; publicationOccurrenceId: string };
+  /** `selection` fills the owner's selection from the first message's scope grant (#4103). Under a
+   * healthy selection grant a proposal without lineage takes the same route. */
+  lineage?: { kind: "epic"; epic: number } | { kind: "follow_up"; publicationOccurrenceId: string } | { kind: "selection" };
+  /** The Orchestrator's structured proposal (#4282, protocol 308): each addition's origin and
+   * rationale, the count, constraints and withheld operations it read from the owner's message. */
+  proposal?: import("./scope-proposal.js").CampaignScopeProposalInput;
+}
+
+/** One repository's part of a scope change (#4118). */
+export interface CampaignIssueScopeRepositoryChange {
+  repository: string;
+  before: number[];
+  additions: number[];
+  removals: number[];
 }
 
 export interface CampaignIssueAdmission {
@@ -5277,13 +5502,18 @@ export interface CampaignIssueAdmission {
 
 export interface CampaignIssueScopeSnapshot {
   category: "campaign_issue_scope";
+  /** The launch Location's repository; `before`, `additions` and `removals` are its numbers. */
   repository: string;
   expectedRevision: number;
   before: number[];
   additions: number[];
   removals: number[];
+  /** The same change in every other boundary repository the scope holds or the change touches
+   * (#4118), sorted by repository. Omitted when the scope stays in the launch repository. */
+  otherRepositories?: CampaignIssueScopeRepositoryChange[];
   explanation: string;
-  affectedAssignments: Array<{ sessionId: string; issue: number }>;
+  /** `repository` is present only for an assignment outside the launch repository. */
+  affectedAssignments: Array<{ sessionId: string; issue: number; repository?: string }>;
   affectedDecisions: string[];
   activeChildren: Array<{ sessionId: string; title: string; assignmentDigest: string }>;
   lineage?: CampaignIssueScopeRequest["lineage"];
@@ -5293,6 +5523,36 @@ export interface CampaignIssueScopeSnapshot {
   /** Present when the Orchestrator's own proposal is the owner's to approve because of the first
    * message's scope grant (#4102). Server-derived; it changes who decides, never what is granted. */
   grantReview?: CampaignScopeGrantReview;
+  /** The Decision Model's `admit` of a selection proposal (#4103), which the server's
+   * `issueAdmission` evidence binds: the review occurrence, the grant it read and its reason. */
+  selectionReview?: CampaignSelectionReview;
+  /** Present when a Full Control Orchestrator proposed additions that no lineage or selection grant
+   * admits, so the proposal is the owner's one typed approval rather than a refusal (#4267).
+   * Server-derived; it changes who decides, never what is granted. */
+  ownerReview?: CampaignScopeOwnerReview;
+  /** The Orchestrator's proposal under the propose-then-check flow (#4282), as the server recorded
+   * it after the floors. Server-derived; it changes who decides, never what is granted. */
+  scopeProposal?: import("./scope-proposal.js").CampaignScopeProposal;
+}
+
+/** Why an Orchestrator's scope proposal waits for the owner (#4267), and the Maximum Issues increase
+ * its additions need. Approving applies the change and raises Maximum Issues by exactly `increase`;
+ * denying applies neither. */
+export interface CampaignScopeOwnerReview {
+  /** The proposal named no epic, published follow-up or selection lineage. */
+  cause: "lineage_missing";
+  /** Present when the scope plus publication reservations would exceed the campaign's issue limit:
+   * the Maximum Issues the boundary held when it was requested, and how many more the additions need. */
+  maxIssuesIncrease?: { from: number; increase: number };
+}
+
+export interface CampaignSelectionReview {
+  /** The `scope_review` Decision occurrence. One occurrence admits at most one scope change. */
+  occurrenceId: string;
+  /** SHA-256 of the stored scope grant the review read. */
+  grantDigest: string;
+  verdict: "admit";
+  reason: string;
 }
 
 /** Why an Orchestrator's scope proposal is the owner's one typed approval (#4102), with what the
@@ -5301,18 +5561,38 @@ export interface CampaignIssueScopeSnapshot {
  *
  * - `grant_failed` / `grant_uncertain`: the Decision Model failed or was uncertain on the first
  *   message, so there is no grant to review the proposal against.
- * - `selection`: the proposal fills the grant's selection. Until the Decision Model reviews
- *   selection proposals (#4103), the owner approves them. */
+ * - `selection_uncertain` / `selection_failed` (#4103): the proposal passed every deterministic
+ *   floor of the grant's selection, but the Decision Model's review of it was uncertain or failed.
+ * - `selection_unverified` (#4103): the runner could not report the issues' state and labels, so
+ *   the open and Human Required floors are unverified and nothing reviewed it.
+ * - `selection`: the interim before #4103, when the owner approved every selection proposal. Kept
+ *   so requests created then still read; nothing creates it now. */
 export interface CampaignScopeGrantReview {
-  cause: "grant_failed" | "grant_uncertain" | "selection";
+  cause: "grant_failed" | "grant_uncertain" | "selection" | "selection_uncertain" | "selection_failed" | "selection_unverified";
   /** The owner's first message as the boundary records it: one line, at most 4000 characters. */
   ownerMessage: string;
   messageDigest: string;
   grantOccurrenceId?: string;
+  /** The `scope_review` Decision occurrence that was uncertain or failed (#4103). */
+  reviewOccurrenceId?: string;
   failureClass?: DecisionErrorClass;
-  /** The model's uncertain reason, or for `selection` its reason for the grant. */
+  /** The model's uncertain reason, or for a selection its reason for the grant. */
   reason?: string;
   selection?: Pick<ScopeGrantSelection, "count" | "defaulted" | "criteria" | "constraints">;
+}
+
+/** One selection proposal the Decision Model reviewed (#4103), for Campaign Status. */
+export interface CampaignSelectionProposal {
+  issues: Array<{ repository: string; number: number; title: string }>;
+  /** The Orchestrator's rationale, as it proposed it. */
+  explanation: string;
+  /** `reviewing` until the review settles; `admitted` once an Orchestrator-owned scope change
+   * exists, `applied` once it is in scope; `refused` by the review; `waiting_for_owner` while the
+   * owner's one request is pending, then `owner_approved` or `owner_declined`; `replaced` when a
+   * later proposal superseded its scope change before it was applied. */
+  outcome: "reviewing" | "admitted" | "applied" | "refused" | "waiting_for_owner" | "owner_approved" | "owner_declined" | "replaced";
+  /** The scope change it led to, when there is one. */
+  requestOccurrenceId?: string;
 }
 
 /** The follow-up a `campaign_follow_up_admission` decision admits (#2940): a recommendation the
@@ -5356,10 +5636,34 @@ export interface SetCampaignFollowUpLimitRequest {
   expectedRevision: number;
 }
 
+/** One boundary repository in a campaign's scope view (#4118). */
+export interface CampaignIssueScopeRepositoryView {
+  repository: string;
+  /** Its authorized issue numbers. */
+  issueNumbers: number[];
+  /** `verified`: the launch repository was verified through the campaign runner for this view;
+   * another repository has a boundary-verified Location online to verify changes through.
+   * `no_location_online`: none of its Locations is online, so changes in it are refused. `saved`:
+   * the view shows the saved scope without verifying, as when the campaign runner is disconnected. */
+  state: "verified" | "no_location_online" | "saved";
+}
+
+/** The owner's change to how many issues a Full Control scope grant's selection may admit (#4102).
+ * Compare-and-set on the campaign's policy revision. A derived Maximum Issues moves with it; an
+ * explicit Maximum Issues never grows, so the count stays within what it leaves after the named issues. */
+export interface SetScopeGrantSelectionCountRequest {
+  count: number;
+  expectedRevision: number;
+}
+
 export interface CampaignIssueScopeView {
   campaignSessionId: string;
+  /** The launch Location's repository; `issueNumbers` are its numbers. Kept for older clients. */
   repository: string;
   issueNumbers: number[];
+  /** Every boundary repository with its scope, the launch repository first (#4118). A repository
+   * appears when the boundary holds it, so an empty one can still be added to. */
+  repositories?: CampaignIssueScopeRepositoryView[];
   revision: number;
   authorization?: CampaignIssueScope;
   supported: boolean;
@@ -5372,8 +5676,23 @@ export interface CampaignIssueScopeView {
   /** Issues a Full Control first message referenced only as context (#3920), less the current
    * scope. They carry no authority; adding one goes through scope review. */
   contextIssueNumbers?: number[];
-  /** The scope grant the owner's first message established (#4102), for Campaign Status. */
+  /** The scope grant the owner's first message established (#4102), for Campaign Status. Its
+   * ceilings are the current authorization's: `maxIssuesSource` is `derived` only while that
+   * authorization still derives Maximum Issues. */
   scopeGrant?: FullControlScopeGrant;
+  /** The Orchestrator's scope proposals under the propose-then-check flow (#4282), newest first. */
+  scopeProposals?: import("./scope-proposal.js").CampaignScopeProposalView[];
+  /** With `scopeGrant`: the policy revision this view was read at. A selection count change is
+   * compare-and-set against it, so a change made from a stale view is refused. */
+  policyRevision?: number;
+  /** True when the view is the saved scope because the campaign runner is disconnected (#2664).
+   * Campaign Status polls while it is set, so a mounted panel recovers after reconnection. */
+  runnerDisconnected?: boolean;
+  /** Recorded work whose number is in the saved scope while the campaign repository is unknown
+   * (`repository` is empty, #2664). It is neither verified in scope nor confirmed outside it. */
+  unverifiedWork?: Array<{ workItemId: string; title: string; issue: CampaignIssueRef; sessionId: string | null }>;
+  /** Recorded work confirmed outside the scope: another repository than a known `repository`, or a
+   * number the saved scope does not hold. An unknown repository alone never places work here. */
   outsideScope: Array<{ workItemId: string; title: string; issue: CampaignIssueRef; sessionId: string | null }>;
   candidates?: Array<{ issue: CampaignIssueRef; title: string; source: "umbrella" | "sub_issue" | "member_checklist" }>;
 }
@@ -5382,9 +5701,18 @@ export type CampaignIssueScopeMessage = {
   type: "campaign_issue_scope";
   requestId: string;
   sessionId: string;
-} & ({ operation: "inspect"; epic?: number; issues?: number[]; publication?: { sanitizedTitle: string; sanitizedBody: string; labels: string[] } } |
+} & ({ operation: "inspect"; epic?: number; issues?: number[]; publication?: { sanitizedTitle: string; sanitizedBody: string; labels: string[] };
+       /** v291 (#4103): also report `issueFacts` for each of `issues`. */
+       facts?: true } |
      { operation: "publication_inspect"; sanitizedTitle: string; sanitizedBody: string; labels: string[] } |
-     { operation: "synchronize"; scope: CampaignIssueScope; control?: CampaignControl });
+     { operation: "synchronize"; scope: CampaignIssueScope; control?: CampaignControl;
+       /** v310 (#3363): the campaign root's policy revision `control` was read at. A runner never
+        * replaces a control it holds at a newer revision. Sent only with `control`. */
+       controlRevision?: number } |
+     /** v302 (#4269): the issue numbers a Custom campaign's first-message reading granted, for its
+      * live root Orchestrator `campaignSessionId` (always the addressed session). It may only set
+      * numbers on a session holding none and no issue scope; it never widens, scopes or re-targets. */
+     { operation: "grant_issue_numbers"; campaignSessionId: string; issueNumbers: number[] });
 
 /** Bounded host-placement diagnostic; never carries configuration values or runner output. */
 export type HostExecutionTargetRefusalReason =
@@ -5394,6 +5722,21 @@ export type HostExecutionTargetRefusalReason =
   | "filesystem_mismatch"
   | "stale_network_policy"
   | "unsupported_host_boundaries";
+
+/** Why a runner refused a `grant_issue_numbers` delivery (#4269). */
+export type CampaignIssueNumberGrantRefusal =
+  /** The message's issue numbers or campaign session are malformed. */
+  | "invalid"
+  /** The addressed session is not a runner-local Orchestrator. */
+  | "not_orchestrator"
+  /** The grant names another campaign than the addressed session. */
+  | "other_campaign"
+  /** The session has no live provider (stopped, finished, or not launched). */
+  | "not_live"
+  /** The session already holds other issue numbers. */
+  | "issue_numbers_held"
+  /** The session already holds an authorized issue scope. */
+  | "issue_scope_held";
 
 export interface CampaignIssueScopeResultMessage {
   type: "campaign_issue_scope_result";
@@ -5409,10 +5752,48 @@ export interface CampaignIssueScopeResultMessage {
   candidates?: CampaignIssueScopeView["candidates"];
   error?: string;
   publicationDigest?: string;
+  /** v291 (#4103): the facts of each requested issue, when the inspection asked for them. */
+  issueFacts?: CampaignIssueFacts[];
+  /** v302 (#4269): a `grant_issue_numbers` answer. `applied` set the numbers on the live session;
+   * `unchanged` found exactly these numbers already held (a duplicate delivery). A refusal is
+   * `ok: false` with `grantRefusal`. */
+  issueNumbersGrant?: "applied" | "unchanged";
+  grantRefusal?: CampaignIssueNumberGrantRefusal;
   /** Duplicate inspection searched and compared titles by their subject, without a type tag
    * (#2940). Older runners omit it: their search and comparison keep the tag, so they can miss an
    * existing issue that differs only by it, and no bounded publication is admitted through them. */
   duplicateSearch?: "subject";
+}
+
+/** What the forge reports about one requested number (#4103), for the selection floors and the
+ * Decision Model's review. Title, labels and body are the forge's untrusted text. */
+export interface CampaignIssueFacts {
+  number: number;
+  kind: "issue" | "pull_request";
+  state: "open" | "closed";
+  /** Every label, never truncated: the Human Required label floor reads them all. An issue with
+   * more than `CAMPAIGN_ISSUE_FACT_LIMITS.labels` labels, or a longer name than `labelChars`, fails
+   * the read instead. */
+  labels: string[];
+  assignees: string[];
+  title: string;
+  /** The body's first `CAMPAIGN_ISSUE_FACT_LIMITS.bodyExcerptChars` characters. */
+  bodyExcerpt: string;
+}
+
+export const CAMPAIGN_ISSUE_FACT_LIMITS = { labels: 100, labelChars: 255, assignees: 20, titleChars: 512, bodyExcerptChars: 2000 } as const;
+
+/** Whether one reported fact is within its bounds, with every label complete (#4103). */
+export function validCampaignIssueFacts(value: unknown): value is CampaignIssueFacts {
+  const limits = CAMPAIGN_ISSUE_FACT_LIMITS;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  const strings = (list: unknown, max: number, chars: number) => Array.isArray(list) && list.length <= max &&
+    list.every((item) => typeof item === "string" && item.length <= chars);
+  return Number.isSafeInteger(v.number) && (v.number as number) > 0 && (v.kind === "issue" || v.kind === "pull_request") &&
+    (v.state === "open" || v.state === "closed") && strings(v.labels, limits.labels, limits.labelChars) &&
+    strings(v.assignees, limits.assignees, 100) && typeof v.title === "string" && v.title.length <= limits.titleChars &&
+    typeof v.bodyExcerpt === "string" && v.bodyExcerpt.length <= limits.bodyExcerptChars;
 }
 
 export interface GithubIssueClosureInspection {
@@ -5461,6 +5842,10 @@ export interface GithubIssueClosureSnapshot extends Omit<GithubIssueClosureInspe
   evidence: string[];
   comment?: string;
   activeChildren: Array<{ sessionId: string; title: string; assignmentDigest: string }>;
+  /** Server-derived (#3237): the live campaign children the ledger proves unrelated, so left out of
+   * `activeChildren`, each with the ledger facts that excluded it. Read-only: it stays outside the
+   * resource digest and is not sent to the runner. A snapshot from an earlier release omits it. */
+  excludedChildren?: IssueClosureExcludedChild[];
   issueAdmission?: CampaignIssueAdmission;
   dispositionRecommendationId?: string;
   /** Server-derived (#4059): the latest earlier closure of this issue by this Orchestrator that was
@@ -5509,12 +5894,18 @@ export interface OwnerDecisionSnapshot {
   question: string;
   options: WorkflowDecisionOption[];
   recommendedOptionId?: string;
-  /** What the owner needs to decide: links, head SHAs, check state, what each option does. */
+  /** What the owner needs to decide: links, head SHAs, check state, what each option does. Shown
+   * as Markdown. */
   material?: string;
+  /** v303 (#4270): an Owner Question, a design choice, clarification or preference the owner
+   * answers in their own words. It grants nothing, takes 0 to 12 suggested options and is never
+   * revoked by a scope, boundary or policy change. Absent: an Owner Approval, as before. */
+  kind?: "question";
 }
 
-/** Bounds of an owner decision, shared by the runner tool and the control plane. */
-export const OWNER_DECISION_LIMITS = { question: 4000, material: 8000, minOptions: 2, maxOptions: 12 } as const;
+/** Bounds of an owner decision, shared by the runner tool and the control plane. An Owner Question
+ * (#4270) takes as few as `minQuestionOptions` suggested options. */
+export const OWNER_DECISION_LIMITS = { question: 4000, material: 8000, minOptions: 2, minQuestionOptions: 0, maxOptions: 12 } as const;
 
 export type WorkflowDecisionResourceSnapshot =
   | AutomationCreationSnapshot
@@ -5553,11 +5944,12 @@ export type WorkflowDecisionResourceSnapshot =
       squash?: boolean;
       /** GitLab only: delete the source branch on merge; for a train, the merge request's own setting. */
       removeSourceBranch?: boolean;
-      /** GitHub only (v242, #3713): every issue this merge is meant to close, as sorted unique
-       * `owner/repo#N`. The control plane admits the merge only when these are exactly the issues
-       * GitHub would close. Absent when it closes none, so earlier digests are unchanged. */
+      /** Every issue this merge is meant to close (GitHub v242, #3713; GitLab v295, #3762), as sorted
+       * unique `owner/repo#N`, or `host/group/project#N` for GitLab. The control plane admits the
+       * merge only when these are exactly the issues the forge would close. Absent when it closes
+       * none, so earlier digests are unchanged. */
       intendedClosures?: string[];
-      /** GitHub only (v292, #4119): the pull request's repository requires no checks, so
+      /** GitHub only (v315, #4119): the pull request's repository requires no checks, so
        * `requiredChecks.checks` lists every check reported for the head instead, each passing,
        * with GitHub's merge state clean. With no checks at all the merge stays a person's
        * (`no_checks`). Absent for the required-checks basis, so earlier digests are unchanged. */
@@ -5734,6 +6126,10 @@ export interface WorkflowDecisionView {
    * owner. One way: it stays the person's, and so does every later request for the same resource
    * in the campaign. Only a person resolves it. */
   ownerHandoff?: { bySessionId: string; at: number; reason: string };
+  /** v296 (#4137): the installed or user-authored rule that keeps this occurrence for a person,
+   * named by its requester or carried over from an earlier occurrence for the same resource. The
+   * occurrence was created human-owned (`owner_kept`); only a person resolves it. */
+  ownerRule?: import("./workflow-decision-owner-rule.js").WorkflowDecisionOwnerRule;
 }
 
 /** v281 (#4064): a Full Control root's question for its campaign's owner. */
@@ -5746,6 +6142,9 @@ export interface CreateOwnerDecisionRequest {
   options: WorkflowDecisionOption[];
   recommendedOptionId?: string;
   material?: string;
+  /** v303 (#4270): `question` asks an Owner Question, answered in the owner's own words; `approval`
+   * (the default) asks for an exact choice among 2 to 12 options. */
+  kind?: "question" | "approval";
 }
 
 /** v281 (#4064): hand one pending Orchestrator-owned occurrence to the campaign's owner. */
@@ -5763,6 +6162,10 @@ export interface CreateWorkflowDecisionRequest {
    * that would supersede a person-owned follow-up publication is refused instead (#4066). */
   resourceKey: string;
   resourceSnapshot: WorkflowDecisionResourceSnapshot;
+  /** v296 (#4137): an installed or user-authored rule keeps this gate for a person. The occurrence
+   * is created human-owned under any mode or grant; it can only narrow authority. Bounded and
+   * refused, never truncated, when oversize. Reusing a requestId with a different rule fails. */
+  ownerRule?: import("./workflow-decision-owner-rule.js").WorkflowDecisionOwnerRule;
 }
 
 export interface ResolveWorkflowDecisionRequest {
@@ -5963,6 +6366,10 @@ export interface GovernancePolicyConditions {
   minToolCalls?: number;
   maxToolCalls?: number;
   escalated?: boolean;
+  /** Issue labels, matched case-insensitively (#4103). Only a Human Required ask rule may set them,
+   * and such a rule never matches a tool request: it keeps an Orchestrator from admitting an issue
+   * with one of these labels into its own scope, which stays the owner's to add. */
+  issueLabels?: string[];
 }
 
 export type GovernancePolicyEffect = "allow" | "deny" | "ask";
@@ -7266,7 +7673,8 @@ export interface SessionNamingConnectionTestResult {
  * `scope_grant` reads a Full Control owner's first message into a typed scope grant (#4102), and
  * `credential_screen` screens Full Control questions (#4104); the other Full Control callers add
  * their kinds here with their prompts. */
-export type DecisionKind = "probe" | "scope_grant" | "credential_screen";
+export type DecisionKind = "probe" | "scope_grant" | "credential_screen" | "follow_up_relatedness" | "closure_reason" | "scope_review" |
+  "scope_check";
 
 /** Why one Decision attempt failed. The control plane, not the runner, decides what is transient:
  * see DECISION_TRANSIENT_ERROR_CLASSES. */
@@ -7315,8 +7723,12 @@ export const DECISION_PREPARATION_BUDGET_MS = 4_000;
 export const DECISION_CLEANUP_BUDGET_MS = 1_000;
 /** Extra time the control plane waits on the runner round trip beyond the attempt budget. */
 export const DECISION_TRANSPORT_MARGIN_MS = DECISION_CLEANUP_BUDGET_MS + 1_000;
-/** Largest structured output, in UTF-8 bytes, a runner returns. */
-export const DECISION_OUTPUT_MAX_BYTES = 8 * 1024;
+/** Largest structured output, in UTF-8 bytes, a runner returns. A v307 runner allows 32 KiB so one
+ * call can carry every typed answer (#4283); older runners stop at 8 KiB and never receive a typed
+ * call. */
+export const DECISION_OUTPUT_MAX_BYTES = 32 * 1024;
+/** Largest output schema, in JSON characters, a v307 runner accepts (older runners: 8,000). */
+export const DECISION_SCHEMA_MAX_CHARS = 32_000;
 /** Largest rendered input, in characters, the control plane sends for one call. */
 export const DECISION_INPUT_MAX_CHARS = 48_000;
 
@@ -7360,6 +7772,8 @@ export interface DecisionModelResolvedTarget {
   driver: SessionNamingHarnessOption["driver"];
   provider: SessionNamingAccountBoundary["provider"];
   model: string;
+  /** The model's advertised display name, as Settings shows it. Absent on older records. */
+  modelName?: string;
   effort: string;
 }
 
@@ -7397,6 +7811,9 @@ export interface DecisionOccurrenceView {
   usage: DecisionUsageView;
   createdAt: number;
   decidedAt?: number;
+  /** v307 (#4283): a typed occurrence's questions and answers; the verdict above is the server's
+   * derivation from them. Absent on single-verdict occurrences. */
+  typedAnswers?: import("./decision-questions.js").DecisionTypedAnswersView;
 }
 
 export interface DecisionModelTestResult {
@@ -7410,11 +7827,17 @@ export interface DecisionModelTestResult {
 export interface CampaignDecisionSubject {
   /** The session whose request was screened. */
   sessionId: string;
-  surface: "implementation_question" | "provider_question" | "tool_request" | "owner_decision";
+  surface: "implementation_question" | "provider_question" | "tool_request" | "owner_decision" | "follow_up_publication" | "issue_closure" |
+    "issue_scope_seed";
   /** The affected request: a workflow decision request id, or a provider request occurrence id. */
   requestId: string;
-  /** The owner's classification of an uncertain or failed screen. */
+  /** The owner's classification of an uncertain or failed screen. For an epic seed, `orchestrator`
+   * is the owner's Continue Without an Epic. */
   classification?: "decline" | "orchestrator";
+  /** An `issue_scope_seed` subject's seed state, when this occurrence is the campaign's current
+   * reading, or `scoped` once the person approved a scope, which ends any hold the seed placed.
+   * Server-derived for Campaign Status; never stored on the subject. */
+  seed?: CampaignIssueScopeSeed["state"] | "scoped";
 }
 
 /** Owner classification of a question the Decision Model could not screen (#4104). It never
@@ -7425,7 +7848,7 @@ export interface ClassifyCampaignDecisionRequest {
 
 export interface CampaignDecisionsResponse {
   campaignSessionId: string;
-  decisions: Array<DecisionOccurrenceView & { subject?: CampaignDecisionSubject }>;
+  decisions: Array<DecisionOccurrenceView & { subject?: CampaignDecisionSubject; selectionProposal?: CampaignSelectionProposal }>;
   usage: DecisionUsageView & { calls: number; unpricedCalls: number };
 }
 
@@ -7941,7 +8364,9 @@ export interface ManagedBackgroundJobView {
   endedBy?: ManagedBackgroundJobEnd;
   /** Set once a job the runner still lists has gone `BACKGROUND_JOB_STALL_MS` without a terminal
    * status (#1651). It is a report, not proof that the job ended: Wollipog cannot tell a monitor
-   * that never fires from one still waiting. */
+   * that never fires from one still waiting. Past it the job no longer counts as a campaign child's
+   * wait; dashboards from #4249 on still show the job Running, since elapsed time breaks no
+   * liveness contract (older ones label it Stalled). */
   stalledSince?: number;
 }
 
@@ -8679,6 +9104,10 @@ export interface SessionView {
   /** v272: the merge-queue watch this session is parked on, or the latest one whose wake is still
    * owed or was lost (#4071). Omitted otherwise and by older control planes. */
   pullRequestWatch?: import("./pull-request-watch.js").PullRequestWatchView;
+  /** v298: the `wait_session` and `wait_pull_request` calls in progress on this session, oldest
+   * first, each classified Healthy or Stalled by the control plane (#1280, #4249). Omitted when
+   * there are none and by older control planes. */
+  waits?: import("./session-waits.js").SessionWaitView[];
   /** Submission stays fenced until the runner confirms the committed role. */
   roleConversion?: SessionRoleConversionView;
   /** Resolved campaign behavior and authority snapshot. Present only for Orchestrator sessions
@@ -10157,9 +10586,11 @@ export interface GitLabMergePreflightResultMessage {
   reason?: string;
 }
 
-/** One issue a GitHub merge would close (#3713). `description` is the description's text, with
- * its line in `excerpt`; `linked` is GitHub's own `closingIssuesReferences`, which also covers an
- * issue linked by hand. Either alone closes the issue. */
+/** One issue a merge would close (#3713). `description` is the description's text, with its line in
+ * `excerpt`; `linked` is the forge's own list: GitHub's `closingIssuesReferences`, which also covers
+ * an issue linked by hand, or GitLab's `closes_issues` (#3762), which also covers the title, the
+ * commits and an instance's own closing pattern. Either alone closes the issue. A GitHub issue is
+ * `owner/repo#N`; a GitLab issue is `host/group/project#N`, lowercased. */
 export interface PullRequestClosure {
   issue: string;
   sources: Array<"description" | "linked">;
@@ -10181,11 +10612,11 @@ export interface GithubMergePreflightMessage {
   repository: string;
   pullRequest: number;
   headSha: string;
-  /** v292 (#4119): also read the head's checks, for a snapshot whose `checksBasis` is `all_reported`. */
+  /** v315 (#4119): also read the head's checks, for a snapshot whose `checksBasis` is `all_reported`. */
   checks?: true;
 }
 
-/** v292 (#4119): what GitHub reports for a pull request's head: every check, how many it marks
+/** v315 (#4119): what GitHub reports for a pull request's head: every check, how many it marks
  * required, and whether its merge state is clean. */
 export interface PullRequestChecksRead {
   /** Reported checks GitHub marks required for this pull request. */
@@ -10207,8 +10638,34 @@ export interface GithubMergePreflightResultMessage {
   refusal?: "stale_head" | "unavailable";
   reason?: string;
   check?: PullRequestClosingReferenceCheck;
-  /** v292: present when the request asked for `checks` and the read succeeded. */
+  /** v315: present when the request asked for `checks` and the read succeeded. */
   checks?: PullRequestChecksRead;
+}
+
+/** v295 (#3762): before a GitLab `pr_merge` is requested or armed, the child's runner reads the open
+ * merge request through the session's own `glab` login: its head, its description and GitLab's own
+ * `closes_issues` list. Read-only; the control plane compares the closures with the snapshot's
+ * `intendedClosures`. */
+export interface GitLabMergeClosuresMessage {
+  type: "gitlab_merge_closures";
+  requestId: string;
+  sessionId: string;
+  repository: string;
+  pullRequest: number;
+  headSha: string;
+}
+
+/** As `GithubMergePreflightResultMessage`: `stale_head` (the merge request is not open at the
+ * snapshot's head) or `unavailable` (GitLab could not be read, so nothing was proven). `reason` is a
+ * fixed sentence, never `glab` output. */
+export interface GitLabMergeClosuresResultMessage {
+  type: "gitlab_merge_closures_result";
+  requestId: string;
+  sessionId: string;
+  ok: boolean;
+  refusal?: "stale_head" | "unavailable";
+  reason?: string;
+  check?: PullRequestClosingReferenceCheck;
 }
 
 /** Runner-authoritative coordinates for one successfully appended action-arm fence. */
@@ -10857,6 +11314,7 @@ export type RunnerToControlPlane =
   | WorkflowActionAdmissionRecordedMessage
   | GitLabMergePreflightResultMessage
   | GithubMergePreflightResultMessage
+  | GitLabMergeClosuresResultMessage
   | import("./forge-decision-action.js").ForgeDecisionActionResultMessage
   | WorkflowActionReconciliationResultMessage
   | GithubIssueClosureResultMessage
@@ -12411,6 +12869,11 @@ export interface SearchWorkspaceReferencesRequestMessage {
    * contain the query, files and folders, in traversal order. A runner that predates the field
    * ignores it and answers without echoing it. */
   match?: WorkspaceReferenceSearchMatch;
+  /** The composer's picker (#4129): matched like `match: "fuzzy"`, folders as well as files, ranked
+   * by the same scorer within the same caps. Sent instead of `match`, so a runner or control plane
+   * that predates it answers with substring results, which still include folders, rather than with
+   * fuzzy files only. Takes precedence over `match`. */
+  fuzzyWithDirectories?: boolean;
 }
 
 export type WorkspaceReferenceSearchMatch = "fuzzy";
@@ -12425,8 +12888,11 @@ export interface SearchWorkspaceReferencesResultMessage {
   error?: string;
   results?: WorkspaceReferenceCandidate[];
   truncated?: boolean;
-  /** Echoes the request's `match` when the runner applied it. */
+  /** Echoes the request's `match` when the runner applied it; `"fuzzy"` too for an applied
+   * `fuzzyWithDirectories`. */
   match?: WorkspaceReferenceSearchMatch;
+  /** Echoes the request's `fuzzyWithDirectories` when the runner applied it (#4129). */
+  fuzzyWithDirectories?: boolean;
   /** Set on a truncated fuzzy search. */
   limit?: WorkspaceReferenceSearchLimit;
 }
@@ -12962,6 +13428,7 @@ export type ControlPlaneToRunner =
   | RecordWorkflowActionAdmissionMessage
   | GitLabMergePreflightMessage
   | GithubMergePreflightMessage
+  | GitLabMergeClosuresMessage
   | import("./forge-decision-action.js").ForgeDecisionActionMessage
   | ReconcileWorkflowActionMessage
   | GithubIssueClosureMessage

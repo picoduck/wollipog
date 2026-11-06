@@ -41,6 +41,7 @@ import {
   setRemoteRefsMetadataReaderForTests,
   setGitRunnerForTests,
   stageHunk,
+  latestCheckContexts,
   summarizeCheckRollup,
   summarizeGitLabPipeline,
   synchronizeCheckpointRefs,
@@ -312,6 +313,103 @@ test("summarizeCheckRollup: never throws; unknown SHAPES are pending, but a COMP
   const r = summarizeCheckRollup([{ mystery: true }, { name: "odd", status: "COMPLETED", conclusion: "WAT" }]);
   assert.equal(r.pending, 1, "an unrecognizable node shape stays pending (can't be judged)");
   assert.deepEqual(r.failingNames, ["odd"], "a terminal non-pass conclusion must not be labeled 'running'");
+});
+
+/** A check run as `gh pr view --json statusCheckRollup` reports it (#4263). */
+function ghRun(name: string, conclusion: string | null, startedAt: string | null, job: number, workflowName = "CI") {
+  return {
+    __typename: "CheckRun", name, workflowName, startedAt, completedAt: conclusion ? startedAt : null,
+    status: conclusion ? "COMPLETED" : "QUEUED", conclusion: conclusion ?? "",
+    detailsUrl: `https://github.com/picoduck/wollipog/actions/runs/${Math.floor(job / 1000)}/job/${job}`,
+  };
+}
+
+test("summarizeCheckRollup: a cancelled run superseded by a newer passing run of the same check passes (#4263)", () => {
+  // The closed pull request's run was cancelled; the replacement's run of every check passed.
+  const r = summarizeCheckRollup([
+    ghRun("Typecheck, Test & Sidecar Bundle", "CANCELLED", "2026-11-05T15:24:47Z", 127339808509),
+    ghRun("Unit Tests (1)", "CANCELLED", "2026-11-05T15:23:14Z", 127338879088),
+    ghRun("Unit Tests (1)", "SUCCESS", "2026-11-05T16:14:33Z", 127367279079),
+    ghRun("Typecheck, Test & Sidecar Bundle", "SUCCESS", "2026-11-05T16:27:37Z", 127374358123),
+  ]);
+  assert.deepEqual(r, { failing: 0, pending: 0, passing: 2, failingNames: [] });
+});
+
+test("summarizeCheckRollup: a check whose latest run failed or was cancelled still fails (#4263)", () => {
+  const r = summarizeCheckRollup([
+    ghRun("test", "SUCCESS", "2026-11-05T15:00:00Z", 1001),
+    ghRun("test", "FAILURE", "2026-11-05T16:00:00Z", 2001),
+    ghRun("e2e", "CANCELLED", "2026-11-05T15:00:00Z", 1002),
+  ]);
+  assert.deepEqual(r, { failing: 2, pending: 0, passing: 0, failingNames: ["test", "e2e"] });
+  // A queued re-run supersedes the failure it re-runs, before it has started.
+  const rerun = summarizeCheckRollup([ghRun("test", "FAILURE", "2026-11-05T15:00:00Z", 1001), ghRun("test", null, null, 2001)]);
+  assert.deepEqual(rerun, { failing: 0, pending: 1, passing: 0, failingNames: [] });
+});
+
+test("summarizeCheckRollup: the job id orders Actions runs, so an old job cancelled after the new one started does not win (#4263)", () => {
+  // The closed pull request's job never started; GitHub stamped it when it was cancelled, after the
+  // replacement's job had already started.
+  const r = summarizeCheckRollup([
+    ghRun("Lint", "SUCCESS", "2026-11-05T15:23:30Z", 2001),
+    ghRun("Lint", "CANCELLED", "2026-11-05T15:24:47Z", 1001),
+  ]);
+  assert.deepEqual(r, { failing: 0, pending: 0, passing: 1, failingNames: [] });
+});
+
+test("summarizeCheckRollup: check runs and status contexts each keep their latest entry per check (#4263)", () => {
+  const r = summarizeCheckRollup([
+    // Status contexts: an older error superseded by a newer success, and a lone failure.
+    { __typename: "StatusContext", context: "ci/legacy", state: "ERROR", startedAt: "2026-11-05T15:00:00Z" },
+    { __typename: "StatusContext", context: "ci/legacy", state: "SUCCESS", startedAt: "2026-11-05T16:00:00Z" },
+    { __typename: "StatusContext", context: "ci/broken", state: "FAILURE", startedAt: "2026-11-05T15:00:00Z" },
+    // A check run sharing a status context's name is a different check.
+    ghRun("ci/legacy", "FAILURE", "2026-11-05T14:00:00Z", 1001),
+    // The same job name in two workflows is two checks, each counted.
+    ghRun("build", "FAILURE", "2026-11-05T15:00:00Z", 1002, "Release"),
+    ghRun("build", "SUCCESS", "2026-11-05T16:00:00Z", 2002, "CI"),
+  ]);
+  assert.deepEqual(r, { failing: 3, pending: 0, passing: 2, failingNames: ["ci/broken", "ci/legacy", "build"] });
+});
+
+test("summarizeCheckRollup: runs that cannot be ordered keep the worse result (#4263)", () => {
+  // Neither carries a job id, and both started in the same second.
+  const tie = summarizeCheckRollup([
+    { name: "x", status: "COMPLETED", conclusion: "FAILURE", startedAt: "2026-11-05T15:00:00Z" },
+    { name: "x", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "2026-11-05T15:00:00Z" },
+  ]);
+  assert.deepEqual(tie, { failing: 1, pending: 0, passing: 0, failingNames: ["x"] });
+  // An unknown start time never proves a run newer, whichever order GitHub lists them in.
+  for (const nodes of [
+    [{ name: "y", status: "COMPLETED", conclusion: "SUCCESS" }, { name: "y", status: "COMPLETED", conclusion: "CANCELLED", startedAt: "2026-11-05T15:00:00Z" }],
+    [{ name: "y", status: "COMPLETED", conclusion: "CANCELLED", startedAt: "2026-11-05T15:00:00Z" }, { name: "y", status: "COMPLETED", conclusion: "SUCCESS" }],
+  ]) {
+    assert.deepEqual(summarizeCheckRollup(nodes), { failing: 1, pending: 0, passing: 0, failingNames: ["y"] });
+  }
+  // `gh` prints Go's zero time for a run with no start: unknown, never older than a real time.
+  const zero = summarizeCheckRollup([
+    { name: "z", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "2026-11-05T15:00:00Z" },
+    { name: "z", status: "COMPLETED", conclusion: "FAILURE", startedAt: "0001-01-01T00:00:00Z" },
+  ]);
+  assert.deepEqual(zero, { failing: 1, pending: 0, passing: 0, failingNames: ["z"] });
+});
+
+test("summarizeCheckRollup: a failure no later run is provably newer than still counts, whatever the order (#4263)", () => {
+  // No ids: a failure at 15:00, a failure with no start time, and a success at 16:00. The success is
+  // newer than the first failure but cannot be shown newer than the second.
+  const timed = { name: "w", status: "COMPLETED", conclusion: "FAILURE", startedAt: "2026-11-05T15:00:00Z" };
+  const untimed = { name: "w", status: "COMPLETED", conclusion: "FAILURE" };
+  const success = { name: "w", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "2026-11-05T16:00:00Z" };
+  for (const nodes of [[timed, untimed, success], [untimed, timed, success], [success, untimed, timed]]) {
+    assert.deepEqual(summarizeCheckRollup(nodes), { failing: 1, pending: 0, passing: 0, failingNames: ["w"] }, JSON.stringify(nodes));
+  }
+  // Once every failure is provably older, the success counts.
+  assert.deepEqual(summarizeCheckRollup([timed, { ...untimed, startedAt: "2026-11-05T15:30:00Z" }, success]),
+    { failing: 0, pending: 0, passing: 1, failingNames: [] });
+  // The check keeps the place where it first appears.
+  const first = { name: "a", status: "COMPLETED", conclusion: "SUCCESS" };
+  const queued = { name: "b", status: "QUEUED" };
+  assert.deepEqual(latestCheckContexts([first, timed, queued, success]), [first, success, queued]);
 });
 
 test("summarizeCheckRollup: failing names are bounded to 8", () => {

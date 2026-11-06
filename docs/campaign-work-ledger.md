@@ -565,6 +565,16 @@ derivation, refresh) and `apps/runner/src/campaign-forge-status.ts` (the read).
   GitHub still computes it, they read `unknown`. A seen failure or pending check is reported as
   such. When more checks exist than one read covers (100) and none of those seen failed, the
   required rollup is `unknown` too.
+- **Latest run per check (#4263):** a head can carry several runs of one check, such as a cancelled
+  run from a closed pull request and the replacement pull request's passing run. Only each check's
+  most recent run counts, by check run id (creation order) and otherwise by start or creation time;
+  runs that cannot be ordered keep the worse result. Check runs and status contexts are
+  de-duplicated separately, and a check run's workflow keeps same-named jobs of two workflows
+  apart. GitHub's own rollup state counts superseded runs too, so when every context was read, a
+  `FAILURE` or `ERROR` state that superseded failures explain is set aside, but only when each is
+  a status context or a check run whose workflow is known (another app's run, or a login that
+  cannot read workflow runs, leaves it unknown). Past a truncated read it still reads `failing`.
+  The session Git panel's checks summary de-duplicates the same way.
 - **Refresh:** on demand, `POST /api/sessions/:id/campaign/work-items/:itemId/forge-refresh`, which
   the panel sends when an item's details open and every 60 seconds while they stay open; it waits
   at most 20 seconds and returns the item's facts (`CampaignForgeRefreshResponse`). The panel does
@@ -574,7 +584,9 @@ derivation, refresh) and `apps/runner/src/campaign-forge-status.ts` (the read).
   **unfinished** items whose last read, successful or not (a timed-out or rejected read included),
   finished more than `backgroundIntervalMs` (5 minutes) ago,
   oldest first, at most `backgroundRefsPerTick` (32) per pass, skipping a pull request last seen
-  merged or closed (on-demand reads still refresh it) and campaigns whose root is archived.
+  merged or closed (on-demand reads still refresh it) and campaigns whose root is archived. A
+  merged pull request whose branch cleanup is still owed (#4067) is not skipped. That includes one
+  read before its runner reported head branches, until that runner, now v284, reads it once (#4145).
 - **Bounds:** one pull request is read at most once per `minIntervalMs` (30 seconds, counted from
   when the previous read finished) whoever asks;
   a read already in flight is shared; at most `concurrentRequests` (2) runner requests run at once,

@@ -22,6 +22,7 @@
     { "method": "POST", "route": "/api/projects/:id/locations/:id/worktree-setup", "budget": "serverBoundUpTo150s", "why": "A 150s runner wait." },
     { "method": "POST", "route": "/api/pods/:id/reconcile", "budget": "serverBoundUpTo150s", "why": "Pod reconciliation waits 120s." },
     { "method": "POST", "route": "/api/skill-git/preview", "budget": "serverBoundUpTo150s", "why": "A Git skill preview clones for up to 90s." },
+    { "method": "POST", "route": "/api/decision-model/test", "budget": "serverBoundUpTo150s", "why": "Test Decision Model runs one probe decision bounded at 90s (DECISION_TOTAL_BOUND_MS)." },
     { "method": "POST", "route": "/api/sessions/:id/git", "budget": "serverBoundUpTo60s", "why": "Opening a pull request and forge review syncs wait 60s (other Git actions 30s, same route)." },
     { "method": "POST", "route": "/api/sessions/:id/role", "budget": "serverBoundUpTo60s", "why": "Role conversion prepares and commits sequentially, with a 30s runner wait for each phase." },
     { "method": "POST", "route": "/api/sessions/:id/authentication/account", "budget": "serverBoundUpTo60s", "why": "Choosing a provider account waits 60s." },

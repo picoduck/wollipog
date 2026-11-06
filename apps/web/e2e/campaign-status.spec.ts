@@ -183,6 +183,36 @@ for (const theme of ["dark", "light"] as const) {
   }
 }
 
+// UI evidence for #4117: set CAMPAIGN_REPOSITORIES_EVIDENCE_DIR to capture the Repositories section.
+const REPOSITORIES_EVIDENCE_DIR = process.env.CAMPAIGN_REPOSITORIES_EVIDENCE_DIR;
+for (const theme of ["dark", "light"] as const) {
+  for (const [device, viewport] of [["desktop", { width: 1440, height: 900 }], ["phone", { width: 390, height: 844 }]] as const) {
+    test(`Repositories lists the boundary and includes a waiting Location on a ${device} ${theme} viewport (#4117)`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.goto(`/campaign-status-e2e.html?scenario=campaign&repositories=1&theme=${theme}`);
+      const section = page.locator("section.campaign-detail-section", { has: page.locator("h3", { hasText: /^Repositories$/ }) });
+      await expect(section).toBeVisible();
+      await expect(section.locator("dt")).toHaveText(["picoduck/wollipog", "picoduck/dev-box-setup", "picoduck/notes-site", "Boundary Revision"]);
+      await expect(section.getByRole("list", { name: "Locations of picoduck/wollipog" })).toContainText("Wollipog on Laptop");
+      await expect(section.getByRole("list", { name: "Locations of picoduck/wollipog" })).toContainText("Default");
+      await expect(section.getByRole("list", { name: "Locations of picoduck/notes-site" })).toContainText("Removed");
+      await expect(section.getByRole("list", { name: "Excluded Locations" })).toContainText("Scratch Folder");
+      await expect(section.getByRole("list", { name: "Excluded Locations" })).toContainText("not a git repository");
+      await expect(section).toContainText("Joined at boundary revision 6.");
+      await section.scrollIntoViewIfNeeded();
+      await assertNoHorizontalOverflow(page, ".campaign-status");
+      if (REPOSITORIES_EVIDENCE_DIR) await section.screenshot({ path: `${REPOSITORIES_EVIDENCE_DIR}/repositories-${device}-${theme}.png` });
+      const include = section.getByRole("button", { name: "Include Shared Docs in Campaign" });
+      await expect(include).toHaveText("Include in Campaign");
+      await include.click();
+      expect(await page.evaluate(() => (window as unknown as { __INCLUDED_LOCATION__?: string }).__INCLUDED_LOCATION__)).toBe("loc_shared");
+      await expect(section.getByRole("list", { name: "Locations of picoduck/shared-docs" })).toContainText("Shared Docs");
+      await expect(section.getByRole("button", { name: "Include Shared Docs in Campaign" })).toHaveCount(0);
+      if (REPOSITORIES_EVIDENCE_DIR) await section.screenshot({ path: `${REPOSITORIES_EVIDENCE_DIR}/repositories-included-${device}-${theme}.png` });
+    });
+  }
+}
+
 // UI evidence for #3539 and #3600: set CAMPAIGN_GITLAB_EVIDENCE_DIR to capture the GitLab refs.
 const GITLAB_EVIDENCE_DIR = process.env.CAMPAIGN_GITLAB_EVIDENCE_DIR;
 test("GitLab issue and merge request refs link to their host and show observed GitLab facts in GitLab's terms", async ({ page }) => {
@@ -273,6 +303,45 @@ test("a campaign complete with handoffs lists the owner's items without a recove
   await assertNoHorizontalOverflow(page, ".campaign-status");
 });
 
+// UI evidence for #3361: set CAMPAIGN_RECOVERY_HOLD_EVIDENCE_DIR to capture each recovery hold. The
+// capture comes before the assertions, so the same run against the old panel records "before".
+const RECOVERY_HOLD_EVIDENCE_DIR = process.env.CAMPAIGN_RECOVERY_HOLD_EVIDENCE_DIR;
+const RECOVERY_HOLDS = [
+  { name: "complete", query: "activity=complete&automation=complete", label: "Campaign Complete", notice: null },
+  { name: "cleanup", query: "activity=cleanup&automation=complete", label: "Complete, Needs Cleanup", notice: null },
+  { name: "active", query: "activity=active&automation=complete", label: "Campaign Active", notice: "No Recovery Needed" },
+  { name: "stuck", query: "activity=stuck&automation=held", label: "Campaign Stuck", notice: "Authorized Recovery Unavailable" },
+] as const;
+for (const theme of ["dark", "light"] as const) {
+  for (const [device, viewport] of [["desktop", { width: 1440, height: 1000 }], ["phone", { width: 390, height: 844 }]] as const) {
+    for (const hold of RECOVERY_HOLDS) {
+      test(`${hold.label} shows ${hold.notice ?? "no recovery notice"} for its recovery hold on a ${device} ${theme} viewport (#3361)`, async ({ page }) => {
+        await page.setViewportSize(viewport);
+        await page.goto(`/campaign-status-e2e.html?scenario=campaign&${hold.query}&theme=${theme}`);
+        await expect(page.locator(".campaign-status-summary")).toContainText(hold.label);
+        const titled = (title: string) => page.locator(".notice", { has: page.locator(".notice-title", { hasText: title }) });
+        // Frame where the recovery notice is, or where it would be: just above Authorized Issue Scope.
+        const notice = page.locator(".notice", { has: page.locator(".notice-title", { hasText: /^(No Recovery Needed|Authorized Recovery Unavailable)$/u }) });
+        await (await notice.count() ? notice : page.getByRole("heading", { name: "Authorized Issue Scope" })).scrollIntoViewIfNeeded();
+        if (RECOVERY_HOLD_EVIDENCE_DIR) await page.screenshot({ path: `${RECOVERY_HOLD_EVIDENCE_DIR}/recovery-${hold.name}-${device}-${theme}.png` });
+        if (hold.notice === "No Recovery Needed") {
+          await expect(titled("No Recovery Needed")).toHaveClass(/\bt-neutral\b/u);
+          await expect(titled("No Recovery Needed")).toHaveAttribute("role", "status");
+          await expect(titled("No Recovery Needed")).toContainText("The campaign has no unfinished original scoped recovery obligation.");
+          await expect(titled("Authorized Recovery Unavailable")).toHaveCount(0);
+        } else if (hold.notice) {
+          await expect(titled("Authorized Recovery Unavailable")).toHaveClass(/\bt-warning\b/u);
+          await expect(titled("Authorized Recovery Unavailable")).toContainText("Reconcile its original obligation before continuing.");
+          await expect(titled("No Recovery Needed")).toHaveCount(0);
+        } else {
+          await expect(page.getByText(/Authorized Recovery Unavailable|No Recovery Needed/u)).toHaveCount(0);
+        }
+        await assertNoHorizontalOverflow(page, ".campaign-status");
+      });
+    }
+  }
+}
+
 test("a campaign without a recorded plan says so", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=planless");
   const notice = page.locator(".campaign-status-summary .notice");
@@ -327,3 +396,38 @@ test("decisions the owner kept wait for them in Campaign Status, and each opens 
   await expect(detail.getByRole("button", { name: "Do Not Proceed" })).toBeVisible();
   await assertNoHorizontalOverflow(page, ".request-panel-detail");
 });
+
+for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "phone", width: 390, height: 844 }]) {
+  test(`an Orchestrator's scope proposal without lineage waits for the owner with its Maximum Issues increase, ${viewport.name} (#4267)`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&ownerScope=1");
+    const waiting = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Waiting for You" }) });
+    const summary = "Add team/repo#141, team/repo#142, raising Maximum Issues from 6 to 7";
+    await expect(waiting).toContainText("Scope Approval");
+    await expect(waiting).toContainText(summary);
+    await expect(waiting).toContainText("Proposed by the Orchestrator");
+    await expect(waiting).toContainText("Only you can make this decision.");
+    // The root's own request opens as its dock card above the composer, which this harness does not
+    // render; campaign-issue-scope.spec.ts reads that card.
+    await expect(waiting.getByRole("button", { name: `Open Request: ${summary}` })).toBeVisible();
+  });
+
+  test(`a merge an installed rule keeps for the owner waits for them with the rule's source and quote, ${viewport.name} (#4137)`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&owners=rule");
+    const waiting = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Waiting for You" }) });
+    await expect(waiting).toContainText("Kept by Rule");
+    await expect(waiting).toContainText("Merge picoduck/wollipog#4141");
+    await expect(waiting).toContainText("~/.codex/skills/issue-workflow/SKILL.md");
+    await expect(waiting).toContainText("Never merge a pull request without per-PR user authorization");
+    await assertNoHorizontalOverflow(page, ".campaign-status");
+    await waiting.getByRole("button", { name: "Open Request: Merge picoduck/wollipog#4141" }).click();
+    const detail = page.locator(".request-panel-detail");
+    await expect(detail).toContainText("PR Merge Approval Required");
+    await expect(detail).toContainText("An installed or user-authored rule keeps this decision for a person, so no agent can make it.");
+    await expect(detail).toContainText("Rule Source");
+    await expect(detail).toContainText("~/.codex/skills/issue-workflow/SKILL.md");
+    await expect(detail.getByRole("button", { name: "Approve" })).toBeVisible();
+    await assertNoHorizontalOverflow(page, ".request-panel-detail");
+  });
+}

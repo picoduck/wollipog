@@ -1,7 +1,8 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-export const BROWSER_SHARD_COUNT = 5;
+import { BROWSER_SHARD_COUNT } from "./scripts/browser-shard-count.mjs";
+export { BROWSER_SHARD_COUNT } from "./scripts/browser-shard-count.mjs";
 export const browserTestDir = fileURLToPath(new URL("./apps/web/e2e/", import.meta.url));
 export const browserProfile = JSON.parse(readFileSync(new URL("./scripts/fixtures/browser-shard-profile.json", import.meta.url), "utf8")) as {
   fallbackDurationMs: number;

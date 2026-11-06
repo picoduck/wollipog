@@ -407,6 +407,34 @@ if (new URLSearchParams(location.search).has("no-input")) {
     if (sessions[index]!.column === "input_required") sessions.splice(index, 1);
   }
 }
+// At-rest Orchestrator roots in each campaign state (#2938), as a v297 list snapshot sends them: the
+// server's lifecycle column (Review for an idle session) and a Full Control root's campaign status.
+// Each holds an unacknowledged result. An ordinary running session and a question keep their columns.
+if (new URLSearchParams(location.search).has("campaigns")) {
+  const at = Date.now() - 600_000;
+  const root = (id: string, title: string, status: SessionView["fullControlCampaignStatus"], extra: Partial<SessionView> = {}) =>
+    session(id, title, "review", {
+      role: "orchestrator",
+      updatedAt: at, lastEventAt: at,
+      orchestratorPolicy: { control: { mode: status ? "full_control" : "custom" } } as unknown as SessionView["orchestratorPolicy"],
+      ...(status ? { fullControlCampaignStatus: status } : {}),
+      attention: { version: 1, meaningfulAt: at, humanActions: [], result: { revision: `${id}-result`, at, owner: "human" },
+        acknowledgedRevision: null },
+      ...extra,
+    });
+  sessions.splice(0, sessions.length,
+    root("s-campaign-active", "Campaign Active: Children Working", "active"),
+    root("s-campaign-complete", "Campaign Complete: Every Issue Merged", "verified_complete"),
+    root("s-campaign-cleanup", "Campaign Delivered: Merged Branch Left", "complete_needs_cleanup"),
+    root("s-campaign-stuck", "Campaign Stuck: Unmerged PR, Nothing Running", "stuck"),
+    root("s-campaign-waiting", "Campaign Waiting: Merge Approval for You", "waiting_human",
+      { campaignRequests: { human: 1, orchestrator: 0, humanRequestTokens: [] } }),
+    root("s-campaign-custom", "Custom Campaign: Result to Review", undefined),
+    session("s-running", "Running Session", "running", { status: "running", updatedAt: at, lastEventAt: at }),
+    session("s-question", "Question Session", "input_required", { status: "input_required", updatedAt: at, lastEventAt: at,
+      pendingApproval: { requestId: "campaign-question", kind: "question", title: "Which release?", options: [], questions: [] } as never }),
+  );
+}
 
 const reminders: SessionReminderView[] = [
   {

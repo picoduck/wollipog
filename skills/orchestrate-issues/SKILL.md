@@ -68,6 +68,9 @@ Required exceptions. Identify unresolved mandatory human rules by their exact in
 never silently rewrite external or user-authored instructions. Full Control applies only to eligible
 server-established authority permitted by repository policy. Custom preserves existing approval
 requirements. A changed policy must pass its own explicitly authorized contribution workflow.
+Under Full Control, which launches with no form or question, the root makes this record visible
+after launch in one first report before its first child; the reference says what it names. The
+report asks nothing and waits for nobody.
 
 Carry forward the user's actual campaign authorization and repository rules. Routine claims, isolated worktrees, testing, pushing, opening PRs, and required reviews need no repeated permission. Existing rules may still require per-PR merge authorization, UI evidence review, remote-branch deletion authorization, and approval of each exact sanitized issue payload. Do not silently convert a request for this workflow into a waiver of those gates.
 
@@ -75,9 +78,9 @@ Read the authoritative current campaign state and server-derived policy with `ge
 
 When you own a `ui_evidence_approval` decision with several images, prefer `prepare_descendant_ui_evidence_review`. It hands every image to a managed reviewer Session with a fresh context, so the images never enter your own conversation. Write its brief from the child's stated claims and the issue's UI acceptance criteria. While the reviewer works, end your turn or wait on its session instead of polling, then read the verdict with `get_descendant_ui_evidence_review`. Approve only with the exact `delegatedImageReview` reference it returns, listing every evidence id in `evidenceReviewed`. On a deny recommendation, deny with a `childMessage` that names the observed defects. Keep `review_descendant_ui_evidence` for a decision with one image, or for a targeted look at one image when the verdict leaves something unclear. Where the reviewer path is unavailable, it refuses with the reason; review directly instead. A reviewer is a campaign child like any other: verify its report and include it in cleanup.
 
-Before approving a child's GitHub `pr_merge`, read what it closes: the decision's `closingReferenceCheck` lists every issue GitHub would close on merge, and the server created the decision only because they match the snapshot's `intendedClosures`. Approve a closure only when the campaign means that merge to close the issue; deny with a child message otherwise, so the child rewords the reference as "Refs #N". Where the check is absent (the child's runner predates it), run `wollipog pr closures <pr-url> --json` yourself before approving. Closing keywords bypass a typed `issue_closure` gate, so where the campaign closes issues through that route, a child's merge should normally close none.
+Before approving a child's `pr_merge`, GitHub or GitLab, read what it closes: the decision's `closingReferenceCheck` lists every issue the forge would close on merge, and the server created the decision only because they match the snapshot's `intendedClosures`. Approve a closure only when the campaign means that merge to close the issue; deny with a child message otherwise, so the child rewords the reference as "Refs #N". Where the check is absent (the child's runner predates it: v242 for GitHub, v295 for GitLab), run `wollipog pr closures <pr-or-mr-url> --json` yourself before approving. GitLab closes more than GitHub: "closing" and "implements" count, and one keyword closes every reference in a list. Closing keywords bypass a typed `issue_closure` gate, so where the campaign closes issues through that route, a child's merge should normally close none.
 
-Never change campaign control settings, approve a human-owned request, impersonate a human, or bypass a pending approval with a plain prompt. An eligible root Full Control occurrence may use server-recorded standing authorization through its exact typed resolution route; it cannot mint a new grant. UI evidence remains human-owned when the active policy says the Orchestrator cannot inspect the evidence bytes. For any human-owned or otherwise undelegated gate, relay the concrete decision through the harness's supported typed question mechanism and keep unrelated children progressing. Under Full Control no person sees the root's questions: the server dismisses them unanswered, so resolve Orchestrator-owned occurrences yourself and report a human-owned gate, which stays visible in Campaign Status, instead of asking. When the owner kept a decision for themselves (a design choice, risk consent to a merge, publication, an epic's closure), give it to them as a typed request rather than in chat: `request_owner_decision` for a new question with explicit options and decision material, or `hand_workflow_decision_to_owner` for a pending occurrence you own, such as a child's `pr_merge`. Neither parks you: keep unrelated children progressing, and act on the owner's choice when it comes back. A handoff is one way, so never resolve that occurrence afterwards (`using-wollipog`, Decisions the Owner Kept). Identify the exact policy requiring the gate. Do not imply that campaign ownership authorizes external effects beyond the active policy.
+Never change campaign control settings, approve a human-owned request, impersonate a human, or bypass a pending approval with a plain prompt. An eligible root Full Control occurrence may use server-recorded standing authorization through its exact typed resolution route; it cannot mint a new grant. UI evidence approval belongs to `get_campaign.uiEvidenceReview.effectiveOwner`: under Custom it goes to the person when the Orchestrator cannot inspect the evidence bytes; under Full Control an Orchestrator-owned gate stays yours even then, so approve only evidence you inspected and otherwise ask for screenshots attached as Session artifacts or deny the claim as unproven. For any human-owned or otherwise undelegated gate, relay the concrete decision through the harness's supported typed question mechanism and keep unrelated children progressing. Under Full Control no person sees the root's questions: the server dismisses them unanswered, so resolve Orchestrator-owned occurrences yourself and report a human-owned gate, which stays visible in Campaign Status, instead of asking. When the owner kept a decision for themselves (a design choice, risk consent to a merge, publication, an epic's closure), give it to them as a typed request rather than in chat: `request_owner_decision` for a new question with explicit options and decision material, or `hand_workflow_decision_to_owner` for a pending occurrence you own, such as a child's `pr_merge`. Neither parks you: keep unrelated children progressing, and act on the owner's choice when it comes back. A handoff is one way, so never resolve that occurrence afterwards (`using-wollipog`, Decisions the Owner Kept). Identify the exact policy requiring the gate. Do not imply that campaign ownership authorizes external effects beyond the active policy.
 
 For unattended campaigns, explain up front which gates still need the user. A user may explicitly delegate eligible decisions for a campaign, subject to higher-priority and platform restrictions; record the exact scope and exceptions. Do not modify standing policies as part of execution.
 
@@ -137,7 +140,7 @@ If follow-ups continually expand into new product scope, recur after purported f
 
 The campaign converges only when every selected and accepted issue is delivered, every child's latest follow-up report has been adjudicated, no accepted follow-up awaits publication or execution, and no PR, review, approval, or implementation task remains pending. Rejected or already-resolved proposals need recorded reasons; raw recommendations need not be empty if none remain actionable after review.
 
-Before archival, save final child reports and verify remote branches are gone or retained for an explicitly documented dependency. Never delete a branch merely because a PR entered the merge queue. Retained branches or unresolved delivery obligations prevent reporting full completion. Where `get_campaign` reports `mergedBranches`, it lists each merged campaign pull request's head branch as `deleted`, `retained` (with the reason), or `pending`, and a pending one keeps the campaign from `verified_complete`. Have the child that merged a branch delete it before its final report. When a branch must stay, or its child can no longer delete it, record a handoff to `human` or `external` on the work item naming its pull request, with the reason and the next action; the branch then reads `retained` and the campaign can finish as `complete_with_handoffs`.
+Before archival, save final child reports and verify remote branches are gone or retained for an explicitly documented dependency. Never delete a branch merely because a PR entered the merge queue. Retained branches or unresolved delivery obligations prevent reporting full completion. Where `get_campaign` reports `mergedBranches`, it lists each merged campaign pull request's head branch as `deleted`, `retained` (with the reason), or `pending`, and a pending or retained one keeps the campaign from `verified_complete`: once nothing is running it reads `complete_needs_cleanup` (older hosts: `active` or `complete_with_handoffs`), and `get_campaign.cleanup` names each item's exact action. Have the child that merged a branch delete it before its final report. When a branch must stay, or its child can no longer delete it, record a handoff to `human` or `external` on the work item naming its pull request, with the reason and the next action; the branch then reads `retained` and is listed for the owner.
 
 When a provider refuses an approved forge command (for example, Claude Code's auto-mode classifier refusing an approved enqueue or branch deletion), neither you nor the child retries it through another shell, wrapper, or permission change, and nobody turns the classifier off. The child calls `execute_workflow_decision` for that exact occurrence instead, and Wollipog performs the one approved action itself: a compare-and-delete pinned to the approved merged head for a `merged_branch_deletion` that names `pullRequest` and `headSha`, or the canonical pinned enqueue for an armed `pr_merge`. Its `forgeAction` records the outcome. A refusal that changed nothing leaves the approval in place for a retry; a stale snapshot revokes it and needs a new request.
 
@@ -206,7 +209,11 @@ Never substitute a shell command or generic approval, and never
 approve a human-owned request. A root may resolve an eligible Full Control occurrence only from
 its server-recorded standing authorization; the server rechecks it when the root resolves. Under
 Full Control nobody sees the root's own questions: the server dismisses them unanswered and tells
-the root to decide with these typed tools. Read `issueClosureResult`: `closed` and `already_closed`
+the root to decide with these typed tools. When the root genuinely needs its owner's input on a
+design choice, clarification or preference, it asks an Owner Question with `request_owner_decision`
+and `kind: "question"`: the owner answers in their own words and the root keeps working meanwhile.
+Reserve Owner Approvals (`kind: "approval"`, or a typed decision handed over with
+`hand_workflow_decision_to_owner`) for exact actions the owner kept. Read `issueClosureResult`: `closed` and `already_closed`
 are verified outcomes. `refused` wrote nothing and used up the approval: its `refusal.reason` and
 `refusal.summary` say why and name any pull request that changed, so address that and request a
 new closure. `uncertain` means GitHub may have accepted the action. Inspect uncertain outcomes without replaying the comment or closure.
@@ -217,24 +224,66 @@ execution targets, or incomplete bounded conflict evidence refuse the operation 
 ## Inspecting and Changing Campaign Issue Scope
 
 Before delegating an epic, use `get_campaign_issue_scope` (CLI: `wollipog issue-scope get --epic <number>`).
-It returns authorized repository-qualified issues, a revision, recorded work outside scope, and reviewable
-umbrella/member candidates. Native GitHub sub-issues and leading checklist entries under Units, Members,
+It returns authorized repository-qualified issues grouped by repository under `repositories` (one entry
+per campaign repository, the launch repository first, with whether one of its Locations is online), a
+revision, recorded work outside scope, and reviewable umbrella/member candidates. Native GitHub sub-issues and leading checklist entries under Units, Members,
 Child Issues, Sub-Issues, or Implementation Issues are candidates; dependencies and incidental references
 are not members and never grant authority. Inspect candidates and select the intended members.
 
 To recover or extend an existing campaign, use `request_campaign_issue_scope_change` (CLI:
 `wollipog issue-scope request --proposal '<json>'`) with `requestId`, `expectedRevision`, `explanation`,
-and exact `additions` and `removals`, each an array of `{ "repository": "owner/repo", "number": 123 }`.
-Custom requires an authenticated human to approve the exact change. In Full Control with a separate
+and exact `additions` and `removals`, each an array of `{ "repository": "owner/repo", "number": 123 }`
+in any of the campaign's repositories. The same number in two repositories is two separate issues. Each
+repository's part is verified through one of its own online Locations; a repository with none online
+refuses the whole request by name. A repository outside the campaign is refused with
+`repository_outside_boundary` before any runner call: if the campaign's Project has a Location of it,
+ask the owner to include it, then retry. Custom requires an authenticated human to approve the exact change. In Full Control with a separate
 human-established issue boundary, use `lineage: {kind: "epic", epic: <number>}` for verified intended
 members or `{kind: "follow_up", publicationOccurrenceId: <id>}` for an exact authorized publication.
 A publication the boundary's author or a campaign owner approved as a person under the current
-objective also qualifies. When the owner's first message set the scope and its Scope Grant in Campaign
-Status failed, was uncertain, or asked the campaign to select issues, propose the issues you chose
-without lineage: the proposal goes to the owner as one typed approval, so put your rationale in
-`explanation`. The server
-refuses incidental references, foreign repositories and changes beyond human-set limits, naming the
-failed condition in a bounded `code`; a campaign owner can still propose the change from Campaign Status.
+objective also qualifies.
+
+When the owner's first message started a Full Control campaign, you read that message and propose
+its scope; the server reads nothing from it. The campaign starts with an empty scope and dispatches
+nothing until your initial proposal is admitted, so proposing it is your first campaign action, after
+`get_campaign` and the preflight report. Send the issues as `additions` with `proposal`: for each
+issue its `origin`, `owner_named` when its number is in the owner's message or `orchestrator_chosen`,
+and a one-line `rationale`; `requestedCount`, the number the owner asked for or `null`;
+`constraints`, each checkable limit you read ("open", "UI only", "skip anything labeled security");
+and `withheldOperations`, operations the message rules out ("fix but don't merge" withholds
+`pr_merge`). Ranking criteria such as "highest priority" are your call: explain them in each
+rationale and in `explanation`, never as constraints. A task that needs no issues proposes no
+additions. Deterministic checks run first and refuse, naming the issue and condition: an owner-named
+number the message doesn't write, an issue outside the campaign's repositories, a pull request, a
+closed issue, one already in scope, one another active campaign holds, one past an explicit Maximum
+Issues, and one with a label a Human Required rule names; revise and propose again rather than asking.
+A proposal of only owner-named issues that the message writes as issue references (`#12`,
+`owner/repo#12` or the issue's URL), with no constraint, withheld operation or other count, returns
+an Orchestrator-owned scope change that you resolve and apply yourself. Anything else goes to the
+Decision Model's constraint check, which checks only what the owner's words allow (the count, which
+issues were asked for rather than mentioned, each stated constraint, omissions and withheld
+operations), never priority. Its admit also returns an Orchestrator-owned change. Its refusal names
+the question and issue: revise and propose again, since the same issues with another rationale get
+the same answer. When it is uncertain or fails, the proposal becomes the owner's one approval, asked
+as an Owner Question with your proposal and rationale; proposing the same issues again returns that
+same request, and an answer in the owner's own words declines it and reaches you as a prompt. A
+stated count must be one the message writes, your chosen issues stay within it (3 when none is
+stated), and later additions take the same route within the admitted count.
+
+A campaign whose stored Scope Grant predates this keeps it. When that grant failed or was uncertain,
+propose the issues you chose without lineage: the proposal goes to the owner as one typed approval,
+so put your rationale in `explanation`. When it asked the campaign to select issues, propose the open
+issues you chose with `lineage: {kind: "selection"}`, additions only, with your ranking in
+`explanation`: the same deterministic checks run (and one past the selection count), then the Decision
+Model checks the proposal against the owner's stated constraints, never your ranking; an uncertain or
+failed check becomes the owner's one typed approval, and proposing the same issues again returns that
+same request. For any other addition,
+such as an issue the owner asks for mid-run, propose it without lineage: it becomes the owner's one
+typed approval, stating any Maximum Issues increase it needs, and the returned occurrence tells you
+what to ask the owner to approve in their Inbox or Campaign Status; proposing the same issues again
+returns that same request. The server refuses incidental references, foreign repositories and
+lineage changes beyond human-set limits, naming the failed condition in a bounded `code`; a campaign
+owner can still propose the change from Campaign Status.
 Resolution applies and consumes scope atomically; do not separately consume it. A root can resolve
 only an eligible occurrence backed by its standing human authorization: when the effective owner is
 `orchestrator`, resolve it with `resolve_descendant_workflow_decision` and its own session ID as
@@ -243,8 +292,9 @@ Pending, denied, stale and replayed proposals leave scope unchanged. After appro
 Humans can inspect, resolve epic candidates, and request changes in Campaign Status's Authorized Issue Scope.
 
 Scope changes preserve conversation and work history. Removals display affected assignments and revoke
-outstanding action decisions; issue closure retains its separate exact decision. Active Orchestrator
-participants must use the campaign's runner and repository workspace. Updates require protocol v208
+outstanding action decisions; issue closure retains its separate exact decision. Every active
+Orchestrator participant must run in a Location of one of the campaign's repositories, and stores only
+its own repository's issues; one outside the launch repository needs protocol v313. Updates require protocol v208
 on the control plane and participating runners; unsupported peers must be updated and reconnected.
 The authoritative revision is persisted on both sides, delivered on reconnect and restart, and checked
 again by closure execution. An offline or unsynchronized runner cannot execute a revised closure.
@@ -256,8 +306,9 @@ naming the scope route. A merge that would
 close an unscoped issue needs the campaign owner: a child's `pr_merge` naming one in `intendedClosures`
 is refused with each issue named, so have the child write "Refs #N" or add the issue to the scope first.
 A refused scope change is final for this campaign: do not recommit, dispatch, or merge around it. Report
-the issue as blocked work for the campaign owner. A merge whose closures cannot be read (a GitLab merge,
-or a GitHub merge from an older runner) is human-owned whatever it declares. Merges are evaluated again
+the issue as blocked work for the campaign owner. A merge whose closures cannot be read (a GitHub merge from a runner
+older than v242, or a GitLab merge from one older than v295) is human-owned whatever it declares; a
+current runner's merge whose closures are all in scope is owned like any other. Merges are evaluated again
 against the current scope before approval and arming.
 
 Bounded Full Control issue writes require protocol v217 on every participant. The authorizing human

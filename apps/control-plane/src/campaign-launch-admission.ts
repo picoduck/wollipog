@@ -9,7 +9,7 @@ import {
   type CampaignLaunchProposal, type CampaignLaunchInspectionResult, type ChildSessionDefaults,
   type OrchestratorCampaignBudgetDefault,
   type CreateSessionRequest, type FullControlEnableRequest, type FullControlLaunchOverrides, type FullControlLaunchRequest,
-  type PreparedCampaignLaunch, type ProjectLocationInspection, type RunnerView,
+  type PreparedCampaignLaunch, type ProjectLocationInspection, type RunnerView, type ExecutionTargetDefinition,
 } from "@wollipog/protocol";
 import type { UiEvidenceReviewEvaluation } from "./ui-evidence-review.js";
 import { launchBoundaryRepositories, type CampaignProjectLocation } from "./campaign-repository-boundary.js";
@@ -87,7 +87,9 @@ function validOverrides(o: unknown): o is FullControlLaunchOverrides {
   if (!record(o) || !only(o, ["session", "objective", "operations", "delegatablePolicyIds", "budget", "issues"])) return false;
   const v = o as FullControlLaunchOverrides;
   if (v.session !== undefined && (!record(v.session) ||
-      !only(v.session, ["agentId", "providerAccountId", "title", "useWorktree", "config", "orchestrator"]))) return false;
+      !only(v.session, ["agentId", "providerAccountId", "title", "useWorktree", "executionTargetId", "launchSurface", "config", "orchestrator"]) ||
+      (v.session.executionTargetId !== undefined && !text(v.session.executionTargetId, 256)) ||
+      (v.session.launchSurface !== undefined && v.session.launchSurface !== "direct" && v.session.launchSurface !== "native_tui"))) return false;
   if (v.objective !== undefined && !text(v.objective, 4000)) return false;
   if (v.operations !== undefined && (!Array.isArray(v.operations) || !v.operations.length ||
       new Set(v.operations).size !== v.operations.length ||
@@ -113,9 +115,9 @@ export function firstMessageLaunch(request: Pick<FullControlLaunchRequest, "task
 }
 
 /** Issue references in the owner's first message that name the campaign's own repository (see
- * `issueReferenceSpans`), distinct and bounded. These are candidates only: since #3920 only those
- * `firstMessageIssueIntent` finds the message asking to act on become scope, and the runner still
- * verifies each one is an issue of the repository before it enters the scope. */
+ * `issueReferenceSpans`), distinct and bounded. These are the scope grant's fast path only: only
+ * what the Decision Model's grant names becomes scope (#4102, #4104), and the runner still verifies
+ * each one is an issue of the repository before it enters the scope. */
 export function issueReferencesInMessage(text: string, repository: string): number[] {
   return [...new Set(issueReferenceSpans(text, repository).map((r) => r.number))].sort((a, b) => a - b).slice(0, MAX_MESSAGE_ISSUES);
 }
@@ -182,6 +184,21 @@ export function defaultLaunchAgentId(runner: RunnerView): string | undefined {
   return (eligible.find((agent) => agent.id === reviewer && agent.driver === "claude-code") ??
     eligible.find((agent) => agent.driver === "claude-code") ??
     eligible.find((agent) => agent.driver === "codex-app-server"))?.id;
+}
+
+/** Why the person's own Harness or Run On choice can't hold a Full Control root, or null (#2940).
+ * Only a choice that names a known non-host target or Native TUI is refused here, in words; every
+ * other choice, an unknown or unavailable target included, goes to the ordinary creation
+ * validator, which also refuses both of these. Nothing is ever replaced by the host default. */
+export function fullControlRootPlacementRefusal(request: FullControlLaunchRequest, targets: ReadonlyArray<Pick<ExecutionTargetDefinition, "id" | "adapter">>): string | null {
+  const session = request.overrides?.session;
+  if (session?.launchSurface === "native_tui") {
+    return "Full Control needs the Direct harness, because Native TUI doesn't track usage or show approval cards. Choose Direct under Harness.";
+  }
+  const target = session?.executionTargetId === undefined ? undefined : targets.find((item) => item.id === session.executionTargetId);
+  return target && target.adapter !== "host"
+    ? `An Orchestrator runs only on its machine's host, so Full Control can't start on a ${target.adapter} target. Choose a host target under Run On.`
+    : null;
 }
 
 /** The ordinary creation request the launch validates and, once authorized, admits. */

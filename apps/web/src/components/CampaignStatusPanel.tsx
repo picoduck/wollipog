@@ -30,6 +30,7 @@ import {
   RESPONSIBLE_ACTOR_LABELS,
   UNAVAILABLE,
   campaignCostView,
+  campaignRecoveryAutomationNotice,
   campaignSummaryView,
   costWithProvenance,
   causeNeedsRequests,
@@ -57,8 +58,14 @@ import { sessionAgentLabel } from "./agent-options.js";
 import { DetailSkeleton, Skeleton } from "./common.js";
 import { ChevronLeftIcon } from "./Icons.js";
 import { CampaignIssueScopePanel } from "./CampaignIssueScopePanel.js";
+import { CampaignAuthoritySummary } from "./CampaignAuthoritySummary.js";
 import { CampaignFollowUpLimit } from "./CampaignFollowUpLimit.js";
+import { CampaignCleanup, CampaignStuck } from "./CampaignCleanup.js";
+import { useStoreSelector } from "../store.js";
+import { CampaignDecisions } from "./CampaignDecisions.js";
 import { CampaignDecisionModelChecks } from "./CampaignDecisionModelChecks.js";
+import { OwnerRuleFactRows } from "./requests/WorkflowDecisionSummary.js";
+import { CampaignRepositories } from "./CampaignRepositories.js";
 import { CampaignRecoveryNotice } from "./CampaignRecoveryNotice.js";
 import { Notice } from "./Notice.js";
 import { StaleContent } from "./StaleContent.js";
@@ -218,6 +225,8 @@ function AvailableCampaignStatus({
   }, [memory.selectedItemId, shownRows, listSettled]);
 
   const heldChildren = data.summary.campaign?.heldChildren ?? [];
+  // A child named by Cleanup or Campaign Stuck, as a link to its session.
+  const sessionLink = (sessionId: string) => <CampaignChildLink sessionId={sessionId} onOpen={onOpenSession} />;
   return (
     <div className="campaign-status" ref={scrollRef}>
       {memory.selectedItemId ? (
@@ -262,7 +271,24 @@ function AvailableCampaignStatus({
                 canClassify={availability.role === "campaign"}
                 refreshKey={data.summary.campaign}
                 onOpenSession={onOpenSession}
+                findRequest={findRequest}
+                onOpenRequest={onOpenRequest}
               />
+              {data.summary.campaign?.status === "stuck" && data.summary.campaign.stuck && (
+                <CampaignStuck
+                  stuck={data.summary.campaign.stuck}
+                  repair={data.summary.campaign.activity?.repair}
+                  onOpenSession={sessionLink}
+                />
+              )}
+              {data.summary.campaign?.cleanup && (
+                <CampaignCleanup
+                  campaignId={availability.campaignSessionId}
+                  cleanup={data.summary.campaign.cleanup}
+                  canAct={availability.role === "campaign"}
+                  onOpenSession={sessionLink}
+                />
+              )}
               {data.summary.campaign?.handoffs && (
                 <CampaignHandoffs
                   handoffs={data.summary.campaign.handoffs}
@@ -271,11 +297,7 @@ function AvailableCampaignStatus({
                     scrollTop: scrollRef.current?.scrollTop ?? memory.scrollTop })}
                 />
               )}
-              {data.summary.campaign?.recovery?.automation?.reason && (
-                <Notice tone="warning" title="Authorized Recovery Unavailable">
-                  {data.summary.campaign.recovery.automation.reason}
-                </Notice>
-              )}
+              <CampaignRecoveryAutomation campaign={data.summary.campaign} />
               {data.summary.campaign?.recovery?.records.map(record => (
                 <CampaignRecoveryNotice key={record.id} record={record} />
               ))}
@@ -290,7 +312,22 @@ function AvailableCampaignStatus({
                   onOpenRequest={onOpenRequest}
                 />
               )}
-              <CampaignIssueScopePanel session={session} campaignId={availability.campaignSessionId} />
+              {data.summary.campaign?.control?.mode === "full_control" && data.summary.campaign.decisionOwners &&
+                data.summary.campaign.uiEvidenceReview && (
+                <CampaignAuthoritySummary campaign={{ ...data.summary.campaign, control: data.summary.campaign.control,
+                  decisionOwners: data.summary.campaign.decisionOwners, uiEvidenceReview: data.summary.campaign.uiEvidenceReview }} />
+              )}
+              {data.summary.campaign?.repositoryBoundary && (
+                <CampaignRepositories
+                  campaignId={availability.campaignSessionId}
+                  boundary={data.summary.campaign.repositoryBoundary}
+                  canInclude={availability.role === "campaign"}
+                />
+              )}
+              <CampaignIssueScopePanel session={session} campaignId={availability.campaignSessionId}
+                policyRevision={availability.role === "campaign" ? data.summary.campaign?.policyRevision : undefined}
+                boundaryShown={data.summary.campaign?.control?.mode === "full_control"} />
+              <CampaignDecisions campaignId={availability.campaignSessionId} />
               <CampaignWorkList
                 data={data}
                 filters={memory.filters}
@@ -310,6 +347,18 @@ function AvailableCampaignStatus({
   );
 }
 
+/** The recovery automation's hold (#3361): nothing for a finished campaign, neutral when nothing is
+ * left to recover, and a warning only for a hold that keeps work from continuing. */
+function CampaignRecoveryAutomation({ campaign }: { campaign: CampaignStatusData["summary"]["campaign"] }) {
+  const notice = campaignRecoveryAutomationNotice(campaign?.status, campaign?.recovery?.automation);
+  if (!notice) return null;
+  return (
+    <Notice tone={notice.tone} title={notice.title} role={notice.tone === "neutral" ? "status" : undefined}>
+      {notice.body}
+    </Notice>
+  );
+}
+
 /* ------------------------------------------------------------------------------------------------
  * Handed Off (#4070)
  * ---------------------------------------------------------------------------------------------- */
@@ -324,12 +373,17 @@ function CampaignOwnerDecisions({ ownerDecisions, now, findRequest, onOpenReques
 }) {
   const headingId = useId();
   const hidden = ownerDecisions.total - ownerDecisions.items.length;
+  // An Orchestrator's scope proposal without lineage waits for the owner without the owner keeping it (#4267).
+  const scopeApproval = (item: (typeof ownerDecisions.items)[number]) => item.category === "campaign_issue_scope" && !item.ownerRule && !item.handedOff;
+  const one = ownerDecisions.total === 1;
   return (
     <section className="campaign-status-handoffs" aria-labelledby={headingId}>
       <h3 id={headingId} className="section-title">Waiting for You</h3>
       <p className="section-note">
-        You kept {ownerDecisions.total === 1 ? "this decision" : "these decisions"}, so only you can make{" "}
-        {ownerDecisions.total === 1 ? "it" : "them"}. The Orchestrator keeps working on everything else meanwhile.
+        {ownerDecisions.items.some(scopeApproval)
+          ? `Only you can make ${one ? "this decision" : "these decisions"}.`
+          : `You kept ${one ? "this decision" : "these decisions"}, so only you can make ${one ? "it" : "them"}.`}{" "}
+        The Orchestrator keeps working on everything else meanwhile.
       </p>
       <ul className="campaign-detail-list">
         {ownerDecisions.items.map((item) => {
@@ -338,15 +392,17 @@ function CampaignOwnerDecisions({ ownerDecisions, now, findRequest, onOpenReques
             <li key={item.occurrenceId}>
               <dl className="facts">
                 <div>
-                  <dt>{item.handedOff ? "Handed to You" : "Owner Decision"}</dt>
+                  <dt>{item.ownerRule ? "Kept by Rule" : item.handedOff ? "Handed to You" : scopeApproval(item) ? "Scope Approval" : "Owner Decision"}</dt>
                   <dd>
                     {item.summary}
                     <span className="campaign-status-meta">
-                      {item.handedOff ? "Handed over by the Orchestrator" : "Asked by the Orchestrator"}{" "}
+                      {item.ownerRule ? "Requested under a rule" : item.handedOff ? "Handed over by the Orchestrator"
+                        : scopeApproval(item) ? "Proposed by the Orchestrator" : "Asked by the Orchestrator"}{" "}
                       <RecordedTime at={item.createdAt} now={now} />
                     </span>
                   </dd>
                 </div>
+                {item.ownerRule && <OwnerRuleFactRows rule={item.ownerRule} />}
               </dl>
               {requestKey && <button type="button" className="btn sm" aria-label={`Open Request: ${item.summary}`}
                 onClick={() => onOpenRequest(requestKey)}>Open Request</button>}
@@ -712,6 +768,12 @@ function SessionLink({ sessionId, onOpen, children }: { sessionId: string; onOpe
       {children}
     </a>
   );
+}
+
+/** A campaign child by its title from the store, as a link to its session (#4146). */
+function CampaignChildLink({ sessionId, onOpen }: { sessionId: string; onOpen: (sessionId: string) => void }) {
+  const title = useStoreSelector((s) => s.sessions.get(sessionId)?.title ?? "");
+  return <SessionLink sessionId={sessionId} onOpen={onOpen}>{title || "Open Child Session"}</SessionLink>;
 }
 
 function RecordedTime({ at, now, prefix }: { at: number | null; now: number; prefix?: string }) {

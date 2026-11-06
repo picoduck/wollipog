@@ -16,6 +16,7 @@ import {
   AGENT_CONTROL_RELAY_KEY_ENV,
 } from "./agent-control-relay.js";
 import type { GhOutcome, GhRunner } from "./campaign-forge-status.js";
+import type { GlabRunner } from "./campaign-gitlab-status.js";
 import { runPullRequestCli, runWollipogCli, runWollipogInit } from "./wollipog-cli.js";
 import { expandCommandAlias, resolveHelp } from "./wollipog-help.js";
 
@@ -372,12 +373,60 @@ test("pr closures reports what merging a pull request or a draft would close, ag
   assert.equal(JSON.parse(denied.stdout).error, "gh in this session's context is not signed in to github.com.");
   for (const args of [["pr", "closures"], ["pr", "closures", "7", "8"], ["pr", "closures", "--file"],
     ["pr", "closures", "7", "--intended"], ["pr", "closures", "7", "--repo", "a/b", "--intended", "nope"],
-    ["pr", "closures", "gitlab.example.com/group/project!7"], ["pr", "closures", "--file", "body.md", "7", "--repo", "a/b"]]) {
+    ["pr", "closures", "--file", "body.md", "7", "--repo", "a/b"]]) {
     assert.equal((await run([...args, "--json"])).code, 2, args.join(" "));
   }
   const help = await captureCli(["pr", "closures", "--help"]);
   assert.equal(help.code, 0);
   assert.match(help.stdout, /wollipog pr closures --file <description\.md>/u);
+});
+
+test("pr closures reads a GitLab merge request or draft by GitLab's closing pattern and its own list (#3762)", async () => {
+  const head = "44579c6c25235598f1a28f8ccb0449cb8dbbc810";
+  const project = "gitlab.example.com/group/project";
+  const encoded = encodeURIComponent("group/project");
+  const calls: string[][] = [];
+  const glab: GlabRunner = async (args) => {
+    calls.push(args);
+    if (args[1] === `projects/${encoded}/merge_requests/7`) {
+      return { stdout: JSON.stringify({ iid: 7, state: "opened", sha: head, description: "Refs #3. This MR is not closing #12." }),
+        stderr: "", code: null, timedOut: false };
+    }
+    assert.equal(args[1], `projects/${encoded}/merge_requests/7/closes_issues?per_page=100`);
+    return { stdout: JSON.stringify([{ id: 1, iid: 20, web_url: `https://${project}/-/issues/20`, references: { full: "group/project#20" } }]),
+      stderr: "", code: null, timedOut: false };
+  };
+  const gh: GhRunner = async () => { throw new Error("a GitLab merge request is never read with gh"); };
+  const run = async (args: string[]) => {
+    let stdout = "";
+    const code = await runPullRequestCli(args, true, { stdout: (text) => { stdout += text; }, stderr: () => {} }, gh, undefined, undefined, glab);
+    return { code, stdout };
+  };
+  const flagged = await run(["pr", "closures", `${project}!7`, "--intended", "#20", "--json"]);
+  assert.equal(flagged.code, 3);
+  assert.deepEqual(JSON.parse(flagged.stdout), {
+    repository: project, pullRequest: 7, state: "opened", headSha: head,
+    closures: [
+      { issue: `${project}#12`, sources: ["description"], excerpt: "Refs #3. This MR is not closing #12." },
+      { issue: `${project}#20`, sources: ["linked"] },
+    ],
+    undeclared: [`${project}#12`], unmade: [],
+  });
+  assert.deepEqual(calls[0], ["api", `projects/${encoded}/merge_requests/7`, "--hostname", "gitlab.example.com"]);
+  const byUrl = await run(["pr", "closures", `https://${project}/-/merge_requests/7`, "--intended", "#12", "--intended", `${project}#20`, "--json"]);
+  assert.equal(byUrl.code, 0);
+
+  const root = mkdtempSync(join(tmpdir(), "wollipog-cli-gitlab-closures-"));
+  try {
+    const draft = join(root, "body.md");
+    writeFileSync(draft, "Implements #4, #5 and other/project#6.\n");
+    const fromFile = await run(["pr", "closures", "--file", draft, "--repo", project, "--json"]);
+    assert.equal(fromFile.code, 3);
+    assert.deepEqual(JSON.parse(fromFile.stdout).undeclared, [`${project}#4`, `${project}#5`, "gitlab.example.com/other/project#6"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+  assert.equal((await run(["pr", "closures", `${project}!7`, "--intended", "https://github.com/a/b/issues/1", "--json"])).code, 2);
 });
 
 test("local init succeeds without control-plane credentials and emits stable content-safe JSON", async () => {
@@ -1408,10 +1457,15 @@ test("CLI typed-decision help is discoverable and malformed or cross-session com
     "get_workflow_decision", "consume_workflow_decision", "reconcile_workflow_decision",
     "decision withdraw", "withdraw_workflow_decision", "protocol v269",
     "decision ask-owner", "decision hand-to-owner", "request_owner_decision", "hand_workflow_decision_to_owner", "protocol v281",
+    "--owner-rule-source", "--owner-rule-quote", "protocol v296", "only in prose",
     "protocol v153", "cannot resolve its own decision",
   ]) assert.ok(topic.stdout.includes(text), `decision help omits ${text}`);
 
   for (const malformed of [
+    ["decision", "request", "--request-id", "id", "--resource-key", "key", "--snapshot", "{}", "--owner-rule-source", "AGENTS.md"],
+    ["decision", "request", "--request-id", "id", "--resource-key", "key", "--snapshot", "{}", "--owner-rule-quote", "Ask first."],
+    ["decision", "request", "--request-id", "id", "--resource-key", "key", "--snapshot", "{}", "--owner-rule-source",
+      "--owner-rule-quote", "Ask first."],
     ["decision", "request", "--resource-key", "key", "--snapshot", "{}"],
     ["decision", "request", "--request-id", "id", "--resource-key", "key", "--snapshot", "not-json"],
     ["decision", "get"],
@@ -1436,6 +1490,7 @@ test("CLI typed-decision help is discoverable and malformed or cross-session com
     ["decision", "ask-owner", "--request-id", "r", "--resource-key", "k", "--question", "Q?", "--options", "not-json"],
     ["decision", "ask-owner", "--request-id", "r", "--resource-key", "k", "--question", "Q?", "--options", "{}"],
     ["decision", "ask-owner", "--request-id", "r", "--resource-key", "k", "--question", "Q?", "--options", "[]", "--session", "child"],
+    ["decision", "ask-owner", "--request-id", "r", "--resource-key", "k", "--question", "Q?", "--kind", "other"],
     ["decision", "hand-to-owner", "--reason", "Kept"],
     ["decision", "hand-to-owner", "workflow_1"],
     ["decision", "hand-to-owner", "workflow_1", "--reason", "Kept", "--session"],
@@ -1470,6 +1525,37 @@ test("CLI typed decisions fail closed before their protocol capability", async (
     `requires v${RUNNER_CAPABILITY_MIN_PROTOCOL.typedWorkflowDecisionDelegation}`, "u",
   ));
   assert.equal(calls, 1, "an old control plane receives only the compatibility probe");
+});
+
+test("CLI forwards an owner rule on a decision request and refuses it before protocol v296 (#4137)", async () => {
+  const calls: Array<{ url: string; body?: string }> = [];
+  let version = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule;
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, body: init?.body });
+    return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+      ? { protocolVersion: version } : { occurrenceId: "workflow_1", status: "pending", authority: "human" }) };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token", WOLLIPOG_SESSION_ID: "child" };
+  const snapshot = { category: "implementation_question", question: "Which?", options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] };
+  const rule = { source: "~/.claude/skills/issue-workflow/SKILL.md", quote: "Ask the user before merging." };
+  let stdout = "";
+  const invoke = (extra: string[]) => runWollipogCli(["node", "cli.js", "--wollipog-cli", "decision", "request", "--request-id", "r",
+    "--resource-key", "k", "--snapshot", JSON.stringify(snapshot), ...extra, "--json"],
+  env, { stdout: (text) => { stdout += text; }, stderr: () => {} }, fetch);
+  assert.equal(await invoke(["--owner-rule-source", rule.source, "--owner-rule-quote", rule.quote]), 0);
+  assert.equal(calls.at(-1)!.url, "http://cp/api/sessions/child/workflow-decisions");
+  assert.deepEqual(JSON.parse(calls.at(-1)!.body!), { requestId: "r", resourceKey: "k", resourceSnapshot: snapshot, ownerRule: rule });
+  // An older control plane would drop the rule and leave the policy owner: nothing is requested.
+  version = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule - 1;
+  calls.length = 0;
+  stdout = "";
+  assert.equal(await invoke(["--owner-rule-source", rule.source, "--owner-rule-quote", rule.quote]), 1);
+  assert.match(JSON.parse(stdout).error, new RegExp(`requires v${RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule}`, "u"));
+  assert.deepEqual(calls.map((call) => call.url), ["http://cp/api/compatibility"]);
+  // Without a rule the same control plane still takes the request.
+  calls.length = 0;
+  assert.equal(await invoke([]), 0);
+  assert.equal(JSON.parse(calls.at(-1)!.body!).ownerRule, undefined);
 });
 
 test("CLI reconciliation requires protocol v153 before calling the endpoint", async () => {

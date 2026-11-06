@@ -34,6 +34,7 @@ import { ApprovalsPanel } from "../components/ApprovalsPanel.js";
 import { createApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ApiTransport } from "../api-transport.js";
+import type { DecisionModelSettingsView, DecisionModelTestResult } from "@wollipog/protocol";
 import { aboutUpdateFixture, isAboutUpdateState } from "./about-update-fixtures.js";
 import { DEFAULT_EXPERIMENT_FLAGS } from "../experiments.js";
 import {
@@ -47,6 +48,8 @@ import {
 import { SETTINGS_SECTIONS, viewFromPath, viewPath, type SettingsSection, type View } from "../navigation.js";
 import { browserInstanceManager, InstancesContextProvider, type InstanceManager } from "../instances-context.js";
 import type { TailnetAccessSetting } from "../tailnet-access.js";
+import { DecisionModelPanel } from "../components/DecisionModelPanel.js";
+import { DECIDED } from "./decision-model-fixtures.js";
 import "../styles.css";
 
 /**
@@ -245,6 +248,56 @@ let workflowRetentionState: Pick<WorkflowEventRetentionView, "retentionDays" | "
   source: workflowRetentionMode === "on" ? "organization" : "default",
   prunesFrom: workflowRetentionMode === "on" ? RETENTION_ARMED_AT : null,
 };
+/**
+ * Settings › Orchestrator › Decision Model (#4101). `decision=chosen` stores an explicit agent,
+ * `decision=viewer` reads it without owner or admin permission, and `decisionTest=fail` ends Test
+ * Decision Model without a verdict. Otherwise the organization uses Automatic.
+ */
+const decisionMachines: DecisionModelSettingsView["machines"] = [{
+  runnerId: "runner-studio",
+  machineName: "Studio Workstation",
+  harnesses: [{
+    agentId: "claude-code", name: "Claude Code", driver: "claude-code", provider: "claude", billingSource: "subscription",
+    models: [{ id: "haiku", displayName: "Haiku", efforts: ["low", "medium"] }, { id: "sonnet", displayName: "Sonnet", efforts: ["low", "medium", "high"] }],
+  }],
+}];
+const decisionChosen: NonNullable<DecisionModelSettingsView["target"]> = {
+  runnerId: "runner-studio", machineName: "Studio Workstation", agentId: "claude-code", harnessName: "Claude Code",
+  driver: "claude-code", context: { kind: "native" }, provider: "claude", billingSource: "subscription",
+  model: "haiku", modelName: "Haiku", effort: "low", available: true,
+};
+const decisionParam = new URLSearchParams(window.location.search).get("decision");
+let decisionState: DecisionModelSettingsView = {
+  source: decisionParam === "chosen" || decisionParam === "viewer" ? "organization" : "automatic",
+  canManage: decisionParam !== "viewer",
+  machines: decisionMachines,
+  automaticPreference: ["haiku", "luna", "mini", "nano", "flash"],
+  ...(decisionParam === "chosen" || decisionParam === "viewer" ? { target: decisionChosen } : {}),
+};
+
+function decisionModelResponse(path: string, init?: RequestInit): Response {
+  const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
+  if (path === "/api/decision-model/test") {
+    const fail = new URLSearchParams(window.location.search).get("decisionTest") === "fail";
+    const { verdict: _verdict, ...unanswered } = DECIDED;
+    const result: DecisionModelTestResult = fail
+      ? { latencyMs: 41_800, occurrence: { ...unanswered, state: "failed", failureClass: "rate_limited",
+          attempts: [1, 2, 3].map((attempt) => ({ attempt, errorClass: "rate_limited" as const, latencyMs: 1_000 })) } }
+      : { latencyMs: 3_200, occurrence: DECIDED };
+    return json(result);
+  }
+  if (init?.method === "DELETE") {
+    const { target: _target, ...rest } = decisionState;
+    decisionState = { ...rest, source: "automatic" };
+  } else if (init?.method === "PUT") {
+    const body = JSON.parse(String(init.body)) as { model: string; effort: string };
+    const model = decisionMachines[0]!.harnesses[0]!.models.find((candidate) => candidate.id === body.model)!;
+    decisionState = { ...decisionState, source: "organization",
+      target: { ...decisionChosen, model: model.id, modelName: model.displayName, effort: body.effort } };
+  }
+  return json(decisionState);
+}
+
 function workflowRetentionView(previewDays: number | null): WorkflowEventRetentionView {
   return { ...workflowRetentionState, environmentDays: null, canManage: workflowRetentionMode !== "viewer",
     nextRunAt: Date.UTC(2026, 9, 16, 10, 0), limits: WORKFLOW_EVENT_RETENTION_LIMITS,
@@ -355,6 +408,9 @@ const harnessDefaultsTransport: ApiTransport = {
         reviewers: ["claude-code", "codex"].map(harness => ({ harness, name: harness === "codex" ? "Codex" : "Claude Code", runnerId: "fixture", agentId: harness,
           capabilities: { models: [{ id: harness === "codex" ? "gpt-6.1-sol" : "claude-opus-5-5", displayName: harness === "codex" ? "GPT-6.1 Sol" : "Claude Opus 5.5", default: true, efforts: ["medium", "high"] }], effortLevels: ["medium", "high"], slashCommands: [], supportsImages: false, supportsApprovals: true } })),
       });
+    }
+    if (path === "/api/decision-model" || path === "/api/decision-model/test") {
+      return decisionModelResponse(path, init);
     }
     if (path === "/api/orchestrator-settings") {
       const params = new URLSearchParams(window.location.search);
@@ -676,7 +732,7 @@ function Harness() {
                       </SettingsGroup>
                     )}
                     sessionNaming={(
-                      <SettingsGroup title="Session Titles" scope="Your Account">
+                      <SettingsGroup title="Session Titles" scope="This Organization">
                         <StaticRow title="Title Source" description="The visual fixture does not connect to a control plane." />
                       </SettingsGroup>
                     )}
@@ -693,7 +749,7 @@ function Harness() {
               reviews: <FeedbackProvider><ApiProvider client={harnessDefaultsApi}><ReviewSettingsPanel /></ApiProvider></FeedbackProvider>,
               orchestrator: (
                 <FeedbackProvider>
-                  <ApiProvider client={harnessDefaultsApi}><OrchestratorSettingsPanel /></ApiProvider>
+                  <ApiProvider client={harnessDefaultsApi}><OrchestratorSettingsPanel /><DecisionModelPanel /></ApiProvider>
                 </FeedbackProvider>
               ),
               network: (

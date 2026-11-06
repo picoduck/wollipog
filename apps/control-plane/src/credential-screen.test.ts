@@ -93,6 +93,25 @@ test("#4126: design questions about keys and sessions reach the Orchestrator as 
   } finally { h.db.close(); }
 });
 
+/** #4126's near misses: a bare key or session noun the question asks someone to hand over. */
+const ISSUE_4126_NEAR_MISSES = ["Paste your API key", "Send me the session token", "Share the deploy key"];
+
+test("#4126: near-miss credential questions are screened, not admitted, and decline on the model's ask", async () => {
+  const h = harness((request) => ISSUE_4126_NEAR_MISSES.includes(request.question ?? "") ? { verdict: "ask" } : { verdict: "discusses" });
+  try {
+    for (const [index, question] of ISSUE_4126_NEAR_MISSES.entries()) {
+      const declined = await h.ask(`near-miss-${index}`, h.form(question));
+      assert.equal(declined.status, 403, question);
+    }
+    // The floor leaves them open: each reached the Decision Model once, and nobody was asked.
+    assert.equal(h.screen.calls.length, ISSUE_4126_NEAR_MISSES.length);
+    assert.equal(h.db.pendingWorkflowDecisionsForController("root").length, 0);
+    // The same screen admits #4126's design questions.
+    const admitted = await h.ask("design", h.form(ISSUE_4126[0]!));
+    assert.equal(admitted.data?.authority, "orchestrator");
+  } finally { h.db.close(); }
+});
+
 test("a transient failure that succeeds on retry asks nobody", async () => {
   const h = harness((_request, attempt) => attempt === 1 ? { errorClass: "transport" } : { verdict: "discusses" });
   try {

@@ -1,22 +1,46 @@
-import React, { useEffect, useId, useState } from "react";
-import type { CampaignIssueScopeSnapshot, CampaignIssueScopeView, SessionView } from "@wollipog/protocol";
+import React, { useEffect, useId, useRef, useState } from "react";
+import { campaignScopeChangeGroups, type CampaignIssueScopeSnapshot, type CampaignIssueScopeView, type SessionView } from "@wollipog/protocol";
 import { browserRandomUUID } from "../browser-crypto.js";
 import { Checkbox } from "./ui/ChoiceControls.js";
 import { useApi } from "../api-context.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { CampaignScopeGrantSection, ScopeGrantReviewFacts } from "./CampaignScopeGrant.js";
+import { CampaignScopeProposalSection, ScopeProposalFacts } from "./CampaignScopeProposal.js";
+
+const issueCount = (count: number) => `${count} issue${count === 1 ? "" : "s"}`;
+
+/** Why an Orchestrator's proposal waits for the owner (#4267), and what approving or denying does to
+ * the scope and its Maximum Issues. */
+function ScopeOwnerReviewFacts({ review }: { review: NonNullable<CampaignIssueScopeSnapshot["ownerReview"]> }) {
+  const raise = review.maxIssuesIncrease;
+  return <p>
+    The Orchestrator proposed this change. No authorized epic, published follow-up or issue selection admits it, so it needs your approval.
+    {raise
+      ? ` It needs ${issueCount(raise.increase)} more than Maximum Issues allows. Approving adds the issues and raises Maximum Issues from ${raise.from} to ${raise.from + raise.increase}; denying leaves both unchanged.`
+      : " Denying leaves the scope unchanged."}
+  </p>;
+}
 
 export function CampaignIssueScopeSummary({ snapshot }: { snapshot: CampaignIssueScopeSnapshot }) {
-  const refs = (numbers: number[]) => numbers.length ? numbers.map((n) => `${snapshot.repository}#${n}`).join(", ") : "None";
+  // Every repository's part of the change, each issue qualified by its own repository (#4118).
+  const groups = campaignScopeChangeGroups(snapshot);
+  const refs = (pick: (group: (typeof groups)[number]) => number[]) => {
+    const list = groups.flatMap((group) => pick(group).map((n) => `${group.repository}#${n}`));
+    return list.length ? list.join(", ") : "None";
+  };
+  const raise = snapshot.ownerReview?.maxIssuesIncrease;
   return <>
     {snapshot.grantReview && <ScopeGrantReviewFacts review={snapshot.grantReview} />}
-    <p>{snapshot.explanation}</p>
+    {snapshot.ownerReview && <ScopeOwnerReviewFacts review={snapshot.ownerReview} />}
+    {snapshot.scopeProposal ? <ScopeProposalFacts repository={snapshot.repository} proposal={snapshot.scopeProposal} explanation={snapshot.explanation} />
+      : <p>{snapshot.explanation}</p>}
     <dl className="facts">
       <div><dt>Scope Revision</dt><dd>{snapshot.expectedRevision} to {snapshot.expectedRevision + 1}</dd></div>
-      <div><dt>Additions</dt><dd>{refs(snapshot.additions)}</dd></div>
-      <div><dt>Removals</dt><dd>{refs(snapshot.removals)}</dd></div>
-      <div><dt>Affected Assignments</dt><dd>{snapshot.affectedAssignments.length ? snapshot.affectedAssignments.map((a) => `${snapshot.repository}#${a.issue}: ${a.sessionId}`).join(", ") : "None"}</dd></div>
+      {raise && <div><dt>Maximum Issues</dt><dd>{raise.from} to {raise.from + raise.increase}</dd></div>}
+      <div><dt>Additions</dt><dd>{refs((group) => group.additions)}</dd></div>
+      <div><dt>Removals</dt><dd>{refs((group) => group.removals)}</dd></div>
+      <div><dt>Affected Assignments</dt><dd>{snapshot.affectedAssignments.length ? snapshot.affectedAssignments.map((a) => `${a.repository ?? snapshot.repository}#${a.issue}: ${a.sessionId}`).join(", ") : "None"}</dd></div>
       <div><dt>Active Child Work</dt><dd>{snapshot.activeChildren.length ? snapshot.activeChildren.map((child) => `${child.title}: ${child.sessionId}`).join(", ") : "None"}</dd></div>
       <div><dt>Decisions to Revoke</dt><dd>{snapshot.affectedDecisions.length ? snapshot.affectedDecisions.join(", ") : "None"}</dd></div>
     </dl>
@@ -24,7 +48,19 @@ export function CampaignIssueScopeSummary({ snapshot }: { snapshot: CampaignIssu
   </>;
 }
 
-export function CampaignIssueScopePanel({ session, campaignId }: { session: SessionView; campaignId: string }) {
+/** How often a panel showing a disconnected runner's saved scope checks for reconnection. */
+export const SCOPE_RECONNECT_POLL_MS = 10_000;
+
+export function CampaignIssueScopePanel({ session, campaignId, policyRevision, boundaryShown = false }: {
+  session: SessionView;
+  campaignId: string;
+  /** The campaign's policy revision, given only on the campaign's own session: the owner can then
+   * change the scope grant's selection count there (#4102), and a new revision reloads the scope. */
+  policyRevision?: number;
+  /** Campaign Status's Full Control section already lists the boundary's operations and Maximum
+   * Issues (#2940), so the Scope Grant section leaves those rows out. */
+  boundaryShown?: boolean;
+}) {
   const api = useApi();
   const headingId = useId();
   const [view, setView] = useState<CampaignIssueScopeView | null>(null);
@@ -42,34 +78,62 @@ export function CampaignIssueScopePanel({ session, campaignId }: { session: Sess
   const selectable = context.length > 0 && Boolean(view?.supported && view.canPropose);
   const contextLabelId = useId();
   const contextHelpId = useId();
+  const reading = useRef(false);
   useEffect(() => {
     const controller = new AbortController();
     setError(null);
+    reading.current = true;
     void api.campaignIssueScope(campaignId, undefined, controller.signal).then((next) => {
-      if (!controller.signal.aborted) { setView(next); setPending(false); setSelected([]); }
-    }).catch((e: unknown) => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : "Could not load campaign issue scope."); });
+      if (!controller.signal.aborted) { reading.current = false; setView(next); setPending(false); setSelected([]); }
+    }).catch((e: unknown) => { if (!controller.signal.aborted) { reading.current = false; setError(e instanceof Error ? e.message : "Could not load campaign issue scope."); } });
     return () => controller.abort();
-  }, [api, campaignId, revision, reload]);
+    // A change to the campaign's authority (such as another tab's selection count) reloads it too.
+  }, [api, campaignId, revision, policyRevision, reload]);
+  // A disconnected runner leaves the revision unchanged when it returns, so poll the saved scope
+  // (no runner call) until the view verifies again (#2664). A returning tab refreshes at once. A
+  // poll never replaces a read still in flight: a reconnected runner's inspection can outlast it.
+  const disconnected = Boolean(view?.runnerDisconnected);
+  useEffect(() => {
+    if (!disconnected) return;
+    const poll = () => { if (document.visibilityState !== "hidden" && !reading.current) setReload((n) => n + 1); };
+    const timer = window.setInterval(poll, SCOPE_RECONNECT_POLL_MS);
+    document.addEventListener("visibilitychange", poll);
+    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", poll); };
+  }, [disconnected]);
+  const refreshButton = <button className="btn sm" type="button" onClick={() => setReload((n) => n + 1)}>Refresh Scope</button>;
+  const unverified = view?.unverifiedWork ?? [];
 
+  // Every campaign repository (#4118); a view from an older control plane names only its own.
+  const repositories = view?.repositories?.length ? view.repositories
+    : view ? [{ repository: view.repository, issueNumbers: view.issueNumbers, state: "saved" as const }] : [];
+  const grouped = repositories.length > 1;
+  const held = (repository: string, number: number) =>
+    repositories.some((entry) => entry.repository.toLowerCase() === repository.toLowerCase() && entry.issueNumbers.includes(number));
   const parse = (text: string) => {
-    const result = text.split(/[\s,]+/u).filter(Boolean).map((ref) => {
+    const names = repositories.map((entry) => entry.repository.toLowerCase());
+    const result = new Map<string, { repository: string; number: number }>();
+    for (const ref of text.split(/[\s,]+/u).filter(Boolean)) {
       const match = /^([\w.-]+\/[\w.-]+)#([1-9][0-9]*)$/u.exec(ref);
-      if (!match || !Number.isSafeInteger(Number(match[2])) || match[1]!.toLowerCase() !== view?.repository.toLowerCase()) {
-        throw new Error(`Use repository-qualified issues from ${view?.repository}, such as ${view?.repository}#123.`);
+      if (!match || !Number.isSafeInteger(Number(match[2])) || !names.includes(match[1]!.toLowerCase())) {
+        throw new Error(grouped ? `Use repository-qualified issues from this campaign's repositories (${names.join(", ")}), such as ${view?.repository}#123.`
+          : `Use repository-qualified issues from ${view?.repository}, such as ${view?.repository}#123.`);
       }
-      return Number(match[2]);
-    });
-    return [...new Set(result)];
+      const issue = { repository: match[1]!.toLowerCase(), number: Number(match[2]) };
+      result.set(`${issue.repository}#${issue.number}`, issue);
+    }
+    return [...result.values()];
   };
   const propose = async () => {
     if (!view || busy) return;
     setBusy(true); setError(null);
     try {
-      const add = [...new Set([...selected, ...parse(additions)])].filter((n) => !view.issueNumbers.includes(n));
+      const launch = view.repository.toLowerCase();
+      const add = [...new Map([...selected.map((number) => ({ repository: launch, number })), ...parse(additions)]
+        .map((issue) => [`${issue.repository}#${issue.number}`, issue] as const)).values()].filter((issue) => !held(issue.repository, issue.number));
       const remove = parse(removals);
       if (!add.length && !remove.length) throw new Error("Select at least one issue addition or removal.");
       await api.proposeCampaignIssueScope(campaignId, { requestId: browserRandomUUID(), expectedRevision: view.revision,
-        additions: add.map((number) => ({ repository: view.repository, number })), removals: remove.map((number) => ({ repository: view.repository, number })),
+        additions: add, removals: remove,
         explanation: "Update the campaign's authorized issue scope with the exact additions and removals shown in this request." });
       setPending(true); setSelected([]); setAdditions(""); setRemovals("");
     } catch (e) { setError(e instanceof Error ? e.message : "Could not request scope approval."); }
@@ -85,25 +149,47 @@ export function CampaignIssueScopePanel({ session, campaignId }: { session: Sess
     } catch (e) { setError(e instanceof Error ? e.message : "Could not resolve epic members."); }
     finally { setBusy(false); }
   };
-  return <>{view?.scopeGrant && <CampaignScopeGrantSection grant={view.scopeGrant} />}
+  // Only the owner, who can propose scope here, can change the count; the server checks again.
+  // The change is compare-and-set against the revision this view was read at, never a newer one, so
+  // a change made from a stale view is refused instead of overwriting another one.
+  const grantEdit = view?.canPropose && policyRevision !== undefined && view.policyRevision !== undefined
+    ? { campaignId, policyRevision: view.policyRevision, onSaved: () => setReload((n) => n + 1) } : undefined;
+  // A new revision remounts the section, closing an editor opened on the older one.
+  // Under the propose-then-check flow (#4282) the Orchestrator's proposals replace the Scope Grant.
+  return <>{view?.scopeGrant && (view.scopeGrant.status === "proposal"
+    ? <CampaignScopeProposalSection grant={view.scopeGrant} proposals={view.scopeProposals ?? []} ceilingsShown={boundaryShown} />
+    : <CampaignScopeGrantSection key={view.policyRevision} grant={view.scopeGrant} edit={grantEdit} ceilingsShown={boundaryShown} />)}
   <section className="campaign-detail-section" aria-labelledby={headingId}>
     <h3 id={headingId} className="section-title">Authorized Issue Scope</h3>
     {error && <Notice tone="danger" role="alert" title="Couldn't Load or Update Issue Scope"
-      actions={<button className="btn sm" type="button" onClick={() => setReload((n) => n + 1)}>Refresh Scope</button>}>{error}</Notice>}
+      actions={refreshButton}>{error}</Notice>}
     {view ? <>
       <dl className="facts">
-        <div><dt>Repository</dt><dd>{view.repository || "Not Verified"}</dd></div>
+        {grouped ? <div><dt>Repositories</dt><dd>
+          <ul className="campaign-detail-list">{repositories.map((entry) => <li key={entry.repository}>
+            {entry.repository}
+            {entry.state === "no_location_online" && <> <span className="muted">(No Location Online)</span></>}
+            {": "}{entry.issueNumbers.length ? entry.issueNumbers.map((n) => `#${n}`).join(", ") : "None"}
+          </li>)}</ul>
+        </dd></div> : <div><dt>Repository</dt><dd>{view.repository || "Not Verified"}</dd></div>}
         <div><dt>Scope Revision</dt><dd>{view.revision}</dd></div>
-        <div><dt>Authorized Issues</dt><dd>{view.issueNumbers.length ? view.issueNumbers.map((n) => `${view.repository}#${n}`).join(", ") : "None"}</dd></div>
+        {!grouped && <div><dt>Authorized Issues</dt><dd>{view.issueNumbers.length ? view.issueNumbers.map((n) => `${view.repository}#${n}`).join(", ") : "None"}</dd></div>}
         {context.length > 0 && !selectable && <div><dt>Context-Only References</dt><dd>{context.map((n) => `${view.repository}#${n}`).join(", ")}</dd></div>}
       </dl>
       {view.candidateMessage && <Notice tone="warning" title="Epic Members Need Review">{view.candidateMessage}</Notice>}
-      {!view.issueNumbers.length && <Notice tone="info" title="Issue Scope Needs Confirmation">Confirm the umbrella issue and intended members before delegating issue work. Recorded work and issue mentions do not grant authority.</Notice>}
+      {!view.repository && view.issueNumbers.length > 0 && <Notice tone="info" title="Repository Not Verified">
+        The saved issue numbers are shown without a repository because this campaign never recorded one. They are not confirmed to belong to any repository until the campaign runner verifies it.
+      </Notice>}
+      {unverified.length > 0 && <Notice tone="neutral" title="Work Awaiting Repository Verification">
+        <ul className="campaign-detail-list">{unverified.map((item) => <li key={item.workItemId}>{item.issue.repository}#{item.issue.number}: {item.title}</li>)}</ul>
+        Their issue numbers are in the saved scope, but the campaign repository is not verified, so this work is neither confirmed in scope nor outside it.
+      </Notice>}
+      {!repositories.some((entry) => entry.issueNumbers.length) && <Notice tone="info" title="Issue Scope Needs Confirmation">Confirm the umbrella issue and intended members before delegating issue work. Recorded work and issue mentions do not grant authority.</Notice>}
       {view.outsideScope.length > 0 && <Notice tone="warning" title="Work Outside Authorized Scope">
         <ul className="campaign-detail-list">{view.outsideScope.map((item) => <li key={item.workItemId}>{item.issue.repository}#{item.issue.number}: {item.title}</li>)}</ul>
         Add the intended issues through a scope approval to enable their closure requests.
       </Notice>}
-      {!view.supported ? <Notice tone="neutral" title="Scope Changes Unavailable">{view.compatibilityMessage}</Notice> : view.canPropose ? <>
+      {!view.supported ? <Notice tone="neutral" title="Scope Changes Unavailable" actions={error ? undefined : refreshButton}>{view.compatibilityMessage}</Notice> : view.canPropose ? <>
         {view.candidates && view.candidates.length > 0 && <fieldset className="field"><legend>Proposed Epic Members</legend>
           <p>Choose the umbrella issue and intended members. Dependencies and incidental references are excluded.</p>
           <ul className="campaign-detail-list">{view.candidates.map((candidate) => <li key={candidate.issue.number}><Checkbox
@@ -124,7 +210,7 @@ export function CampaignIssueScopePanel({ session, campaignId }: { session: Sess
         <BusyButton className="btn ghost sm" busy={busy} progress="Resolving epic members…" onClick={() => void resolveEpic()}>Resolve Epic Members</BusyButton>
         <label className="field"><span>Issue Additions</span><input type="text" value={additions} onChange={(e) => setAdditions(e.target.value)} disabled={busy} /></label>
         <label className="field"><span>Issue Removals</span><input type="text" value={removals} onChange={(e) => setRemovals(e.target.value)} disabled={busy} /></label>
-        <p>Enter repository-qualified issues separated by commas, such as {view.repository}#123. Review the exact change and affected assignments in the approval request.</p>
+        <p>Enter repository-qualified issues separated by commas, such as {view.repository}#123{grouped ? ", from any of the repositories above" : ""}. Review the exact change and affected assignments in the approval request.</p>
         <BusyButton className="btn sm" busy={busy} progress="Requesting scope approval…" onClick={() => void propose()}>Request Scope Approval</BusyButton>
         <button className="btn ghost sm" type="button" onClick={() => setReload((n) => n + 1)}>Refresh Scope</button>
         {pending && <p role="status">Scope is unchanged. Review the exact additions and removals in the campaign's approval request.</p>}

@@ -603,9 +603,11 @@ const FULL_CONTROL_ROOT_QUESTION_GUIDANCE = "You own every Orchestrator-owned " 
 /** The root guidance with the owner-decision route (#4064) in place of "report it instead of asking". */
 const FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_GUIDANCE = FULL_CONTROL_ROOT_QUESTION_GUIDANCE.slice(0,
   FULL_CONTROL_ROOT_QUESTION_GUIDANCE.indexOf("A human-owned decision")) +
-  "For a decision the campaign's owner kept for themselves, call request_owner_decision with the question, its options " +
-  "and the decision material: it reaches the owner's Inbox without stopping your turn or other work, and their choice " +
-  "is delivered back to you. To give the owner one of your pending Orchestrator-owned decisions instead, such as a " +
+  "To ask the campaign's owner a design choice, clarification or preference, call request_owner_decision with kind " +
+  "\"question\", the question, any suggested options and the background as Markdown: the owner answers in their own words, " +
+  "and the answer is delivered back to you. For an exact action the owner kept that has no typed category, use kind " +
+  "\"approval\" with explicit options. Either reaches the owner's Inbox without stopping your turn or other work. " +
+  "To give the owner one of your pending Orchestrator-owned decisions instead, such as a " +
   "child's pr_merge, call hand_workflow_decision_to_owner; that cannot be undone. Never decide a human-owned decision yourself.";
 
 const FULL_CONTROL_ROOT_QUESTION_NOTICE = "[Wollipog Full Control] Your question was dismissed: under Full Control " +

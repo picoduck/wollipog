@@ -33,6 +33,39 @@ export interface CampaignExcludedLocation {
   reason: string;
 }
 
+/** A Project Location someone other than the campaign's owner added mid-campaign (#4117). It joins
+ * only when the owner uses Include in Campaign. */
+export interface CampaignPendingLocation {
+  locationId: string;
+  name: string;
+  reason: "added_by_other";
+}
+
+/** One Location that joined a campaign's boundary after launch, and the boundary revision it
+ * joined at. */
+export interface CampaignLocationJoin {
+  locationId: string;
+  name: string;
+  repository: string;
+  revision: number;
+  at: number;
+  source: "owner_added" | "runner_reconnected" | "owner_included";
+}
+
+export const CAMPAIGN_LOCATION_JOINS_MAX = 50;
+
+/** Campaign Status's view of the repository boundary (#4117): each boundary repository with its
+ * Locations, the Locations left out with their reasons, those waiting for the owner, and the
+ * Locations that joined after launch. Names only; no path or origin. */
+export interface CampaignRepositoryBoundaryView {
+  revision: number;
+  repositories: Array<{ repository: string; locations: Array<{ locationId: string; name: string;
+    availability: import("./index.js").ProjectLocationAvailability | "removed"; isDefault: boolean }> }>;
+  excludedLocations: CampaignExcludedLocation[];
+  pendingLocations: CampaignPendingLocation[];
+  joins: CampaignLocationJoin[];
+}
+
 export type ProjectLocationInspection =
   | { ok: true; location: VerifiedProjectLocation }
   | { ok: false; locationId: string; failure: ProjectLocationInspectionFailure; reason: string };

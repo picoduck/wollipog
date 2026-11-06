@@ -14,6 +14,7 @@ import { closureEvidence, closureDeliveryGaps, issueEvidenceDigest } from "./cam
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { CampaignForgeObserver } from "./campaign-forge-observations.js";
 import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
+import { healthyDecisionRuntime } from "./credential-screen-test-fixture.js";
 
 /** A related open pull request as the runner reports it, without a closing reference. */
 const openPullRequest = (number: number) => ({ number, title: "Work", url: `https://github.com/team/repo/pull/${number}`, headSha: "b".repeat(40) });
@@ -45,7 +46,7 @@ function harness(full = true, maximum = 5, issues = [100]) {
         ok: state.publicationOk, repository: "team/repo", publicationDigest: issueEvidenceDigest({ sanitizedTitle: message.sanitizedTitle, sanitizedBody: message.sanitizedBody, labels: message.labels }),
         ...(state.subjectSearch ? { duplicateSearch: "subject" as const } : {}) };
       return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: true, repository: "team/repo",
-        ...(message.operation === "synchronize" ? { revision: message.scope.revision } : { candidates: (message.issues ?? [100, 101]).map((number) =>
+        ...(message.operation === "synchronize" ? { revision: message.scope.revision } : message.operation === "grant_issue_numbers" ? { issueNumbersGrant: "applied" as const } : { candidates: (message.issues ?? [100, 101]).map((number) =>
           ({ issue: { repository: "team/repo", number }, title: message.publication?.sanitizedTitle ?? state.publicationTitles[number] ?? `Issue ${number}`, source: "sub_issue" as const })) }) };
     }
     if (message.type === "github_issue_closure") {
@@ -62,6 +63,8 @@ function harness(full = true, maximum = 5, issues = [100]) {
     throw new Error("Unexpected runner command");
   };
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
+  // A healthy Decision Model (#4104) on a fake harness: relatedness and closure-reason checks confirm.
+  svc.setDecisionRuntime(healthyDecisionRuntime(db).runtime);
   if (full) assert.ok(svc.setCampaignControl("root", { mode: "full_control", objective: "Implement epic 100", operations: ["campaign_issue_scope", "issue_closure", "follow_up_issue_publication", "implementation_question"],
     delegatablePolicyIds: [], issueAuthority: { epics: issues, relatedFollowUps: true, maxIssues: maximum, closureReasons: ["completed", "not_planned"] } }, 1, principal).ok);
   const approve = (d: WorkflowDecisionView) => svc.resolveWorkflowDecision("root", "root", d.occurrenceId, { outcome: "approve" }, d.authority,
@@ -496,9 +499,12 @@ test("scope rejects incidental references, unapproved epics, foreign repositorie
   const h = harness();
   try {
     assert.equal((await h.proposal("dependency",999)).ok,false);
-    for (const change of [{lineage:undefined},{lineage:{kind:"epic" as const,epic:999}},{additions:[{repository:"other/repo",number:101}]}]) {
+    for (const change of [{lineage:{kind:"epic" as const,epic:999}},{additions:[{repository:"other/repo",number:101}]}]) {
       assert.equal((await h.svc.proposeCampaignIssueScope("root", {requestId:JSON.stringify(change),expectedRevision:1,additions:[{repository:"team/repo",number:101}],removals:[],explanation:"Claim",lineage:{kind:"epic",epic:100},...change})).ok,false);
     }
+    // Without lineage nothing is admitted: the addition waits for the owner (#4267).
+    const unadmitted = await h.svc.proposeCampaignIssueScope("root", {requestId:"no-lineage",expectedRevision:1,additions:[{repository:"team/repo",number:101}],removals:[],explanation:"Claim"});
+    assert.ok(unadmitted.ok, unadmitted.error ?? "refused"); assert.equal(unadmitted.data!.authority,"human");
     const p = await h.proposal("race"); assert.ok(p.ok);
     h.db.createSession({id:"later",runnerId:"r",workspaceId:"w",agentId:"codex",title:"Later",parentSessionId:"root",driver:"codex-app-server",config:{},useWorktree:false,now:Date.now()});
     assert.equal(h.approve(p.data!).ok,false);
@@ -900,6 +906,27 @@ test("every bounded publication needs a runner whose duplicate search and compar
   }
 });
 
+test("#4118 Maximum Issues counts issues in every repository for a follow-up publication and a reauthorization", async () => {
+  const h = harness(true, 2);
+  try {
+    // One launch-repository issue and one in another repository: the campaign is full at two.
+    const policy = h.db.sessionOrchestratorPolicy("root")!;
+    policy.issueScope = { ...policy.issueScope!, issues: [{ repository: "other/repo", number: 40 }, { repository: "team/repo", number: 100 }] };
+    h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), "root");
+    const recommendationId = acceptedRecommendation(h);
+    const published = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "full-across-repositories", resourceKey: "full-across-repositories",
+      resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "[Feature]: Related repair", sanitizedBody: body,
+        labels: ["enhancement"], recommendationId } });
+    assert.ok(published.ok, published.error ?? "publication");
+    assert.equal(published.data!.authority, "human");
+    assert.equal(published.data!.authorityEvaluation?.admissionFailure, "capacity_exhausted");
+    // A new authorization can't name a limit below the whole scope either.
+    const refused = h.svc.setCampaignControl("root", { mode: "full_control", objective: "Implement epic 100", operations: ["campaign_issue_scope"], delegatablePolicyIds: [],
+      issueAuthority: { epics: [100], relatedFollowUps: true, maxIssues: 1, closureReasons: [] } }, h.db.getSession("root")!.parentControlPolicy!.revision, h.principal);
+    assert.equal(refused.error, "The issue boundary exceeds its human-set scope limit.");
+  } finally { h.db.close(); }
+});
+
 test("a child's publication outside the proof is refused when it can correct it, and otherwise routes to the person with a visible admission failure (#2940, #4065)", async () => {
   const cases: Array<{ name: string; expected: string; refused: boolean; maximum?: number; setup?: (h: ReturnType<typeof harness>) => string;
     change?: (snapshot: { sanitizedTitle: string; sanitizedBody: string; labels: string[]; recommendationId: string }) => void }> = [
@@ -990,6 +1017,29 @@ test("#4065 a child's title mismatch creates nothing, reaches the root as recove
     const settled = publicationRefusalRecord(h);
     assert.ok(!settled || settled.state === "resolved", "the corrected request settles the refusal");
     assert.equal(h.db.campaignRecovery.publicationRefusals("root", h.db.getSession("root")!.parentControlPolicy?.revision ?? 0).length, 0);
+  } finally { h.db.close(); }
+});
+
+// #2938 criterion 2: the reformulate_request recovery action is emitted and reaches the root as an
+// actionable instruction naming the member and the condition to correct, never the member's text.
+test("#2938 a member's correctable refusal wakes the root with an actionable reformulate_request instruction", async () => {
+  const h = harness();
+  try {
+    const recommendationId = acceptedRecommendation(h);
+    h.db.updateSessionStatus("root", "idle", 3);
+    const refused = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "publish", resourceKey: "publish",
+      resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "[Feature]: Mistitled repairs",
+        sanitizedBody: body, labels: [], recommendationId } });
+    assert.equal(refused.errorDetails?.code, "title_mismatch");
+    const record = publicationRefusalRecord(h)!;
+    const wake = nextContinuation(h);
+    assert.ok(wake, "the refusal wakes the idle root");
+    assert.match(wake.text, /Action needed: yes/u);
+    for (const fact of [`"recoveryId":"${record.id}"`, `"action":"reformulate_request"`, `"reason":"correctable_refusal"`,
+      `"admissionFailure":"title_mismatch"`, `"sessionId":"child"`, `"pending":true`]) {
+      assert.ok(wake.text.includes(fact), `the instruction carries ${fact}`);
+    }
+    assert.equal(wake.text.includes("Mistitled"), false, "the member's refused payload is not repeated to the root");
   } finally { h.db.close(); }
 });
 
@@ -2379,11 +2429,10 @@ test("#2940 Orchestrator scope refusals name their condition with a bounded code
   try {
     const propose = (requestId: string, change: Partial<import("@wollipog/protocol").CampaignIssueScopeRequest>) => h.svc.proposeCampaignIssueScope("root",
       { requestId, expectedRevision: 1, additions: [{ repository: "team/repo", number: 101 }], removals: [], explanation: "Secret-looking explanation text", ...change });
-    const none = await propose("no-lineage", {});
-    assert.equal(refusalCode(none), "lineage_missing"); assert.equal(none.status, 403);
-    assert.match(none.error!, /incidental references cannot grant scope.*Campaign Status/);
-    assert.equal(JSON.stringify(none).includes("Secret-looking"), false);
-    assert.equal(refusalCode(await propose("other-epic", { lineage: { kind: "epic", epic: 999 } })), "epic_not_authorized");
+    const otherEpic = await propose("other-epic", { lineage: { kind: "epic", epic: 999 } });
+    assert.equal(refusalCode(otherEpic), "epic_not_authorized"); assert.equal(otherEpic.status, 403);
+    assert.match(otherEpic.error!, /Campaign Status/);
+    assert.equal(JSON.stringify(otherEpic).includes("Secret-looking"), false);
     assert.equal(refusalCode(await propose("unknown-publication", { lineage: { kind: "follow_up", publicationOccurrenceId: "missing" } })), "publication_not_found");
     assert.equal(refusalCode(await propose("two-follow-ups", { additions: [{ repository: "team/repo", number: 101 }, { repository: "team/repo", number: 102 }],
       lineage: { kind: "follow_up", publicationOccurrenceId: "missing" } })), "follow_up_not_single");
@@ -2398,6 +2447,148 @@ test("#2940 Orchestrator scope refusals name their condition with a bounded code
       issueAuthority:{epics:[100],relatedFollowUps:false,maxIssues:5,closureReasons:[]}},2,noFollowUps.principal).ok);
     assert.equal(refusalCode(await followUpScope(noFollowUps, "no-follow-ups", "missing")), "follow_ups_not_authorized");
   } finally { noFollowUps.db.close(); }
+});
+
+const pendingScopeRequests = (h: ReturnType<typeof harness>) =>
+  h.db.pendingWorkflowDecisionsForController("root").filter((d) => d.category === "campaign_issue_scope");
+const boundaryMaxIssues = (h: ReturnType<typeof harness>) => {
+  const control = h.db.getSession("root")!.orchestratorPolicy!.control;
+  return control?.mode === "full_control" ? control.boundary.issueAuthority?.maxIssues : undefined;
+};
+const proposeWithoutLineage = (h: ReturnType<typeof harness>, requestId: string, numbers: number[], explanation = "The owner asked for these in chat") =>
+  h.svc.proposeCampaignIssueScope("root", { requestId, expectedRevision: 1, additions: numbers.map((number) => ({ repository: "team/repo", number })),
+    removals: [], explanation });
+
+test("#4267 additions without lineage become exactly one pending owner request instead of a 403, and a repeat returns it", async () => {
+  const h = harness(true, 5);
+  try {
+    // An outstanding decision the owner's approval will revoke, as every Full Control human scope approval does (#3915).
+    const question = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "question", resourceKey: "question",
+      resourceSnapshot: { category: "implementation_question", question: "Which layout?", options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } });
+    assert.ok(question.ok, question.error ?? "question");
+    const proposed = await proposeWithoutLineage(h, "owner-asked", [101, 102]);
+    assert.ok(proposed.ok, proposed.error ?? "refused");
+    assert.equal(proposed.data!.authority, "human"); assert.equal(proposed.data!.status, "pending");
+    const snapshot = proposed.data!.resourceSnapshot as ScopeSnapshot;
+    assert.deepEqual(snapshot.additions, [101, 102]);
+    assert.equal(snapshot.explanation, "The owner asked for these in chat");
+    assert.deepEqual(snapshot.ownerReview, { cause: "lineage_missing" });
+    assert.equal(snapshot.issueAdmission, undefined); assert.equal(snapshot.lineage, undefined);
+    assert.deepEqual(snapshot.affectedDecisions, [question.data!.occurrenceId]);
+    assert.deepEqual(pendingScopeRequests(h).map((d) => d.occurrenceId), [proposed.data!.occurrenceId]);
+    // Re-proposing the same additions, reworded under a new request id, returns the same request.
+    const again = await proposeWithoutLineage(h, "owner-asked-again", [102, 101], "Reworded rationale");
+    assert.ok(again.ok, again.error ?? "refused");
+    assert.equal(again.data!.occurrenceId, proposed.data!.occurrenceId);
+    assert.deepEqual(pendingScopeRequests(h).map((d) => d.occurrenceId), [proposed.data!.occurrenceId]);
+    // Campaign Status lists it under Waiting for You so the owner can open the request.
+    assert.deepEqual(h.db.campaignOwnerDecisions("root")?.items.map(({ occurrenceId, category, summary, handedOff }) => ({ occurrenceId, category, summary, handedOff })),
+      [{ occurrenceId: proposed.data!.occurrenceId, category: "campaign_issue_scope", summary: "Add team/repo#101, team/repo#102", handedOff: false }]);
+    // The owner approves it in one step: the scope holds the additions and the outstanding decision is revoked.
+    assert.ok(h.approve(proposed.data!).ok);
+    assert.equal(h.db.campaignOwnerDecisions("root"), null);
+    assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100, 101, 102]);
+    assert.equal(h.db.workflowDecisionByOccurrence(question.data!.occurrenceId)!.status, "revoked");
+    assert.equal(boundaryMaxIssues(h), 5);
+  } finally { h.db.close(); }
+});
+
+test("#4267 an owner request states the Maximum Issues increase its additions need; approving applies both and denying neither", async () => {
+  for (const outcome of ["approve", "deny"] as const) {
+    const h = harness(true, 2);
+    try {
+      const proposed = await proposeWithoutLineage(h, `over-limit-${outcome}`, [101, 102]);
+      assert.ok(proposed.ok, proposed.error ?? "refused");
+      assert.equal(proposed.data!.authority, "human");
+      assert.deepEqual((proposed.data!.resourceSnapshot as ScopeSnapshot).ownerReview, { cause: "lineage_missing", maxIssuesIncrease: { from: 2, increase: 1 } });
+      assert.equal(h.db.campaignOwnerDecisions("root")?.items[0]?.summary, "Add team/repo#101, team/repo#102, raising Maximum Issues from 2 to 3");
+      const resolved = h.svc.resolveWorkflowDecision("root", "root", proposed.data!.occurrenceId, { outcome }, "human", { kind: "human", id: h.principal.userId }, () => true);
+      assert.ok(resolved.ok, resolved.error ?? outcome);
+      if (outcome === "approve") {
+        assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100, 101, 102]);
+        assert.equal(boundaryMaxIssues(h), 3);
+      } else {
+        assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100]);
+        assert.equal(boundaryMaxIssues(h), 2);
+        assert.equal(h.db.workflowDecisionByOccurrence(proposed.data!.occurrenceId)!.status, "denied");
+      }
+    } finally { h.db.close(); }
+  }
+  // A lineage-bearing proposal past the limit is still refused, naming the owner's route (#4061).
+  const epic = harness(true, 1);
+  try {
+    const refused = await epic.proposal("epic-over-limit");
+    assert.equal(refusalCode(refused), "capacity_exhausted"); assert.equal(refused.status, 409);
+  } finally { epic.db.close(); }
+});
+
+test("#4267 only the owner resolves an owner request; the Orchestrator cannot approve, consume or widen it", async () => {
+  const h = harness(true, 2);
+  try {
+    const proposed = await proposeWithoutLineage(h, "owner-only", [101, 102]);
+    assert.ok(proposed.ok, proposed.error ?? "refused");
+    const occurrenceId = proposed.data!.occurrenceId;
+    const asAgent = h.svc.resolveWorkflowDecision("root", "root", occurrenceId, { outcome: "approve" }, "human", { kind: "agent", id: "root" }, () => true);
+    assert.equal(asAgent.ok, false);
+    const asOrchestrator = h.svc.resolveWorkflowDecision("root", "root", occurrenceId, { outcome: "approve" }, "orchestrator", { kind: "agent", id: "root" }, () => true);
+    assert.equal(asOrchestrator.ok, false);
+    const consumed = await h.svc.consumeWorkflowDecision("root", occurrenceId, { resourceSnapshot: proposed.data!.resourceSnapshot });
+    assert.equal(consumed.ok, false); assert.equal(consumed.status, 403);
+    // An agent cannot hand the server its own owner review or a larger increase.
+    const forged = await h.svc.createWorkflowDecisionWithVideo("root", { requestId: "forged", resourceKey: "campaign_issue_scope:root",
+      resourceSnapshot: { ...(proposed.data!.resourceSnapshot as ScopeSnapshot), ownerReview: { cause: "lineage_missing", maxIssuesIncrease: { from: 2, increase: 50 } } } });
+    assert.equal(forged.ok, false); assert.equal(forged.status, 403);
+    assert.equal(h.db.workflowDecisionByOccurrence(occurrenceId)!.status, "pending");
+    assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100]);
+    assert.equal(boundaryMaxIssues(h), 2);
+  } finally { h.db.close(); }
+});
+
+test("#4267 an owner request counts only the publication slots its approval keeps, as its resolution does", async () => {
+  // At the ceiling and below it: a pending admitted publication is revoked by the owner's approval,
+  // so it neither refuses the addition nor asks for a Maximum Issues increase.
+  for (const [maximum, issues] of [[100, [...Array.from({ length: 98 }, (_, i) => i + 1), 100]], [2, [100]]] as const) {
+    const h = harness(true, maximum, [...issues]);
+    try {
+      const rec = h.svc.recordCampaignFollowUp("root", { originSessionId: "child", repository: "team/repo", title: "Pending repair", originWorkItemIds: [h.item.id] });
+      assert.ok(rec.ok, rec.error ?? "recommendation");
+      assert.ok(h.svc.adjudicateCampaignRecommendation("root", { recommendationId: rec.data!.id, disposition: "accepted", reason: "Observed related work", publicationRequired: true }).ok);
+      const publication = await h.svc.createWorkflowDecisionWithVideo("root", { requestId: "pending-publication", resourceKey: "publication",
+        resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "Pending repair", sanitizedBody: body, labels: [], recommendationId: rec.data!.id } });
+      assert.ok(publication.ok, publication.error ?? "publication");
+      assert.equal(publication.data!.status, "pending"); assert.ok((publication.data!.resourceSnapshot as { issueAdmission?: unknown }).issueAdmission);
+      const addition = 500;
+      const proposed = await proposeWithoutLineage(h, `final-${maximum}`, [addition]);
+      assert.ok(proposed.ok, proposed.error ?? "refused");
+      assert.equal(proposed.data!.authority, "human");
+      assert.deepEqual((proposed.data!.resourceSnapshot as ScopeSnapshot).ownerReview, { cause: "lineage_missing" });
+      assert.ok(h.approve(proposed.data!).ok);
+      assert.ok(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers!.includes(addition));
+      assert.equal(boundaryMaxIssues(h), maximum);
+      assert.equal(h.db.workflowDecisionByOccurrence(publication.data!.occurrenceId)!.status, "revoked");
+    } finally { h.db.close(); }
+  }
+});
+
+test("#4267 lineage admissions and Custom proposals keep their routes", async () => {
+  const full = harness(true, 5);
+  try {
+    const epic = await full.proposal("epic-member");
+    assert.ok(epic.ok, epic.error ?? "refused");
+    assert.equal(epic.data!.authority, "orchestrator");
+    assert.equal((epic.data!.resourceSnapshot as ScopeSnapshot).ownerReview, undefined);
+    // Selection lineage under a grant without a selection is still refused (#4103).
+    const selection = await full.svc.proposeCampaignIssueScope("root", { requestId: "selection", expectedRevision: 1,
+      additions: [{ repository: "team/repo", number: 102 }], removals: [], explanation: "Chosen", lineage: { kind: "selection" } });
+    assert.equal(refusalCode(selection), "selection_not_granted");
+  } finally { full.db.close(); }
+  const custom = harness(false, 5);
+  try {
+    const proposed = await proposeWithoutLineage(custom, "custom", [101]);
+    assert.ok(proposed.ok, proposed.error ?? "refused");
+    assert.equal(proposed.data!.authority, "human");
+    assert.equal((proposed.data!.resourceSnapshot as ScopeSnapshot).ownerReview, undefined);
+  } finally { custom.db.close(); }
 });
 
 test("#2940 the bounded publication path admits unchanged and refuses with the new codes", async () => {
@@ -2755,7 +2946,10 @@ test("#3915 adding an issue leaves unrelated decisions as they were and revokes 
     assert.equal(h.state.executes, 1);
     assert.equal(synchronizedRevision, 2);
     assert.ok(closure.resourceSnapshot.category === "issue_closure");
-    assert.deepEqual(dispatched, { ...closure.resourceSnapshot, scopeRevision: 2 },
+    // The excluded children are for the approver only (#3237); the runner receives the binding.
+    const { excludedChildren, ...binding } = closure.resourceSnapshot;
+    assert.ok(excludedChildren?.length, "the closure records the children it excludes");
+    assert.deepEqual(dispatched, { ...binding, scopeRevision: 2 },
       "the approved closure is dispatched unchanged except for the revision the runner was synchronized to");
     assert.notEqual(h.db.workflowDecisionByOccurrence(closure.occurrenceId)!.issueClosureResult?.outcome, "refused");
   } finally { h.db.close(); }
@@ -3307,9 +3501,12 @@ test("#4062 a refused epic-member addition cannot be delivered through a dispatc
 test("#4062 a refused follow-up addition cannot be delivered through a recommit, a dispatch and a merge that closes it", async () => {
   const h = scopeGuardHarness();
   try {
-    const refused = await h.svc.proposeCampaignIssueScope("root", { requestId: "add-follow-up", expectedRevision: 1,
+    // Without lineage the addition waits for the owner (#4267); until a person approves it, the scope is unchanged.
+    const unadmitted = await h.svc.proposeCampaignIssueScope("root", { requestId: "add-follow-up", expectedRevision: 1,
       additions: [{ repository: "team/repo", number: 103 }], removals: [], explanation: "Verified follow-up" });
-    assert.equal(refusalCode(refused), "lineage_missing");
+    assert.ok(unadmitted.ok, unadmitted.error ?? "refused");
+    assert.equal(unadmitted.data!.authority, "human"); assert.equal(unadmitted.data!.status, "pending");
+    assert.equal(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers!.includes(103), false);
     const followUp = h.itemFor("follow-up:103", 103);
     assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: followUp, commitment: { state: "scope_removed", reason: "Not in scope." } }).ok);
     // Recommitting the item is recording, which stays allowed; dispatching it is not.
@@ -3364,6 +3561,70 @@ test("#4062 a merge that says Refs and closes nothing stays the Orchestrator's, 
     const assigned = custom.svc.assignCampaignWorkItem("root", { workItemId: unscoped, childSessionId: "child" });
     assert.ok(assigned.ok, assigned.error ?? "refused");
   } finally { custom.db.close(); }
+});
+
+test("#3762 a Full Control GitLab merge is the Orchestrator's only with its closures read and all in scope", async () => {
+  const h = scopeGuardHarness();
+  try {
+    // The same campaign, on a GitLab project.
+    const project = "gitlab.example.com/team/repo";
+    const sql = (h.db as unknown as { db: import("node:sqlite").DatabaseSync }).db;
+    const policy = structuredClone(h.db.getSession("root")!.orchestratorPolicy!);
+    assert.ok(policy.control?.mode === "full_control");
+    policy.control.boundary.repository = project;
+    policy.issueScope = { ...policy.issueScope!, repository: project };
+    sql.prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
+    const closes = new Map<number, string[] | "unreadable">();
+    const runner = h.hub.requestFromRunner;
+    h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+      if (message.type !== "gitlab_merge_closures") return runner(runnerId, requestId, message, timeout);
+      const closing = closes.get(message.pullRequest) ?? [];
+      return closing === "unreadable"
+        ? { type: "gitlab_merge_closures_result", requestId, sessionId: message.sessionId, ok: false, refusal: "unavailable",
+          reason: "glab in this session's context is not signed in to gitlab.example.com." }
+        : { type: "gitlab_merge_closures_result", requestId, sessionId: message.sessionId, ok: true, check: { checkedAt: 1,
+          closures: closing.map((issue) => ({ issue, sources: ["description" as const], excerpt: `Implementing #${issue.split("#")[1]}` })) } };
+    };
+    const merge = (pullRequest: number, closing: string[] | "unreadable", declared = closing === "unreadable" ? [] : closing) => {
+      closes.set(pullRequest, closing);
+      const headSha = String(pullRequest).padStart(40, "c");
+      return h.svc.createWorkflowDecisionWithVideo("child", { requestId: `gitlab-merge-${pullRequest}`, resourceKey: `${project}!${pullRequest}`,
+        resourceSnapshot: { category: "pr_merge", repository: project, pullRequest, headSha, reviewResult: "merge",
+          mergeMethod: "merge_train", squash: false, removeSourceBranch: false,
+          requiredChecks: { headSha, status: "passed", checkedAt: 10, checks: [{ name: "Pipeline #1", state: "passed" }] },
+          ...(declared.length ? { intendedClosures: declared } : {}) } });
+    };
+
+    // Read, and every closure in scope: owned exactly like a GitHub merge.
+    for (const [pullRequest, closing] of [[31, [`${project}#100`]], [32, []]] as const) {
+      const created = await merge(pullRequest, [...closing]);
+      assert.ok(created.ok, created.error ?? "refused");
+      assert.equal(created.data!.authority, "orchestrator");
+      assert.equal(created.data!.authorityEvaluation?.reason, "authorized_operation");
+      assert.deepEqual(created.data!.closingReferenceCheck?.closures.map((closure) => closure.issue), closing);
+    }
+    // A closure outside the scope is refused, naming the issue, whether declared or not.
+    const declared = await merge(33, [`${project}#101`]);
+    assert.equal(declared.status, 409);
+    assert.match(declared.error!, /Merging this merge request would close an issue outside this Full Control campaign's issue scope: gitlab\.example\.com\/team\/repo#101\./);
+    const undeclared = await merge(34, [`${project}#101`], []);
+    assert.equal(undeclared.status, 409);
+    assert.match(undeclared.error!, /intendedClosures does not list: gitlab\.example\.com\/team\/repo#101, from the description: “Implementing #101”/);
+    // Closures that cannot be read never make it the Orchestrator's: nothing is created.
+    const unreadable = await merge(35, "unreadable");
+    assert.equal(unreadable.status, 409);
+    assert.match(unreadable.error!, /GitLab could not be read .*not signed in to gitlab\.example\.com\. Try again\./);
+    assert.deepEqual(h.decisions("child").map((decision) => decision.resourceSnapshot.category === "pr_merge" && decision.resourceSnapshot.pullRequest), [31, 32]);
+    // A runner that predates the read (v294) keeps today's behavior: the person's.
+    h.db.registerRunner(h.metadata, 1, RUNNER_CAPABILITY_MIN_PROTOCOL.gitlabMergeClosingReferences - 1);
+    const legacy = await merge(36, [`${project}#100`]);
+    assert.ok(legacy.ok, legacy.error ?? "refused");
+    assert.equal(legacy.data!.authority, "human");
+    assert.equal(legacy.data!.authorityEvaluation?.reason, "unverified_closures");
+    assert.equal(legacy.data!.closingReferenceCheck, undefined);
+    assert.equal(h.svc.resolveDescendantRequest("root", "child", legacy.data!.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok, false, "the Orchestrator cannot approve it");
+  } finally { h.db.close(); }
 });
 
 test("#4062 a merge from a runner that cannot read closing references is the person's, whatever it declares", async () => {

@@ -102,8 +102,17 @@ test("at 1440px the section fits in 1,500px with every disclosure closed, and th
   await page.goto("/settings-rows-e2e.html?theme=dark&section=orchestrator");
   await expect(page.getByRole("heading", { name: "Decision Delegation", exact: true })).toBeVisible();
   await expect(page.locator("details.disclosure[open]")).toHaveCount(0);
+  // The organization's Decision Model group (#4101) follows the defaults; it has its own budget.
+  const decisionModel = page.locator("section.settings-group")
+    .filter({ has: page.getByRole("heading", { name: "Decision Model", exact: true }) });
+  await expect(decisionModel).toBeVisible();
+  const decisionHeight = await decisionModel.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return element.getBoundingClientRect().height + Number.parseFloat(style.marginTop) + Number.parseFloat(style.marginBottom);
+  });
   const height = await page.locator(".settings-panel").evaluate((element) => element.getBoundingClientRect().height);
-  expect(height, "four review-policy rows extend the 1,200px section without new disclosures or stylesheet debt").toBeLessThanOrEqual(1500);
+  expect(height - decisionHeight, "four review-policy rows extend the 1,200px section without new disclosures or stylesheet debt").toBeLessThanOrEqual(1500);
+  expect(decisionHeight, "the Decision Model group stays compact").toBeLessThanOrEqual(300);
 
   await makeDirty(page);
   const scroller = page.locator(".main-body");

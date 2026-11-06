@@ -209,6 +209,7 @@ export class DecisionModelSettings {
         driver: harness.driver,
         provider: harness.provider,
         model: choice.model.id,
+        modelName: choice.model.displayName ?? choice.model.id,
         effort: choice.effort,
       },
     };
@@ -229,6 +230,7 @@ export class DecisionModelSettings {
         driver: explicit.view.driver,
         provider: explicit.view.provider ?? (explicit.view.driver === "claude-code" ? "claude" : "codex"),
         model: explicit.view.model,
+        modelName: explicit.view.modelName,
         effort: explicit.view.effort,
       };
       return explicit.errorClass ? { ok: false, errorClass: explicit.errorClass, target } : { ok: true, target };

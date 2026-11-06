@@ -1,8 +1,13 @@
+import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
 import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
-import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, PROJECT_LOCATION_INSPECTION_FAILURES } from "@wollipog/protocol";
+import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, PROJECT_LOCATION_INSPECTION_FAILURES,
+  type CampaignExcludedLocation, type CampaignLocationJoin, type CampaignPendingLocation, type CampaignRepositoryBoundaryView } from "@wollipog/protocol";
+import { CAMPAIGN_CLEANUP_ITEMS_LIMIT, CAMPAIGN_LIVE_WORK_KINDS, CAMPAIGN_STUCK_ITEMS_LIMIT, mergedBranchDeletionCommand,
+  worktreeRefusalAction, cleanupReasonSentence, PROTOCOL_VERSION, type CampaignActivityView, type CampaignCleanupItem, type CampaignLiveWorkKind,
+  type CampaignRepairView, type CampaignStuckItem, type OrchestratorCampaignHandoff } from "@wollipog/protocol";
 import { safeReviewSessionCapability } from "./review-session-capability.js";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
-import { projectCampaignHandoffsForUi } from "./campaign-status-compatibility.js";
+import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
 /**
  * Control-plane persistence, backed by `node:sqlite` (built into Node >=22.5).
  * Using the built-in driver means there is no native module to compile — the
@@ -27,19 +32,21 @@ import type { OrchestratorCampaignBehavior, OrchestratorCampaignBehaviorKey } fr
 import { ReviewSessions, type NewReviewSession } from "./review-sessions.js";
 import { DelegatedImageReviews, type NewDelegatedImageReview } from "./delegated-image-reviews.js";
 import { PullRequestWatches } from "./pull-request-watches.js";
+import { SessionWaits } from "./session-waits.js";
 import { ReviewSettingsStore, type ReviewPolicyCapture } from "./review-settings.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
+import { campaignScopeChangeBefore, campaignScopeChangeGroups, campaignScopeChangeResult, campaignScopeForRepository, campaignScopeIssues, campaignScopeNumbers, campaignScopeWithIssues, canonicalCampaignIssues } from "@wollipog/protocol";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
 import {
   isProviderLoginFailureCode, isSessionLaunchFailureCode, type SessionLaunchFailureCode, PROJECT_CREATION_REQUEST_WINDOW_MS,
   validProviderHomeLaunchRefusal, validProviderHomeWait, validWorktreeSwitch,
 } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
-import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignDispatchScopeRefusal, campaignBoundaryCurrent, remintCampaignBoundary } from "./campaign-authority.js";
-import { campaignBoundaryRepositoryAt } from "./campaign-repository-boundary.js";
+import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignDispatchScopeRefusal, campaignBoundaryCurrent, campaignIssueInScope, campaignLaunchRepository, campaignScopeRepositories, remintCampaignBoundary } from "./campaign-authority.js";
+import { campaignBoundaryRepositoryAt, campaignLocationRepository } from "./campaign-repository-boundary.js";
 import { genericRequestScreenData, storedCredentialScreenFact } from "./credential-screen.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
-import { grantReviewMaxIssues } from "./scope-grant.js";
+import { grantReviewMaxIssues, ownerReviewMaxIssues, proposalMaxIssues } from "./scope-grant.js";
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
 import { validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
@@ -79,6 +86,7 @@ import {
   columnForStatus,
   isPolicyApproval,
   isTerminal,
+  isOwnerQuestionSnapshot,
   pendingRequests,
   removePendingRequest,
   sessionHolds,
@@ -202,6 +210,7 @@ import {
   type OrchestratorCampaignPolicy,
   type OrchestratorCampaignProjection,
   type OrchestratorCampaignStatus,
+  CAMPAIGN_AUTOMATION_HOLD_REASONS,
   CAMPAIGN_HANDOFFS_LIMIT,
   CAMPAIGN_MERGED_BRANCHES_LIMIT,
   FORGE_DECISION_ACTION_MAX_ATTEMPTS,
@@ -1090,7 +1099,7 @@ CREATE TABLE IF NOT EXISTS orchestrator_campaign_events (
   campaign_session_id TEXT NOT NULL,
   kind                TEXT NOT NULL CHECK (kind IN
                        ('request_actionable','request_resolved','child_ready','human_blockers_cleared',
-                        'child_blocked')),
+                        'child_blocked','campaign_idle')),
   subject_session_id  TEXT,
   occurrence_id       TEXT,
   subject_status      TEXT,
@@ -1100,6 +1109,20 @@ CREATE TABLE IF NOT EXISTS orchestrator_campaign_events (
 );
 CREATE INDEX IF NOT EXISTS idx_orchestrator_campaign_events_pending
   ON orchestrator_campaign_events(campaign_session_id, seq);
+
+-- The server's one automatic repair of an idle campaign's leftovers (#4146): a forge re-read,
+-- approved merged-branch deletions, and at most one continuation naming what is left. One row per
+-- campaign, keyed to the digest of the leftovers it found, so each distinct set is tried once.
+-- A 'running' row past its lease reads as attempted, so a crash never keeps a campaign Active.
+CREATE TABLE IF NOT EXISTS orchestrator_campaign_repairs (
+  campaign_session_id TEXT PRIMARY KEY,
+  digest              TEXT NOT NULL,
+  state               TEXT NOT NULL CHECK (state IN ('running','attempted')),
+  continuation        INTEGER NOT NULL DEFAULT 0 CHECK (continuation IN (0, 1)),
+  started_at          INTEGER NOT NULL,
+  finished_at         INTEGER,
+  FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
 
 -- Who resolved a campaign request, keyed by the same hashed identity the projection publishes
 -- (#3083). Written with the resolution's governance audit, read when the request's removal is
@@ -2972,6 +2995,8 @@ CREATE TABLE IF NOT EXISTS decision_occurrences (
   reason                 TEXT,
   failure_class          TEXT,
   fields                 TEXT,
+  -- #4283: a typed occurrence's questions, answers and threshold; NULL on single-verdict records.
+  typed_answers          TEXT,
   target                 TEXT,
   human_route_claimed_at INTEGER,
   human_routed_at        INTEGER,
@@ -2991,12 +3016,25 @@ CREATE TABLE IF NOT EXISTS campaign_decision_subjects (
   occurrence_id       TEXT PRIMARY KEY,
   campaign_session_id TEXT NOT NULL,
   session_id          TEXT NOT NULL,
-  surface             TEXT NOT NULL CHECK (surface IN ('implementation_question','provider_question','tool_request','owner_decision')),
+  surface             TEXT NOT NULL CHECK (surface IN ('implementation_question','provider_question','tool_request','owner_decision',
+                        'follow_up_publication','issue_closure','issue_scope_seed')),
   request_id          TEXT NOT NULL,
   classification      TEXT CHECK (classification IN ('decline','orchestrator')),
   classified_by       TEXT,
   classified_at       INTEGER,
   created_at          INTEGER NOT NULL,
+  FOREIGN KEY (occurrence_id) REFERENCES decision_occurrences(occurrence_id) ON DELETE CASCADE
+);
+
+-- #4103: what each scope_review occurrence reviewed, for Campaign Status, and the one scope change
+-- an admit led to. The audit keeps only input digests; these are the proposal as the campaign shows it.
+CREATE TABLE IF NOT EXISTS campaign_selection_proposals (
+  occurrence_id          TEXT PRIMARY KEY,
+  campaign_session_id    TEXT NOT NULL,
+  issues                 TEXT NOT NULL,
+  explanation            TEXT NOT NULL,
+  workflow_occurrence_id TEXT,
+  created_at             INTEGER NOT NULL,
   FOREIGN KEY (occurrence_id) REFERENCES decision_occurrences(occurrence_id) ON DELETE CASCADE
 );
 
@@ -3576,6 +3614,32 @@ export function campaignRequestToken(type: "typed" | "generic", sessionId: strin
   return createHash("sha256").update(`${type}:${sessionId}:${requestKey}`).digest("hex");
 }
 
+/** Session statuses whose turn is live work for a campaign (#4146): running, starting or queued. */
+const CAMPAIGN_LIVE_SESSION_STATUSES: ReadonlySet<SessionStatus> = new Set(["running", "starting", "queued"]);
+
+/** How long the server's own campaign repair, or a Wollipog-performed branch deletion, reads as in
+ * flight (#4146). Past it, a crashed attempt never keeps a campaign Active. */
+export const CAMPAIGN_REPAIR_LEASE_MS = 5 * 60_000;
+
+/** The identity of an idle campaign's leftovers (#4146): each item's kind and subject, never a time
+ * or a reason, so the server's repair runs once for each distinct set. */
+function campaignLeftoverDigest(status: "stuck" | "complete_needs_cleanup", stuck: readonly CampaignStuckItem[],
+  cleanup: readonly CampaignCleanupItem[], recoveryIds: readonly string[]): string {
+  const keys = [
+    ...stuck.map((item) => item.kind === "unverified_child" ? `child:${item.sessionId}:${item.status}`
+      : item.kind === "orchestrator_request" ? `request:${item.sessionId}:${item.occurrenceId}`
+      : item.kind === "work_item" ? `item:${item.workItemId}`
+      : item.kind === "continuation" ? `continuation:${item.state}`
+      : `scope:${item.reason}`),
+    ...cleanup.map((item) => item.kind === "merged_branch"
+      ? `branch:${item.repository.toLowerCase()}#${item.pullRequest}:${item.state}:${item.branch ?? ""}:${item.action.kind}`
+      : item.kind === "worktree" ? `worktree:${item.sessionId}:${item.path}:${item.status}`
+      : `handoff:${item.workItemId}`),
+    ...recoveryIds.map((id) => `recovery:${id}`),
+  ].sort();
+  return createHash("sha256").update(JSON.stringify([status, keys])).digest("hex");
+}
+
 function addCampaignRequestSummary(
   counts: NonNullable<SessionView["campaignRequests"]>,
   request: CampaignRequestSummaryRow,
@@ -3870,7 +3934,10 @@ export type CampaignContinuationEventKind =
   | "child_ready"
   | "human_blockers_cleared"
   /** A child became held from starting its next turn (#1650); `occurrenceId` is the hold's id. */
-  | "child_blocked";
+  | "child_blocked"
+  /** The server's one repair of an idle campaign's leftovers wakes the root (#4146): `occurrenceId`
+   * is the digest of the leftovers, so each distinct set wakes it at most once. */
+  | "campaign_idle";
 
 /**
  * How the prompt that resumes a child after its workflow decision resolves is progressing (#1650).
@@ -5317,6 +5384,7 @@ interface DecisionOccurrenceRow {
   reason: string | null;
   failure_class: string | null;
   fields: string | null;
+  typed_answers: string | null;
   target: string | null;
   human_route_claimed_at: number | null;
   human_routed_at: number | null;
@@ -5342,6 +5410,8 @@ export interface DecisionOccurrenceRecord {
   failureClass: string | null;
   /** The kind's extra output fields, validated and projected to its schema. */
   fields: Record<string, unknown>;
+  /** A typed occurrence's questions, answers and threshold (#4283); null on single-verdict ones. */
+  typedAnswers: import("@wollipog/protocol").DecisionTypedAnswersView | null;
   target: DecisionModelResolvedTarget | null;
   humanRouteClaimedAt: number | null;
   /** Set once the caller's routing finished, with or without a request. A claim without it was
@@ -5705,17 +5775,17 @@ function sameHostBoot(previous: string, current: string): boolean {
 }
 
 /**
- * Admit the `child_blocked` campaign event (#1650). SQLite cannot alter a CHECK constraint, so an
- * older table is rebuilt under the new one. Event sequence numbers are campaign cursors
- * (`orchestrator_campaign_cursors.consumed_through_seq`), so every row keeps its `seq` and the
- * AUTOINCREMENT high-water mark is carried over too: a pruned tail must never let a new event reuse
- * a number a cursor has already passed.
+ * Admit the newer campaign events: `child_blocked` (#1650) and `campaign_idle` (#4146). SQLite
+ * cannot alter a CHECK constraint, so an older table is rebuilt under the new one. Event sequence
+ * numbers are campaign cursors (`orchestrator_campaign_cursors.consumed_through_seq`), so every row
+ * keeps its `seq` and the AUTOINCREMENT high-water mark is carried over too: a pruned tail must never
+ * let a new event reuse a number a cursor has already passed.
  */
-function admitChildBlockedCampaignEvents(db: DatabaseSync): void {
+function admitCampaignEventKinds(db: DatabaseSync): void {
   const schema = db.prepare(
     "SELECT sql FROM sqlite_master WHERE type='table' AND name='orchestrator_campaign_events'",
   ).get() as { sql?: string } | undefined;
-  if (!schema?.sql || schema.sql.includes("'child_blocked'")) return;
+  if (!schema?.sql || schema.sql.includes("'campaign_idle'")) return;
   db.exec("PRAGMA foreign_keys = OFF;");
   try {
     db.exec("BEGIN;");
@@ -5729,7 +5799,7 @@ function admitChildBlockedCampaignEvents(db: DatabaseSync): void {
         campaign_session_id TEXT NOT NULL,
         kind                TEXT NOT NULL CHECK (kind IN
                              ('request_actionable','request_resolved','child_ready','human_blockers_cleared',
-                              'child_blocked')),
+                              'child_blocked','campaign_idle')),
         subject_session_id  TEXT,
         occurrence_id       TEXT,
         subject_status      TEXT,
@@ -5813,6 +5883,50 @@ function preserveCampaignFollowUpOrigins(db: DatabaseSync): void {
   }
 }
 
+/**
+ * Admit every current subject surface (#4104): the follow-up relatedness and closure-reason subjects
+ * (Slice B) and the Custom epic seed (Slice C). A table written by an earlier release checked its
+ * surface against fewer surfaces; SQLite cannot alter a CHECK, so that table is rebuilt with the
+ * wider check. Every row is preserved.
+ */
+function widenCampaignDecisionSubjects(db: DatabaseSync): void {
+  const schema = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='table' AND name='campaign_decision_subjects'",
+  ).get() as { sql?: string } | undefined;
+  if (!schema?.sql || schema.sql.includes("'issue_scope_seed'")) return;
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    db.exec("BEGIN;");
+    db.exec(`
+      CREATE TABLE campaign_decision_subjects_v2 (
+        occurrence_id       TEXT PRIMARY KEY,
+        campaign_session_id TEXT NOT NULL,
+        session_id          TEXT NOT NULL,
+        surface             TEXT NOT NULL CHECK (surface IN ('implementation_question','provider_question','tool_request','owner_decision',
+                              'follow_up_publication','issue_closure','issue_scope_seed')),
+        request_id          TEXT NOT NULL,
+        classification      TEXT CHECK (classification IN ('decline','orchestrator')),
+        classified_by       TEXT,
+        classified_at       INTEGER,
+        created_at          INTEGER NOT NULL,
+        FOREIGN KEY (occurrence_id) REFERENCES decision_occurrences(occurrence_id) ON DELETE CASCADE
+      );
+      INSERT INTO campaign_decision_subjects_v2
+        (occurrence_id, campaign_session_id, session_id, surface, request_id, classification, classified_by, classified_at, created_at)
+        SELECT occurrence_id, campaign_session_id, session_id, surface, request_id, classification, classified_by, classified_at, created_at
+        FROM campaign_decision_subjects;
+      DROP TABLE campaign_decision_subjects;
+      ALTER TABLE campaign_decision_subjects_v2 RENAME TO campaign_decision_subjects;
+    `);
+    db.exec("COMMIT;");
+  } catch (error) {
+    try { db.exec("ROLLBACK;"); } catch { /* no active transaction */ }
+    throw error;
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+
 /** Session-row assignment that folds a cached event's time into its last activity, binding
  * (ts, ts). Last activity keeps the later time, so replayed history, a restored control-plane
  * event, or a runner clock that trails the control plane's never moves it backward. The first
@@ -5854,19 +5968,28 @@ export class ControlPlaneDb {
   readonly reviewSessions: ReviewSessions;
   readonly delegatedImageReviews: DelegatedImageReviews;
   readonly pullRequestWatches: PullRequestWatches;
+  /** The wait_session and wait_pull_request calls in progress (#1280, #4249). In memory: only the
+   * owning control plane receives their reports. */
+  readonly sessionWaits = new SessionWaits((targetSessionId) => this.sessionStatusOnly(targetSessionId));
+
+  /** A session's lifecycle status alone, without building its view; null when it does not exist. */
+  sessionStatusOnly(sessionId: string): SessionStatus | null {
+    return (this.stmt("SELECT status FROM sessions WHERE id=?").get(sessionId) as { status: SessionStatus } | undefined)?.status ?? null;
+  }
   readonly reviewSettings: ReviewSettingsStore;
   /** A review session's immutable kind and what it reviews (#3368); for a session that requested
    * reviews, their summary (#3369); nothing else for ordinary sessions. Also the merge-queue watch
-   * a session is parked on (#4071). */
+   * a session is parked on (#4071), and its tracked waits (#1280). */
   private reviewSessionProjection(sessionId: string):
-    Pick<SessionView, "kind" | "review" | "reviewRuns" | "reviewPolicy" | "pullRequestWatch"> {
+    Pick<SessionView, "kind" | "review" | "reviewRuns" | "reviewPolicy" | "pullRequestWatch" | "waits"> {
     const review = this.reviewSessions.link(sessionId);
     if (review) return { kind: "review", review };
     const reviewRuns = this.reviewSessions.summaryFor(sessionId);
     const reviewPolicy = this.reviewSettings.sessionPolicy(sessionId);
     const pullRequestWatch = this.pullRequestWatches.visibleFor(sessionId);
+    const waits = this.sessionWaits.views(sessionId);
     return { ...(reviewRuns ? { reviewRuns } : {}), ...(reviewPolicy ? { reviewPolicy } : {}),
-      ...(pullRequestWatch ? { pullRequestWatch } : {}) };
+      ...(pullRequestWatch ? { pullRequestWatch } : {}), ...(waits ? { waits } : {}) };
   }
 
   private constructor(
@@ -6130,17 +6253,19 @@ export class ControlPlaneDb {
     if (!row || !policy || row.archived === 1 || this.sessionStopIntent(campaignId) ||
         isTerminal(row.status as SessionStatus) || row.status === "input_required" || row.history_quarantine ||
         row.worktree_recovery || row.queue_hold || pendingRequests(parseJson<PendingApproval>(row.pending_approval)).some(r => !r.async)) {
-      return { state: "lifecycle_held", reason: "Automatic continuation is held by the campaign's current lifecycle or pending recovery." };
+      return { state: "lifecycle_held", reason: CAMPAIGN_AUTOMATION_HOLD_REASONS.lifecycle };
     }
     const full = policy.control?.mode === "full_control";
     if (full && !campaignBoundaryCurrent({ orchestratorPolicy: policy, parentControlPolicy: this.parentControlPolicy(campaignId) ?? undefined })) {
       return { state: "authority_unavailable", reason: "The current authority boundary is unavailable; recovery cannot enlarge it." };
     }
     const completion = this.campaignRecoveryCompletion(campaignId);
-    if (completion.state === "complete" || completion.state === "recovery_held") {
+    // The one wake-up the server's repair of a delivered campaign's leftovers records (#4146) is how
+    // the Orchestrator learns of owed cleanup; it dispatches no recovery record. Held scoped work
+    // stays held: its original obligation is reconciled first, so the repair records no wake for it.
+    if ((completion.state === "complete" && !this.campaignCleanupWakePending(campaignId)) || completion.state === "recovery_held") {
       return { state: "lifecycle_held", reason: completion.state === "complete"
-        ? "The campaign has no unfinished original scoped recovery obligation."
-        : "Original scoped work remains unfinished, but no current known recovery is eligible. Reconcile its original obligation before continuing." };
+        ? CAMPAIGN_AUTOMATION_HOLD_REASONS.complete : CAMPAIGN_AUTOMATION_HOLD_REASONS.recoveryHeld };
     }
     const active = this.activeCampaignContinuation(campaignId);
     if (active) {
@@ -6227,8 +6352,10 @@ export class ControlPlaneDb {
       if (!page.ok) return { state: "recovery_held", recoveryIds: [] };
       for (const item of page.data.items) {
         if (handedOff.has(item.id)) continue;
+        // Delivery is proven in the launch repository only until per-repository gates (#4119) land:
+        // an item in another campaign repository stays the campaign's ordinary unfinished work.
         if (item.commitment !== "committed" || !item.issue || item.issue.repository.toLowerCase() !== scope.repository.toLowerCase() ||
-            !scope.issueNumbers.includes(item.issue.number) || !policy.issueNumbers?.includes(item.issue.number)) continue;
+            !campaignIssueInScope(policy, item.issue)) continue;
         // A never-dispatched placeholder of an epic this campaign closed from its members (#4060) is
         // finished by that closure. Any item with an attempt still needs its own delivery.
         if (item.attemptCount === 0 && !item.currentAttempt && this.memberProvenEpicClosure(campaignId, item.issue.repository, item.issue.number)) continue;
@@ -6739,6 +6866,12 @@ export class ControlPlaneDb {
     }
     try {
       db.exec("ALTER TABLE skill_git_auto_updates ADD COLUMN checked_modes TEXT");
+    } catch {
+      /* column already present */
+    }
+    try {
+      // #4283: typed Decision answers. Existing occurrences keep their single-verdict form (NULL).
+      db.exec("ALTER TABLE decision_occurrences ADD COLUMN typed_answers TEXT");
     } catch {
       /* column already present */
     }
@@ -7387,6 +7520,8 @@ export class ControlPlaneDb {
       "superseded_by TEXT",
       // #4064: the root handed this Orchestrator-owned occurrence to the campaign's owner.
       "owner_handoff TEXT",
+      // #4137: the installed or user-authored rule that kept this occurrence for a person.
+      "owner_rule TEXT",
       // #4067: what Wollipog did when it performed this approved forge action itself.
       "forge_action TEXT",
       // #4138: the session owner who approved a Location switch, and its claim, then its receipt.
@@ -7407,8 +7542,9 @@ export class ControlPlaneDb {
     // An enqueue Wollipog performed is a merge whatever its occurrence's status became meanwhile.
     db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_forge_merges
       ON workflow_decisions(controlling_session_id) WHERE category='pr_merge' AND forge_action IS NOT NULL`);
-    admitChildBlockedCampaignEvents(db);
+    admitCampaignEventKinds(db);
     preserveCampaignFollowUpOrigins(db);
+    widenCampaignDecisionSubjects(db);
     // An early v147 iteration used one-admission-per-turn uniqueness. Event-order correlation is
     // narrower and permits multiple distinct invocations in one provider turn.
     db.exec("DROP INDEX IF EXISTS idx_workflow_decisions_provider_turn_action");
@@ -8211,6 +8347,11 @@ export class ControlPlaneDb {
         db.exec(`ALTER TABLE orchestrator_campaign_request_resolutions ADD COLUMN ${column}`);
       }
     }
+    // The person who added a Project Location (#4117). Only a campaign owner's own additions join
+    // its boundary automatically; earlier rows, and any added without a person, read as nobody's.
+    if (!(db.prepare("PRAGMA table_info(project_locations)").all() as Array<{ name: string }>).some((column) => column.name === "added_by_user_id")) {
+      db.exec("ALTER TABLE project_locations ADD COLUMN added_by_user_id TEXT");
+    }
     const controlPlane = new ControlPlaneDb(
       db, artifactBlobs, instanceId, journalMode === "wal" ? `${resolvePath(location)}-wal` : null, hostRebooted, false,
     );
@@ -8873,6 +9014,7 @@ export class ControlPlaneDb {
     input: { name: string; path: string },
     now = Date.now(),
     requestedScope?: ResourceScope,
+    addedByUserId?: string,
   ): WorkspaceInfo {
     const name = input.name.trim();
     const path = input.path.trim();
@@ -8911,7 +9053,7 @@ export class ControlPlaneDb {
          (runner_id, workspace_id, organization_id, owner_kind, owner_id, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       ).run(runnerId, id, workspaceScope.organizationId, workspaceScope.owner.kind, ownerId, now, now);
-      this.addProjectLocation(projectId, { runnerId, workspaceId: id }, now);
+      this.addProjectLocation(projectId, { runnerId, workspaceId: id, ...(addedByUserId ? { addedByUserId } : {}) }, now);
     });
     return { id, name, path };
   }
@@ -9598,9 +9740,16 @@ export class ControlPlaneDb {
     return this.resolveImportedSessionLocation(runnerId, path).projectLocation;
   }
 
+  /** The person who added this Project Location, or null when no person did (#4117). */
+  projectLocationAddedBy(locationId: string): string | null {
+    const row = this.stmt("SELECT added_by_user_id FROM project_locations WHERE id=?").get(locationId) as
+      | { added_by_user_id: string | null } | undefined;
+    return row?.added_by_user_id ?? null;
+  }
+
   addProjectLocation(
     projectId: string,
-    input: { runnerId: string; workspaceId: string },
+    input: { runnerId: string; workspaceId: string; addedByUserId?: string },
     now = Date.now(),
   ): ProjectLocationView {
     const project = this.getProject(projectId);
@@ -9629,15 +9778,19 @@ export class ControlPlaneDb {
         this.stmt(
           `UPDATE project_locations
            SET name=CASE WHEN name_source='user' THEN name ELSE ? END,
-             path=?, source=?, last_seen_at=?, detached_at=NULL, updated_at=?
+             path=?, source=?, last_seen_at=?, detached_at=NULL, added_by_user_id=?, updated_at=?
            WHERE id=? AND detached_at IS NOT NULL AND removed_at IS NULL`,
-        ).run(workspace.name, workspace.path, workspace.source, now, now, locationId);
+        ).run(workspace.name, workspace.path, workspace.source, now, input.addedByUserId ?? null, now, locationId);
+        // A revived Location is added anew (#4117): nothing a campaign recorded about its earlier
+        // life (an exclusion a reconnect would retry, a pending entry) survives. Only the adding
+        // route's own provenance check can record it again.
+        this.forgetCampaignLocation(projectId, locationId, now);
       } else {
         this.stmt(
           `INSERT INTO project_locations
            (id, project_id, runner_id, workspace_id, name, path, source, last_seen_at,
-            detached_at, removed_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
+            detached_at, removed_at, created_at, updated_at, added_by_user_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)`,
         ).run(
           locationId,
           projectId,
@@ -9649,6 +9802,7 @@ export class ControlPlaneDb {
           now,
           now,
           now,
+          input.addedByUserId ?? null,
         );
       }
       this.stmt(
@@ -9659,7 +9813,7 @@ export class ControlPlaneDb {
     return this.projectLocation(locationId)!;
   }
 
-  moveProjectLocation(locationId: string, targetProjectId: string, now = Date.now()): ProjectLocationView | null {
+  moveProjectLocation(locationId: string, targetProjectId: string, now = Date.now(), movedByUserId?: string): ProjectLocationView | null {
     const location = this.projectLocation(locationId);
     const target = this.getProject(targetProjectId);
     if (!location || !target) return null;
@@ -9735,6 +9889,12 @@ export class ControlPlaneDb {
       ).run(targetProjectId, now, targetProjectId);
       this.stmt("UPDATE projects SET name_source='user' WHERE id IN (?, ?)")
         .run(sourceProjectId, targetProjectId);
+      // Moving a Location into a Project adds it there, by whoever moved it (#4117), so nothing a
+      // campaign recorded about its earlier life there survives the move.
+      if (!targetLocation) {
+        this.stmt("UPDATE project_locations SET added_by_user_id=? WHERE id=?").run(movedByUserId ?? null, locationId);
+        this.forgetCampaignLocation(targetProjectId, locationId, now);
+      }
     });
     return targetLocation ? this.projectLocation(targetLocation.id) : this.projectLocation(locationId);
   }
@@ -12437,12 +12597,63 @@ export class ControlPlaneDb {
     return row ? this.decisionOccurrenceFromRow(row) : null;
   }
 
+  /** Every issue an applied (consumed) Orchestrator scope proposal of this campaign added as its own
+   * choice (#4282), whether or not it is still in scope: removing an issue never frees room under the
+   * owner's count. Unbounded, for enforcement. */
+  appliedProposalChosenIssues(rootId: string): number[] {
+    const rows = this.stmt(`SELECT resource_snapshot FROM workflow_decisions WHERE controlling_session_id=? AND session_id=?
+      AND category='campaign_issue_scope' AND status='consumed' AND json_extract(resource_snapshot, '$.scopeProposal') IS NOT NULL`)
+      .all(rootId, rootId) as Array<{ resource_snapshot: string }>;
+    const chosen = new Set<number>();
+    for (const row of rows) {
+      const issues = (JSON.parse(row.resource_snapshot) as { scopeProposal?: { issues?: Array<{ number: number; origin: string }> } }).scopeProposal?.issues ?? [];
+      for (const issue of issues) if (issue.origin === "orchestrator_chosen" && Number.isSafeInteger(issue.number)) chosen.add(issue.number);
+    }
+    return [...chosen].sort((a, b) => a - b);
+  }
+
+  /** A campaign's occurrences whose idempotency key starts with `prefix` (#4282: every constraint check
+   * of one set of additions at one boundary and scope revision), oldest first and bounded. */
+  decisionOccurrencesByKeyPrefix(campaignSessionId: string, prefix: string, limit = 20): DecisionOccurrenceRecord[] {
+    const escaped = prefix.replace(/[\\%_]/gu, (character) => `\\${character}`);
+    return (this.stmt(`SELECT * FROM decision_occurrences WHERE campaign_session_id=? AND occurrence_key LIKE ? ESCAPE '\\'
+      ORDER BY created_at, occurrence_id LIMIT ?`).all(campaignSessionId, `${escaped}%`, limit) as unknown as DecisionOccurrenceRow[])
+      .map((row) => this.decisionOccurrenceFromRow(row));
+  }
+
   /** Record what a campaign occurrence affected (#4104). The first record wins. */
   recordCampaignDecisionSubject(input: { occurrenceId: string; campaignSessionId: string } & Omit<CampaignDecisionSubject, "classification">, now: number): void {
     this.stmt(
       `INSERT OR IGNORE INTO campaign_decision_subjects (occurrence_id, campaign_session_id, session_id, surface, request_id, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
     ).run(input.occurrenceId, input.campaignSessionId, input.sessionId, input.surface, input.requestId, now);
+  }
+
+  /** Record what a `scope_review` occurrence reviewed (#4103). The first record wins: a duplicate
+   * proposal joining the same occurrence never rewrites it. */
+  recordSelectionProposal(input: { occurrenceId: string; campaignSessionId: string;
+    issues: Array<{ repository: string; number: number; title: string }>; explanation: string }, now: number): void {
+    this.stmt(`INSERT OR IGNORE INTO campaign_selection_proposals (occurrence_id, campaign_session_id, issues, explanation, created_at)
+      VALUES (?, ?, ?, ?, ?)`).run(input.occurrenceId, input.campaignSessionId, JSON.stringify(input.issues), input.explanation, now);
+  }
+
+  /** Link an admitted review to the one live scope change it created, by compare-and-set on the
+   * link it replaces (`previous`, null for the first): an occurrence holds one scope change at a
+   * time, and only one retired before it was applied is ever replaced. */
+  linkSelectionProposalDecision(occurrenceId: string, workflowOccurrenceId: string, previous: string | null = null): boolean {
+    return Number((previous === null
+      ? this.stmt(`UPDATE campaign_selection_proposals SET workflow_occurrence_id=?
+        WHERE occurrence_id=? AND workflow_occurrence_id IS NULL`).run(workflowOccurrenceId, occurrenceId)
+      : this.stmt(`UPDATE campaign_selection_proposals SET workflow_occurrence_id=?
+        WHERE occurrence_id=? AND workflow_occurrence_id=?`).run(workflowOccurrenceId, occurrenceId, previous)).changes) > 0;
+  }
+
+  selectionProposal(occurrenceId: string): { campaignSessionId: string; issues: Array<{ repository: string; number: number; title: string }>;
+    explanation: string; workflowOccurrenceId: string | null } | null {
+    const row = this.stmt("SELECT * FROM campaign_selection_proposals WHERE occurrence_id=?").get(occurrenceId) as
+      { campaign_session_id: string; issues: string; explanation: string; workflow_occurrence_id: string | null } | undefined;
+    return row ? { campaignSessionId: row.campaign_session_id, issues: JSON.parse(row.issues) as Array<{ repository: string; number: number; title: string }>,
+      explanation: row.explanation, workflowOccurrenceId: row.workflow_occurrence_id } : null;
   }
 
   campaignDecisionSubject(occurrenceId: string): (CampaignDecisionSubject & { campaignSessionId: string }) | null {
@@ -12453,8 +12664,31 @@ export class ControlPlaneDb {
       requestId: row.request_id, ...(row.classification ? { classification: row.classification } : {}) } : null;
   }
 
+  /** The latest check of one subject that did not confirm it (#4104): a refusing verdict, an
+   * uncertain one or a failure. Such an outcome sticks to the server-owned subject, so rewording the
+   * request's text never buys a second verdict. */
+  latestUnconfirmedCampaignCheck(campaignSessionId: string, surface: CampaignDecisionSubject["surface"], requestId: string,
+    kind: string, refuse: string): DecisionOccurrenceRecord | null {
+    const row = this.stmt(
+      `SELECT d.* FROM campaign_decision_subjects s JOIN decision_occurrences d ON d.occurrence_id = s.occurrence_id
+       WHERE s.campaign_session_id=? AND s.surface=? AND s.request_id=? AND d.kind=?
+         AND (d.state IN ('uncertain','failed') OR (d.state='decided' AND d.verdict=?))
+       ORDER BY d.created_at DESC, d.occurrence_id DESC LIMIT 1`,
+    ).get(campaignSessionId, surface, requestId, kind, refuse) as DecisionOccurrenceRow | undefined;
+    return row ? this.decisionOccurrenceFromRow(row) : null;
+  }
+
   /** The owner's one classification of an uncertain or failed screen, by compare-and-set: only an
    * occurrence that routed to a person and has no classification yet accepts one. */
+  /** Record the owner's Continue Without an Epic on an epic seed's reading (#4104), once. The seed's
+   * own `owner` state, not the occurrence's, is what lets the owner release it. */
+  releaseCampaignIssueScopeSeedSubject(occurrenceId: string, userId: string, now: number): boolean {
+    return Number(this.stmt(
+      `UPDATE campaign_decision_subjects SET classification='orchestrator', classified_by=?, classified_at=?
+       WHERE occurrence_id=? AND surface='issue_scope_seed' AND classification IS NULL`,
+    ).run(userId, now, occurrenceId).changes) > 0;
+  }
+
   classifyCampaignDecision(occurrenceId: string, classification: "decline" | "orchestrator", userId: string, now: number): boolean {
     return Number(this.stmt(
       `UPDATE campaign_decision_subjects SET classification=?, classified_by=?, classified_at=?
@@ -12595,10 +12829,11 @@ export class ControlPlaneDb {
     reason?: string;
     failureClass?: string;
     fields?: Record<string, unknown>;
+    typedAnswers?: import("@wollipog/protocol").DecisionTypedAnswersView;
     now: number;
   }): boolean {
     return Number(this.stmt(
-      `UPDATE decision_occurrences SET state=?, verdict=?, reason=?, failure_class=?, fields=?, decided_at=?
+      `UPDATE decision_occurrences SET state=?, verdict=?, reason=?, failure_class=?, fields=?, typed_answers=?, decided_at=?
        WHERE occurrence_id=? AND state='pending'`,
     ).run(
       outcome.state,
@@ -12606,6 +12841,7 @@ export class ControlPlaneDb {
       outcome.reason ?? null,
       outcome.failureClass ?? null,
       outcome.fields ? JSON.stringify(outcome.fields) : null,
+      outcome.typedAnswers ? JSON.stringify(outcome.typedAnswers) : null,
       outcome.now,
       occurrenceId,
     ).changes) === 1;
@@ -12635,6 +12871,10 @@ export class ControlPlaneDb {
     try {
       fields = row.fields ? JSON.parse(row.fields) as Record<string, unknown> : {};
     } catch { /* unreadable fields read as none */ }
+    let typedAnswers: DecisionOccurrenceRecord["typedAnswers"] = null;
+    try {
+      typedAnswers = row.typed_answers ? JSON.parse(row.typed_answers) as NonNullable<DecisionOccurrenceRecord["typedAnswers"]> : null;
+    } catch { /* unreadable answers read as none; the verdict and reason remain */ }
     try {
       target = row.target ? JSON.parse(row.target) as DecisionModelResolvedTarget : null;
     } catch { /* an unreadable target reads as absent */ }
@@ -12655,6 +12895,7 @@ export class ControlPlaneDb {
       reason: row.reason,
       failureClass: row.failure_class,
       fields,
+      typedAnswers,
       target,
       humanRouteClaimedAt: row.human_route_claimed_at,
       humanRoutedAt: row.human_routed_at,
@@ -12959,14 +13200,15 @@ export class ControlPlaneDb {
 
   /** REST and dashboard connects share the exact authorized serialized list until a DB write. */
   sessionListJsonForPrincipal(principal: AuthPrincipal, includeArchived = false, supportsRetryExhaustion = true,
-    supportsHandoffs = true): string {
+    campaignStatusProtocol: number | null = PROTOCOL_VERSION): string {
     const cached = this.sessionSummaryRead(principal,includeArchived);
-    if (supportsRetryExhaustion && supportsHandoffs) return cached.json;
+    const currentStatuses = runnerSupportsProtocol(campaignStatusProtocol, "campaignActivityStatus");
+    if (supportsRetryExhaustion && currentStatuses) return cached.json;
     if (supportsRetryExhaustion) {
-      // Only the campaign status needs a fallback (#4070), and only a campaign completed with
-      // handoffs has one, so this copy is rarely different and is not cached.
+      // Only the campaign status needs a fallback (#4070, #4146), and only a campaign with a newer
+      // status has one, so this copy is rarely different and is not cached.
       const payload={ sessions: cached.sessions };
-      const projected=projectCampaignHandoffsForUi(payload,null);
+      const projected=projectCampaignStatusForUi(payload,campaignStatusProtocol);
       return projected===payload ? cached.json : JSON.stringify(projected);
     }
     if (cached.legacyJson !== undefined) return cached.legacyJson;
@@ -12974,7 +13216,7 @@ export class ControlPlaneDb {
     // data shared and cache the legacy projection lazily, only within the same memory budget.
     // Every dashboard that predates the retry projection also predates campaign handoffs.
     const payload={ sessions: cached.sessions };
-    const legacy=projectCampaignHandoffsForUi(projectBackgroundRetryExhaustionForUi(payload,null),null);
+    const legacy=projectCampaignStatusForUi(projectBackgroundRetryExhaustionForUi(payload,null),null);
     const legacyJson=legacy===payload ? cached.json : JSON.stringify(legacy);
     const extraBytes=legacyJson===cached.json ? 0 : Buffer.byteLength(legacyJson);
     if (this.sessionSummaryReads.get(JSON.stringify([principal,includeArchived]))===cached &&
@@ -17204,23 +17446,49 @@ export class ControlPlaneDb {
       .run(sessionId, randomUUID(), payloadSha256, now);
   }
 
-  /** One-time upgrade path for human-created root campaigns that predate protocol v158. A stored
-   * non-empty scope is immutable, and ambiguous provenance or prompts remain unscoped. */
-  backfillSessionOrchestratorIssueNumbers(id: string, issueNumbers: readonly number[], now: number): number[] | null {
-    const unique = [...new Set(issueNumbers)].filter((number) => Number.isSafeInteger(number) && number > 0);
-    if (unique.length === 0 || unique.length > 100 || !this.sessionWasHumanCreatedOrchestrator(id)) return null;
+  /** Record what a Custom campaign's first message, sent after an empty launch, asks of its epic seed
+   * (#4104): `pending` for a reading, or `none`. Compare-and-set: only a campaign with no seed, no
+   * scope and no seeded epic gets one, so only its first message ever does. */
+  beginCampaignIssueScopeSeed(id: string, seed: { state: "pending" | "none"; messageDigest: string }, now: number): boolean {
     const policy = this.sessionOrchestratorPolicy(id);
-    if (!policy) return null;
-    if (policy.issueScope || policy.issueNumbers?.length) return [...(policy.issueNumbers ?? [])];
+    if (!policy || policy.issueScopeSeed || policy.issueScope || policy.issueScopeProposalEpic !== undefined) return false;
     const previous = JSON.stringify(policy);
-    policy.issueNumbers = unique;
-    // Transcript-derived: never the Human launch request provenance Full Control enable trusts (#2940).
-    delete policy.issueNumbersSource;
-    const result = this.stmt(
-      "UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=? AND orchestrator_policy=?",
-    ).run(JSON.stringify(policy), now, id, previous);
-    if (Number(result.changes) === 1) return unique;
-    return this.sessionOrchestratorPolicy(id)?.issueNumbers ?? null;
+    policy.issueScopeSeed = { state: seed.state, messageDigest: seed.messageDigest };
+    return Number(this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=? AND orchestrator_policy=?")
+      .run(JSON.stringify(policy), now, id, previous).changes) === 1;
+  }
+
+  /** Settle a Custom campaign's epic seed (#4104), compare-and-set on the policy: only a seed still in
+   * `from` (pending, unless the owner releases an `owner` seed) for this exact message changes, and
+   * only `seeded` names the epic. A scope a person approved meanwhile leaves the seed as it was; it
+   * holds nothing once a scope exists.
+   *
+   * A `none` settlement may carry the issues a healthy reading of the first message named and the
+   * runner verified (#4259): they become the campaign's `issueNumbers` in the same write, only from a
+   * pending seed of a Custom campaign that holds no issue numbers yet. `launchRequest` marks them as
+   * the person's own launch request, the provenance Full Control enable trusts (#2940); a reading of
+   * a recorded transcript message is never marked. */
+  settleCampaignIssueScopeSeed(id: string, messageDigest: string,
+    next: { state: "seeded"; epic: number; occurrenceId: string }
+      | { state: "none"; occurrenceId?: string; grant?: { issueNumbers: readonly number[]; launchRequest: boolean } }
+      | { state: "owner"; occurrenceId?: string }, now: number,
+    from: "pending" | "owner" = "pending"): boolean {
+    const policy = this.sessionOrchestratorPolicy(id);
+    if (!policy || policy.issueScope || policy.issueScopeSeed?.state !== from || policy.issueScopeSeed.messageDigest !== messageDigest) return false;
+    const grant = next.state === "none" ? next.grant : undefined;
+    if (grant && (from !== "pending" || policy.control?.mode === "full_control" || policy.issueNumbers?.length ||
+        grant.issueNumbers.length < 1 || grant.issueNumbers.length > 100 || new Set(grant.issueNumbers).size !== grant.issueNumbers.length ||
+        grant.issueNumbers.some((n) => !Number.isSafeInteger(n) || n < 1))) return false;
+    const previous = JSON.stringify(policy);
+    policy.issueScopeSeed = { state: next.state, messageDigest, ...(next.occurrenceId ? { occurrenceId: next.occurrenceId } : {}) };
+    if (next.state === "seeded") policy.issueScopeProposalEpic = next.epic;
+    if (grant) {
+      policy.issueNumbers = [...grant.issueNumbers];
+      if (grant.launchRequest) policy.issueNumbersSource = "human_launch_request";
+      else delete policy.issueNumbersSource;
+    }
+    return Number(this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=? AND orchestrator_policy=?")
+      .run(JSON.stringify(policy), now, id, previous).changes) === 1;
   }
 
   campaignIssueScopeRootsForRunner(runnerId: string): SessionView[] {
@@ -17229,6 +17497,85 @@ export class ControlPlaneDb {
       .all(runnerId) as Array<{id:string}>;
     const roots = new Set(rows.flatMap(({id}) => { const root=this.campaignRootForMember(id); return root ? [root] : []; }));
     return [...roots].flatMap((id) => { const root=this.getSession(id); return root?.orchestratorPolicy?.issueScope ? [root] : []; });
+  }
+
+  /** Issues the root's applied selection-lineage scope changes added (#4103), counted once each and
+   * never given back by a later removal. A scope change is applied and consumed in one step, and a
+   * pending one is superseded by the next proposal, so only consumed changes hold a slot. */
+  consumedSelectionAdditions(rootId: string): number[] {
+    const added = new Set<number>();
+    for (const row of this.stmt("SELECT occurrence_id FROM workflow_decisions WHERE controlling_session_id=? AND category='campaign_issue_scope' AND status='consumed'")
+      .all(rootId) as Array<{ occurrence_id: string }>) {
+      const snapshot = this.workflowDecisionByOccurrence(row.occurrence_id)?.resourceSnapshot;
+      if (snapshot?.category === "campaign_issue_scope" && snapshot.lineage?.kind === "selection") for (const n of snapshot.additions) added.add(n);
+    }
+    return [...added].sort((a, b) => a - b);
+  }
+
+  /** Whether another active campaign holds `issue` (#4103): an active root campaign other than
+   * `rootId` whose scope names it, or whose work ledger has a committed work item for it. */
+  issueHeldByOtherCampaign(rootId: string, repository: string, issue: number): boolean {
+    const wanted = repository.toLowerCase();
+    const active = new Set(this.listOrchestratorCampaignSessionIds().filter((id) => id !== rootId));
+    for (const id of active) {
+      const scope = this.getSession(id)?.orchestratorPolicy?.issueScope;
+      if (scope && scope.repository.toLowerCase() === wanted && scope.issueNumbers.includes(issue)) return true;
+    }
+    return this.campaignWorkLedger.campaignsWithCommittedIssue(wanted, issue).some((id) => active.has(id));
+  }
+
+  /** Campaign Status's repository boundary (#4117): each entry's Locations with their current
+   * availability and default marker, read live, so a Location that left the Project shows as
+   * removed while its repository keeps its entry. */
+  campaignRepositoryBoundaryView(rootId: string, policy: OrchestratorCampaignPolicy): CampaignRepositoryBoundaryView | null {
+    const control = policy.control;
+    if (control?.mode !== "full_control" || !control.boundary.repositories) return null;
+    // Read the row directly: a session view embeds this projection.
+    const projectId = (this.stmt("SELECT project_id FROM sessions WHERE id=?").get(rootId) as { project_id: string | null } | undefined)?.project_id;
+    const project = projectId ? this.getProject(projectId) : null;
+    const current = new Map((project?.locations ?? []).map((location) => [location.id, location]));
+    const named = new Map([...(policy.locationJoins ?? []).map((join) => [join.locationId, join.name] as const)]);
+    return {
+      revision: control.boundary.revision,
+      repositories: control.boundary.repositories.map((entry) => ({ repository: entry.repository,
+        locations: entry.locationIds.map((locationId) => {
+          const location = current.get(locationId);
+          // A Location outside the campaign's Project is never read live: it may now belong to a
+          // Project this campaign's readers can't see. Only the name the campaign recorded is shown.
+          return { locationId, name: location?.name ?? named.get(locationId) ?? "Removed Location",
+            availability: location?.availability ?? "removed" as const, isDefault: location?.isDefault ?? false };
+        }) })),
+      excludedLocations: structuredClone(policy.excludedLocations ?? []),
+      pendingLocations: structuredClone((policy.pendingLocations ?? []).filter((item) => current.has(item.locationId))),
+      joins: structuredClone(policy.locationJoins ?? []),
+    };
+  }
+
+  /** Drop one Location's exclusion and pending records from the Project's campaigns (#4117). */
+  private forgetCampaignLocation(projectId: string, locationId: string, now: number): void {
+    for (const root of this.campaignRepositoryRoots({ projectId })) {
+      const policy = this.sessionOrchestratorPolicy(root.id);
+      if (!policy) continue;
+      const excluded = (policy.excludedLocations ?? []).filter((item) => item.locationId !== locationId);
+      const pending = (policy.pendingLocations ?? []).filter((item) => item.locationId !== locationId);
+      if (excluded.length === (policy.excludedLocations ?? []).length && pending.length === (policy.pendingLocations ?? []).length) continue;
+      if (excluded.length) policy.excludedLocations = excluded; else delete policy.excludedLocations;
+      if (pending.length) policy.pendingLocations = pending; else delete policy.pendingLocations;
+      this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(policy), now, root.id);
+    }
+  }
+
+  /** Live root campaigns whose boundary has a repository list (#4117), in one Project or in any
+   * Project with a Location on one runner. */
+  campaignRepositoryRoots(filter: { projectId: string } | { runnerId: string }): SessionView[] {
+    const projectIds = "projectId" in filter ? [filter.projectId] : this.projectIdsForRunner(filter.runnerId);
+    return projectIds.flatMap((projectId) => (this.stmt(`SELECT id FROM sessions WHERE project_id=? AND parent_session_id IS NULL
+      AND archived=0 AND status NOT IN ('completed','failed','stopped')
+      AND CASE WHEN json_valid(orchestrator_policy) THEN json_type(orchestrator_policy, '$.control.boundary.repositories') ELSE NULL END='array'`)
+      .all(projectId) as Array<{ id: string }>).flatMap(({ id }) => {
+      const root = this.getSession(id);
+      return root?.orchestratorPolicy?.control?.mode === "full_control" && root.orchestratorPolicy.control.boundary.repositories ? [root] : [];
+    }));
   }
 
   campaignPublicationReservations(rootId: string): WorkflowDecisionView[] {
@@ -17308,6 +17655,17 @@ export class ControlPlaneDb {
     const path = (s: Pick<SessionView, "id" | "runnerId" | "workspaceId">) => this.getAdHocWorkspacePath(s.id) ??
       (s.workspaceId ? this.getWorkspacePath(s.runnerId, s.workspaceId) : null);
     return root.runnerId === member.runnerId && root.workspaceId === member.workspaceId && path(root) === path(member);
+  }
+
+  /** The repository of the Location a campaign participant runs in (#4118): the launch repository
+   * when it shares the root's runner and workspace, otherwise the campaign repository whose
+   * verified Locations include one on its runner and workspace. Null when it is in none. */
+  campaignParticipantRepository(root: SessionView, member: Pick<SessionView, "id" | "runnerId" | "workspaceId">): string | null {
+    const launch = campaignLaunchRepository(root);
+    if (!launch) return null;
+    if (this.campaignSharesRepositoryWorkspace(root, member)) return launch;
+    if (!member.workspaceId || this.getAdHocWorkspacePath(member.id)) return null;
+    return campaignLocationRepository(this, root, campaignScopeRepositories(root), member);
   }
 
   /** The newest Human decision on admitting this follow-up past the campaign's approval limit (#2940). */
@@ -17439,7 +17797,158 @@ export class ControlPlaneDb {
           WHERE id=? AND parent_control_policy_revision=?`).run(rootId, expectedRevision).changes) !== 1) {
         return refuse(409, "Campaign authority changed; refresh and try again.");
       }
-      const revoked = this.unconsumedWorkflowDecisionsForController(rootId);
+      const revoked = this.authorityBoundWorkflowDecisionsForController(rootId);
+      for (const stale of revoked) {
+        this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
+        this.retireWorkflowDecisionResume(stale.occurrenceId, now);
+        this.revokeUiEvidenceReviewReceipts(stale.occurrenceId, now);
+      }
+      this.db.exec("COMMIT");
+      return { ok: true, revoked };
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  /** Record what a mid-campaign Location inspection found (#4117). Verified Locations join their
+   * repository's boundary entry, or a new entry, at one new boundary revision authorized by the
+   * campaign's owner, exactly as any owner-authorized boundary change: every Full Control member
+   * gets the re-minted boundary and unconsumed decisions under the old revision are revoked.
+   * Exclusions and pending Locations are informational and never change the revision. The caller
+   * proves each join's provenance; this only refuses a boundary that is stale or not the owner's. */
+  recordCampaignLocations(rootId: string, ownerUserId: string, update: {
+    joins: Array<{ locationId: string; name: string; repository: string; source: CampaignLocationJoin["source"] }>;
+    excluded: CampaignExcludedLocation[];
+    pending: CampaignPendingLocation[];
+  }, now: number): { ok: true; revision: number; joined: boolean; revoked: WorkflowDecisionView[] } | { ok: false; status: number; error: string } {
+    this.db.exec("BEGIN IMMEDIATE");
+    const refuse = (status: number, error: string) => { this.db.exec("ROLLBACK"); return { ok: false as const, status, error }; };
+    try {
+      const policy = this.sessionOrchestratorPolicy(rootId);
+      const control = policy?.control;
+      if (!policy || control?.mode !== "full_control" || !control.boundary.repositories) {
+        return refuse(409, "Only a Full Control campaign with a repository boundary takes Project Locations.");
+      }
+      const parentControlPolicy = this.parentControlPolicy(rootId) ?? undefined;
+      if (!parentControlPolicy || !campaignBoundaryCurrent({ orchestratorPolicy: policy, parentControlPolicy })) {
+        return refuse(409, "This campaign's Full Control authority is out of date.");
+      }
+      if (control.boundary.authorizedByUserId !== ownerUserId) return refuse(403, "Only the campaign's owner can widen its boundary.");
+      const touched = new Set([...update.joins, ...update.excluded, ...update.pending].map((item) => item.locationId));
+      // A Location keeps one state: whatever this update says replaces what was recorded before.
+      const excluded = [...(policy.excludedLocations ?? []).filter((item) => !touched.has(item.locationId)), ...update.excluded];
+      const pending = [...(policy.pendingLocations ?? []).filter((item) => !touched.has(item.locationId)), ...update.pending];
+      let revision = control.boundary.revision;
+      const joins = update.joins.filter((join) => !control.boundary.repositories!.some((entry) => entry.locationIds.includes(join.locationId)));
+      let revoked: WorkflowDecisionView[] = [];
+      if (joins.length) {
+        const order = new Map((this.getProject(this.getSession(rootId)?.projectId ?? "")?.locations ?? []).map((location, index) => [location.id, index]));
+        const repositories = structuredClone(control.boundary.repositories);
+        for (const join of joins) {
+          const name = join.repository.toLowerCase();
+          const entry = repositories.find((item) => item.repository.toLowerCase() === name);
+          if (entry) entry.locationIds.push(join.locationId);
+          else repositories.push({ repository: name, locationIds: [join.locationId] });
+        }
+        // Within an entry, Locations keep Project order (default first); Locations no longer in the
+        // Project keep their place after the rest.
+        for (const entry of repositories) {
+          entry.locationIds = entry.locationIds.map((id, index) => ({ id, index }))
+            .sort((a, b) => (order.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.id) ?? Number.MAX_SAFE_INTEGER) || a.index - b.index)
+            .map((item) => item.id);
+        }
+        const reminted = remintCampaignBoundary({ ...control.boundary, repositories }, { revision: control.boundary.issueScopeRevision }, ownerUserId, now);
+        if (reminted?.mode !== "full_control") return refuse(409, "The campaign's boundary cannot hold more repositories or Locations.");
+        revision = reminted.boundary.revision;
+        for (const id of [rootId, ...this.campaignDescendantIds(rootId)]) {
+          if (id === rootId) continue;
+          const memberPolicy = this.sessionOrchestratorPolicy(id);
+          if (memberPolicy?.control?.mode !== "full_control") continue;
+          memberPolicy.control = structuredClone(reminted);
+          this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(memberPolicy), now, id);
+        }
+        policy.control = reminted;
+        policy.locationJoins = [...(policy.locationJoins ?? []), ...joins.map((join) => ({ locationId: join.locationId, name: join.name,
+          repository: join.repository.toLowerCase(), revision, at: now, source: join.source }))].slice(-CAMPAIGN_LOCATION_JOINS_MAX);
+        if (Number(this.stmt(`UPDATE sessions SET parent_control_policy_revision=parent_control_policy_revision+1
+            WHERE id=? AND parent_control_policy_revision=?`).run(rootId, parentControlPolicy.revision).changes) !== 1) {
+          return refuse(409, "Campaign authority changed; inspect the Location again.");
+        }
+        revoked = this.authorityBoundWorkflowDecisionsForController(rootId);
+        for (const stale of revoked) {
+          this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
+          this.retireWorkflowDecisionResume(stale.occurrenceId, now);
+          this.revokeUiEvidenceReviewReceipts(stale.occurrenceId, now);
+        }
+      }
+      if (excluded.length) policy.excludedLocations = excluded.slice(-CAMPAIGN_BOUNDARY_LOCATIONS_MAX); else delete policy.excludedLocations;
+      if (pending.length) policy.pendingLocations = pending.slice(-CAMPAIGN_BOUNDARY_LOCATIONS_MAX); else delete policy.pendingLocations;
+      this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(policy), now, rootId);
+      this.db.exec("COMMIT");
+      return { ok: true, revision, joined: joins.length > 0, revoked };
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  /** The owner's new count for the selection a Full Control first message's scope grant asked for
+   * (#4102). Only the Human who authorized the current boundary changes it, compare-and-set on the
+   * policy revision, and the boundary is re-minted around it in the same transaction, as the
+   * follow-up limit is. While the current authorization derived Maximum Issues, it moves by exactly
+   * the change in the count, up to the 100-issue ceiling, and never below the issues the campaign
+   * already holds; an explicit Maximum Issues never moves, so the count must fit what it leaves after
+   * the named issues. Like any boundary change, it revokes every unconsumed decision, which it returns. */
+  setScopeGrantSelectionCount(rootId: string, count: number, userId: string, expectedRevision: number, now: number):
+    { ok: true; revoked: WorkflowDecisionView[] } | { ok: false; status: number; error: string } {
+    this.db.exec("BEGIN IMMEDIATE");
+    const refuse = (status: number, error: string) => { this.db.exec("ROLLBACK"); return { ok: false as const, status, error }; };
+    try {
+      const policy = this.sessionOrchestratorPolicy(rootId);
+      const control = policy?.control;
+      const first = policy?.firstMessageScope;
+      const grant = first?.state === "established" ? first.grant : undefined;
+      if (!policy || control?.mode !== "full_control" || !control.boundary.issueAuthority || first?.state !== "established" ||
+          grant?.status !== "granted" || !grant.selection) {
+        return refuse(409, "This campaign's first message asked it to choose no issues, so there is no selection count to change.");
+      }
+      const boundary = control.boundary;
+      const parentControlPolicy = this.parentControlPolicy(rootId) ?? undefined;
+      if (parentControlPolicy?.revision !== expectedRevision) return refuse(409, "Campaign authority changed; refresh and try again.");
+      if (!campaignBoundaryCurrent({ orchestratorPolicy: policy, parentControlPolicy })) {
+        return refuse(409, "This campaign's Full Control authority is out of date. Revoke Full Control in Orchestrator Controls, then Enable Full Control.");
+      }
+      if (boundary.authorizedByUserId !== userId) return refuse(403, "Only the person who authorized this campaign's Full Control can change its selection count.");
+      const issues = boundary.issueAuthority!;
+      const previous = grant.selection.count;
+      // Only a limit both the grant and the current authorization derived moves; anything a person set stays.
+      const derived = first.derivedLimits?.maxIssues === true && grant.ceilings.maxIssuesSource === "derived";
+      let maxIssues = issues.maxIssues;
+      if (derived) {
+        const most = previous + (100 - issues.maxIssues);
+        if (count > most) return refuse(400, `Enter a count from 0 to ${most}: a campaign holds at most 100 issues.`);
+        // The whole repository-qualified scope (#4118), not only the launch repository's numbers.
+        const held = (policy.issueScope ? campaignScopeIssues(policy.issueScope).length : policy.issueNumbers?.length ?? 0) +
+          this.unsettledPublicationSlots(rootId, []);
+        maxIssues = Math.max(1, held, issues.maxIssues + count - previous);
+      } else {
+        const most = Math.max(0, issues.maxIssues - grant.namedIssues.length);
+        if (count > most) {
+          return refuse(400, `Enter a count from 0 to ${most}: the Maximum Issues you set (${issues.maxIssues}) never grows.`);
+        }
+      }
+      const reminted = remintCampaignBoundary({ ...boundary, issueAuthority: { ...issues, maxIssues } },
+        { revision: boundary.issueScopeRevision }, userId, now);
+      if (reminted?.mode !== "full_control") return refuse(400, "Enter a whole number of issues.");
+      const { capped: _capped, ...selection } = grant.selection;
+      first.grant = { ...grant, selection: { ...selection, count, defaulted: false, setByOwner: true },
+        ceilings: { ...grant.ceilings, maxIssues } };
+      for (const id of [rootId, ...this.campaignDescendantIds(rootId)]) {
+        const memberPolicy = id === rootId ? policy : this.sessionOrchestratorPolicy(id);
+        if (memberPolicy?.control?.mode !== "full_control") continue;
+        memberPolicy.control = structuredClone(reminted);
+        this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(memberPolicy), now, id);
+      }
+      if (Number(this.stmt(`UPDATE sessions SET parent_control_policy_revision=parent_control_policy_revision+1
+          WHERE id=? AND parent_control_policy_revision=?`).run(rootId, expectedRevision).changes) !== 1) {
+        return refuse(409, "Campaign authority changed; refresh and try again.");
+      }
+      const revoked = this.authorityBoundWorkflowDecisionsForController(rootId);
       for (const stale of revoked) {
         this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
         this.retireWorkflowDecisionResume(stale.occurrenceId, now);
@@ -17462,23 +17971,35 @@ export class ControlPlaneDb {
       const snapshot = decision?.resourceSnapshot;
       const root = decision ? this.getSession(decision.sessionId) : null;
       const policy = root?.orchestratorPolicy;
+      // The change starts from exactly the scope the campaign holds, in every repository (#4118).
+      const held = policy?.issueScope ? campaignScopeIssues(policy.issueScope)
+        : (policy?.issueNumbers ?? []).map((number) => ({ repository: snapshot?.category === "campaign_issue_scope" ? snapshot.repository : "", number }));
       if (!decision || decision.status !== "pending" || decision.authority !== (agentSessionId ? "orchestrator" : "human") || snapshot?.category !== "campaign_issue_scope" ||
           !root || !policy || (policy.issueScope?.revision ?? 0) !== snapshot.expectedRevision ||
-          JSON.stringify([...(policy.issueNumbers ?? [])].sort((a,b) => a-b)) !== JSON.stringify(snapshot.before)) {
+          JSON.stringify([...(policy.issueNumbers ?? [])].sort((a,b) => a-b)) !== JSON.stringify(snapshot.before) ||
+          (policy.issueScope && policy.issueScope.repository.toLowerCase() !== snapshot.repository) ||
+          JSON.stringify(canonicalCampaignIssues(held)) !== JSON.stringify(campaignScopeChangeBefore(snapshot))) {
         this.db.exec("ROLLBACK"); return null;
       }
+      const after = campaignScopeChangeResult(snapshot);
       const boundary = policy.control?.mode === "full_control" ? policy.control.boundary : null;
+      // An Orchestrator proposal the floors admitted (#4282) grows a derived Maximum Issues to fit,
+      // as a first message naming those issues derived it before; it never withholds operations.
+      const agentGrown = agentSessionId && boundary ? proposalMaxIssues(policy, snapshot, boundary, after.length) : undefined;
       if (agentSessionId && (!boundary?.issueAuthority || !snapshot.issueAdmission || agentSessionId !== root.id ||
           snapshot.issueAdmission.boundaryRevision !== boundary.revision || decision.policyRevision !== boundary.revision ||
           boundary.issueScopeRevision !== snapshot.expectedRevision || userId !== boundary.authorizedByUserId ||
-          snapshot.before.length + snapshot.additions.length - snapshot.removals.length > this.campaignIssueLimit(root.id, boundary.issueAuthority.maxIssues))) {
+          snapshot.scopeProposal?.withheldOperations.length ||
+          after.length > this.campaignIssueLimit(root.id, agentGrown ?? boundary.issueAuthority.maxIssues))) {
         this.db.exec("ROLLBACK"); return null;
       }
-      const scope: import("@wollipog/protocol").CampaignIssueScope = { repository: snapshot.repository,
-        issueNumbers: [...snapshot.before.filter((n) => !snapshot.removals.includes(n)), ...snapshot.additions].sort((a,b) => a-b),
-        revision: snapshot.expectedRevision + 1, authorizedByUserId: userId,
+      // Every repository the change names must still be one of the campaign's (#4118).
+      const repositories = new Set([snapshot.repository, ...campaignScopeRepositories(root).map((entry) => entry.repository)]);
+      if (after.some((issue) => !repositories.has(issue.repository))) { this.db.exec("ROLLBACK"); return null; }
+      const scope: import("@wollipog/protocol").CampaignIssueScope = campaignScopeWithIssues({ repository: snapshot.repository,
+        issueNumbers: [], revision: snapshot.expectedRevision + 1, authorizedByUserId: userId,
         authorizedAt: agentSessionId ? policy.issueScope!.authorizedAt : now,
-        ...(agentSessionId ? { disposition: { bySessionId: agentSessionId, at: now, occurrenceId, boundaryRevision: boundary!.revision } } : {}) };
+        ...(agentSessionId ? { disposition: { bySessionId: agentSessionId, at: now, occurrenceId, boundaryRevision: boundary!.revision } } : {}) }, after);
       // A Human's approval is the authority for the scope it establishes (#2940): under Full Control
       // the boundary is re-minted from that Human in this transaction, so the campaign never holds a
       // scope its boundary does not name. A boundary stale for any other reason is not extended.
@@ -17486,11 +18007,27 @@ export class ControlPlaneDb {
         ? remintCampaignBoundary(boundaryWithScopedEpics(boundary, scope.issueNumbers), scope, userId, now) : null;
       // The owner approving the proposal a failed or uncertain scope grant routed to them (#4102)
       // also sets the derived issue limit that grant could not.
-      const grown = reminted?.mode === "full_control" ? grantReviewMaxIssues(policy, snapshot, reminted.boundary, scope.issueNumbers.length) : undefined;
+      const grown = reminted?.mode === "full_control" ? proposalMaxIssues(policy, snapshot, reminted.boundary, after.length) ??
+        grantReviewMaxIssues(policy, snapshot, reminted.boundary, after.length) : undefined;
       if (grown !== undefined && reminted?.mode === "full_control") reminted.boundary.issueAuthority!.maxIssues = grown;
+      // The owner approving an Orchestrator's proposal (#4282) also withholds the operations it says
+      // the message withholds: narrowing only. An approval that cannot re-mint the boundary applies nothing.
+      const withheld = snapshot.scopeProposal?.withheldOperations ?? [];
+      if (withheld.length) {
+        if (reminted?.mode !== "full_control") { this.db.exec("ROLLBACK"); return null; }
+        reminted.boundary.operations = reminted.boundary.operations.filter((operation) => !withheld.includes(operation));
+      }
+      // The owner approving an Orchestrator's proposal without lineage (#4267) also raises Maximum
+      // Issues by exactly the increase the request stated, against the limit it was computed from. An
+      // approval that cannot re-mint the boundary, or a limit that moved since, applies nothing.
+      if (snapshot.ownerReview?.maxIssuesIncrease) {
+        const raised = boundary && reminted?.mode === "full_control" ? ownerReviewMaxIssues(snapshot, boundary) : null;
+        if (raised == null || reminted?.mode !== "full_control") { this.db.exec("ROLLBACK"); return null; }
+        reminted.boundary.issueAuthority!.maxIssues = raised;
+      }
       // The re-minted boundary's issue limit holds the scope and every slot a consumed publication
       // still reserves, as an explicit authorization's does.
-      if (reminted?.mode === "full_control" && reminted.boundary.issueAuthority && scope.issueNumbers.length +
+      if (reminted?.mode === "full_control" && reminted.boundary.issueAuthority && after.length +
           this.unsettledPublicationSlots(root.id, scopeSettlements(snapshot)) > this.campaignIssueLimit(root.id, reminted.boundary.issueAuthority.maxIssues)) {
         this.db.exec("ROLLBACK"); return null;
       }
@@ -17498,9 +18035,19 @@ export class ControlPlaneDb {
         const memberPolicy = this.sessionOrchestratorPolicy(id);
         if (!memberPolicy) continue;
         const member = this.getSession(id)!;
-        // Retired participants may belong to a different repository. Record the revision, but
-        // never transfer this repository's issue numbers into their launch permission policy.
-        const memberScope = this.campaignSharesRepositoryWorkspace(root, member) ? scope : { ...scope, issueNumbers: [] };
+        // The root holds the whole scope. Each other participant holds only its own Location
+        // repository's part (#4118), as its runner does, so a number is never read in the wrong
+        // repository; a retired participant in no campaign repository records the revision only.
+        const memberRepository = id === root.id ? null : this.campaignParticipantRepository(root, member);
+        const memberScope = id === root.id ? scope : memberRepository ? campaignScopeForRepository(scope, memberRepository)
+          : { ...campaignScopeForRepository(scope, scope.repository), issueNumbers: [] };
+        // The first scope applied under the propose-then-check flow is the campaign's initial scope
+        // (#4282), whoever approved it: dispatch can start.
+        const first = memberPolicy.firstMessageScope;
+        if (id === root.id && first?.state === "established" && first.grant?.status === "proposal" && !first.initialScope) {
+          first.initialScope = { admittedAt: now, occurrenceId, requestedCount: snapshot.scopeProposal?.requestedCount ?? null,
+            constraints: [...snapshot.scopeProposal?.constraints ?? []], withheldOperations: [...withheld] };
+        }
         memberPolicy.issueNumbers = [...memberScope.issueNumbers];
         memberPolicy.issueScope = memberScope;
         if (reminted && memberPolicy.control?.mode === "full_control") memberPolicy.control = structuredClone(reminted);
@@ -17509,6 +18056,7 @@ export class ControlPlaneDb {
           memberPolicy.control = { ...memberPolicy.control, boundary: boundaryWithScopedEpics(memberPolicy.control.boundary, scope.issueNumbers) };
           if (agentSessionId) {
             memberPolicy.control.boundary.issueScopeRevision = scope.revision;
+            if (agentGrown !== undefined && memberPolicy.control.boundary.issueAuthority) memberPolicy.control.boundary.issueAuthority.maxIssues = agentGrown;
             // Evidence authority names the scope revision too; a stale copy invalidates the boundary.
             if (memberPolicy.control.boundary.evidenceAuthority) memberPolicy.control.boundary.evidenceAuthority.issueScopeRevision = scope.revision;
           }
@@ -17523,7 +18071,7 @@ export class ControlPlaneDb {
         throw new Error("Scope approval was resolved concurrently");
       }
       const affected = new Set(snapshot.affectedDecisions);
-      const revoked = this.unconsumedWorkflowDecisionsForController(root.id)
+      const revoked = this.authorityBoundWorkflowDecisionsForController(root.id)
         .filter((stale) => (!agentSessionId && boundary !== null) || affected.has(stale.occurrenceId));
       for (const stale of revoked) {
         this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
@@ -17604,7 +18152,7 @@ export class ControlPlaneDb {
         scope.authorizedByUserId === userId && this.boundaryTrailsHumanScope(rootId, policy)
         ? remintCampaignBoundary(boundaryWithScopedEpics(control.boundary, scope.issueNumbers), scope, userId, scope.authorizedAt) : null;
       if (reminted?.mode !== "full_control" || reminted.boundary.issueAuthority &&
-          scope!.issueNumbers.length + this.unsettledPublicationSlots(rootId) > this.campaignIssueLimit(rootId, reminted.boundary.issueAuthority.maxIssues)) {
+          campaignScopeIssues(scope!).length + this.unsettledPublicationSlots(rootId) > this.campaignIssueLimit(rootId, reminted.boundary.issueAuthority.maxIssues)) {
         this.db.exec("ROLLBACK"); return null;
       }
       for (const id of [rootId, ...this.campaignDescendantIds(rootId)]) {
@@ -17617,7 +18165,7 @@ export class ControlPlaneDb {
           WHERE id=? AND parent_control_policy_revision=?`).run(rootId, (control as Extract<CampaignControl, { mode: "full_control" }>).boundary.revision).changes) !== 1) {
         throw new Error("Campaign authority changed concurrently");
       }
-      const revoked = this.unconsumedWorkflowDecisionsForController(rootId);
+      const revoked = this.authorityBoundWorkflowDecisionsForController(rootId);
       for (const stale of revoked) {
         this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
         this.retireWorkflowDecisionResume(stale.occurrenceId, now);
@@ -20634,7 +21182,10 @@ export class ControlPlaneDb {
     established?: { issueScope: import("@wollipog/protocol").CampaignIssueScope; firstMessage: boolean },
     /** This authorization's own limit provenance (#2940): a waiting campaign keeps only the limits
      * this request left to the server, never an earlier authorization's. */
-    derivedLimits?: import("@wollipog/protocol").FullControlDerivedLimits): boolean {
+    derivedLimits?: import("@wollipog/protocol").FullControlDerivedLimits,
+    /** What this Full Control authorization disclosed (#2940). It replaces any earlier record, and
+     * a revoke, or an authorization without one, drops it so no stale record outlives its boundary. */
+    launchDisclosure?: import("@wollipog/protocol").CampaignLaunchDisclosure): boolean {
     const campaign = this.sessionOrchestratorPolicy(id);
     const policy = this.parentControlPolicy(id);
     if (!campaign || !policy || policy.revision !== expectedRevision || !validCampaignControl(control) ||
@@ -20665,6 +21216,9 @@ export class ControlPlaneDb {
       campaign.firstMessageScope = { ...rest, ...(control.mode === "full_control" && derivedLimits ? { derivedLimits: { ...derivedLimits } } : {}) };
     }
     campaign.control = structuredClone(control);
+    if (control.mode === "full_control" && launchDisclosure && validCampaignLaunchDisclosure(launchDisclosure)) {
+      campaign.launchDisclosure = structuredClone(launchDisclosure);
+    } else delete campaign.launchDisclosure;
     this.db.exec("BEGIN");
     try {
       const changed = this.stmt(`UPDATE sessions SET orchestrator_policy=?, parent_control_policy_revision=parent_control_policy_revision+1,
@@ -20672,7 +21226,7 @@ export class ControlPlaneDb {
       if (Number(changed.changes) !== 1) { this.db.exec("ROLLBACK"); return false; }
       if (control.mode === "full_control" && control.boundary.budgetAuthority) this.campaignBudgets.authorize(id, control.boundary.budgetAuthority);
       else if (this.campaignBudgets.view(id)) this.campaignBudgets.stop(id, "revoked", "Human authorization for campaign allowance was revoked.");
-      for (const decision of this.unconsumedWorkflowDecisionsForController(id)) {
+      for (const decision of this.authorityBoundWorkflowDecisionsForController(id)) {
         this.stmt(`UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?)
           WHERE occurrence_id=? AND status IN ('pending','approved')`).run(now, decision.occurrenceId);
         this.retireWorkflowDecisionResume(decision.occurrenceId, now);
@@ -21218,10 +21772,22 @@ export class ControlPlaneDb {
    * runner; the watch ends by a runner report or a lost notice, never by a stall bound. */
   campaignChildWait(sessionId: string, now: number): CampaignChildWait | null {
     if (this.pullRequestWatches.isParked(sessionId)) return "merge_queue_watch";
-    return this.stmt(
-      `SELECT 1 FROM managed_background_jobs
-       WHERE session_id=? AND source_present=1 AND terminal_observed_at IS NULL AND registered_at>? LIMIT 1`,
-    ).get(sessionId, now - BACKGROUND_JOB_STALL_MS) ? "background_job" : null;
+    return this.sessionsWithLiveBackgroundJobs([sessionId], now).size > 0 ? "background_job" : null;
+  }
+
+  /** The sessions among `sessionIds` with a registered managed background job the runner still
+   * lists and has not reported finished, within the stall bound (#2938). This reads the individual
+   * job records rather than the session's aggregate `backgroundWorkState`, so a job counts even
+   * where that summary is absent or already cleared. A job past the bound is reported as stalled
+   * instead, the same rule campaignChildWait applies. */
+  sessionsWithLiveBackgroundJobs(sessionIds: readonly string[], now: number): Set<string> {
+    if (sessionIds.length === 0) return new Set();
+    return new Set((this.stmt(
+      `SELECT DISTINCT session_id FROM managed_background_jobs
+       WHERE session_id IN (SELECT value FROM json_each(?)) AND source_present=1
+         AND terminal_observed_at IS NULL AND registered_at>?`,
+    ).all(JSON.stringify(sessionIds), now - BACKGROUND_JOB_STALL_MS) as Array<{ session_id: string }>)
+      .map((row) => row.session_id));
   }
 
   /** Whether a campaign descendant's live background job reached the stall bound in (after,
@@ -21792,6 +22358,10 @@ export class ControlPlaneDb {
     let cleanupPending = 0;
     const cleanupWorktrees: NonNullable<OrchestratorCampaignProjection["cleanupWorktrees"]> = [];
     const heldChildren: NonNullable<OrchestratorCampaignProjection["heldChildren"]> = [];
+    const genericOrchestratorRequests: Array<{ sessionId: string; occurrenceId: string }> = [];
+    // Verified children whose worktree retirement the runner is performing right now (#4146).
+    let worktreesRetiring = false;
+    const unverifiedChildren: Array<{ sessionId: string; status: SessionStatus; held: boolean }> = [];
     if (policy.control?.mode === "full_control") {
       for (const request of pendingRequests(parseJson<PendingApproval>(campaign.pending_approval)).filter((item) => item.kind !== "workflow_decision")) {
         const evaluation = campaignAuthorityFromRows(campaign, { id: campaign.id, driver: campaign.driver as SessionView["driver"],
@@ -21800,6 +22370,7 @@ export class ControlPlaneDb {
           (id) => this.campaignPeerContract(id), this);
         if (evaluation.owner === "orchestrator") {
           pendingGenericOrchestrator += 1;
+          genericOrchestratorRequests.push({ sessionId: campaign.id, occurrenceId: request.occurrenceId ?? request.requestId });
           orchestratorRequestTokens.push(campaignRequestToken("generic", campaign.id, request.occurrenceId ?? request.requestId));
         } else {
           pendingGenericHuman += 1;
@@ -21816,6 +22387,7 @@ export class ControlPlaneDb {
         if (campaignAuthorityFromRows(campaign, { id: child.id, driver: child.driver, runnerId: child.runner_id, workspaceId: child.workspace_id, repositoryRoot: policy.control?.mode === "full_control" ? this.sessionRepositoryRoot(child.id) : undefined }, this.getRunner(child.runner_id)?.protocolVersion, this.campaignPolicyRequest(child.id, policy.control, request), policy.control?.mode === "full_control" ? this.getRunner(campaign.runner_id)?.protocolVersion : undefined,
           (id) => this.campaignPeerContract(id), this).owner === "orchestrator") {
           pendingGenericOrchestrator += 1;
+          genericOrchestratorRequests.push({ sessionId: child.id, occurrenceId: request.occurrenceId ?? request.requestId });
           orchestratorRequestTokens.push(campaignRequestToken("generic", child.id, request.occurrenceId ?? request.requestId));
         } else {
           pendingGenericHuman += 1;
@@ -21830,6 +22402,12 @@ export class ControlPlaneDb {
       const childCleanup = reportVerified && policy.behavior.completion === "stop_and_archive"
         ? this.campaignWorktreeCleanup(child.id) : [];
       cleanupWorktrees.push(...childCleanup);
+      // An archived child's pending retirement on a capable, online runner is the server's own
+      // cleanup in flight; offline, too old, deferred or refused, nothing is acting on it.
+      if (!worktreesRetiring && child.archived === 1 && childCleanup.some((item) => item.status === "pending")) {
+        const runner = this.getRunner(child.runner_id);
+        worktreesRetiring = runner?.status === "online" && runnerSupportsProtocol(runner.protocolVersion, "archiveWorktreeRetirement");
+      }
       const retired = child.archived === 1 && childCleanup.length === 0;
       if (reportVerified && (policy.behavior.completion === "retain" || retired)) fullyVerified += 1;
       else if (reportVerified && policy.behavior.completion === "stop_and_archive") cleanupPending += 1;
@@ -21842,72 +22420,370 @@ export class ControlPlaneDb {
         blocked += 1;
         if (heldChildren.length < CAMPAIGN_HELD_CHILDREN_LIMIT) heldChildren.push({ sessionId: child.id, holds });
       } else if (!reportVerified && !childHasHumanRequest) active += 1;
+      if (!reportVerified) unverifiedChildren.push({ sessionId: child.id, status: child.status, held: holds.length > 0 });
     }
     const total = rows.length;
     // A human-owned recovery exception (an uncertain consumed closure, a missing access hold, ...)
     // waits for a person even when no request is pending, so it is Waiting for a Person as well (#2938).
-    const humanRecovery = policy.control?.mode === "full_control" && this.campaignRecovery.activeRecords(resolvedCampaignId)
+    const fullControl = policy.control?.mode === "full_control";
+    const humanRecovery = fullControl && this.campaignRecovery.activeRecords(resolvedCampaignId)
       .some((record) => record.effectiveOwner === "human" && record.state === "waiting_human");
-    let childStatus: OrchestratorCampaignProjection["status"] = waitingHuman > 0 || (policy.control?.mode === "full_control" &&
-      (pendingHuman.length > 0 || pendingGenericHuman > 0 || humanRecovery)) ? "waiting_human" as const
-      : active > 0 || pendingOrchestrator.length > 0 || cleanupPending > 0 || total === 0 ? "active" as const
-      : blocked > 0 ? "blocked" as const
-      : fullyVerified === total ? "verified_complete" as const
-      : "active" as const;
-    if (childStatus === "verified_complete") childStatus = this.campaignTerminalStatus(resolvedCampaignId);
-    // The continuation reads the child-derived status (its `held` state depends on it), and the
-    // final status reads the continuation, so derive them in that order and never the reverse.
-    const continuation = resolvedCampaignId === campaignSessionId
-      ? this.campaignContinuationProjection(campaign, childStatus)
-      : {};
-    // A campaign whose own wake-up failed or lost its result is not progressing, however busy its
-    // children look; say so at the root so a consumer need not special-case `continuation` (#1352).
-    // Human attention and verified completion keep precedence; neither gate starves a retry.
+    // A Full Control campaign launched without a task waits for its owner's first message (#2940):
+    // nothing runs until that person writes it, so it is waiting for them, never Active (#4146).
+    const awaitingFirstMessage = fullControl && policy.firstMessageScope?.state === "pending";
+    // #4146: first what the campaign would be with nothing running (its base), then what is live.
+    // Waiting for You comes first; otherwise undelivered work an agent owns is Campaign Stuck unless
+    // something is live, and a delivered campaign is complete, owing cleanup or not.
+    const stuckItems: CampaignStuckItem[] = [];
+    let cleanupItems: CampaignCleanupItem[] = [];
+    let recoveryIds: string[] = [];
+    let baseStatus: Exclude<OrchestratorCampaignStatus, "active" | "blocked" | "complete_with_handoffs">;
+    if (waitingHuman > 0 || (fullControl && (pendingHuman.length > 0 || pendingGenericHuman > 0 || humanRecovery)) ||
+        awaitingFirstMessage) {
+      baseStatus = "waiting_human";
+    } else {
+      for (const child of unverifiedChildren) {
+        stuckItems.push({ kind: "unverified_child", sessionId: child.sessionId, status: child.status,
+          reason: child.held ? "The child is held from starting its next turn."
+            : child.status === "failed" || child.status === "stopped" ? `The child ${child.status === "failed" ? "failed" : "was stopped"} before its report was verified.`
+            : child.status === "idle" || child.status === "completed" ? "The child's latest report has not been verified."
+            : child.status === "input_required" ? "The child is waiting for input."
+            : "The child's work is unfinished." });
+      }
+      for (const decision of pendingOrchestrator) {
+        stuckItems.push({ kind: "orchestrator_request", sessionId: decision.session_id, occurrenceId: decision.occurrence_id,
+          reason: "An Orchestrator-owned decision is waiting for the Orchestrator." });
+      }
+      for (const request of genericOrchestratorRequests) {
+        stuckItems.push({ kind: "orchestrator_request", sessionId: request.sessionId, occurrenceId: request.occurrenceId,
+          reason: "An Orchestrator-owned request is waiting for the Orchestrator." });
+      }
+      if (stuckItems.length > 0) {
+        baseStatus = "stuck";
+      } else {
+        const rootPending = pendingRequests(parseJson<PendingApproval>(campaign.pending_approval)).length > 0 ||
+          pending.some((decision) => decision.session_id === campaign.id);
+        const terminal = this.campaignTerminalStatus(resolvedCampaignId, policy,
+          { childCount: total, worktreesPending: cleanupPending > 0, rootPending });
+        baseStatus = terminal.status;
+        recoveryIds = terminal.recoveryIds;
+        if (baseStatus === "stuck") stuckItems.push(...terminal.stuckItems);
+        if (baseStatus === "complete_needs_cleanup") {
+          cleanupItems = this.campaignCleanupItems(resolvedCampaignId, cleanupWorktrees, terminal.handoffs);
+        }
+      }
+    }
+    // The continuation reads the base status (its `held` state depends on it), and the final status
+    // reads the continuation, so derive them in that order and never the reverse. It is derived for
+    // every view, since a pending continuation is live work, and projected on the root's own view only.
+    // A campaign that never had a child has finished nothing, so nothing it owes holds its wake-ups.
+    const continuation = this.campaignContinuationProjection(campaign,
+      total === 0 && campaignStatusTerminal(baseStatus) ? "stuck" : baseStatus);
+    // A campaign whose own wake-up failed or lost its result has a stalled continuation (#1352). It
+    // is not live work, so with nothing else live an unfinished campaign reads Campaign Stuck.
     const stalled = continuation.continuation?.state === "failed" ? "continuation_failed" as const
       : continuation.continuation?.state === "missing_result" ? "continuation_missing_result" as const
       : undefined;
-    const status = stalled && childStatus === "active" ? "blocked" as const : childStatus;
-    return { childIds, pendingHuman, pendingOrchestrator, pendingGenericHuman, pendingGenericOrchestrator, humanRequestTokens, orchestratorRequestTokens, waitingHuman, active, blocked, fullyVerified, cleanupPending, cleanupWorktrees, heldChildren, total, continuation, stalled, status };
+    const now = Date.now();
+    const members = [resolvedCampaignId, ...childIds];
+    const liveKinds = new Set<CampaignLiveWorkKind>();
+    if (CAMPAIGN_LIVE_SESSION_STATUSES.has(campaign.status as SessionStatus)) liveKinds.add("root_turn");
+    if (rows.some((child) => child.archived !== 1 && CAMPAIGN_LIVE_SESSION_STATUSES.has(child.status))) liveKinds.add("child_turn");
+    if (this.sessionsWithLiveBackgroundJobs(members, now).size > 0) liveKinds.add("background_job");
+    if (continuation.continuation?.state === "pending" || continuation.continuation?.state === "running") liveKinds.add("continuation");
+    if (members.some((id) => this.pullRequestWatches.isParked(id))) liveKinds.add("merge_queue_wait");
+    const repair = this.campaignRepairView(resolvedCampaignId, now);
+    if (repair?.state === "running" || worktreesRetiring || this.campaignBranchDeletionInFlight(members, now)) {
+      liveKinds.add("server_repair");
+    }
+    const live = CAMPAIGN_LIVE_WORK_KINDS.filter((kind) => liveKinds.has(kind));
+    // A campaign that never had a child and still owes a wake-up (held, stalled or not yet
+    // delivered) has delivered nothing it was woken for, so it is not complete.
+    if (total === 0 && continuation.continuation && baseStatus === "verified_complete") baseStatus = "stuck";
+    if (baseStatus === "stuck" && stalled) {
+      stuckItems.push({ kind: "continuation", state: stalled === "continuation_failed" ? "failed" : "missing_result",
+        reason: stalled === "continuation_failed" ? "The campaign's last continuation failed." : "The campaign's last continuation lost its result." });
+    } else if (baseStatus === "stuck" && continuation.continuation?.state === "held") {
+      stuckItems.push({ kind: "continuation", state: "held",
+        reason: continuation.continuation.error ? `The campaign's next continuation is held: ${continuation.continuation.error}.`
+          : "The campaign's next continuation is held by its current lifecycle." });
+    }
+    const status: OrchestratorCampaignStatus = baseStatus === "waiting_human" ? "waiting_human" : live.length > 0 ? "active" : baseStatus;
+    // What the server's one automatic repair is keyed to: the identity of every leftover, never a
+    // time or a reason, so the same leftovers are tried once and any change tries again.
+    const leftoverDigest = baseStatus === "stuck" || baseStatus === "complete_needs_cleanup"
+      ? campaignLeftoverDigest(baseStatus, stuckItems, cleanupItems, recoveryIds) : null;
+    const activity: CampaignActivityView = { live, ...(repair ? { repair } : {}) };
+    return { childIds, pendingHuman, pendingOrchestrator, pendingGenericHuman, pendingGenericOrchestrator, humanRequestTokens, orchestratorRequestTokens, waitingHuman, active, blocked, fullyVerified, cleanupPending, cleanupWorktrees, heldChildren, total, continuation, stalled, status, baseStatus, activity, cleanupItems, stuckItems, leftoverDigest };
   }
 
   /**
-   * The one place a campaign's end state is decided, once every child is verified and cleaned up and
-   * no request is pending. Recovery that is ready keeps it going (or blocked without admission), and
-   * original scoped work with no eligible recovery holds it blocked, as before: that check alone
-   * judges in-scope original items, a fresh merged forge fact included. Then the ledger decides
-   * (#4070) for the rest of the unfinished committed work an agent still owns. Under Full Control
-   * any of it is blocked; a Custom campaign without handoffs reads its children alone, as before.
-   * With handoffs to `human` or `external` the campaign is Complete with Handoffs only while none
-   * of it is left, and blocked otherwise. Reads rows only, never a SessionView.
+   * The one place a delivered campaign's end state is decided, once every child is verified (its
+   * worktree retirement may still be pending) and no request an agent owns is pending (#4146).
+   * Recovery that is ready or held means original scoped work is undelivered: Campaign Stuck unless
+   * something is live (the server's repair wakes the root to take up ready recovery). That check
+   * alone judges in-scope original items, a fresh merged forge fact included, whenever it can run.
+   * Then the ledger decides (#4070) for the rest of the unfinished committed work an agent still
+   * owns: under Full Control any of it is stuck; a Custom campaign without handoffs reads its
+   * children alone, as before. Housekeeping still owed (a merged branch on the remote, a worktree
+   * not yet retired, an item handed to a person or an outside party) reads Complete, Needs Cleanup;
+   * nothing owed reads Campaign Complete. A request the root itself still has pending, with handoffs
+   * waiting on a person, reads Waiting for You. Reads rows only, never a SessionView.
    */
-  private campaignTerminalStatus(campaignId: string): OrchestratorCampaignStatus {
+  private campaignTerminalStatus(campaignId: string, policy: OrchestratorCampaignPolicy,
+    facts: { childCount: number; worktreesPending: boolean; rootPending: boolean }): {
+    status: "waiting_human" | "complete_needs_cleanup" | "verified_complete" | "stuck";
+    recoveryIds: string[];
+    stuckItems: CampaignStuckItem[];
+    handoffs: OrchestratorCampaignHandoff[];
+  } {
     const completion = this.campaignRecoveryCompletion(campaignId);
-    if (completion.state === "recovery_ready") {
-      return this.campaignContinuationAdmission(campaignId).state === "available" ? "active" : "blocked";
-    }
-    if (completion.state === "recovery_held") return "blocked";
-    const facts = this.campaignWorkLedger.completionFacts(campaignId);
-    const row = this.stmt("SELECT orchestrator_policy FROM sessions WHERE id=?").get(campaignId) as { orchestrator_policy: string | null } | undefined;
-    const policy = orchestratorCampaignPolicyFromJson(row?.orchestrator_policy ?? null);
-    const fullControl = policy?.control?.mode === "full_control";
-    const scope = fullControl ? policy?.issueScope : undefined;
-    // The same in-scope test `campaignRecoveryCompletion` applies, so no item is judged twice.
-    const agentWork = facts.agentUnfinished.filter((item) => !(scope && item.origin === "original" && item.issue &&
+    const ledger = this.campaignWorkLedger.completionFacts(campaignId);
+    const fullControl = policy.control?.mode === "full_control";
+    const scope = fullControl ? policy.issueScope : undefined;
+    // Only a completion check that ran judged the in-scope original items; when it could not run
+    // (a worktree retirement still pending, or no child at all), they count as agent work here.
+    const scopeJudged = completion.state !== "children_unfinished";
+    const agentWork = ledger.agentUnfinished.filter((item) => !(scopeJudged && scope && item.origin === "original" && item.issue &&
       item.issue.repository.toLowerCase() === scope.repository.toLowerCase() && scope.issueNumbers.includes(item.issue.number) &&
-      policy?.issueNumbers?.includes(item.issue.number)));
-    // #4067: a merged campaign branch still on the remote is cleanup the campaign owes. A pending one
-    // keeps it going; one retained with a reason (a handoff to a person or an outside party on its
-    // work item) is the owner's to-do, so the campaign finishes with handoffs rather than verified.
+      policy.issueNumbers?.includes(item.issue.number)));
+    const stuckItems: CampaignStuckItem[] = agentWork.map((item) => ({ kind: "work_item", workItemId: item.id, issue: item.issue,
+      reason: "Committed work is not delivered and no agent is working on it." }));
+    const result = (status: "waiting_human" | "complete_needs_cleanup" | "verified_complete" | "stuck") =>
+      ({ status, recoveryIds: completion.recoveryIds, stuckItems: status === "stuck" ? stuckItems : [], handoffs: ledger.handoffs });
+    if (completion.state === "recovery_ready" || completion.state === "recovery_held") {
+      if (!stuckItems.length) {
+        stuckItems.push({ kind: "scope", reason: completion.state === "recovery_ready"
+          ? "Original scoped work is undelivered; its recovery is ready for the Orchestrator."
+          : "Original scoped work is undelivered and no recovery is eligible." });
+      }
+      return result("stuck");
+    }
+    // A Full Control campaign with issues in scope that never started a child has delivered none
+    // of them, whatever its ledger says.
+    if (fullControl && facts.childCount === 0 && (policy.issueNumbers?.length ?? 0) > 0 && !agentWork.length && !ledger.handoffs.length) {
+      stuckItems.push({ kind: "scope",
+        reason: "Issues are in scope, but no child session has been started for them." });
+      return result("stuck");
+    }
+    // A request or decision the root itself still has pending (a Custom root's question, say) waits
+    // on a person: the campaign is never complete while its own Orchestrator is asking.
+    if (facts.rootPending && !(fullControl && agentWork.length > 0)) return result("waiting_human");
+    // #4067: a merged campaign branch still on the remote, pending or retained with a reason, is
+    // housekeeping the campaign owes, as is a verified child's worktree retirement.
     const branches = this.campaignMergedBranchCounts(campaignId);
-    if (!facts.handoffs.length) {
-      if (fullControl && agentWork.length > 0) return "blocked";
-      return branches.pending > 0 ? "active" : branches.retained > 0 ? "complete_with_handoffs" : "verified_complete";
+    const owed = facts.worktreesPending || branches.pending > 0 || branches.retained > 0;
+    if (!ledger.handoffs.length) {
+      // A Custom campaign reads its children alone, as before; one with no child yet has delivered
+      // none of the work it committed to.
+      if ((fullControl || facts.childCount === 0) && agentWork.length > 0) return result("stuck");
+      return result(owed ? "complete_needs_cleanup" : "verified_complete");
     }
     // Only a request or decision the root itself still has pending is left here (the children are
     // done), and the counts above already routed those an Orchestrator owns: a person's turn.
-    if (completion.state === "children_unfinished") return "waiting_human";
-    if (agentWork.length > 0) return "blocked";
-    return branches.pending > 0 ? "active" : "complete_with_handoffs";
+    if (facts.rootPending) return result("waiting_human");
+    if (agentWork.length > 0) return result("stuck");
+    return result("complete_needs_cleanup");
+  }
+
+  /** Each item of housekeeping a delivered campaign owes, with its reason and the exact action that
+   * settles it (#4146): merged branches still on the remote, child worktrees not yet retired, and
+   * work items handed to a person or an outside party. Bounded by CAMPAIGN_CLEANUP_ITEMS_LIMIT. */
+  private campaignCleanupItems(campaignId: string,
+    worktrees: NonNullable<OrchestratorCampaignProjection["cleanupWorktrees"]>,
+    handoffs: readonly OrchestratorCampaignHandoff[]): CampaignCleanupItem[] {
+    const items: CampaignCleanupItem[] = [];
+    const branches = this.campaignMergedBranches(campaignId).filter((row) => row.state !== "deleted");
+    if (branches.length) {
+      const workItems = this.campaignWorkLedger.pullRequestWorkItems(campaignId);
+      const performable = this.campaignPerformableBranchDeletions(campaignId);
+      for (const row of branches) {
+        const key = `${row.repository.toLowerCase()}#${row.pullRequest}`;
+        const handoff = workItems.get(key)?.handoff;
+        const base = { kind: "merged_branch" as const, sessionId: row.sessionId, repository: row.repository,
+          pullRequest: row.pullRequest, branch: row.branch, reason: cleanupReasonSentence(row.reason ?? "The merged branch is still on the remote.") };
+        if (row.state === "retained") {
+          items.push({ ...base, state: "retained", action: { kind: "person", text: handoff?.nextAction ?? row.reason ?? "" } });
+          continue;
+        }
+        const observed = this.stmt(
+          `SELECT value_json FROM campaign_forge_observations WHERE campaign_session_id=? AND repository_key=? AND number=?`,
+        ).get(campaignId, row.repository.toLowerCase(), row.pullRequest) as { value_json: string | null } | undefined;
+        const value = parseJson<CampaignForgePullRequestObservation>(observed?.value_json ?? null);
+        // Deleting the branch of a pull request that has not merged would close it: never offer it.
+        if (value?.state !== "merged") {
+          items.push({ ...base, state: "pending", action: { kind: "automatic", text: value
+            ? "Wollipog reads the forge again; the branch is cleaned up after the merge lands."
+            : "Wollipog reads the forge for this pull request." } });
+          continue;
+        }
+        const occurrenceId = row.branch !== null
+          ? performable.get(`${row.repository.toLowerCase()}#${row.branch}`) : undefined;
+        items.push({ ...base, state: "pending", action: occurrenceId
+          ? { kind: "delete_merged_branches", occurrenceId }
+          : { kind: "command", command: mergedBranchDeletionCommand(row.repository, row.branch, row.pullRequest) } });
+      }
+    }
+    // Branches Wollipog can delete come first, so the bounded list always shows what its
+    // Delete Merged Branches performs.
+    items.sort((a, b) => Number(b.action.kind === "delete_merged_branches") - Number(a.action.kind === "delete_merged_branches"));
+    for (const worktree of worktrees) {
+      // A refused worktree may hold work Wollipog must preserve: the person inspects it and decides
+      // what to keep, and nothing offered here removes or discards it.
+      const reason = cleanupReasonSentence(worktree.reason);
+      items.push({ kind: "worktree", sessionId: worktree.sessionId, path: worktree.path, status: worktree.status, reason,
+        action: worktree.status === "refused" ? worktreeRefusalAction(worktree.path, worktree.reason) : { kind: "automatic", text: reason } });
+    }
+    for (const handoff of handoffs) {
+      items.push({ kind: "handoff", workItemId: handoff.workItemId, title: handoff.title, issue: handoff.issue,
+        responsibleActor: handoff.handoff.responsibleActor, reason: handoff.handoff.reason,
+        action: { kind: "person", text: handoff.handoff.nextAction } });
+    }
+    return items;
+  }
+
+  /** `merged_branch_deletion` decisions of this campaign that Wollipog could still perform itself
+   * through the existing forge action (#4067), keyed `repository#branch` (lowercased repository):
+   * approved ones, and consumed ones Wollipog has not performed (the requester's own command was
+   * refused, which `executeWorkflowDecision` still admits). Each names its merged pull request and
+   * head, has attempts left, is not being performed, and its requester has not ended. */
+  campaignPerformableBranchDeletions(campaignId: string): Map<string, string> {
+    const performable = new Map<string, string>();
+    const rows = this.stmt(
+      `SELECT decision.occurrence_id, decision.session_id, decision.resource_snapshot, decision.forge_action, requester.status
+       FROM workflow_decisions decision JOIN sessions requester ON requester.id=decision.session_id
+       WHERE decision.category='merged_branch_deletion' AND decision.status IN ('approved','consumed')
+       ORDER BY decision.created_at, decision.occurrence_id`,
+    ).all() as Array<{ occurrence_id: string; session_id: string; resource_snapshot: string; forge_action: string | null; status: SessionStatus }>;
+    for (const row of rows) {
+      if (isTerminal(row.status) || !this.sessionWithinCampaign(row.session_id, campaignId)) continue;
+      const snapshot = parseJson<WorkflowDecisionResourceSnapshot>(row.resource_snapshot);
+      const action = parseJson<NonNullable<WorkflowDecisionView["forgeAction"]>>(row.forge_action);
+      if (snapshot?.category !== "merged_branch_deletion" || snapshot.pullRequest === undefined || snapshot.headSha === undefined) continue;
+      if (action && (action.outcome === "in_progress" || action.attempts >= FORGE_DECISION_ACTION_MAX_ATTEMPTS ||
+          FORGE_DECISION_ACTION_SUCCESSES.has(action.outcome) ||
+          (action.refusal && FORGE_DECISION_ACTION_STALE_REFUSALS.has(action.refusal.reason)))) continue;
+      performable.set(`${snapshot.repository.toLowerCase()}#${snapshot.branch}`, row.occurrence_id);
+    }
+    return performable;
+  }
+
+  /** Whether Wollipog is performing a merged-branch deletion for any of these sessions right now. A
+   * lease older than the runner's answer could take reads as finished: begin marks it uncertain. */
+  private campaignBranchDeletionInFlight(sessionIds: readonly string[], now: number): boolean {
+    return Boolean(this.stmt(
+      `SELECT 1 FROM workflow_decisions WHERE category='merged_branch_deletion' AND forge_action IS NOT NULL
+         AND json_extract(forge_action,'$.outcome')='in_progress' AND json_extract(forge_action,'$.updatedAt')>?
+         AND (session_id IN (SELECT value FROM json_each(?)) OR controlling_session_id IN (SELECT value FROM json_each(?))) LIMIT 1`,
+    ).get(now - CAMPAIGN_REPAIR_LEASE_MS, JSON.stringify(sessionIds), JSON.stringify(sessionIds)));
+  }
+
+  /** The server's automatic repair of this campaign's idle leftovers (#4146), or null before any. */
+  campaignRepairView(campaignId: string, now: number): CampaignRepairView | null {
+    const row = this.stmt(
+      "SELECT state, continuation, started_at, finished_at FROM orchestrator_campaign_repairs WHERE campaign_session_id=?",
+    ).get(campaignId) as { state: "running" | "attempted"; continuation: number; started_at: number; finished_at: number | null } | undefined;
+    if (!row) return null;
+    const running = row.state === "running" && now - row.started_at < CAMPAIGN_REPAIR_LEASE_MS;
+    return { state: running ? "running" : "attempted", startedAt: row.started_at,
+      ...(row.finished_at !== null ? { finishedAt: row.finished_at } : {}), continuation: row.continuation === 1 };
+  }
+
+  /** The leftovers digest the last repair settled on, or null; a running repair past its lease and
+   * an attempted one both count, so a crashed attempt is never retried for the same leftovers. */
+  campaignRepairDigest(campaignId: string): string | null {
+    return (this.stmt("SELECT digest FROM orchestrator_campaign_repairs WHERE campaign_session_id=?").get(campaignId) as
+      { digest: string } | undefined)?.digest ?? null;
+  }
+
+  /** Claim the repair for these leftovers. False when another repair holds a live lease. */
+  beginCampaignRepair(campaignId: string, digest: string, now: number): boolean {
+    return Number(this.stmt(
+      `INSERT INTO orchestrator_campaign_repairs (campaign_session_id, digest, state, continuation, started_at, finished_at)
+       VALUES (?, ?, 'running', 0, ?, NULL)
+       ON CONFLICT(campaign_session_id) DO UPDATE SET digest=excluded.digest, state='running', continuation=0,
+         started_at=excluded.started_at, finished_at=NULL
+       WHERE orchestrator_campaign_repairs.state<>'running' OR orchestrator_campaign_repairs.started_at<=?`,
+    ).run(campaignId, digest, now, now - CAMPAIGN_REPAIR_LEASE_MS).changes) === 1;
+  }
+
+  /** Record the repair as attempted, keyed to the leftovers it left (which its own forge re-read or
+   * deletions may have changed), so the same leftovers are not tried again. */
+  finishCampaignRepair(campaignId: string, digest: string, continuation: boolean, now: number): void {
+    this.stmt(
+      `UPDATE orchestrator_campaign_repairs SET digest=?, state='attempted', continuation=?, finished_at=?
+       WHERE campaign_session_id=?`,
+    ).run(digest, continuation ? 1 : 0, now, campaignId);
+  }
+
+  /** What the server's repair needs for a campaign that reads Complete, Needs Cleanup or Campaign
+   * Stuck with leftovers it has not tried yet (#4146), or null when nothing is to be repaired: the
+   * campaign is not idle with leftovers, or these exact leftovers were already tried. */
+  campaignRepairCandidate(campaignId: string, options: { force?: boolean } = {}): {
+    status: "complete_needs_cleanup" | "stuck";
+    digest: string;
+    /** Pull requests to read again: pending merged branches and unfinished items' reported ones. */
+    refs: CampaignPullRequestRef[];
+    /** Approved deletions Wollipog can perform, with what `executeWorkflowDecision` needs. */
+    deletions: Array<{ sessionId: string; occurrenceId: string; resourceDigest: string }>;
+    cleanup: CampaignCleanupItem[];
+    stuck: CampaignStuckItem[];
+  } | null {
+    const campaign = this.resolvedCampaignSession(campaignId);
+    const policy = campaign ? orchestratorCampaignPolicyFromJson(campaign.orchestrator_policy) : null;
+    if (!campaign || !policy || campaign.id !== campaignId || campaign.archived === 1) return null;
+    const state = this.campaignStatusState(campaign, policy, campaignId);
+    if ((state.status !== "complete_needs_cleanup" && state.status !== "stuck") || !state.leftoverDigest) return null;
+    if (!options.force && this.campaignRepairDigest(campaignId) === state.leftoverDigest) return null;
+    const refs = new Map<string, CampaignPullRequestRef>();
+    for (const target of [...this.campaignMergedBranchTargets((id) => id === campaignId),
+      ...this.campaignWorkLedger.forgeBackgroundTargets((id) => id === campaignId)]) {
+      for (const ref of target.refs) refs.set(`${ref.repository.toLowerCase()}#${ref.number}`, ref);
+    }
+    const deletions = state.cleanupItems.flatMap((item) => {
+      if (item.kind !== "merged_branch" || item.action.kind !== "delete_merged_branches") return [];
+      const decision = this.workflowDecisionByOccurrence(item.action.occurrenceId);
+      return decision ? [{ sessionId: decision.sessionId, occurrenceId: decision.occurrenceId, resourceDigest: decision.resourceDigest }] : [];
+    });
+    return { status: state.status, digest: state.leftoverDigest, refs: [...refs.values()], deletions,
+      cleanup: state.cleanupItems, stuck: state.stuckItems };
+  }
+
+  /** The campaign's leftovers as they stand, whatever is live (#4146): what its repair settles on
+   * after its own forge re-read and deletions, and what a `campaign_idle` continuation names. */
+  campaignLeftovers(campaignId: string): {
+    status: "complete_needs_cleanup" | "stuck";
+    digest: string;
+    agentActionable: boolean;
+    cleanup: CampaignCleanupItem[];
+    stuck: CampaignStuckItem[];
+  } | null {
+    const campaign = this.resolvedCampaignSession(campaignId);
+    const policy = campaign ? orchestratorCampaignPolicyFromJson(campaign.orchestrator_policy) : null;
+    if (!campaign || !policy || campaign.id !== campaignId) return null;
+    const state = this.campaignStatusState(campaign, policy, campaignId);
+    if ((state.baseStatus !== "complete_needs_cleanup" && state.baseStatus !== "stuck") || !state.leftoverDigest) return null;
+    // Stuck work continues only where continuation admission already allows it: while children are
+    // unfinished, or recovery is ready. Once every child is verified, admission holds continuations
+    // (scoped work held by recovery is reconciled through its original obligation, #2938), so a
+    // wake-up could never reach the Orchestrator and none is recorded.
+    // A stalled continuation's own bounded retry owns waking the root (#1352); a new event would
+    // reset its attempt allowance, so none is recorded while it stands.
+    const completion = state.baseStatus === "stuck" ? this.campaignRecoveryCompletion(campaignId).state : null;
+    const held = completion === "complete" || completion === "recovery_held" || state.stalled !== undefined;
+    return { status: state.baseStatus, digest: state.leftoverDigest,
+      agentActionable: !held && (state.baseStatus === "stuck" || state.cleanupItems.some((item) =>
+        (item.kind === "merged_branch" && item.state === "pending") || (item.kind === "worktree" && item.status === "refused"))),
+      cleanup: state.cleanupItems, stuck: state.stuckItems };
+  }
+
+  /** Whether the repair's wake-up for a delivered campaign's owed cleanup (#4146) waits beyond the
+   * campaign's cursor. Only that wake-up passes the holds a finished campaign keeps. */
+  private campaignCleanupWakePending(campaignId: string): boolean {
+    return Boolean(this.stmt(
+      `SELECT 1 FROM orchestrator_campaign_events WHERE campaign_session_id=? AND seq>? AND kind='campaign_idle'
+         AND subject_status='complete_needs_cleanup' LIMIT 1`,
+    ).get(campaignId, this.campaignContinuationCursor(campaignId)));
   }
 
   /** For the forge observer's background pass (#4067): each live campaign's merged pull requests
@@ -22089,8 +22965,10 @@ export class ControlPlaneDb {
     const policy = orchestratorCampaignPolicyFromJson(campaign.orchestrator_policy);
     if (!policy) return null;
     const resolvedCampaignId = campaign.id;
-    const { childIds, pendingHuman, pendingOrchestrator, pendingGenericHuman, pendingGenericOrchestrator, humanRequestTokens, orchestratorRequestTokens, waitingHuman, active, blocked, fullyVerified, cleanupPending, cleanupWorktrees, heldChildren, total, continuation, stalled, status } =
+    const { childIds, pendingHuman, pendingOrchestrator, pendingGenericHuman, pendingGenericOrchestrator, humanRequestTokens, orchestratorRequestTokens, waitingHuman, active, blocked, fullyVerified, cleanupPending, cleanupWorktrees, heldChildren, total, continuation: continuationState, stalled, status, activity, cleanupItems, stuckItems } =
       this.campaignStatusState(campaign, policy, campaignSessionId);
+    // The continuation and its stall ride on the root campaign's own view only, as before #4146.
+    const continuation = resolvedCampaignId === campaignSessionId ? continuationState : {};
     const followUps = this.stmt(
       `SELECT SUM(CASE WHEN duplicate_of IS NULL THEN 1 ELSE 0 END) AS unique_count,
               SUM(CASE WHEN duplicate_of IS NOT NULL THEN 1 ELSE 0 END) AS duplicate_count
@@ -22162,6 +23040,11 @@ export class ControlPlaneDb {
       policyRevision: campaign.parent_control_policy_revision,
       ...(this.campaignRootAudienceCanSee(campaignSessionId)(resolvedCampaignId)
         ? { control: structuredClone(policy.control ?? { mode: "custom" as const }) } : {}),
+      ...(() => {
+        const boundary = this.campaignRootAudienceCanSee(campaignSessionId)(resolvedCampaignId)
+          ? this.campaignRepositoryBoundaryView(resolvedCampaignId, policy) : null;
+        return boundary ? { repositoryBoundary: boundary } : {};
+      })(),
       ...(budget && this.campaignBudgets.members(resolvedCampaignId).every((id) => !this.stmt("SELECT 1 FROM sessions WHERE id=?").get(id) || this.campaignRootAudienceCanSee(resolvedCampaignId)(id))
         ? { budget } : {}),
       ...(recovery ? { recovery } : {}),
@@ -22177,6 +23060,20 @@ export class ControlPlaneDb {
       })(),
       ...(policy.control?.mode === "full_control"
         ? { fullControlHumanRequired: fullControlStandingHumanRequired(humanRequiredRulesExist(this.listGovernancePolicies())) } : {}),
+      // What the launch or enable disclosed (#2940), to the same audience as `control`.
+      ...(policy.control?.mode === "full_control" && policy.launchDisclosure &&
+        this.campaignRootAudienceCanSee(campaignSessionId)(resolvedCampaignId)
+        ? { launchDisclosure: structuredClone(policy.launchDisclosure) } : {}),
+      ...(() => {
+        // With a first-message scope grant (#4102), whether Maximum Issues is still derived, read as
+        // the Issue Scope view reads it: only a limit both the grant and the current authorization
+        // derived moves with the selection count.
+        const first = policy.firstMessageScope;
+        const grant = first && first.state !== "pending" ? first.grant : undefined;
+        if (policy.control?.mode !== "full_control" || !grant || !this.campaignRootAudienceCanSee(campaignSessionId)(resolvedCampaignId)) return {};
+        return { maxIssuesSource: first!.derivedLimits?.maxIssues === true && grant.ceilings.maxIssuesSource === "derived"
+          ? "derived" as const : "explicit" as const };
+      })(),
       ...(handoffs.length
         ? { handoffs: { total: handoffs.length, items: handoffs.slice(0, CAMPAIGN_HANDOFFS_LIMIT).map((item) => structuredClone(item)) } }
         : {}),
@@ -22216,6 +23113,10 @@ export class ControlPlaneDb {
         } };
       })(),
       ...(heldChildren.length ? { heldChildren } : {}),
+      // #4146: what is live, the housekeeping a delivered campaign owes, and why an idle one is stuck.
+      activity,
+      ...(cleanupItems.length ? { cleanup: { total: cleanupItems.length, items: cleanupItems.slice(0, CAMPAIGN_CLEANUP_ITEMS_LIMIT) } } : {}),
+      ...(status === "stuck" && stuckItems.length ? { stuck: { total: stuckItems.length, items: stuckItems.slice(0, CAMPAIGN_STUCK_ITEMS_LIMIT) } } : {}),
       ...(() => {
         const parkedChildren = this.pullRequestWatches.visibleAmong(childIds, CAMPAIGN_PARKED_CHILDREN_LIMIT);
         return parkedChildren.length ? { parkedChildren } : {};
@@ -22235,7 +23136,7 @@ export class ControlPlaneDb {
         unique: Number(followUps.unique_count ?? 0),
         duplicates: Number(followUps.duplicate_count ?? 0),
       },
-      ...(stalled ? { stalled } : {}),
+      ...(stalled && resolvedCampaignId === campaignSessionId ? { stalled } : {}),
       ...continuation,
       // The ledger summary rides on the root's own view only: a nested Orchestrator's reader may not
       // be allowed the root, and reaches the summary through its membership instead. It is cached
@@ -22296,7 +23197,9 @@ export class ControlPlaneDb {
       this.campaignContinuationAdmission(campaign.id).state !== "available" ||
       campaign.status === "input_required" || (campaignStatus === "waiting_human" &&
         !this.campaignMayContinueWhileHumanWaiting(campaign.id)) ||
-      campaignStatusTerminal(campaignStatus) || !runnerCompatible;
+      // A finished campaign takes no automatic turn, except the one wake-up its server's repair of
+      // owed cleanup records (#4146): that is how the Orchestrator learns what is left.
+      (campaignStatusTerminal(campaignStatus) && !this.campaignCleanupWakePending(campaign.id)) || !runnerCompatible;
     const state = latest?.state === "missing_result" ? "missing_result" as const
       : latest?.state === "failed" ? "failed" as const
       : held ? "held" as const
@@ -22407,15 +23310,17 @@ export class ControlPlaneDb {
         `INSERT INTO workflow_decisions
          (request_id, occurrence_id, session_id, controlling_session_id, category, resource_key,
           resource_snapshot, resource_digest, policy_revision, authority, status, human_fallback, authority_evaluation,
-          closing_reference_check, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+          closing_reference_check, owner_rule, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
       ).run(
         input.requestId, input.occurrenceId, input.sessionId, input.controllingSessionId,
         input.category, input.resourceKey, JSON.stringify(input.resourceSnapshot), input.resourceDigest,
-        input.policyRevision, input.authority,
+        // A rule keeps the occurrence for a person whatever the caller computed (#4137).
+        input.policyRevision, input.ownerRule ? "human" : input.authority,
         input.humanFallback ? JSON.stringify(input.humanFallback) : null,
         input.authorityEvaluation ? JSON.stringify(input.authorityEvaluation) : null,
-        input.closingReferenceCheck ? JSON.stringify(input.closingReferenceCheck) : null, input.createdAt,
+        input.closingReferenceCheck ? JSON.stringify(input.closingReferenceCheck) : null,
+        input.ownerRule ? JSON.stringify(input.ownerRule) : null, input.createdAt,
       );
       this.db.exec("COMMIT");
     } catch (error) {
@@ -22449,6 +23354,17 @@ export class ControlPlaneDb {
        ORDER BY created_at ASC, occurrence_id ASC LIMIT ?`,
     ).all(sessionId, ...(cursor ? [cursor.createdAt, cursor.createdAt, cursor.occurrenceId] : []), limit) as unknown[])
       .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null);
+  }
+
+  /** The root's own scope requests that carry an Orchestrator's proposal (#4282), newest first and
+   * bounded, in every state, for Campaign Status. */
+  scopeProposalDecisions(rootId: string, limit = 20): WorkflowDecisionView[] {
+    return (this.stmt(
+      `SELECT * FROM workflow_decisions WHERE controlling_session_id=? AND session_id=? AND category='campaign_issue_scope'
+       AND json_extract(resource_snapshot, '$.scopeProposal') IS NOT NULL ORDER BY created_at DESC, occurrence_id DESC LIMIT ?`,
+    ).all(rootId, rootId, limit) as unknown[]).map(workflowDecisionFromRow).filter(
+      (decision): decision is WorkflowDecisionView => decision !== null,
+    );
   }
 
   pendingWorkflowDecisionsForController(controllingSessionId: string): WorkflowDecisionView[] {
@@ -22540,6 +23456,14 @@ export class ControlPlaneDb {
     ).all(controllingSessionId) as unknown[]).map(workflowDecisionFromRow).filter(
       (decision): decision is WorkflowDecisionView => decision !== null,
     );
+  }
+
+  /** The unconsumed decisions a scope, boundary or policy change revokes: every one bound to the
+   * authority it was evaluated under. An Owner Question (#4270) grants nothing and is bound to no
+   * authority, so it stays pending through every such change. */
+  authorityBoundWorkflowDecisionsForController(controllingSessionId: string): WorkflowDecisionView[] {
+    return this.unconsumedWorkflowDecisionsForController(controllingSessionId)
+      .filter((decision) => !isOwnerQuestionSnapshot(decision.resourceSnapshot));
   }
 
   /**
@@ -22652,7 +23576,7 @@ export class ControlPlaneDb {
       const changed = Number(this.stmt(
         `UPDATE workflow_decisions SET authority='human', owner_handoff=?, authority_evaluation=?
          WHERE occurrence_id=? AND status='pending' AND authority='orchestrator' AND owner_handoff IS NULL
-           AND consumed_at IS NULL AND action_kind IS NULL AND action_armed_at IS NULL`,
+           AND owner_rule IS NULL AND consumed_at IS NULL AND action_kind IS NULL AND action_armed_at IS NULL`,
       ).run(JSON.stringify(handoff), JSON.stringify(authorityEvaluation), occurrenceId).changes) === 1;
       if (!changed) return null;
       // Receipts back only an Orchestrator's approval, which this occurrence can no longer have.
@@ -22664,26 +23588,31 @@ export class ControlPlaneDb {
   /** The owner's classification releasing a question held for it (#4104): an implementation
    * question moves to the Orchestrator, and an owner decision stays the owner's but may now be
    * answered. Only a pending, unconsumed occurrence held for that reason changes; nothing else can
-   * be released this way, and an owner decision can never move to an agent. */
+   * be released this way, and an owner decision can never move to an agent. Nor can a question an
+   * owner rule kept (#4137): it stays the person's, who may now answer it. */
   releaseCredentialScreenReview(
     occurrenceId: string,
     authority: "human" | "orchestrator",
     authorityEvaluation: NonNullable<WorkflowDecisionView["authorityEvaluation"]>,
   ): WorkflowDecisionView | null {
-    const category = authority === "orchestrator" ? "implementation_question" : "owner_decision";
     const changed = Number(this.stmt(
       `UPDATE workflow_decisions SET authority=?, authority_evaluation=?
-       WHERE occurrence_id=? AND status='pending' AND authority='human' AND category=?
+       WHERE occurrence_id=? AND status='pending' AND authority='human'
+         AND (?='human' AND (category='owner_decision' OR (category='implementation_question' AND owner_rule IS NOT NULL))
+           OR ?='orchestrator' AND category='implementation_question' AND owner_rule IS NULL)
          AND owner_handoff IS NULL AND consumed_at IS NULL
          AND json_extract(authority_evaluation, '$.reason')='credential_screen_review'`,
-    ).run(authority, JSON.stringify(authorityEvaluation), occurrenceId, category).changes) === 1;
+    ).run(authority, JSON.stringify(authorityEvaluation), occurrenceId, authority, authority).changes) === 1;
     return changed ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
 
-  /** The pending decisions a campaign's owner kept (#4064), oldest first, for Campaign Status. */
+  /** The pending decisions a campaign's owner kept (#4064), oldest first, for Campaign Status: the
+   * root's owner decisions, the occurrences it handed over, those an owner rule kept (#4137), and
+   * the Orchestrator's scope proposals that wait for the owner for want of lineage (#4267). */
   campaignOwnerDecisions(controllingSessionId: string): NonNullable<OrchestratorCampaignProjection["ownerDecisions"]> | null {
     const where = `controlling_session_id=? AND status='pending' AND authority='human'
-      AND (category='owner_decision' OR owner_handoff IS NOT NULL)`;
+      AND (category='owner_decision' OR owner_handoff IS NOT NULL OR owner_rule IS NOT NULL
+        OR category='campaign_issue_scope' AND session_id=controlling_session_id AND json_type(resource_snapshot, '$.ownerReview')='object')`;
     const total = Number((this.stmt(`SELECT COUNT(*) AS count FROM workflow_decisions WHERE ${where}`)
       .get(controllingSessionId) as { count: number }).count);
     if (!total) return null;
@@ -22691,14 +23620,17 @@ export class ControlPlaneDb {
       ORDER BY created_at ASC, occurrence_id ASC LIMIT ${CAMPAIGN_OWNER_DECISIONS_LIMIT}`).all(controllingSessionId) as unknown[])
       .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null)
       .map((decision) => ({ occurrenceId: decision.occurrenceId, sessionId: decision.sessionId, category: decision.category,
-        summary: ownerDecisionSummary(decision.resourceSnapshot), handedOff: decision.ownerHandoff !== undefined, createdAt: decision.createdAt }));
+        summary: ownerDecisionSummary(decision.resourceSnapshot), handedOff: decision.ownerHandoff !== undefined,
+        ...(decision.ownerRule ? { ownerRule: decision.ownerRule } : {}), createdAt: decision.createdAt }));
     return { total, items };
   }
 
-  /** Every occurrence a campaign's root handed to its owner, in any state (#4064). */
-  ownerHandedWorkflowDecisions(controllingSessionId: string): WorkflowDecisionView[] {
+  /** Every occurrence a campaign's root handed to its owner (#4064) or an owner rule kept for a
+   * person (#4137), in any state. */
+  ownerKeptWorkflowDecisions(controllingSessionId: string): WorkflowDecisionView[] {
     return (this.stmt(
-      `SELECT * FROM workflow_decisions WHERE controlling_session_id=? AND owner_handoff IS NOT NULL
+      `SELECT * FROM workflow_decisions WHERE controlling_session_id=?
+         AND (owner_handoff IS NOT NULL OR owner_rule IS NOT NULL)
        ORDER BY created_at ASC, occurrence_id ASC`,
     ).all(controllingSessionId) as unknown[]).map(workflowDecisionFromRow).filter(
       (decision): decision is WorkflowDecisionView => decision !== null,
@@ -33887,6 +34819,26 @@ function validContextIssueNumbers(value: unknown): value is number[] {
     value.every((n) => Number.isSafeInteger(n) && n > 0);
 }
 
+const locationRecord = (item: unknown, keys: string[]): Record<string, unknown> | null => {
+  const entry = item as Record<string, unknown> | null;
+  return entry && typeof entry === "object" && !Array.isArray(entry) && Object.keys(entry).every((key) => keys.includes(key)) &&
+    typeof entry.locationId === "string" && entry.locationId.length > 0 && entry.locationId.length <= 256 &&
+    typeof entry.name === "string" && entry.name.length <= 256 ? entry : null;
+};
+
+function validPendingLocations(value: unknown): boolean {
+  return Array.isArray(value) && value.length <= CAMPAIGN_BOUNDARY_LOCATIONS_MAX &&
+    value.every((item) => locationRecord(item, ["locationId", "name", "reason"])?.reason === "added_by_other");
+}
+
+function validLocationJoins(value: unknown): boolean {
+  return Array.isArray(value) && value.length <= CAMPAIGN_LOCATION_JOINS_MAX && value.every((item) => {
+    const entry = locationRecord(item, ["locationId", "name", "repository", "revision", "at", "source"]);
+    return Boolean(entry && campaignRepositoryLocation(entry.repository) && Number.isSafeInteger(entry.revision) && (entry.revision as number) > 0 &&
+      Number.isSafeInteger(entry.at) && ["owner_added", "runner_reconnected", "owner_included"].includes(entry.source as string));
+  });
+}
+
 function validExcludedLocations(value: unknown): boolean {
   return Array.isArray(value) && value.length <= CAMPAIGN_BOUNDARY_LOCATIONS_MAX && value.every((item) => {
     const entry = item as Record<string, unknown> | null;
@@ -33958,6 +34910,11 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
   value.delegation.decisions = decisions;
   behavior.childHarness = childHarness;
   if (value.issueScopeProposalEpic !== undefined && (!Number.isSafeInteger(value.issueScopeProposalEpic) || value.issueScopeProposalEpic < 1)) return null;
+  const seed = value.issueScopeSeed as unknown as Record<string, unknown> | undefined;
+  if (seed !== undefined && !(seed && ["pending", "seeded", "none", "owner"].includes(seed.state as string) &&
+      typeof seed.messageDigest === "string" && /^[a-f0-9]{64}$/.test(seed.messageDigest) &&
+      (seed.occurrenceId === undefined || typeof seed.occurrenceId === "string") &&
+      (seed.state === "seeded") === (value.issueScopeProposalEpic !== undefined))) return null;
   if (value.issueScope && (typeof value.issueScope.repository !== "string" || !campaignRepositoryLocation(value.issueScope.repository) ||
       !Array.isArray(value.issueScope.issueNumbers) || value.issueScope.issueNumbers.length > 100 ||
       value.issueScope.issueNumbers.some((n) => !Number.isSafeInteger(n) || n < 1) ||
@@ -33965,6 +34922,12 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
       typeof value.issueScope.authorizedByUserId !== "string" || !value.issueScope.authorizedByUserId ||
       !Number.isSafeInteger(value.issueScope.authorizedAt) || value.issueScope.authorizedAt < 1 ||
       JSON.stringify(value.issueScope.issueNumbers) !== JSON.stringify(value.issueNumbers ?? []))) return null;
+  // A repository-qualified scope (#4118) is canonical, and its launch numbers are derived from it.
+  if (value.issueScope?.issues !== undefined) {
+    const issues = canonicalCampaignIssues(value.issueScope.issues);
+    if (!issues || JSON.stringify(issues) !== JSON.stringify(value.issueScope.issues) ||
+        JSON.stringify(campaignScopeNumbers(value.issueScope, value.issueScope.repository)) !== JSON.stringify([...value.issueScope.issueNumbers].sort((a, b) => a - b))) return null;
+  }
   if (value.issueNumbers) value.issueNumbers = [...new Set(value.issueNumbers)];
   const first = value.firstMessageScope as unknown as Record<string, unknown> | undefined;
   const digest = (v: unknown) => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
@@ -33978,6 +34941,12 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
   if (value.issueNumbersSource !== undefined && value.issueNumbersSource !== "human_launch_request") return null;
   // Informational only (#4117): a malformed list is dropped instead of discarding the policy.
   if (value.excludedLocations !== undefined && !validExcludedLocations(value.excludedLocations)) delete value.excludedLocations;
+  // Informational only (#2940), and only beside the Full Control boundary it describes.
+  if (value.launchDisclosure !== undefined && (value.control?.mode !== "full_control" || !validCampaignLaunchDisclosure(value.launchDisclosure))) {
+    delete value.launchDisclosure;
+  }
+  if (value.pendingLocations !== undefined && !validPendingLocations(value.pendingLocations)) delete value.pendingLocations;
+  if (value.locationJoins !== undefined && !validLocationJoins(value.locationJoins)) delete value.locationJoins;
   const validSources = new Set([
     "system_default", "user_default", "session_override", "compatibility_fallback", "legacy_session", "active_campaign",
   ]);
@@ -34037,6 +35006,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     withdrawal?: string | null;
     superseded_by?: string | null;
     owner_handoff?: string | null;
+    owner_rule?: string | null;
     issue_closure_result?: string | null;
     automation_creation_result?: string | null;
     location_switch_result?: string | null;
@@ -34105,6 +35075,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     ...(row.withdrawal ? { withdrawal: parseJson<NonNullable<WorkflowDecisionView["withdrawal"]>>(row.withdrawal) ?? undefined } : {}),
     ...(row.status === "superseded" && row.superseded_by ? { supersededBy: row.superseded_by } : {}),
     ...(row.owner_handoff ? { ownerHandoff: parseJson<NonNullable<WorkflowDecisionView["ownerHandoff"]>>(row.owner_handoff) ?? undefined } : {}),
+    ...(row.owner_rule ? { ownerRule: parseJson<NonNullable<WorkflowDecisionView["ownerRule"]>>(row.owner_rule) ?? undefined } : {}),
   };
 }
 
@@ -34119,7 +35090,18 @@ function ownerDecisionSummary(snapshot: WorkflowDecisionView["resourceSnapshot"]
       case "merged_branch_deletion": return `Delete branch ${snapshot.branch} in ${snapshot.repository}`;
       case "issue_closure": return `Close ${snapshot.repository}#${snapshot.issue}`;
       case "follow_up_issue_publication": return `Publish ${JSON.stringify(snapshot.sanitizedTitle)} in ${snapshot.repository}`;
-      case "campaign_issue_scope": return `Change the campaign's issue scope in ${snapshot.repository}`;
+      case "campaign_issue_scope": {
+        // An Orchestrator's proposal waiting for the owner names its exact change (#4267).
+        if (!snapshot.ownerReview) return `Change the campaign's issue scope in ${snapshot.repository}`;
+        // Every repository's part, each issue qualified by its own repository (#4118).
+        const groups = campaignScopeChangeGroups(snapshot);
+        const refs = (pick: (group: (typeof groups)[number]) => number[]) =>
+          groups.flatMap((group) => pick(group).map((n) => `${group.repository}#${n}`)).join(", ");
+        const removals = refs((group) => group.removals);
+        const raise = snapshot.ownerReview.maxIssuesIncrease;
+        return `Add ${refs((group) => group.additions)}${removals ? ` and remove ${removals}` : ""}` +
+          (raise ? `, raising Maximum Issues from ${raise.from} to ${raise.from + raise.increase}` : "");
+      }
       case "ui_evidence_approval": return `Review ${snapshot.evidence.length} UI evidence item${snapshot.evidence.length === 1 ? "" : "s"}`;
       default: return snapshot.category;
     }
