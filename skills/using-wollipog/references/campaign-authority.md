@@ -64,6 +64,13 @@ admitted with no model call; anything else goes to the Decision Model's constrai
 admits, refuses naming the question and issue, or, when uncertain or failed, makes it the owner's one
 approval, asked as an Owner Question. Ranking criteria are the root's own call and are never checked.
 
+A Custom root does the same for its person's first message when that message writes an issue number:
+`create_session` refuses with `seed_proposal_required` until the root proposes exactly the issues the
+message asks for, each `owner_named` (or none). The constraint check always runs; an admit seeds the
+epic the person approves (one issue with members) or makes the issues the campaign's issue numbers
+with no person step, and an uncertain or failed check leaves the scope to the person, who approves it
+or chooses Continue Without an Epic.
+
 When such a rule keeps a gate for a person, the gate reaches the owner as a typed request, never
 only as prose:
 

@@ -92,6 +92,17 @@ test("Full Control roots post a first report naming scope, unsupported paths and
   assert.doesNotMatch(report, /AskUserQuestion|request_user_input|confirm/i);
 });
 
+test("a Custom root proposes the issues its person's first message asks for, never background or its own choice (#4282)", () => {
+  for (const strict of [true, false]) {
+    const text = orchestratorInstructions(["/repo"], strict);
+    assert.match(text, /Custom first-message scope: when this root campaign Orchestrator's first message writes an issue number and create_session refuses with seed_proposal_required/);
+    assert.match(text, /every issue's origin is owner_named/);
+    assert.match(text, /Never add an issue the message only mentions as background, context, an example or something to avoid, and never one you chose/);
+    assert.match(text, /Propose no additions when the message asks for no issue work/);
+    assert.match(text, /wait for their scope approval or Continue Without an Epic without proposing again/);
+  }
+});
+
 test("UI evidence guidance follows the effective owner under Custom and Full Control (#2940)", () => {
   for (const strict of [true, false]) {
     const text = orchestratorInstructions(["/repo"], strict);

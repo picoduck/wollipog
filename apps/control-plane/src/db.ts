@@ -17449,11 +17449,14 @@ export class ControlPlaneDb {
   /** Record what a Custom campaign's first message, sent after an empty launch, asks of its epic seed
    * (#4104): `pending` for a reading, or `none`. Compare-and-set: only a campaign with no seed, no
    * scope and no seeded epic gets one, so only its first message ever does. */
-  beginCampaignIssueScopeSeed(id: string, seed: { state: "pending" | "none"; messageDigest: string }, now: number): boolean {
+  beginCampaignIssueScopeSeed(id: string, seed: { state: "pending" | "none"; messageDigest: string } &
+    Pick<import("@wollipog/protocol").CampaignIssueScopeSeed, "proposal" | "author">,
+    now: number): boolean {
     const policy = this.sessionOrchestratorPolicy(id);
     if (!policy || policy.issueScopeSeed || policy.issueScope || policy.issueScopeProposalEpic !== undefined) return false;
     const previous = JSON.stringify(policy);
-    policy.issueScopeSeed = { state: seed.state, messageDigest: seed.messageDigest };
+    policy.issueScopeSeed = { state: seed.state, messageDigest: seed.messageDigest,
+      ...(seed.state === "pending" && seed.proposal ? { proposal: true as const } : {}), ...(seed.author ? { author: seed.author } : {}) };
     return Number(this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=? AND orchestrator_policy=?")
       .run(JSON.stringify(policy), now, id, previous).changes) === 1;
   }
@@ -17469,7 +17472,7 @@ export class ControlPlaneDb {
    * the person's own launch request, the provenance Full Control enable trusts (#2940); a reading of
    * a recorded transcript message is never marked. */
   settleCampaignIssueScopeSeed(id: string, messageDigest: string,
-    next: { state: "seeded"; epic: number; occurrenceId: string }
+    next: { state: "seeded"; epic: number; occurrenceId?: string }
       | { state: "none"; occurrenceId?: string; grant?: { issueNumbers: readonly number[]; launchRequest: boolean } }
       | { state: "owner"; occurrenceId?: string }, now: number,
     from: "pending" | "owner" = "pending"): boolean {
@@ -17487,6 +17490,20 @@ export class ControlPlaneDb {
       if (grant.launchRequest) policy.issueNumbersSource = "human_launch_request";
       else delete policy.issueNumbersSource;
     }
+    return Number(this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=? AND orchestrator_policy=?")
+      .run(JSON.stringify(policy), now, id, previous).changes) === 1;
+  }
+
+  /** Mark a Custom campaign's pending seed as awaiting its Orchestrator's proposal (#4282), recording
+   * who wrote the first message. Compare-and-set on the pending seed of exactly this message. */
+  awaitCampaignIssueScopeSeedProposal(id: string, messageDigest: string,
+    author: NonNullable<import("@wollipog/protocol").CampaignIssueScopeSeed["author"]>, now: number): boolean {
+    const policy = this.sessionOrchestratorPolicy(id);
+    const seed = policy?.issueScopeSeed;
+    if (!policy || policy.issueScope || seed?.state !== "pending" || seed.messageDigest !== messageDigest) return false;
+    if (seed.proposal && seed.author === author) return true;
+    const previous = JSON.stringify(policy);
+    policy.issueScopeSeed = { ...seed, proposal: true, author };
     return Number(this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=? AND orchestrator_policy=?")
       .run(JSON.stringify(policy), now, id, previous).changes) === 1;
   }
@@ -34914,6 +34931,8 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
   if (seed !== undefined && !(seed && ["pending", "seeded", "none", "owner"].includes(seed.state as string) &&
       typeof seed.messageDigest === "string" && /^[a-f0-9]{64}$/.test(seed.messageDigest) &&
       (seed.occurrenceId === undefined || typeof seed.occurrenceId === "string") &&
+      (seed.proposal === undefined || seed.proposal === true) &&
+      (seed.author === undefined || ["launch_request", "owner", "other", "unattributed"].includes(seed.author as string)) &&
       (seed.state === "seeded") === (value.issueScopeProposalEpic !== undefined))) return null;
   if (value.issueScope && (typeof value.issueScope.repository !== "string" || !campaignRepositoryLocation(value.issueScope.repository) ||
       !Array.isArray(value.issueScope.issueNumbers) || value.issueScope.issueNumbers.length > 100 ||

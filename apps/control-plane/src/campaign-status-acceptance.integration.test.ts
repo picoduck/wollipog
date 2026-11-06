@@ -33,9 +33,8 @@ import { ControlPlaneDb } from "./db.js";
 import { Hub, type Socket } from "./hub.js";
 import type { HumanPrincipal } from "./identity.js";
 import { SessionsService } from "./sessions.js";
-import { fakeDecisionKind, fakeDecisionRuntime, HEALTHY_VERDICTS } from "./credential-screen-test-fixture.js";
 import type { DecisionRuntime } from "./decision-runtime.js";
-import { EMPTY_GRANT } from "./scope-grant-test-fixture.js";
+import { fakeScopeGrantRuntime } from "./scope-grant-test-fixture.js";
 
 const RUNNER_ID = "acceptance-runner";
 const WORKSPACE_ID = "acceptance-workspace";
@@ -170,23 +169,40 @@ async function acceptanceStack(options: { completion?: "retain" | "stop_and_arch
     svc.onSessionStatus(created.data.id, "running");
     return created.data.id;
   };
-  // The root's first message names its issues; only the Decision Model's reading grants them (#4259).
-  // The reading is scripted to name `options.issues`, and the runner reads each as an issue of REPO.
+  // The root's first message names its issues; only the root's checked proposal grants them (#4259,
+  // #4282). The root proposes `options.issues`, the fake constraint check admits, and the runner
+  // reads each as an issue of REPO.
   const internals = svc as unknown as { decisionRuntime: DecisionRuntime };
   const defaultRuntime = internals.decisionRuntime;
   const named = options.issues ?? [101, 102];
-  svc.setDecisionRuntime(fakeDecisionRuntime(db, (message) => fakeDecisionKind(message) === "scope_grant"
-    ? { verdict: "grant", fields: { ...EMPTY_GRANT, explicit: named.map((number) => ({ repository: "", number })) } }
-    : { verdict: HEALTHY_VERDICTS[fakeDecisionKind(message)]! }).runtime);
-  reply = (message, replyHub) => {
-    if (message.type !== "campaign_issue_scope" || message.operation !== "inspect") return;
+  svc.setDecisionRuntime(fakeScopeGrantRuntime(db).runtime);
+  // The fake Decision Model's harness runner, which a typed check requires to be current (#4283).
+  db.registerRunner({ runnerId: "r", hostname: "decision", os: "linux", version: "1.0.0", workspaces: [], agents: [] }, Date.now(), PROTOCOL_VERSION);
+  reply =(message, replyHub) => {
+    if (message.type !== "campaign_issue_scope") return;
+    if (message.operation === "grant_issue_numbers") {
+      replyHub.resolveRunnerRequest({ type: "campaign_issue_scope_result", requestId: message.requestId, sessionId: message.sessionId, ok: true,
+        issueNumbersGrant: "applied" }, RUNNER_ID);
+      return;
+    }
+    if (message.operation !== "inspect") return;
+    const issues = message.issues ?? [];
     replyHub.resolveRunnerRequest({ type: "campaign_issue_scope_result", requestId: message.requestId, sessionId: message.sessionId, ok: true,
-      repository: REPO, candidates: (message.issues ?? []).map((number) => ({ issue: { repository: REPO, number }, title: `Issue ${number}`,
-        source: "member_checklist" as const })) }, RUNNER_ID);
+      repository: REPO, candidates: issues.map((number) => ({ issue: { repository: REPO, number }, title: `Issue ${number}`,
+        source: "member_checklist" as const })),
+      ...(message.facts ? { issueFacts: issues.map((number) => ({ number, kind: "issue" as const, state: "open" as const, labels: [], assignees: [],
+        title: `Issue ${number}`, bodyExcerpt: "" })) } : {}) }, RUNNER_ID);
   };
   const root = createRoot("Acceptance Campaign");
-  await svc.campaignIssueScopeSeedSettled(root);
-  assert.deepEqual(db.getSession(root)!.orchestratorPolicy!.issueNumbers, named, "the scripted reading granted the root's issues");
+  const prompt = options.prompt ?? "Orchestrate issues 101 and 102.";
+  // The runner records the launch prompt as the root's first user message.
+  db.appendEvent(root, { kind: "user_message", text: prompt }, Date.now());
+  const proposed = await svc.proposeCampaignSeedScope(root, { requestId: "acceptance-seed", expectedRevision: 0, removals: [],
+    additions: named.map((number) => ({ repository: REPO, number })), explanation: "The issues the owner named.",
+    proposal: { issues: named.map((number) => ({ repository: REPO, number, origin: "owner_named" as const, rationale: "Named in the message." })),
+      requestedCount: null, constraints: [], withheldOperations: [] } });
+  assert.equal(proposed?.data?.seedProposal.outcome, "issues_granted", proposed?.error ?? "proposed");
+  assert.deepEqual(db.getSession(root)!.orchestratorPolicy!.issueNumbers, named, "the checked proposal granted the root's issues");
   reply = null;
   svc.setDecisionRuntime(defaultRuntime);
   controllerId = root;

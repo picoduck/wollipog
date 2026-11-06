@@ -270,6 +270,20 @@ same request, and an answer in the owner's own words declines it and reaches you
 stated count must be one the message writes, your chosen issues stay within it (3 when none is
 stated), and later additions take the same route within the admitted count.
 
+A Custom campaign's first message gets the same propose-then-check treatment, with the authority it
+always had and no new person step. When the first message writes an issue number, `create_session`
+refuses with `seed_proposal_required` until you propose: call `request_campaign_issue_scope_change`
+with exactly the issues the person's message asks the campaign to work on as `additions`, and a
+`proposal` in which every issue is `owner_named` with a one-line `rationale`, plus the count,
+constraints and withheld operations you read. Never add an issue the message only mentions (as
+background, context, an example or something to avoid), and never one you chose: those go through the
+person's ordinary scope approval. Propose no additions when the message asks for no issue work. The
+server checks every such proposal against the person's own words, the empty one included. When it is
+admitted, one issue with sub-issues or checklist members seeds the epic, which the person still
+approves (or they choose Continue Without an Epic); otherwise the issues become the campaign's issue
+numbers and you delegate. A refusal names the issue and question: revise and propose again. When the
+result says the person now decides, wait for their scope approval without proposing again.
+
 A campaign whose stored Scope Grant predates this keeps it. When that grant failed or was uncertain,
 propose the issues you chose without lineage: the proposal goes to the owner as one typed approval,
 so put your rationale in `explanation`. When it asked the campaign to select issues, propose the open
