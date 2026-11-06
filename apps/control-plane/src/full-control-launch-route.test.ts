@@ -1555,6 +1555,20 @@ test("an owner-named number the message writes only as a plain number is the own
     assert.deepEqual(refused.errorDetails, { code: "other_campaign_scope", issue: 61 });
     assert.deepEqual(f.db.getSession(second.id)!.orchestratorPolicy!.issueScope!.issueNumbers, []);
     assert.equal(establishedOf(f, second.id).initialScope, undefined, "nothing is dispatched for the refused campaign");
+
+    // The owner's approval is re-checked the same way: approving after another campaign took the issue applies nothing.
+    const third = await proposalCampaign(f, server, "Fix #71 and one more open bug.");
+    const waiting = await third.propose([named(71), chosen(72)], { constraints: ["open"] });
+    assert.equal(waiting.data!.authority, "human");
+    const taker = await proposalCampaign(f, server, "Fix #72.");
+    const takes = await taker.propose([named(72)]);
+    assert.equal(taker.apply(takes.data!.occurrenceId).ok, true);
+    const approved = third.answer({ scope_proposal_answer: "Approve Scope" });
+    assert.equal(approved.ok, false);
+    assert.deepEqual(approved.errorDetails, { code: "other_campaign_scope", issue: 72 });
+    assert.deepEqual(f.db.getSession(third.id)!.orchestratorPolicy!.issueScope!.issueNumbers, []);
+    assert.equal(establishedOf(f, third.id).initialScope, undefined);
+    assert.notEqual(f.db.workflowDecisionByOccurrence(waiting.data!.occurrenceId)!.status, "consumed");
   } finally { await server.close(); f.db.close(); }
 });
 
@@ -1719,6 +1733,7 @@ test("a task that needs no issues proposes none and opens dispatch; an older run
 
     // A root runner older than v308 sends no structured proposal: its additions are the owner's.
     const old = await proposalCampaign(f, server, "Fix #12.");
+    const older = await proposalCampaign(f, server, "Fix #14.");
     const runner = f.db.getRunner("r")!;
     f.db.registerRunner({ runnerId: "r", hostname: runner.hostname, os: runner.os, version: runner.version, workspaces: runner.workspaces,
       agents: runner.agents }, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.campaignScopeProposals - 1);
@@ -1727,6 +1742,17 @@ test("a task that needs no issues proposes none and opens dispatch; an older run
     assert.equal(unstructured.data!.authority, "human");
     const record = (unstructured.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!;
     assert.deepEqual([record.ownerCause, record.checks, record.issues[0]!.origin], ["proposal_unstructured", ["proposal_unstructured"], "orchestrator_chosen"]);
+
+    // A runner that can't report issue facts can't prove the open and Human Required floors: it fails
+    // closed, with no owner request the owner could approve past them.
+    f.issues.facts.set(14, { state: "closed" });
+    f.db.registerRunner({ runnerId: "r", hostname: runner.hostname, os: runner.os, version: runner.version, workspaces: runner.workspaces,
+      agents: runner.agents }, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueFacts - 1);
+    const unverified = await older.propose([named(14)]);
+    assert.equal(unverified.ok, false);
+    assert.equal(unverified.status, 409);
+    assert.match(unverified.error!, /state and labels/u);
+    assert.equal(older.ownerRequests().length, 0);
   } finally { await server.close(); f.db.close(); }
 });
 

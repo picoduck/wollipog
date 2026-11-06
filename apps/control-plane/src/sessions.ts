@@ -12164,8 +12164,10 @@ export class SessionsService {
           return fail("The forge could not verify every proposed addition in the campaign repository.", 409);
         }
       } catch { return fail("GitHub issue validation timed out or failed. Try a smaller explicit proposal and verify the runner's GitHub access, then retry.", 409); }
-      // A structured proposal is admitted only on verified facts: a runner that sends one reports them.
-      if (structured && !facts) return fail("The campaign runner could not report the proposed issues' state and labels. Update and reconnect it, then propose again.", 409);
+      // Every proposal is admitted or routed only on verified facts, so the open and Human Required
+      // label floors always run: a runner that can't report them (before campaignIssueFacts) fails
+      // closed, even on the owner route, because the owner's approval checks neither.
+      if (!facts) return fail("The campaign runner could not report the proposed issues' state and labels. Update and reconnect it, then propose again.", 409);
     }
     const latest = this.db.getSession(sessionId);
     const latestBoundary = latest && issueBoundary(latest);
@@ -13284,7 +13286,8 @@ export class SessionsService {
     if (!answer) return fail("choose Approve Scope or Decline Scope, or type an answer", 400);
     const resolved = this.resolveWorkflowDecision(sessionId, sessionId, occurrenceId,
       { outcome: answer.approve ? "approve" : "deny", ...(answer.text ? { childMessage: answer.text } : {}) }, "human", actor, () => true);
-    if (!resolved.ok) return failAs(resolved);
+    // A refusal keeps its code (such as other_campaign_scope) so Campaign Status can name the issue.
+    if (!resolved.ok) return { ...failAs<SessionView>(resolved), ...(resolved.errorDetails ? { errorDetails: resolved.errorDetails } : {}) };
     return ok(this.db.getSession(sessionId)!);
   }
 
@@ -13890,10 +13893,10 @@ export class SessionsService {
       const proposedMax = boundary ? proposalMaxIssues(currentChild.orchestratorPolicy, snapshot, boundary, scopeSize) : undefined;
       if (authority === "orchestrator" && (!boundary || scopeSize + reserved >
           this.db.campaignIssueLimit(childSessionId, proposedMax ?? boundary.issueAuthority!.maxIssues))) return fail("Scope capacity or its human boundary changed before resolution", 409);
-      // A selection, or a proposal the floors admitted (#4282), the Orchestrator applies must still
-      // hold no issue another active campaign took since its review; nothing awaits between this
-      // check and the approval below.
-      const taken = authority === "orchestrator" && (snapshot.lineage?.kind === "selection" || snapshot.scopeProposal !== undefined)
+      // A selection the Orchestrator applies, and any Orchestrator proposal (#4282), whether the floors
+      // admitted it or its owner approves it, must still hold no issue another active campaign took
+      // since its floors ran; nothing awaits between this check and the approval below.
+      const taken = (authority === "orchestrator" && snapshot.lineage?.kind === "selection") || snapshot.scopeProposal !== undefined
         ? snapshot.additions.find((n) => this.db.issueHeldByOtherCampaign(childSessionId, snapshot.repository, n)) : undefined;
       if (taken !== undefined) {
         this.revokeWorkflowDecision(decision, { reason: "approval_refused_stale", triggeredBy: actor });
