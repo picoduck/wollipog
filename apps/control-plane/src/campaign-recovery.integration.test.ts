@@ -58,6 +58,8 @@ function fixture(budgetAuthority?: CampaignBudgetAuthority, completion?: "retain
     ...(budgetAuthority ? { budgetAuthority } : {}) }, 1,
   { ...identity, kind: "human", actorId: identity.userId });
   assert.ok(enabled.ok, enabled.error ?? "admission failed");
+  // The control change's own scope synchronization (#3363) is not what these tests count.
+  sent.splice(0, sent.length, ...sent.filter((message) => (message as { type: string }).type !== "campaign_issue_scope"));
   const recovery = new CampaignRecoveryService(db, () => {}, log);
   return { db, svc, recovery, sent, logs, metadata, hub, identity };
 }

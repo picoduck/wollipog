@@ -120,7 +120,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 296);
+  assert.equal(PROTOCOL_VERSION, 299);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -358,8 +358,8 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 296", () => {
-  assert.equal(PROTOCOL_VERSION, 296);
+test("PROTOCOL_VERSION is 299", () => {
+  assert.equal(PROTOCOL_VERSION, 299);
   // An owner rule on a typed decision needs a v296 control plane (#4137).
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule, 296);
   // A v294 runner cannot report the closing references of a GitLab merge (#3762).
@@ -368,6 +368,9 @@ test("PROTOCOL_VERSION is 296", () => {
   // Selection floors read issue facts from a v291 runner (#4103).
   assert.equal(runnerSupportsProtocol(290, "campaignIssueFacts"), false);
   assert.equal(runnerSupportsProtocol(291, "campaignIssueFacts"), true);
+  // Campaign control metadata is ordered by its own revision on a v299 runner (#3363).
+  assert.equal(runnerSupportsProtocol(298, "campaignControlRevision"), false);
+  assert.equal(runnerSupportsProtocol(299, "campaignControlRevision"), true);
   // A regular session's Location switch needs a v287 runner and control plane (#4138), and
   // Switch and Continue of the live session a v289 runner.
   assert.equal(runnerSupportsProtocol(286, "sessionLocationSwitch"), false);

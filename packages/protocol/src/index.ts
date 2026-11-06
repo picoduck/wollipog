@@ -911,7 +911,14 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      under any mode, grant or category; later requests for the same resource stay the person's,
 //      and Campaign Status lists it under Waiting for You with the rule. A runner refuses the field
 //      against an older control plane, which would drop it.
-export const PROTOCOL_VERSION = 296;
+// 299: campaign control metadata carries its own authoritative ordering (#3363). A campaign
+//      issue scope synchronization, and an Orchestrator launch policy, add `controlRevision`: the
+//      campaign root's policy revision the control was read at. A runner keeps the newest control
+//      it was sent and never lets a delayed or reordered update replace it with an older one, even
+//      within one issue-scope revision. A pre-v299 runner is never sent the field and keeps
+//      replacing control with each synchronization. (297, 298, 300 and 301 are claimed by pull
+//      requests still open.)
+export const PROTOCOL_VERSION = 299;
 
 export * from "./campaign-authority.js";
 export * from "./workflow-decision-owner-rule.js";
@@ -1476,6 +1483,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   campaignRepositoryBoundary: 288,
   /** v291 reports issue facts (kind, state, labels, assignees) for selection scope (#4103). */
   campaignIssueFacts: 291,
+  /** v299 orders campaign control metadata by `controlRevision` (#3363). */
+  campaignControlRevision: 299,
 } as const;
 
 /* ========================================================================== */
@@ -2965,6 +2974,8 @@ export interface OrchestratorLaunchPolicy extends OrchestratorExecutionDefaults 
   issueScope?: CampaignIssueScope;
   /** Server-synchronized diagnostic boundary; never a provider permission grant. */
   control?: CampaignControl;
+  /** v299 (#3363): the campaign root's policy revision `control` was read at, which orders it. */
+  controlRevision?: number;
 }
 
 export interface OrchestratorDefaults {
@@ -5497,7 +5508,10 @@ export type CampaignIssueScopeMessage = {
        /** v291 (#4103): also report `issueFacts` for each of `issues`. */
        facts?: true } |
      { operation: "publication_inspect"; sanitizedTitle: string; sanitizedBody: string; labels: string[] } |
-     { operation: "synchronize"; scope: CampaignIssueScope; control?: CampaignControl });
+     { operation: "synchronize"; scope: CampaignIssueScope; control?: CampaignControl;
+       /** v299 (#3363): the campaign root's policy revision `control` was read at. A runner never
+        * replaces a control it holds at a newer revision. Sent only with `control`. */
+       controlRevision?: number });
 
 /** Bounded host-placement diagnostic; never carries configuration values or runner output. */
 export type HostExecutionTargetRefusalReason =

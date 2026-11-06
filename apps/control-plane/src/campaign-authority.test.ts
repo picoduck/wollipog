@@ -58,9 +58,14 @@ function harness(protocol = PROTOCOL_VERSION, workspacePath = "/repos/test", dri
   const screen = fakeScreenRuntime(db, (request) =>
     [...asking].some((text) => JSON.stringify(request).includes(JSON.stringify(text).slice(1, -1))) ? { verdict: "ask" } : { verdict: "discusses" });
   svc.setDecisionRuntime(screen.runtime);
-  const enable =(delegatablePolicyIds: string[] = []) => svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #2934",
-    operations: ["implementation_question", "question", "tool_approval", "policy_ask", "pr_merge", "merged_branch_deletion"],
-    delegatablePolicyIds }, 1, principal);
+  const enable =(delegatablePolicyIds: string[] = []) => {
+    const result = svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #2934",
+      operations: ["implementation_question", "question", "tool_approval", "policy_ask", "pr_merge", "merged_branch_deletion"],
+      delegatablePolicyIds }, 1, principal);
+    // The control change's own scope synchronization (#3363) is not what these tests count.
+    sent.splice(0, sent.length, ...sent.filter((message) => (message as { type: string }).type !== "campaign_issue_scope"));
+    return result;
+  };
   const snapshot: WorkflowDecisionResourceSnapshot = { category: "implementation_question", question: "Which authentication library should we implement?",
     options: [{ optionId: "a", label: "Library A" }, { optionId: "b", label: "Library B" }] };
   // The typed route's own entry point, which screens the question before it is admitted.

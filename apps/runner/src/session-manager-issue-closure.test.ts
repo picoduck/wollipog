@@ -481,3 +481,62 @@ test("same-revision synchronization with a changed origin withdraws live issue p
     assert.deepEqual(policy.issueNumbers,[issue]);
   } finally {active.delete(sessionId);}
 });
+
+/** #3363: control metadata has its own order, alongside issue-scope ordering. */
+const orderedControl = (revision: number): import("@wollipog/protocol").CampaignControl => ({ mode: "full_control", boundary: {
+  version: 1, revision, issueScopeRevision: 1, repository: "example/project", objective: "Retire scoped work",
+  authorizedByUserId: "owner", authorizedAt: 2000, operations: ["issue_closure"], delegatablePolicyIds: [],
+  issueAuthority: { epics: [], relatedFollowUps: false, maxIssues: 1, closureReasons: ["not_planned"] } } });
+
+test("a delayed synchronization cannot roll back control within one scope revision, before or after recreation (#3363)", async (t) => {
+  const f = fixture(t);
+  const original = await f.snapshot();
+  const scope = { repository: "example/project", issueNumbers: [issue], revision: 1, authorizedByUserId: "owner", authorizedAt: 1000 };
+  assert.equal((await f.scope({ operation: "synchronize", scope, control: orderedControl(2), controlRevision: 2 })).ok, true);
+  // A same-scope control change (a reauthorization) applies without any scope edit.
+  assert.equal((await f.scope({ operation: "synchronize", scope, control: orderedControl(3), controlRevision: 3 })).ok, true);
+  assert.deepEqual(f.diskMeta().orchestrator!.control, orderedControl(3));
+  assert.equal(f.diskMeta().orchestrator!.controlRevision, 3);
+  const policy: { issueNumbers?: number[]; issueScope?: typeof scope; control?: import("@wollipog/protocol").CampaignControl; controlRevision?: number } =
+    { issueNumbers: [issue], issueScope: scope, control: orderedControl(3), controlRevision: 3 };
+  const active = (f.manager() as unknown as { active: Map<string, { orchestratorLaunchPolicy: typeof policy }> }).active;
+  active.set(sessionId, { orchestratorLaunchPolicy: policy });
+  try {
+    const delayed = await f.scope({ operation: "synchronize", scope, control: orderedControl(2), controlRevision: 2 });
+    assert.equal(delayed.ok, true, "the scope itself is current");
+    assert.deepEqual(f.diskMeta().orchestrator!.control, orderedControl(3), "the delayed control is ignored on disk");
+    assert.deepEqual(policy.control, orderedControl(3), "and in the live launch policy");
+    assert.deepEqual(policy.issueNumbers, [issue]);
+    assert.ok(f.logs.some((line) => line.includes("campaign_control_update_ignored")));
+  } finally { active.delete(sessionId); }
+
+  // The order persists: a runner restart (reconnect) does not reopen the window.
+  f.restart();
+  assert.equal((await f.scope({ operation: "synchronize", scope, control: orderedControl(2), controlRevision: 2 })).ok, true);
+  assert.deepEqual(f.store().readMeta(sessionId)!.orchestrator!.control, orderedControl(3));
+
+  // A revoke at the next revision narrows it; nothing older revives the boundary.
+  assert.equal((await f.scope({ operation: "synchronize", scope, control: { mode: "custom" }, controlRevision: 4 })).ok, true);
+  assert.equal((await f.scope({ operation: "synchronize", scope, control: orderedControl(3), controlRevision: 3 })).ok, true);
+  assert.equal((await f.scope({ operation: "synchronize", scope, control: orderedControl(3) })).ok, true, "an unordered peer");
+  assert.deepEqual(f.diskMeta().orchestrator!.control, { mode: "custom" });
+  assert.equal(f.diskMeta().orchestrator!.controlRevision, 4);
+  const refused = await f.execute({ ...original, scopeRevision: 1, issueAdmission: { boundaryRevision: 3, evidenceDigest: "a".repeat(64) } });
+  assert.equal(refused.ok, false, "a stale diagnostic never becomes a grant");
+  assert.equal(refused.failure, "campaign_authority_changed");
+  assert.equal(f.mutations().length, 0);
+});
+
+test("a control revision must be valid and accompany control (#3363)", async (t) => {
+  const f = fixture(t);
+  const scope = { repository: "example/project", issueNumbers: [issue], revision: 1, authorizedByUserId: "owner", authorizedAt: 1000 };
+  assert.equal((await f.scope({ operation: "synchronize", scope, control: orderedControl(2), controlRevision: -1 })).ok, false);
+  assert.equal((await f.scope({ operation: "synchronize", scope, control: orderedControl(2), controlRevision: 1.5 })).ok, false);
+  assert.equal((await f.scope({ operation: "synchronize", scope, controlRevision: 2 })).ok, false);
+  assert.equal(f.diskMeta().orchestrator!.issueScope, undefined, "a refused synchronization persists nothing");
+  // An older control plane sends no revision: control replaces as before.
+  assert.equal((await f.scope({ operation: "synchronize", scope, control: orderedControl(2) })).ok, true);
+  assert.equal((await f.scope({ operation: "synchronize", scope, control: orderedControl(3) })).ok, true);
+  assert.deepEqual(f.diskMeta().orchestrator!.control, orderedControl(3));
+  assert.equal(f.diskMeta().orchestrator!.controlRevision, undefined);
+});
