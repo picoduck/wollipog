@@ -920,6 +920,8 @@ export * from "./gitlab-closing-references.js";
 export * from "./issue-closure-refusal.js";
 import type { GithubIssueClosureRefusal, GithubIssueClosureRefusalReason } from "./issue-closure-refusal.js";
 export * from "./issue-closure-delivery-gap.js";
+export * from "./issue-closure-excluded-children.js";
+import type { IssueClosureExcludedChild } from "./issue-closure-excluded-children.js";
 import type { DeliveryVerificationFailure, IssueClosureDeliveryGap, IssueClosureEpicMembers } from "./issue-closure-delivery-gap.js";
 export * from "./campaign-issue-publication.js";
 export * from "./campaign-evidence-authority.js";
@@ -5607,6 +5609,10 @@ export interface GithubIssueClosureSnapshot extends Omit<GithubIssueClosureInspe
   evidence: string[];
   comment?: string;
   activeChildren: Array<{ sessionId: string; title: string; assignmentDigest: string }>;
+  /** Server-derived (#3237): the live campaign children the ledger proves unrelated, so left out of
+   * `activeChildren`, each with the ledger facts that excluded it. Read-only: it stays outside the
+   * resource digest and is not sent to the runner. A snapshot from an earlier release omits it. */
+  excludedChildren?: IssueClosureExcludedChild[];
   issueAdmission?: CampaignIssueAdmission;
   dispositionRecommendationId?: string;
   /** Server-derived (#4059): the latest earlier closure of this issue by this Orchestrator that was
