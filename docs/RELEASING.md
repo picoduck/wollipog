@@ -15,12 +15,15 @@ from the host. Each target therefore builds on a matching runner.
 
 | Runner            | Target triple                | Bundles                     |
 | ----------------- | ---------------------------- | --------------------------- |
-| `macos-14`        | `aarch64-apple-darwin`       | `.dmg`, `.app.tar.gz`       |
+| `macos-15`        | `aarch64-apple-darwin`       | `.dmg`, `.app.tar.gz`       |
 | `macos-15-intel`  | `x86_64-apple-darwin`        | `.dmg`, `.app.tar.gz`       |
 | `windows-latest`  | `x86_64-pc-windows-msvc`     | `.msi`, NSIS `.exe`         |
 | `windows-11-arm`  | `aarch64-pc-windows-msvc`    | `.msi`, NSIS `.exe`         |
 | `ubuntu-24.04`    | `x86_64-unknown-linux-gnu`   | `.deb`, `.rpm`, `.AppImage` |
 | `ubuntu-24.04-arm`| `aarch64-unknown-linux-gnu`  | `.deb`, `.rpm`, `.AppImage` |
+
+Apple Silicon builds use the ARM64 `macos-15` image; Intel builds use `macos-15-intel`.
+GitHub [retired macOS 14 runners on November 2, 2026](https://github.com/actions/runner-images/issues/13518).
 
 These six triples are the exhaustive supported native release set, not examples. A standalone
 `pnpm --filter @wollipog/runner build:binary` invocation may set `TARGET_TRIPLE` only to one of
