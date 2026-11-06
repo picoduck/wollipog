@@ -358,7 +358,7 @@ test("an offline machine's settings say what saves now and what waits, and still
   await expect(page.getByRole("button", { name: "New Harness Release · View Settings" })).toHaveCount(0);
   await openSettings(page);
   await expect(settingsDialog(page).locator(".notice").first()).toHaveText(
-    "Design Workstation is offline. Changes save now; Capacity Limit and automatic switching take effect when it reconnects.",
+    "Design Workstation is offline. Changes save now; Capacity Limit, automatic switching, and reviewer executable policy take effect when it reconnects.",
   );
   await expect(installationGroup(page, "Codex").getByRole("radio")).toHaveCount(2);
   // Nothing here needs the machine online, so every field stays enabled.
