@@ -236,7 +236,8 @@ import {
   type UsageWindowRejection,
 } from "./automatic-provider-account-switch.js";
 import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation, type LeaseProfileBinding, type ProviderHomeReference, type ProviderProfileAccessSource } from "./provider-home-lease-async.js";
-import { providerHomeRunnerMarker } from "./provider-home-lease-evidence.js";
+import { currentLeaseProcessEvidence, isLeaseProcessEvidence, linuxLeaseProcessProbe, proveLeaseAbandoned, providerHomeRunnerMarker, type LeaseAbandonmentProof, type LeaseProcessProbe } from "./provider-home-lease-evidence.js";
+import { providerContainmentStatus, providerContainmentUnitIdentity, selectedProviderContainmentIdentity } from "./linux-cgroup.js";
 import type { AgentTuiProviderHome } from "./shell-manager.js";
 import { providerHomeLeaseEnv, providerHomeLeaseTarget, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
 import { isolatedDiscoveryEnvironment } from "./discovery/provider-home.js";
@@ -271,6 +272,7 @@ import {
   type DurableBackgroundJob,
   type LocationHistoryEntry,
   type PendingLocationSwitch,
+  type RetiringProviderRunner,
   type SessionMeta,
   type StoredEvent,
 } from "./session-store.js";
@@ -1155,6 +1157,56 @@ const DISCARDED_PROMPT_QUOTE_CHARS = 400;
 /** How much of a provider's rejection a hold blocker quotes (#3100); the driver's own error row keeps it all. */
 const PROVIDER_REJECTION_QUOTE_CHARS = 500;
 const PROVIDER_CLOSE_TIMEOUT_MS = 5_000;
+/** How long a restarted runner waits between attempts to prove an earlier runner process gone (#4256). */
+const EARLIER_RUNNER_PROOF_RETRY_DELAYS_MS = [30_000, 60_000, 120_000, 300_000, 600_000] as const;
+
+/** How a retirement fence names the runner processes that ran providers of its generation, and how a
+ * later runner process proves each gone with every process it launched (#4256). */
+export interface RetirementProcessProof {
+  /** This runner process, for a fence on `meta`; undefined when nothing could prove it gone later. */
+  current(meta: Pick<SessionMeta, "context" | "executionTarget">): RetiringProviderRunner | undefined;
+  /** True only when nothing `runner` launched can still run. */
+  abandoned(runner: RetiringProviderRunner): boolean;
+}
+
+/** Whether `runner` is exactly this lifecycle identity: the same pid, boot, start time and marker. */
+function sameRunner(runner: RetiringProviderRunner, other: RetiringProviderRunner): boolean {
+  return runner.pid === other.pid && runner.process.bootId === other.process.bootId &&
+    runner.process.startTime === other.process.startTime && runner.process.marker === other.process.marker;
+}
+
+/** Only proofs that cover a whole process tree, descendants included, release a campaign slot. A
+ * reboot ends every process; an empty provider cgroup (or its retired unit) holds none, and cgroup
+ * membership survives a child that clears its environment. The launch-marker scan does not: a child
+ * started with a cleared environment carries no marker, so it never releases a slot. */
+const WHOLE_TREE_ABANDONMENT_PROOFS: ReadonlySet<LeaseAbandonmentProof> = new Set(["reboot", "linux_cgroup", "linux_cgroup_unit_removed"]);
+
+/** The provider-HOME lease evidence (#3241), restricted to whole-tree proofs. Only host-native
+ * providers are covered: a WSL, container or cloud provider can outlive the runner outside its cgroup. */
+export function leaseRetirementProcessProof(probe: LeaseProcessProbe | undefined = linuxLeaseProcessProbe()): RetirementProcessProof {
+  // Created now, before any provider launches, so every provider this process starts carries it.
+  const marker = probe ? providerHomeRunnerMarker() : undefined;
+  let own: RetiringProviderRunner | null | undefined;
+  return {
+    current: (meta) => {
+      if (meta.context.kind !== "native" || (meta.executionTarget && meta.executionTarget.adapter !== "host")) return undefined;
+      if (own === undefined) {
+        const parent = selectedProviderContainmentIdentity();
+        const unit = providerContainmentUnitIdentity();
+        const containment = parent ? { ...parent, ...(unit ? { unit } : {}) }
+          : { kind: "marker-parent-links" as const, reason: providerContainmentStatus().reason };
+        const evidence = currentLeaseProcessEvidence(probe, process.pid, marker, containment);
+        own = evidence ? { pid: process.pid, process: evidence } : null;
+      }
+      return own ?? undefined;
+    },
+    abandoned: (runner) => {
+      if (!isLeaseProcessEvidence(runner.process) || !Number.isSafeInteger(runner.pid) || runner.pid <= 1) return false;
+      const result = proveLeaseAbandoned(runner.process, runner.pid, probe);
+      return result.proven && WHOLE_TREE_ABANDONMENT_PROOFS.has(result.proof);
+    },
+  };
+}
 const CHECKPOINT_REF_MAINTENANCE_CONCURRENCY = 4;
 const ORPHAN_RECOVERY_RETRY_MS = 30_000;
 /** (#4138) Why a moved session waits: the runner restarted between the move and its relaunch. */
@@ -1615,6 +1667,9 @@ export class SessionManager {
   /** Fences an earlier runner process left for a generation this process has providers of again
    * (#3788). Nothing this process proves covers that earlier provider, so they are never lifted. */
   private readonly inheritedFences = new Map<string, string>();
+  /** The process evidence a fence records, and the proof that an earlier runner process is gone (#4256). */
+  private retirementProof: RetirementProcessProof = leaseRetirementProcessProof();
+  private earlierRunnerProofTimer: ReturnType<typeof setTimeout> | null = null;
   /** A turn-boundary worktree move owns a retiring provider even after it leaves `active`.
    * Unlike an ordinary close, prompts may join its pre-launch FIFO while the conversation reopens. */
   private readonly worktreeRebindings = new Map<string, {
@@ -6273,6 +6328,12 @@ export class SessionManager {
     const pendingWorktreeCleanup = this.cleanupJournal.list();
     const currentCheckpointOwnershipKeys = new Set<string>();
     void this.reconcileProviderStateStorage();
+    // Fences a crashed or unproven runner process left (#4256), before any relaunch can inherit one.
+    try {
+      if (this.proveEarlierRunnerRetirements()) this.scheduleEarlierRunnerRetirementProof();
+    } catch (error) {
+      this.log(`earlier runner retirement proof failed: ${errText(error)}`);
+    }
     for (const m of this.store.listSessions()) {
       if (this.store.isDeleted(m.sessionId)) {
         void this.delete(m.sessionId).catch((error) => {
@@ -7348,10 +7409,12 @@ export class SessionManager {
       config: spec.config ?? {},
       campaignBudgetDispatch: spec.campaignBudgetDispatch,
       campaignBudgetCheckpoint: undefined,
-      // A relaunch under the same generation does not prove an earlier provider of it gone (#3788).
+      // A relaunch under the same generation does not prove an earlier provider of it gone (#3788),
+      // and this process now runs a provider of it too (#4256).
       ...(prior?.retiringProviderGeneration !== undefined &&
           prior.retiringProviderGeneration === spec.campaignBudgetDispatch?.generation
-        ? { retiringProviderGeneration: prior.retiringProviderGeneration } : {}),
+        ? { retiringProviderGeneration: prior.retiringProviderGeneration,
+            retiringProviderRunners: this.fenceRunnersWithThisProcess(prior.retiringProviderRunners, { context, executionTarget }) } : {}),
       projectMemory: spec.projectMemory ?? prior?.projectMemory,
       artifactUploads: spec.artifactUploads ?? prior?.artifactUploads ?? "manual",
       orchestrator: this.withAppliedIssueGrant(spec.sessionId,
@@ -7450,6 +7513,8 @@ export class SessionManager {
         meta.retiringProviderGeneration = latest.retiringProviderGeneration !== undefined &&
           latest.retiringProviderGeneration === meta.campaignBudgetDispatch?.generation
           ? latest.retiringProviderGeneration : undefined;
+        meta.retiringProviderRunners = meta.retiringProviderGeneration === undefined ? undefined
+          : this.fenceRunnersWithThisProcess(latest.retiringProviderRunners, meta);
         const latestMatchesWorkspace = latest.repoPath === repoPath &&
           agentContextKey(latest.context) === agentContextKey(context);
         shouldUseWorktree = spec.useWorktree || latestMatchesWorkspace && !!latest.worktreePath &&
@@ -18820,12 +18885,17 @@ export class SessionManager {
           if (entry.controlPlaneHold) this.recoveryHolds.add(sessionId);
           setImmediate(() => void this.recoverQueuedAppServer(sessionId));
         }
-      } else if (code && code !== 0) {
-        this.rejectQueued(queued, "agent exited before queued command started");
-        this.fenceExitedProvider(sessionId, expectedClient);
-        this.emitStatus(sessionId, "failed", `agent exited ${code}`);
       } else {
         this.rejectQueued(queued, "agent exited before queued command started");
+        // Every exit the provider makes by itself ends the session with an accurate terminal
+        // status, and its slot waits for its whole tree's proof (#3788, #4256). A clean exit
+        // between turns completed it; one that cut a turn short, a non-zero code, or a signal failed it.
+        this.fenceExitedProvider(sessionId, expectedClient);
+        const turnCut = entry.running || entry.providerInitiatedTurnActive;
+        if (code === 0 && !turnCut) this.emitStatus(sessionId, "completed", "agent exited (code 0)");
+        else if (code === 0) this.emitStatus(sessionId, "failed", "agent exited (code 0) during a turn");
+        else if (code === null) this.emitStatus(sessionId, "failed", "agent exited by a signal");
+        else this.emitStatus(sessionId, "failed", `agent exited ${code}`);
       }
     } else {
       this.deleteActiveSession(sessionId, entry);
@@ -19083,6 +19153,8 @@ export class SessionManager {
     this.orphanDiscoveryLaunching.clear();
     if (this.orphanRecoveryScanTimer) clearTimeout(this.orphanRecoveryScanTimer);
     this.orphanRecoveryScanTimer = null;
+    if (this.earlierRunnerProofTimer) clearTimeout(this.earlierRunnerProofTimer);
+    this.earlierRunnerProofTimer = null;
     for (const timer of this.orphanRecoveryTimers.values()) clearTimeout(timer);
     this.orphanRecoveryTimers.clear();
     for (const { timer } of this.backgroundContinuationTimers.values()) clearTimeout(timer);
@@ -19243,18 +19315,39 @@ export class SessionManager {
   }
 
   /** Fence the current campaign generation's final checkpoint while one of its providers retires
-   * (#3788). A fence already present with nothing of this process outstanding was left by an earlier
-   * runner process, whose provider this process can never prove gone. */
+   * (#3788), recording this runner process's evidence so a later process can prove it gone (#4256).
+   * A fence already present with nothing of this process outstanding was left by an earlier runner
+   * process; only proof that the earlier process's providers are all gone lifts it. */
   private fenceRetiringProvider(sessionId: string): string | undefined {
     const meta = this.store.readMeta(sessionId);
     const generation = meta?.campaignBudgetDispatch?.generation;
     if (generation === undefined) return undefined;
     if (meta!.retiringProviderGeneration === generation) {
       if (!this.retirementOutstanding(sessionId, generation)) this.inheritedFences.set(sessionId, generation);
+      const runners = this.fenceRunnersWithThisProcess(meta!.retiringProviderRunners, meta!);
+      if (runners !== meta!.retiringProviderRunners) this.store.patchMeta(sessionId, { retiringProviderRunners: runners });
     } else {
-      this.store.patchMeta(sessionId, { retiringProviderGeneration: generation });
+      const runner = this.thisRetirementRunner(meta!);
+      this.store.patchMeta(sessionId, { retiringProviderGeneration: generation, retiringProviderRunners: runner ? [runner] : undefined });
     }
     return generation;
+  }
+
+  private thisRetirementRunner(meta: Pick<SessionMeta, "context" | "executionTarget">): RetiringProviderRunner | undefined {
+    try { return this.retirementProof.current(meta); } catch { return undefined; }
+  }
+
+  /** A fence's runner list once this process runs a provider of its generation too (#4256). Every
+   * runner on it must be proven gone before a later process lifts the fence, so a list this process
+   * cannot join with evidence becomes absent: such a fence is never lifted by a later process. */
+  private fenceRunnersWithThisProcess(
+    runners: RetiringProviderRunner[] | undefined,
+    launch: Pick<SessionMeta, "context" | "executionTarget">,
+  ): RetiringProviderRunner[] | undefined {
+    if (!runners?.length) return undefined;
+    const current = this.thisRetirementRunner(launch);
+    if (!current) return undefined;
+    return runners.some((runner) => sameRunner(runner, current)) ? runners : [...runners, current];
   }
 
   /** Lift a proven retirement's fence on its generation's final checkpoint (#3788), unless another
@@ -19264,8 +19357,90 @@ export class SessionManager {
     if (generation === undefined || this.retirementOutstanding(sessionId, generation) ||
         this.inheritedFences.get(sessionId) === generation) return;
     if (this.store.readMeta(sessionId)?.retiringProviderGeneration === generation) {
-      this.store.patchMeta(sessionId, { retiringProviderGeneration: undefined });
+      this.store.patchMeta(sessionId, { retiringProviderGeneration: undefined, retiringProviderRunners: undefined });
     }
+  }
+
+  /** Inject the process evidence fences record and the proof that an earlier runner is gone. */
+  setRetirementProcessProof(proof: RetirementProcessProof): void {
+    this.retirementProof = proof;
+  }
+
+  /**
+   * Prove gone every earlier runner process that ran a provider of a fenced generation, with every
+   * process it launched (#4256): after a crash or a shutdown that could not prove its reaping,
+   * nothing else ever would. The proof is the provider-HOME lease abandonment proof over the
+   * evidence recorded with the fence, restricted to whole-tree proofs (a reboot, or the runner's
+   * provider cgroup empty). Once every earlier runner on the list is proven gone, a fence of a
+   * terminal session stores its final checkpoint, which the negotiated session snapshots deliver;
+   * with `live`, it is reported at once too. If this process's own provider of that generation is
+   * still retiring, the fence passes to it instead. A fence without a runner list, or with any
+   * earlier runner unproven, stays. Returns whether any fence with a list remains unproven.
+   */
+  proveEarlierRunnerRetirements(live = false): boolean {
+    if (this.shuttingDown) return false;
+    const proofs = new Map<string, boolean>();
+    const abandoned = (runner: RetiringProviderRunner) => {
+      const key = JSON.stringify(runner);
+      let proven = proofs.get(key);
+      if (proven === undefined) {
+        try { proven = this.retirementProof.abandoned(runner); } catch { proven = false; }
+        proofs.set(key, proven);
+      }
+      return proven;
+    };
+    let unproven = false;
+    for (const meta of this.store.listSessions()) {
+      const generation = meta.retiringProviderGeneration;
+      const runners = meta.retiringProviderRunners;
+      if (generation === undefined || !runners?.length || this.store.isDeleted(meta.sessionId)) continue;
+      // This process's own providers are proven by its own retirements.
+      const own = this.thisRetirementRunner(meta);
+      const earlier = runners.filter((runner) => !own || !sameRunner(runner, own));
+      if (earlier.length === 0) continue;
+      if (!earlier.every(abandoned)) {
+        unproven = true;
+        continue;
+      }
+      try {
+        this.liftEarlierRunnerFence(meta.sessionId, generation, live, own);
+      } catch (error) {
+        unproven = true;
+        this.log(`earlier runner retirement proof failed for ${meta.sessionId}: ${errText(error)}`);
+      }
+    }
+    return unproven;
+  }
+
+  private liftEarlierRunnerFence(sessionId: string, generation: string, live: boolean, own: RetiringProviderRunner | undefined): void {
+    if (this.inheritedFences.get(sessionId) === generation) this.inheritedFences.delete(sessionId);
+    if (this.retirementOutstanding(sessionId, generation)) {
+      // Every earlier runner is gone; this process's own retiring provider now holds the fence alone.
+      this.store.patchMeta(sessionId, { retiringProviderRunners: own ? [own] : undefined });
+      return;
+    }
+    const meta = this.store.readMeta(sessionId)!;
+    const dispatch = meta.campaignBudgetDispatch;
+    const attest = dispatch?.generation === generation && isTerminal(meta.status) && !this.active.has(sessionId);
+    this.store.patchMeta(sessionId, { retiringProviderGeneration: undefined, retiringProviderRunners: undefined,
+      ...(attest ? { campaignBudgetCheckpoint: this.finalBudgetCheckpoint(meta, dispatch!) } : {}) });
+    this.store.flush(sessionId);
+    this.log(`session ${sessionId}: the runner process that left its retirement fence is proven gone`);
+    if (live && attest) this.emitStatus(sessionId, meta.status, undefined, undefined, undefined, true);
+  }
+
+  /** Retry the earlier-runner proofs startup could not make (#4256), backing off to a steady
+   * interval: a provider the crashed runner left may still be ending. Each retry is the same proof;
+   * nothing is inferred from elapsed time. */
+  private scheduleEarlierRunnerRetirementProof(attempt = 0): void {
+    if (this.shuttingDown) return;
+    if (this.earlierRunnerProofTimer) clearTimeout(this.earlierRunnerProofTimer);
+    const delays = EARLIER_RUNNER_PROOF_RETRY_DELAYS_MS;
+    this.earlierRunnerProofTimer = setTimeout(() => {
+      this.earlierRunnerProofTimer = null;
+      if (this.proveEarlierRunnerRetirements(true)) this.scheduleEarlierRunnerRetirementProof(attempt + 1);
+    }, delays[Math.min(attempt, delays.length - 1)]);
+    this.earlierRunnerProofTimer.unref?.();
   }
 
   private awaitShutdownProof(sessionId: string, generation: string | undefined): void {
@@ -19296,7 +19471,7 @@ export class SessionManager {
         if (!meta || generation === undefined || !generations.has(generation) ||
             this.retirementOutstanding(sessionId, generation) || this.inheritedFences.get(sessionId) === generation) continue;
         const dispatch = meta.campaignBudgetDispatch;
-        this.store.patchMeta(sessionId, { retiringProviderGeneration: undefined,
+        this.store.patchMeta(sessionId, { retiringProviderGeneration: undefined, retiringProviderRunners: undefined,
           ...(dispatch?.generation === generation && isTerminal(meta.status)
             ? { campaignBudgetCheckpoint: this.finalBudgetCheckpoint(meta, dispatch) } : {}) });
         this.store.flush(sessionId);
