@@ -1358,12 +1358,14 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "prepare_descendant_ui_evidence_review", "get_descendant_ui_evidence_review",
   "reconcile_workflow_decision", "execute_workflow_decision", "withdraw_workflow_decision", "list_workflow_decisions",
   "request_owner_decision", "hand_workflow_decision_to_owner",
+  "request_campaign_repository_addition", "get_campaign_repository_addition", "execute_campaign_repository_addition",
   "wait_session", "wait_pull_request", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "list_steering_attempts", "get_steering_attempt", "resolve_steering_attempt", "handoff_session_result",
   "stop_session", "stop_background_job", "release_queue_hold", "restart_session", "archive_session", "unarchive_session", "set_guardrails", "create_worktree",
   "attach_worktree", "select_worktree", "discard_worktree", "delete_worktree_refs"]);
 const PARENT_CONTROL_TOOLS = new Set(["get_campaign_issue_scope", "request_campaign_issue_scope_change", "request_github_issue_closure", "close_github_issue",
   "request_owner_decision", "hand_workflow_decision_to_owner",
+  "request_campaign_repository_addition", "get_campaign_repository_addition", "execute_campaign_repository_addition",
   "allocate_campaign_budget",
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child", ...CAMPAIGN_WORK_LEDGER_TOOLS,
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
@@ -1426,7 +1428,58 @@ async function locationSwitchCall(deps: McpDeps, method: "GET" | "POST", suffix:
   return response.ok ? textResult(response.data) : errorResult(response.message);
 }
 
+/** A campaign root's request to add a Project repository, and carrying out its owner's approval (#4117). */
+async function repositoryAdditionCall(deps: McpDeps, method: "GET" | "POST", suffix: string, body?: Json): Promise<ToolResult> {
+  if (!deps.selfSessionId) return errorResult("A repository addition requires a Wollipog session identity");
+  const compatibility = deps.controlPlaneProtocolVersion === undefined ? await cpFetch(deps, "GET", "/api/compatibility") : null;
+  const version = deps.controlPlaneProtocolVersion ?? (compatibility?.ok ? compatibility.data?.protocolVersion : undefined);
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryAddition;
+  if (!Number.isSafeInteger(version) || version < required) {
+    return controlPlaneUpdateRequired("Adding a repository to a campaign needs a newer version of Wollipog. Update Wollipog; until then, " +
+      "record the work that needs it as blocked on the campaign's owner.", required, version);
+  }
+  const response = await cpFetch(deps, method,
+    `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/repository-additions${suffix}`,
+    body, method === "POST" ? deps.requestTimeoutMs ?? 90_000 : undefined);
+  return response.ok ? textResult(response.data) : errorResult(response.message);
+}
+
 export const TOOLS: McpTool[] = [
+  {
+    name: "request_campaign_repository_addition",
+    description: "Ask your campaign's owner to add one Location of the campaign's Project, and so its repository, to the campaign, " +
+      "when recorded work needs a Project repository the campaign does not cover (most often a follow-up in another repository). " +
+      "Name the Location by id (list it with get_campaign or the Project), a one-line reason, and the recorded follow-up or work item " +
+      "that needs it. The control plane inspects that Location first; one outside the Project or failing inspection is refused before " +
+      "the owner sees it. The decision is always the owner's, in Full Control and Custom: nobody acting for the campaign can approve it. " +
+      "A pending request for the same repository is reused, and a declined one is not asked again for the same work. You cannot create " +
+      "a Location: when no Location of the repository exists, report that instead. Then end your turn; the owner's answer resumes you.",
+    inputSchema: { type: "object", properties: {
+      requestId: { type: "string", minLength: 1, maxLength: 256 },
+      locationId: { type: "string", minLength: 1, maxLength: 256, description: "The Project Location to add, by id." },
+      reason: { type: "string", minLength: 1, maxLength: 1000, description: "One line the owner reads, quoted as your words: why the campaign needs this repository." },
+      work: { type: "object", properties: {
+        kind: { type: "string", enum: ["follow_up", "work_item"] },
+        id: { type: "string", minLength: 1, maxLength: 256, description: "The recorded follow-up's id or the work item's id." },
+      }, required: ["kind", "id"], additionalProperties: false },
+    }, required: ["requestId", "locationId", "reason", "work"], additionalProperties: false },
+    handler: async (args, deps) => repositoryAdditionCall(deps, "POST", "", args),
+  },
+  {
+    name: "get_campaign_repository_addition",
+    description: "Read one of your campaign's repository-addition requests: the Location, the repository it verified as, the owner's " +
+      "answer and, once carried out, the boundary revision it joined at. Nothing is approved or added.",
+    inputSchema: { type: "object", properties: { occurrenceId: { type: "string", minLength: 1, maxLength: 256 } }, required: ["occurrenceId"], additionalProperties: false },
+    handler: async (args, deps) => repositoryAdditionCall(deps, "GET", `/${encodeURIComponent(args.occurrenceId)}`),
+  },
+  {
+    name: "execute_campaign_repository_addition",
+    description: "Carry out a repository addition your campaign's owner approved: the control plane inspects the exact approved Location " +
+      "again and adds its repository to the campaign at a new boundary revision. Supply the occurrenceId and resourceDigest of the " +
+      "request; no Location can be supplied. Read get_campaign afterwards for the new boundary.",
+    inputSchema: { type: "object", properties: { occurrenceId: { type: "string", minLength: 1, maxLength: 256 }, resourceDigest: { type: "string", pattern: "^[0-9a-f]{64}$" } }, required: ["occurrenceId", "resourceDigest"], additionalProperties: false },
+    handler: async (args, deps) => repositoryAdditionCall(deps, "POST", `/${encodeURIComponent(args.occurrenceId)}/execute`, { resourceDigest: args.resourceDigest }),
+  },
   {
     name: "request_location_switch",
     description: "Ask your person to continue this task in another Location of the same Project when the task belongs to another " +

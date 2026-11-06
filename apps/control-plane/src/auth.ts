@@ -196,6 +196,10 @@ const ORCHESTRATOR_API_ROUTES = new Set([
   // A Full Control root's owner decisions and one-way handoffs to its owner (#4064).
   "POST /api/sessions/:id/owner-decisions",
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/hand-to-owner",
+  // A campaign root asks its owner to add a Project repository, then carries out the approval (#4117).
+  "POST /api/sessions/:id/orchestrator-campaign/repository-additions",
+  "GET /api/sessions/:id/orchestrator-campaign/repository-additions/:occurrenceId",
+  "POST /api/sessions/:id/orchestrator-campaign/repository-additions/:occurrenceId/execute",
   "GET /api/sessions/:id/orchestrator-campaign",
   "POST /api/sessions/:id/orchestrator-campaign/follow-ups",
   "POST /api/sessions/:id/orchestrator-campaign/verify-child",

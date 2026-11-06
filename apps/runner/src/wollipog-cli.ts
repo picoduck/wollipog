@@ -420,6 +420,22 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       const body = input();
       return "error" in body ? body : { tool: "record_campaign_plan", input: body.value };
     }
+    // #4117: ask the campaign's owner to add a Project repository, read it, and carry out the approval.
+    if (verb === "repository-addition") {
+      const step = args[groupIndex + 2];
+      if (step === "request") {
+        const body = input();
+        return "error" in body ? body : { tool: "request_campaign_repository_addition", input: body.value };
+      }
+      const occurrenceId = operand(3);
+      if (step === "get" && occurrenceId) return { tool: "get_campaign_repository_addition", input: { occurrenceId } };
+      const resourceDigest = option(args, "--digest");
+      if (step === "execute" && occurrenceId && resourceDigest) {
+        return { tool: "execute_campaign_repository_addition", input: { occurrenceId, resourceDigest } };
+      }
+      return { error: "use campaign repository-addition request --input <json>, campaign repository-addition get <occurrence-id>, " +
+        "or campaign repository-addition execute <occurrence-id> --digest <digest>" };
+    }
     if (verb === "update-item" && operand(2)) {
       const body = input();
       return "error" in body ? body : { tool: "update_campaign_work_item", input: { ...body.value, workItemId: operand(2) } };
@@ -1065,6 +1081,8 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.ownerQuestions
     : parsed.tool === "request_owner_decision" || parsed.tool === "hand_workflow_decision_to_owner"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions
+    : ["request_campaign_repository_addition", "get_campaign_repository_addition", "execute_campaign_repository_addition"].includes(parsed.tool)
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryAddition
     : parsed.tool === "request_workflow_decision" && parsed.input.ownerRule !== undefined
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule
     : ["get_campaign_issue_scope", "request_campaign_issue_scope_change"].includes(parsed.tool)

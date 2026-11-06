@@ -14,7 +14,8 @@ import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { DECISION_MAX_ATTEMPTS, type DecisionRuntime } from "./decision-runtime.js";
 import { OrchestratorSettings, resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
-import { authorizeFullControl, campaignBoundaryCurrent, campaignControlForRunner, evaluateCampaignAuthority } from "./campaign-authority.js";
+import { authorizeFullControl, campaignBoundaryCurrent, campaignControlForRunner, campaignScopeRepositories, evaluateCampaignAuthority } from "./campaign-authority.js";
+import { repositoryOutsideBoundary } from "./campaign-issue-scope.js";
 import { firstMessageBoundary, firstMessageDigest, firstMessageObjective } from "./campaign-launch-admission.js";
 import { campaignBehaviorValues } from "./campaign-behavior.js";
 import { randomUUID } from "node:crypto";
@@ -22,12 +23,14 @@ import { closureEvidence, publicationEvidence } from "./campaign-issue-authority
 import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosures.js";
 import { composeHostingVideoEvidence } from "./hosting-video-evidence.js";
 import { syntheticInspectedVideoRuns, syntheticMediaReviewerAttestation, syntheticVideoReviewerTarget } from "./video-live-validation-test-fixture.js";
-import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
+import type { AgentPrincipal, AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
 import { campaignBoundaryRepositoryAt } from "./campaign-repository-boundary.js";
-import { inspectCampaignWorkspace } from "./project-location-inspection.js";
+import { inspectCampaignWorkspace, inspectProjectLocation } from "./project-location-inspection.js";
+import { CampaignRepositoryAdditions } from "./campaign-repository-additions.js";
 import { CampaignLocations, registerCampaignLocationRoutes } from "./campaign-locations.js";
-import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, PROJECT_LOCATION_INSPECTION_FAILURES, campaignBoundaryRepositories, validCampaignControl, type CampaignControl } from "@wollipog/protocol";
+import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, PROJECT_LOCATION_INSPECTION_FAILURES, campaignBoundaryRepositories, validCampaignControl, type CampaignControl,
+  type CampaignRepositoryAdditionRequest } from "@wollipog/protocol";
 import type { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
 import { fakeScopeGrantRuntime, grantVerdict, issues, ownerMessageOf, reviewVerdict, scopeCheckAnswer, scopeCheckParametersOf, uncertainVerdict,
@@ -4210,5 +4213,284 @@ test("Campaign Status never reads a moved Location's name from another Project (
     const entry = view.repositories.find((item) => item.repository === "other/repo")!;
     assert.deepEqual(entry.locations, [{ locationId: c.p.other.id, name: "Removed Location", availability: "removed", isDefault: false }]);
     assert.doesNotMatch(JSON.stringify(view), /Secret Client Repo/u);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+/** A launched campaign whose Project gained a Location of a new repository nobody included, plus
+ * one recorded follow-up that needs it (#4117). */
+async function repositoryAdditionCampaign(f: ReturnType<typeof fixture>) {
+  const c = await launchedMultiRepositoryCampaign(f);
+  const other: HumanPrincipal = { ...f.human, userId: "usr_other", actorId: "usr_other" };
+  const third = f.db.addProjectLocation(c.p.project.id, { runnerId: "r2", workspaceId: "c", addedByUserId: other.userId });
+  await c.locations.locationAdded(third.id, other);
+  const insertFollowUp = (id: string, title: string) => f.db.raw().prepare(`INSERT INTO orchestrator_campaign_follow_ups
+    (id, campaign_session_id, origin_session_id, repository, title, recommendation_key, normalized_key, duplicate_of, created_at)
+    VALUES (?, ?, NULL, 'third/repo', ?, NULL, ?, NULL, ?)`).run(id, c.rootId, title, `third/repo:${id}`, Date.now());
+  insertFollowUp("fu_docs", "Document the Third Repository's Release Steps");
+  insertFollowUp("fu_other", "Fix the Third Repository's Build");
+  const additions = new CampaignRepositoryAdditions({ db: f.db, hub: f.hub, sessions: f.sessions,
+    inspect: (locationId, options) => inspectProjectLocation({ db: f.db, hub: f.hub }, locationId, { ...options, requireProtocol: "campaignRepositoryBoundary" }),
+    synchronize: (id) => f.sessions.synchronizeCampaignIssueScope(id) });
+  const orchestrator: AgentPrincipal = { kind: "agent", actorId: "root-agent", credentialSessionId: c.rootId, orchestrator: true,
+    organizationId: f.human.organizationId, delegatedScope: f.scope };
+  const request = (requestId: string, overrides: Partial<CampaignRepositoryAdditionRequest> = {}) => additions.request(c.rootId,
+    { requestId, locationId: third.id, reason: "The follow-up lives in third/repo.", work: { kind: "follow_up", id: "fu_docs" }, ...overrides },
+    orchestrator);
+  const resolve = (occurrenceId: string, outcome: "approve" | "deny", actor: { kind: "human" | "agent"; id: string },
+    authority: "human" | "orchestrator" = "human") => f.sessions.resolveWorkflowDecision(c.rootId, c.rootId, occurrenceId, { outcome },
+    authority, actor, () => true);
+  return { ...c, third, other, additions, orchestrator, request, resolve };
+}
+
+test("an Orchestrator asks to add a Project repository; only the owner's approval adds it, at a new revision (#4117)", async () => {
+  const f = fixture();
+  const c = await repositoryAdditionCampaign(f);
+  try {
+    const before = c.boundary().revision;
+    const requested = await c.request("add-third");
+    assert.equal(requested.status, 201, requested.error ?? "");
+    const decision = requested.data!;
+    assert.equal(decision.category, "campaign_repository_addition");
+    assert.equal(decision.authority, "human", "the decision is the owner's even under Full Control");
+    assert.deepEqual(decision.resourceSnapshot, { category: "campaign_repository_addition", locationId: c.third.id, locationName: "r2 c",
+      repository: "third/repo", reason: "The follow-up lives in third/repo.",
+      work: { kind: "follow_up", id: "fu_docs", title: "Document the Third Repository's Release Steps" } });
+    // It waits for the owner in Campaign Status, even under Full Control.
+    assert.deepEqual(f.db.campaignOwnerDecisions(c.rootId)!.items.map((item) => [item.occurrenceId, item.category, item.summary]),
+      [[decision.occurrenceId, "campaign_repository_addition", "Add third/repo to the campaign"]]);
+    // A scope change into that repository is refused, and the refusal names this typed request.
+    assert.equal(campaignScopeRepositories(f.db.getSession(c.rootId)!).some((entry) => entry.repository === "third/repo"), false);
+    assert.match(repositoryOutsideBoundary("third/repo").error, /request_campaign_repository_addition/u);
+    // Nor can a child be placed there, or a gate routed there, until it is added (#4119).
+    const thirdPlace = { runnerId: "r2", workspaceId: "c" };
+    assert.equal(campaignBoundaryRepositoryAt(f.db, f.db.getSession(c.rootId)!, thirdPlace), null);
+    // One request per repository: a second request reuses the pending one.
+    const again = await c.request("add-third-again", { reason: "Still needed." });
+    assert.equal(again.data!.occurrenceId, decision.occurrenceId);
+    // Nobody acting for the campaign can decide it, nor can another person, and nothing joins meanwhile.
+    assert.equal(c.resolve(decision.occurrenceId, "approve", { kind: "agent", id: "root-agent" }, "orchestrator").ok, false);
+    assert.equal(c.resolve(decision.occurrenceId, "approve", { kind: "human", id: c.other.userId }).status, 403);
+    const early = await c.additions.execute(c.rootId, decision.occurrenceId, decision.resourceDigest, c.orchestrator);
+    assert.equal(early.ok, false, "a pending addition cannot be carried out");
+    assert.equal(c.boundary().revision, before);
+    // The owner approves; the Orchestrator carries out exactly that Location.
+    const approved = c.resolve(decision.occurrenceId, "approve", { kind: "human", id: f.human.userId });
+    assert.equal(approved.ok, true, approved.error ?? "");
+    assert.equal(f.db.campaignOwnerDecisions(c.rootId), null, "an answered request no longer waits");
+    const question = f.sessions.createWorkflowDecision(c.rootId, { requestId: "q-1", resourceKey: "design-question",
+      resourceSnapshot: { category: "implementation_question", question: "Which design?",
+        options: [{ optionId: "a", label: "Option A" }, { optionId: "b", label: "Option B" }] } }, () => true);
+    assert.equal(question.ok, true, question.error ?? "");
+    const executed = await c.additions.execute(c.rootId, decision.occurrenceId, decision.resourceDigest, c.orchestrator);
+    assert.equal(executed.ok, true, executed.error ?? "");
+    assert.equal(executed.data!.status, "consumed");
+    // The new revision revokes what was outstanding, through the boundary-change lifecycle.
+    assert.equal(f.db.workflowDecisionByOccurrence(question.data!.occurrenceId)!.status, "revoked");
+    assert.match(JSON.stringify(f.db.listGovernanceAudit(c.rootId)), /campaign_control_changed/u);
+    assert.deepEqual(c.boundary().repositories!.at(-1), { repository: "third/repo", locationIds: [c.third.id] });
+    assert.equal(c.boundary().revision, before + 1);
+    // The new revision makes that Location a place for children and that repository's gates at once (#4119).
+    assert.equal(campaignBoundaryRepositoryAt(f.db, f.db.getSession(c.rootId)!, thirdPlace), "third/repo");
+    assert.ok(campaignBoundaryCurrent(f.db.getSession(c.rootId)!));
+    assert.deepEqual(executed.data!.campaignRepositoryAdditionResult, { repository: "third/repo", locationId: c.third.id,
+      revision: before + 1, completedAt: executed.data!.campaignRepositoryAdditionResult!.completedAt });
+    assert.equal(c.policy().pendingLocations?.some((item) => item.locationId === c.third.id) ?? false, false);
+    assert.equal(c.policy().locationJoins!.at(-1)!.source, "addition_approved");
+    // Carrying it out again changes nothing.
+    const replay = await c.additions.execute(c.rootId, decision.occurrenceId, decision.resourceDigest, c.orchestrator);
+    assert.equal(replay.ok, true);
+    assert.equal(c.boundary().revision, before + 1);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a declined addition changes nothing and is not asked again for the same work (#4117)", async () => {
+  const f = fixture();
+  const c = await repositoryAdditionCampaign(f);
+  try {
+    const before = c.boundary().revision;
+    const decision = (await c.request("add-third")).data!;
+    assert.equal(c.resolve(decision.occurrenceId, "deny", { kind: "human", id: f.human.userId }).ok, true);
+    const executed = await c.additions.execute(c.rootId, decision.occurrenceId, decision.resourceDigest, c.orchestrator);
+    assert.equal(executed.ok, false);
+    assert.equal(c.boundary().revision, before);
+    assert.equal(c.boundary().repositories!.some((entry) => entry.repository === "third/repo"), false);
+    const repeated = await c.request("add-third-repeat");
+    assert.equal(repeated.ok, false);
+    assert.match(repeated.error!, /declined/);
+    const newWork = await c.request("add-third-new-work", { work: { kind: "follow_up", id: "fu_other" } });
+    assert.equal(newWork.status, 201, newWork.error ?? "");
+    // A later decline for other work doesn't reopen the first: every decline counts, not only the latest.
+    assert.equal(c.resolve(newWork.data!.occurrenceId, "deny", { kind: "human", id: f.human.userId }).ok, true);
+    const decisions = () => f.db.raw().prepare("SELECT COUNT(*) AS n FROM workflow_decisions WHERE category='campaign_repository_addition'").get() as { n: number };
+    const count = decisions().n;
+    const firstAgain = await c.request("add-third-first-again");
+    assert.equal(firstAgain.ok, false);
+    assert.match(firstAgain.error!, /declined/);
+    assert.equal(decisions().n, count, "no new decision was created");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+/** Holds the next inspection of `path` until the test resolves it, as a slow runner would. */
+function holdInspection(f: ReturnType<typeof fixture>, path: string) {
+  const inspect = f.state.inspect;
+  let held: Extract<ControlPlaneToRunner, { type: "campaign_launch_inspect" }> | null = null;
+  f.state.inspect = (message) => message.workspacePath === path && !held ? (held = message, null) : inspect(message);
+  return {
+    async taken() {
+      for (let tick = 0; tick < 100 && !held; tick += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.ok(held, `the inspection of ${path} is being held`);
+    },
+    release(repository: string, runnerId: string) {
+      f.hub.resolveRunnerRequest({ type: "campaign_launch_inspection_result", requestId: held!.requestId, workspaceId: held!.workspaceId,
+        ok: true, repository, issueNumbers: [], digest: "d".repeat(64) }, runnerId);
+    },
+  };
+}
+
+test("an approved addition whose Location moves during a Custom campaign's own-Location inspection is refused and stays approved (#4117)", async () => {
+  const f = fixture();
+  const c = await repositoryAdditionCampaign(f);
+  try {
+    assert.equal(f.sessions.setCampaignControl(c.rootId, { mode: "custom" }, f.db.getSession(c.rootId)!.parentControlPolicy!.revision, f.human).ok, true);
+    const decision = (await c.request("custom-move")).data!;
+    assert.equal(c.resolve(decision.occurrenceId, "approve", { kind: "human", id: f.human.userId }).ok, true);
+    const own = holdInspection(f, "/fixture/repository");
+    const executing = c.additions.execute(c.rootId, decision.occurrenceId, decision.resourceDigest, c.orchestrator);
+    await own.taken();
+    // The target inspection already passed; it now leaves the Project before the own-Location one ends.
+    const elsewhere = f.db.createProject({ name: "Elsewhere", scope: f.scope });
+    f.db.moveProjectLocation(c.third.id, elsewhere.id, Date.now(), f.human.userId);
+    own.release("owner/repo", "r");
+    const executed = await executing;
+    assert.equal(executed.ok, false);
+    assert.match(executed.error!, /changed while it was being inspected/);
+    assert.equal(f.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "approved", "the approval is not consumed");
+    assert.equal(f.db.getSession(c.rootId)!.orchestratorPolicy!.repositories, undefined, "no repository was recorded");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("an approved addition is refused when the owner loses access to the Location while it is inspected (#4117)", async () => {
+  const f = fixture();
+  const c = await repositoryAdditionCampaign(f);
+  try {
+    const before = c.boundary().revision;
+    const decision = (await c.request("revoked-access")).data!;
+    assert.equal(c.resolve(decision.occurrenceId, "approve", { kind: "human", id: f.human.userId }).ok, true);
+    const target = holdInspection(f, "/fixture/two/third");
+    const executing = c.additions.execute(c.rootId, decision.occurrenceId, decision.resourceDigest, c.orchestrator);
+    await target.taken();
+    const access = f.db.canAccessWorkspace.bind(f.db);
+    f.db.canAccessWorkspace = (principal, runnerId, workspaceId) => !(runnerId === "r2" && workspaceId === "c") && access(principal, runnerId, workspaceId);
+    target.release("third/repo", "r2");
+    const executed = await executing;
+    assert.equal(executed.ok, false);
+    assert.equal(f.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "approved");
+    assert.equal(c.boundary().revision, before);
+    assert.equal(c.boundary().repositories!.some((entry) => entry.repository === "third/repo"), false);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("an approved addition checks access with the owner's current role, not the one it started with (#4117)", async () => {
+  const f = fixture();
+  const c = await repositoryAdditionCampaign(f);
+  try {
+    const before = c.boundary().revision;
+    const decision = (await c.request("demoted")).data!;
+    assert.equal(c.resolve(decision.occurrenceId, "approve", { kind: "human", id: f.human.userId }).ok, true);
+    const target = holdInspection(f, "/fixture/two/third");
+    const executing = c.additions.execute(c.rootId, decision.occurrenceId, decision.resourceDigest, c.orchestrator);
+    await target.taken();
+    // The owner is demoted to an operator, and an operator can't reach the target workspace.
+    const resolvePrincipal = f.db.operatingHumanPrincipal.bind(f.db);
+    f.db.operatingHumanPrincipal = (userId, organizationId) => {
+      const principal = resolvePrincipal(userId, organizationId);
+      return principal && userId === f.human.userId ? { ...principal, role: "operator" } : principal;
+    };
+    const access = f.db.canAccessWorkspace.bind(f.db);
+    f.db.canAccessWorkspace = (principal, runnerId, workspaceId) =>
+      !(principal.kind === "human" && principal.role === "operator" && runnerId === "r2" && workspaceId === "c") && access(principal, runnerId, workspaceId);
+    target.release("third/repo", "r2");
+    const executed = await executing;
+    assert.equal(executed.ok, false);
+    assert.equal(f.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "approved");
+    assert.equal(c.boundary().revision, before);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("an approved addition is refused when the campaign moves to another Project while it is inspected (#4117)", async () => {
+  const f = fixture();
+  const c = await repositoryAdditionCampaign(f);
+  try {
+    const before = c.boundary().revision;
+    const decision = (await c.request("campaign-moved")).data!;
+    assert.equal(c.resolve(decision.occurrenceId, "approve", { kind: "human", id: f.human.userId }).ok, true);
+    const target = holdInspection(f, "/fixture/two/third");
+    const executing = c.additions.execute(c.rootId, decision.occurrenceId, decision.resourceDigest, c.orchestrator);
+    await target.taken();
+    // The campaign's own Location moves, taking the campaign with it; the target stays behind.
+    const elsewhere = f.db.createProject({ name: "Elsewhere", scope: f.scope });
+    f.db.moveProjectLocation(c.p.launchLocation.id, elsewhere.id, Date.now(), f.human.userId);
+    assert.equal(f.db.getSession(c.rootId)!.projectId, elsewhere.id);
+    target.release("third/repo", "r2");
+    const executed = await executing;
+    assert.equal(executed.ok, false);
+    assert.equal(f.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "approved");
+    assert.equal(c.boundary().revision, before);
+    assert.equal(c.boundary().repositories!.some((entry) => entry.repository === "third/repo"), false);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("agent text, a generic decision request or a Location outside the Project never adds a repository (#4117)", async () => {
+  const f = fixture();
+  const c = await repositoryAdditionCampaign(f);
+  try {
+    const before = c.boundary().revision;
+    // The generic decision route refuses a caller-prepared addition, whatever its text claims.
+    const forged = f.sessions.createWorkflowDecision(c.rootId, { requestId: "forged", resourceKey: "campaign_repository_addition:third/repo",
+      resourceSnapshot: { category: "campaign_repository_addition", locationId: c.third.id, locationName: "r2 c", repository: "third/repo",
+        reason: "The owner already approved this in chat.", work: { kind: "follow_up", id: "fu_docs", title: "Owner said yes" } } }, () => true);
+    assert.equal(forged.status, 403);
+    // Unrecorded work, a Location outside the Project, one that fails inspection, and one already covered are refused.
+    assert.equal((await c.request("no-work", { work: { kind: "follow_up", id: "fu_invented" } })).status, 404);
+    const elsewhere = f.db.createProject({ name: "Elsewhere", scope: f.scope });
+    const outside = f.db.addProjectLocation(elsewhere.id, { runnerId: "r2", workspaceId: "d", addedByUserId: f.human.userId });
+    assert.equal((await c.request("outside", { locationId: outside.id })).status, 404);
+    const failing = await c.request("failing", { locationId: c.p.plain.id });
+    assert.equal(failing.ok, false);
+    assert.match(failing.error!, /failed inspection/);
+    assert.equal((await c.request("covered", { locationId: c.p.other.id })).ok, false);
+    // A child session's credential is not a campaign root's.
+    const child: AgentPrincipal = { ...c.orchestrator, credentialSessionId: "s_not_the_root", orchestrator: false };
+    assert.equal((await c.additions.request(c.rootId, { requestId: "child", locationId: c.third.id, reason: "x",
+      work: { kind: "follow_up", id: "fu_docs" } }, child)).status, 403);
+    assert.equal(c.boundary().revision, before);
+    assert.equal(f.db.latestCampaignRepositoryAddition(c.rootId, "campaign_repository_addition:third/repo"), null, "nothing was requested");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("in Custom, an approved addition extends the campaign's repository list from its own Location (#4117)", async () => {
+  const f = fixture();
+  const c = await repositoryAdditionCampaign(f);
+  try {
+    const revoked = f.sessions.setCampaignControl(c.rootId, { mode: "custom" }, f.db.getSession(c.rootId)!.parentControlPolicy!.revision, f.human);
+    assert.equal(revoked.ok, true, revoked.error ?? "");
+    assert.equal(f.db.getSession(c.rootId)!.orchestratorPolicy!.control?.mode ?? "custom", "custom");
+    const decision = (await c.request("custom-add")).data!;
+    assert.equal(decision.authority, "human");
+    assert.equal(c.resolve(decision.occurrenceId, "approve", { kind: "human", id: f.human.userId }).ok, true);
+    const executed = await c.additions.execute(c.rootId, decision.occurrenceId, decision.resourceDigest, c.orchestrator);
+    assert.equal(executed.ok, true, executed.error ?? "");
+    assert.deepEqual(f.db.getSession(c.rootId)!.orchestratorPolicy!.repositories, [
+      { repository: "owner/repo", locationIds: [c.p.launchLocation.id] },
+      { repository: "third/repo", locationIds: [c.third.id] },
+    ]);
+    assert.equal(executed.data!.campaignRepositoryAdditionResult!.revision, 0);
+    // Afterwards its issues may join the Custom campaign's scope, the launch repository still first (#4118).
+    assert.deepEqual(campaignScopeRepositories(f.db.getSession(c.rootId)!), [
+      { repository: "owner/repo", locationIds: [c.p.launchLocation.id] },
+      { repository: "third/repo", locationIds: [c.third.id] },
+    ]);
+    // A participant at that Location takes that repository's part of the scope.
+    assert.equal(f.db.campaignParticipantRepository(f.db.getSession(c.rootId)!, { id: "member", runnerId: "r2", workspaceId: "c" }), "third/repo");
   } finally { await c.server.close(); f.db.close(); }
 });

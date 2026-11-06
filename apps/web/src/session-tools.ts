@@ -243,6 +243,7 @@ export function requestKindPhrase(request: Pick<PendingApproval, "kind" | "workf
       case "owner_decision": return "a decision you kept";
       case "review_round_extension": return "more review rounds";
       case "location_switch": return "a Location switch";
+      case "campaign_repository_addition": return "adding a repository to the campaign";
       default: return "a workflow decision";
     }
   }
