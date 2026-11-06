@@ -426,7 +426,7 @@ ws.prototype.send = function(data, ...args) {
 };
 const enqueue = RunnerFrameQueue.prototype.enqueue;
 const smallFrames = ${smallFrames};
-if (smallFrames) {
+{
   const hydrate = SessionsService.prototype.hydrateRunnerSessionsCooperatively;
   SessionsService.prototype.hydrateRunnerSessionsCooperatively = async function(...args) {
     // An early registration ACK admits republish before inventory completes. Keep HTTP/pongs
@@ -636,7 +636,7 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
       // The early registration ACK admits the first window before the inventory is applied.
       // Its credit is not eligible until runner online; subsequent credits retain the existing
       // inter-window watchdog. Keep the first-ACK acceptance budget at five seconds after online.
-      const creditStalled = smallFrames && processingAcknowledgements === 0
+      const creditStalled = processingAcknowledgements === 0
         ? runnerOnlineAt !== undefined && performance.now() - runnerOnlineAt > 5000
         : performance.now() - lastProcessingAckAt > 15_000;
       if (window && !window.complete && creditStalled) {
@@ -660,14 +660,12 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
     assert.ok(maxHealthMs < 2000);
     assert.ok(maxPongMs < 2000);
     assert.equal(reconciliationCompleted, true);
-    if (smallFrames) {
-      assert.ok(firstAckAt !== undefined && runnerOnlineAt !== undefined);
-      const firstAckAfterOnlineMs = Math.max(0, firstAckAt - runnerOnlineAt);
-      assert.ok(firstAckAfterOnlineMs < 5000, `first processing ACK after runner online took ${firstAckAfterOnlineMs}ms`);
-      t.diagnostic(`2444 children: first ACK ${Math.round(firstAckAfterOnlineMs)}ms after runner online, ${Math.round(firstAckMs!)}ms after republish start`);
-      t.diagnostic("Initial registration includes a test-only asynchronous 16000ms wait before hydration; the trace below measures hydration separately.");
-      t.diagnostic(`Registration measured separately: ${trace.summary()}`);
-    }
+    assert.ok(firstAckAt !== undefined && runnerOnlineAt !== undefined);
+    const firstAckAfterOnlineMs = Math.max(0, firstAckAt - runnerOnlineAt);
+    assert.ok(firstAckAfterOnlineMs < 5000, `first processing ACK after runner online took ${firstAckAfterOnlineMs}ms`);
+    t.diagnostic(`${snapshots.length} children: first ACK ${Math.round(firstAckAfterOnlineMs)}ms after runner online, ${Math.round(firstAckMs!)}ms after republish start`);
+    t.diagnostic("Initial registration includes a test-only asynchronous 16000ms wait before hydration; the trace below measures hydration separately.");
+    t.diagnostic(`Registration measured separately: ${trace.summary()}`);
     t.diagnostic(`${snapshots.length} children: HTTP ${Math.round(maxHealthMs)}ms, pong ${Math.round(maxPongMs)}ms, convergence ${Math.round(maxConvergenceMs)}ms, receive pause 0ms`);
   }
 }
