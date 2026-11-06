@@ -46,12 +46,15 @@ export function CampaignIssueScopeSummary({ snapshot }: { snapshot: CampaignIssu
 /** How often a panel showing a disconnected runner's saved scope checks for reconnection. */
 export const SCOPE_RECONNECT_POLL_MS = 10_000;
 
-export function CampaignIssueScopePanel({ session, campaignId, policyRevision }: {
+export function CampaignIssueScopePanel({ session, campaignId, policyRevision, boundaryShown = false }: {
   session: SessionView;
   campaignId: string;
   /** The campaign's policy revision, given only on the campaign's own session: the owner can then
    * change the scope grant's selection count there (#4102), and a new revision reloads the scope. */
   policyRevision?: number;
+  /** Campaign Status's Full Control section already lists the boundary's operations and Maximum
+   * Issues (#2940), so the Scope Grant section leaves those rows out. */
+  boundaryShown?: boolean;
 }) {
   const api = useApi();
   const headingId = useId();
@@ -137,8 +140,8 @@ export function CampaignIssueScopePanel({ session, campaignId, policyRevision }:
   // A new revision remounts the section, closing an editor opened on the older one.
   // Under the propose-then-check flow (#4282) the Orchestrator's proposals replace the Scope Grant.
   return <>{view?.scopeGrant && (view.scopeGrant.status === "proposal"
-    ? <CampaignScopeProposalSection grant={view.scopeGrant} proposals={view.scopeProposals ?? []} />
-    : <CampaignScopeGrantSection key={view.policyRevision} grant={view.scopeGrant} edit={grantEdit} />)}
+    ? <CampaignScopeProposalSection grant={view.scopeGrant} proposals={view.scopeProposals ?? []} ceilingsShown={boundaryShown} />
+    : <CampaignScopeGrantSection key={view.policyRevision} grant={view.scopeGrant} edit={grantEdit} ceilingsShown={boundaryShown} />)}
   <section className="campaign-detail-section" aria-labelledby={headingId}>
     <h3 id={headingId} className="section-title">Authorized Issue Scope</h3>
     {error && <Notice tone="danger" role="alert" title="Couldn't Load or Update Issue Scope"

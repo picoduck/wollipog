@@ -7,13 +7,13 @@ import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import type { HumanPrincipal } from "./identity.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
-import { SessionsService } from "./sessions.js";
+import { SessionsService, auditDigest } from "./sessions.js";
 import { fakeScreenRuntime } from "./credential-screen-test-fixture.js";
 
 /** Owner Questions (#4270): a Full Control root asks its owner a design or clarification question,
  * presented as an agent question, answered in the owner's own words, and never revoked by a scope,
  * boundary or policy change because it grants nothing. */
-function harness(options: { runnerProtocol?: number } = {}) {
+function harness(options: { runnerProtocol?: number; issueScope?: boolean } = {}) {
   const db = ControlPlaneDb.open(":memory:");
   const identity = db.localIdentityContext();
   const principal: HumanPrincipal = { ...identity, kind: "human", actorId: identity.userId };
@@ -34,14 +34,27 @@ function harness(options: { runnerProtocol?: number } = {}) {
   const toRunner: ControlPlaneToRunner[] = [];
   hub.isRunnerOnline = () => true; hub.sessionChangedById = () => {};
   hub.sendToRunner = (_runner, message) => { toRunner.push(message); return true; };
+  // The runner's campaign issue scope commands (#3915), answered the way a healthy runner does.
+  hub.requestFromRunner = async (_runner, requestId, message) => {
+    if (message.type !== "campaign_issue_scope" || message.operation === "publication_inspect") {
+      throw new Error(`unexpected runner command ${message.type}`);
+    }
+    return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: true, repository: "team/repo",
+      ...(message.operation === "synchronize" ? { revision: message.scope.revision }
+        : message.operation === "grant_issue_numbers" ? { issueNumbersGrant: "applied" as const }
+        : { candidates: (message.issues ?? [100, 101]).map((number) =>
+          ({ issue: { repository: "team/repo", number }, title: `Issue ${number}`, source: "sub_issue" as const })) }) };
+  };
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
   // A fake Decision Model: `uncertain` for request texts a test lists, `discusses` otherwise.
   const uncertain = new Set<string>();
   svc.setDecisionRuntime(fakeScreenRuntime(db, (request) =>
     [...uncertain].some((text) => JSON.stringify(request).includes(text)) ? { verdict: "uncertain" } : { verdict: "discusses" }).runtime);
   const control = { mode: "full_control" as const, objective: "Implement #100",
-    operations: ["implementation_question", "pr_merge", "question", "tool_approval", "policy_ask"] as Array<"implementation_question" | "pr_merge" | "question" | "tool_approval" | "policy_ask">,
-    delegatablePolicyIds: [] };
+    operations: ["implementation_question", "pr_merge", "question", "tool_approval", "policy_ask",
+      ...(options.issueScope ? ["campaign_issue_scope" as const] : [])] as Array<"implementation_question" | "pr_merge" | "question" | "tool_approval" | "policy_ask" | "campaign_issue_scope">,
+    delegatablePolicyIds: [],
+    ...(options.issueScope ? { issueAuthority: { epics: [100], relatedFollowUps: true, maxIssues: 5, closureReasons: ["completed" as const] } } : {}) };
   const enabled = svc.setCampaignControl("root", control, 1, principal);
   assert.ok(enabled.ok, enabled.error ?? "Full Control enabled");
   const owner = { kind: "human" as const, id: principal.userId };
@@ -310,5 +323,134 @@ test("Owner Questions need a current root runner, and an approval keeps 2 to 12 
       "an approval needs options");
     assert.equal((await h.svc.createOwnerDecision("root", { requestId: "y", resourceKey: "y", question: "Q?", options: [],
       kind: "other" as never })).status, 400);
+  } finally { h.db.close(); }
+});
+
+test("an Owner Question suggests 0 to 12 options and refuses a 13th; an approval refuses a 13th too (#4270)", async () => {
+  const h = harness();
+  try {
+    const options = (count: number) => Array.from({ length: count }, (_, index) => ({ optionId: `o${index + 1}`, label: `Option ${index + 1}` }));
+    const ask = (requestId: string, count: number, kind?: "question") => h.svc.createOwnerDecision("root", { requestId, resourceKey: requestId,
+      question: "Which one?", options: options(count), ...(kind ? { kind } : {}) });
+    const none = await ask("none", 0, "question");
+    assert.ok(none.ok && none.data, none.error ?? "no options");
+    assert.deepEqual(presentOwnerQuestionRequest(h.card(none.data)!).questions!.map((question) => [question.id, question.options.length]),
+      [[OWNER_QUESTION_ANSWER_ID, 0]], "only the free-text answer, with no note");
+    const twelve = await ask("twelve", 12, "question");
+    assert.ok(twelve.ok && twelve.data, twelve.error ?? "twelve options");
+    assert.equal(presentOwnerQuestionRequest(h.card(twelve.data)!).questions![0]!.options.length, 12);
+    for (const [requestId, kind] of [["thirteen-question", "question"], ["thirteen-approval", undefined]] as const) {
+      const refused = await ask(requestId, 13, kind);
+      assert.equal(refused.ok, false, `${requestId} is refused`);
+      assert.match(refused.error!, /to 12 options/u);
+      assert.ok(!pendingRequests(h.db.getSession("root")!.pendingApproval).some((request) => request.requestId === requestId), "no card is shown");
+    }
+    assert.ok((await ask("twelve-approval", 12)).ok, "an approval still takes 12");
+  } finally { h.db.close(); }
+});
+
+test("the audit records an Owner Question's answer and its dismissal by the owner, without the owner's words (#4270)", async () => {
+  const h = harness();
+  try {
+    const entries = (occurrenceId: string) => h.svc.governanceAudit("root").filter((entry) => entry.requestId === occurrenceId);
+    const answered = await h.askQuestion("answered");
+    assert.ok(answered.ok && answered.data);
+    const asked = entries(answered.data.occurrenceId);
+    assert.deepEqual(asked.map((entry) => [entry.stage, entry.outcome]), [["request", "pending"]], "asking it is recorded");
+    const note = "Cap the lease at 15 minutes.";
+    assert.ok(h.answer(answered.data, { [OWNER_QUESTION_ANSWER_ID]: "Short-Lived Lease (Recommended)", [OWNER_QUESTION_NOTE_ID]: note }).ok);
+    const answer = entries(answered.data.occurrenceId).find((entry) => entry.stage === "resolution");
+    assert.ok(answer, "the answer is recorded");
+    assert.equal(answer.outcome, "answered");
+    assert.deepEqual(answer.actor, h.owner, "it names the owner who answered");
+    assert.equal(answer.optionId, "lease");
+    assert.equal(answer.approvalKind, "workflow_decision");
+    assert.deepEqual([answer.workflowDecision?.occurrenceId, answer.workflowDecision?.category, answer.workflowDecision?.parentSessionId,
+      answer.workflowDecision?.childSessionId, answer.workflowDecision?.resourceDigest],
+    [answered.data.occurrenceId, "owner_decision", "root", "root", answered.data.resourceDigest]);
+    assert.equal(answer.workflowDecision?.childMessageDigest, auditDigest(note), "the owner's words are bound by digest");
+    assert.ok(!JSON.stringify(entries(answered.data.occurrenceId)).includes(note), "the audit never stores the owner's words");
+
+    const dismissed = await h.askQuestion("dismissed");
+    assert.ok(dismissed.ok && dismissed.data);
+    assert.ok(h.svc.answerQuestion("root", dismissed.data.occurrenceId, {}, h.owner, "dismiss", undefined, dismissed.data.occurrenceId).ok);
+    const dismissal = entries(dismissed.data.occurrenceId).find((entry) => entry.stage === "resolution");
+    assert.ok(dismissal, "the dismissal is recorded");
+    assert.equal(dismissal.outcome, "denied");
+    assert.deepEqual(dismissal.actor, h.owner);
+    assert.equal(dismissal.optionId, undefined);
+    assert.deepEqual([dismissal.workflowDecision?.occurrenceId, dismissal.workflowDecision?.category],
+      [dismissed.data.occurrenceId, "owner_decision"]);
+    assert.equal(dismissal.workflowDecision?.childMessageDigest, undefined, "a dismissal carries no words");
+
+    // A refused attempt by an agent leaves no resolution in the audit.
+    const refused = await h.askQuestion("refused");
+    assert.ok(refused.ok && refused.data);
+    assert.equal(h.answer(refused.data, { [OWNER_QUESTION_ANSWER_ID]: "Broker Process" }, { kind: "agent", id: "root" }).status, 403);
+    assert.deepEqual(entries(refused.data.occurrenceId).map((entry) => entry.outcome), ["pending"]);
+  } finally { h.db.close(); }
+});
+
+test("an approved issue-scope change revokes a pending Owner Approval but leaves an Owner Question pending and answerable (#4270)", async () => {
+  for (const route of ["orchestrator", "owner"] as const) {
+    const h = harness({ issueScope: true });
+    try {
+      const question = await h.askQuestion();
+      const approval = await h.askApproval();
+      assert.ok(question.ok && question.data && approval.ok && approval.data);
+      const revision = () => h.db.getSession("root")!.orchestratorPolicy!.issueScope!.revision;
+      const before = revision();
+      // An epic member the Orchestrator may admit itself, or additions without lineage only the owner may approve (#4267).
+      const proposed = await h.svc.proposeCampaignIssueScope("root", { requestId: `scope-${route}`, expectedRevision: 1,
+        additions: [{ repository: "team/repo", number: 101 }], removals: [], explanation: "Verified intended member",
+        ...(route === "orchestrator" ? { lineage: { kind: "epic" as const, epic: 100 } } : {}) });
+      assert.ok(proposed.ok && proposed.data, proposed.error ?? "proposed");
+      assert.equal(proposed.data.authority, route === "orchestrator" ? "orchestrator" : "human");
+      const snapshot = proposed.data.resourceSnapshot;
+      assert.ok(snapshot.category === "campaign_issue_scope");
+      assert.deepEqual(snapshot.affectedDecisions, [approval.data.occurrenceId], "the request lists the approval it revokes, never the question");
+      const resolved = h.svc.resolveWorkflowDecision("root", "root", proposed.data.occurrenceId, { outcome: "approve" }, proposed.data.authority,
+        proposed.data.authority === "human" ? h.owner : { kind: "agent", id: "root" }, () => true);
+      assert.ok(resolved.ok, resolved.error ?? "approved");
+      assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100, 101], "the scope changed");
+      assert.ok(revision() > before, "the issue scope revision moved");
+      assert.equal(h.db.workflowDecisionByOccurrence(approval.data.occurrenceId)!.status, "revoked", `${route}: the approval is revoked as today`);
+      assert.equal(h.card(approval.data), undefined);
+      assert.equal(h.db.workflowDecisionByOccurrence(question.data.occurrenceId)!.status, "pending", `${route}: the question stays pending`);
+      assert.ok(h.card(question.data), "its card still waits on the root");
+      assert.deepEqual(h.db.campaignProjection("root")!.ownerDecisions?.items.map((item) => item.occurrenceId), [question.data.occurrenceId],
+        "Campaign Status still lists it as Waiting for You");
+      assert.ok(h.answer(question.data, { [OWNER_QUESTION_ANSWER_ID]: "Broker Process" }).ok, "the owner still answers it");
+      assert.equal(h.db.workflowDecisionByOccurrence(question.data.occurrenceId)!.selectedOptionId, "broker");
+    } finally { h.db.close(); }
+  }
+});
+
+test("a runner reconnect restores a pending Owner Question's card from an older policy revision, but not a revoked Owner Approval's (#4270)", async () => {
+  const h = harness();
+  try {
+    const question = await h.askQuestion();
+    const approval = await h.askApproval();
+    assert.ok(question.ok && question.data && approval.ok && approval.data);
+    const revision = () => h.db.getSession("root")!.parentControlPolicy!.revision;
+    assert.ok(h.svc.setCampaignControl("root", { ...h.control, objective: "Implement #100 carefully" }, revision(), h.principal).ok);
+    assert.notEqual(h.db.workflowDecisionByOccurrence(question.data.occurrenceId)!.policyRevision, revision(),
+      "the question was asked under the previous policy revision");
+    assert.equal(h.db.workflowDecisionByOccurrence(approval.data.occurrenceId)!.status, "revoked");
+    // An Owner Approval asked under the current revision is restored too, as every current decision is.
+    const current = await h.askApproval("current-approval");
+    assert.ok(current.ok && current.data);
+
+    h.svc.failRunnerSessions("r");
+    assert.equal(h.db.getSession("root")!.pendingApproval, null, "a provisional disconnect clears the projected cards");
+    h.svc.reconcileRunnerSessions("r", ["root", "child"]);
+    const restored = pendingRequests(h.db.getSession("root")!.pendingApproval).map((request) => request.occurrenceId).sort();
+    assert.deepEqual(restored, [question.data.occurrenceId, current.data.occurrenceId].sort(),
+      "the question and the current approval come back; the revoked approval does not");
+    assert.equal(h.db.workflowDecisionByOccurrence(question.data.occurrenceId)!.status, "pending", "restoring never revokes the question");
+    assert.equal(h.card(question.data)!.async, true, "the restored question does not park the root");
+    assert.equal(presentOwnerQuestionRequest(h.card(question.data)!).kind, "question", "it is still presented as a question");
+    assert.ok(h.answer(question.data, { [OWNER_QUESTION_ANSWER_ID]: "Use the lease." }).ok, "the owner answers the restored question");
+    assert.equal(h.db.workflowDecisionByOccurrence(question.data.occurrenceId)!.childMessage, "Use the lease.");
   } finally { h.db.close(); }
 });

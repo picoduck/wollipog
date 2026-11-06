@@ -40,6 +40,14 @@ export function isOwnerQuestionRequest(request: Pick<PendingApproval, "kind" | "
   return ownerQuestionOfRequest(request) !== null || scopeProposalOfRequest(request) !== null;
 }
 
+/** An Owner Question in either form: the card the control plane stores, or the question card
+ * `presentOwnerQuestionRequest` makes of it, which keeps its workflow decision. The session detail
+ * shows the presented card, and its badge must still read as the owner's question. */
+export function isOwnerQuestionCard(request: Pick<PendingApproval, "kind" | "workflowDecision"> | null | undefined): boolean {
+  return isOwnerQuestionRequest(request) ||
+    (request?.kind === "question" && isOwnerQuestionSnapshot(request.workflowDecision?.resourceSnapshot));
+}
+
 function optionLabel(snapshot: OwnerQuestionSnapshot, option: OwnerQuestionSnapshot["options"][number]): string {
   return option.optionId === snapshot.recommendedOptionId ? `${option.label}${OWNER_QUESTION_RECOMMENDED_SUFFIX}` : option.label;
 }

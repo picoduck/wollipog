@@ -13,7 +13,8 @@ import {
 import { useApi } from "../api-context.js";
 import { ApiError } from "../api.js";
 import { titleCaseLabel } from "../format.js";
-import { FULL_CONTROL_LINE } from "../orchestrator-policy.js";
+import { WORKFLOW_DECISION_LABELS } from "../full-control-readiness.js";
+import { FullControlReadinessNote } from "./CampaignAuthoritySummary.js";
 import { agentHarnessIdentityLabel } from "../agent-presentation.js";
 import { integrationIsolationDisclosure, ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE } from "../session-preset-defaults.js";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
@@ -37,14 +38,7 @@ export const CHILD_SESSION_REQUEST_OPTIONS: readonly ChoiceRowOption<ParentContr
   { value: "questions_and_approvals", title: "Questions and Approvals", description: "Also delegate eligible one-time approvals." },
 ];
 
-export const WORKFLOW_DECISION_LABELS: Record<DelegatableWorkflowDecisionCategory, string> = {
-  implementation_question: "Implementation Questions",
-  pr_merge: "PR Merge Approval",
-  merged_branch_deletion: "Merged Branch Deletion",
-  follow_up_issue_publication: "Follow-Up Issue Publication",
-  ui_evidence_approval: "UI Evidence Approval",
-  review_round_extension: "Review Round Extensions",
-};
+export { WORKFLOW_DECISION_LABELS };
 
 const AUTHORITY_OPTIONS = [
   { value: "human", label: "Human", description: "Require a person's decision for this exact workflow gate." },
@@ -378,7 +372,9 @@ export function OrchestratorControlsDialog({
           <OrchestratorControlChoice embedded mode={controlPreview} onChange={setControlPreview} disabled={refusal !== null || enabling} />
           {controlPreview === "full_control" && enableError && <Notice tone="danger" role="alert" title="Couldn't Enable Full Control">{enableError}</Notice>}
         </>}
-        {effectiveMode === "full_control" && !canEnable && <p className="section-note">{FULL_CONTROL_LINE}</p>}
+        {/* Readiness from the server's live facts (#2940): the bare "end to end" line only when
+            nothing comes to a person and no needed capability is limited. */}
+        {effectiveMode === "full_control" && !canEnable && <FullControlReadinessNote campaign={session.orchestratorCampaign} />}
         {fullControl && <>
           <p className="section-note">Revoking Full Control updates this root campaign and its descendants and invalidates unused approvals. Your saved defaults and selected session configuration stay unchanged.</p>
           <button type="button" className="btn" disabled={!canRevoke || Object.keys(pending).length > 0}

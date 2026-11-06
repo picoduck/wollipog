@@ -24,11 +24,14 @@
  * merge still the Orchestrator's and the owner's decision nowhere in Wollipog.
  * `activity=active|cleanup|complete|stuck` shows each activity state (#4146), and `automation=` holds
  * its recovery automation (#3361).
+ * `fullControl=rules|ready|old|degraded` makes it a Full Control campaign and shows its Full Control
+ * section (#2940); see `fullControlProjection`.
  */
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   CAMPAIGN_AUTOMATION_HOLD_REASONS,
+  CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE,
   campaignIssueLimitsRequirement,
   campaignIssueScopeChangesRequirement,
   PROTOCOL_VERSION,
@@ -305,6 +308,70 @@ function handoffProjection(state: "before" | "after"): Partial<import("@wollipog
   };
 }
 
+/** `fullControl=rules|ready|old|degraded` (#2940): a Full Control campaign's boundary and what its launch
+ * disclosed, as Campaign Status shows it after launch. `rules`: a person-marked Human Required rule and
+ * a long objective; `ready`: nothing comes to the person; `old`: authorized before the launch record
+ * existed; `degraded`: an Orchestrator that can't view images. Static rendering data only. */
+const fullControlScenario = ["rules", "ready", "old", "degraded"].includes(params.get("fullControl") ?? "")
+  ? params.get("fullControl") as "rules" | "ready" | "old" | "degraded" : null;
+const FULL_CONTROL_OPERATIONS = ["implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication",
+  "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"] as const;
+function fullControlProjection(kind: "rules" | "ready" | "old" | "degraded"): Partial<import("@wollipog/protocol").OrchestratorCampaignProjection> {
+  const objective = kind === "rules"
+    ? "Fix Full Control authority, gate routing and admission in picoduck/wollipog: #4137, #3676, #3685, #3618, #3382 and #3237. " +
+      "Each issue specifies its behavior and acceptance criteria; follow them and say so in each pull request. Close an issue only after " +
+      "verifying every criterion against merged main, and deliver an issue in slices when one pull request can't meet all of its criteria."
+    : "Deliver picoduck/wollipog #4137 and #3676.";
+  const images = kind === "degraded" ? "orchestrator_decides" as const : "verified" as const;
+  return {
+    control: { mode: "full_control", boundary: { version: 1, revision: 4, issueScopeRevision: 3, repository: "picoduck/wollipog", objective,
+      authorizedByUserId: "fixture-human", authorizedAt: NOW - 3 * 60 * MINUTE, operations: [...FULL_CONTROL_OPERATIONS], delegatablePolicyIds: [],
+      issueAuthority: { epics: [2940], relatedFollowUps: true, maxIssues: 21, closureReasons: ["completed"] },
+      budgetAuthority: { version: 1, concurrency: 3, acceptedFollowUps: 20, accounting: "managed_workers_only", unpriced: "stop" } } },
+    decisionOwners: { implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "orchestrator",
+      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "orchestrator", review_round_extension: "orchestrator" },
+    fullControlHumanRequired: kind === "rules" ? ["human_required_rules"] : [],
+    // Nothing waits in recovery unless `recovery=` adds a record (its own fixture wins below).
+    ...(recoveryRecord ? {} : { recovery: { unattendedReady: true, automation: { state: "available" as const }, automatic: 0,
+      waitingHuman: 0, blocked: 0, records: [], truncated: false } }),
+    uiEvidenceReview: kind === "degraded"
+      ? { status: "unavailable", effectiveOwner: "orchestrator", reasonCode: "model_unsupported",
+        reason: "The Orchestrator model \"text-only\" does not accept image input. It asks for inspectable evidence or denies the claim as unproven." }
+      : { status: "available", effectiveOwner: "orchestrator" },
+    videoEvidenceReview: { status: "unavailable",
+      reason: "The Orchestrator can't watch video because no current live proof certifies the media-only reviewer on the Orchestrator's machine. It asks for screenshots or denies the claim as unproven." },
+    ...(params.get("scope") === "grant" ? { maxIssuesSource: "derived" as const } : {}),
+    ...(kind === "old" ? {} : { launchDisclosure: {
+      version: 1, source: kind === "degraded" ? "enable" : "launch", recordedAt: NOW - 3 * 60 * MINUTE,
+      capabilities: [
+        { id: "repository_scope", capability: "Repository and Issue Scope", state: "verified",
+          reason: "The registered workspace's origin is picoduck/wollipog and issues #4137, #3676 were read from it.", mandatory: true },
+        { id: "authority_contract", capability: "Full Control Authority", state: "verified", reason: "The claude-code root's runner enforces the Full Control authority contract.", mandatory: true },
+        { id: "accounting_budget", capability: "Campaign Accounting and Budget", state: "verified",
+          reason: "No limit. Managed workers are metered and priced, and Campaign Status shows the campaign's usage.", mandatory: false },
+        { id: "native_review", capability: "Controlled Cross-Model Review", state: "informational",
+          reason: "This runner does not offer the controlled reviewer, which needs provider isolation (current: unreported), Claude Code CLI 2.1.296 and python3 on Linux; the campaign uses the regular cross-model review workflow.", mandatory: false },
+        { id: "execution_isolation", capability: "Execution Isolation", state: "informational", reason: "The runner does not report the execution isolation it enforces.", mandatory: false },
+        { id: "image_evidence", capability: "Screenshot Evidence Review", state: images, reason: images === "verified"
+          ? "Screenshots attached as private Session artifacts are reviewed by the Orchestrator."
+          : "The Orchestrator can't view screenshots: its model doesn't accept image input. It asks for inspectable evidence or denies the claim as unproven.", mandatory: false },
+        { id: "video_evidence", capability: "Video Evidence Review", state: "orchestrator_decides",
+          reason: "The Orchestrator can't watch video, so it asks for screenshots or denies the claim as unproven.", mandatory: false },
+        { id: "external_evidence", capability: "Externally Stored Evidence", state: "orchestrator_decides",
+          reason: "The Orchestrator can't inspect externally stored evidence, so it asks for Session artifacts or denies the claim as unproven.", mandatory: false },
+      ],
+      evidence: {
+        statement: images === "verified"
+          ? "The Orchestrator reviews screenshots. For video and external evidence it asks for screenshots or denies the claim as unproven."
+          : "The Orchestrator decides UI evidence but can't view images, so it asks for inspectable evidence or denies the claim as unproven.",
+        destination: "private_session_artifacts",
+        provider: images === "verified" ? { providerId: "claude-code", disclosureRevision: 1, retentionDisclosure: CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE,
+          reviewer: { driver: "claude-code", model: "claude-opus-5-5" } } : null,
+      },
+    } }),
+  };
+}
+
 /** `activity=active|cleanup|complete|stuck` (#4146): the same delivered-or-idle campaign in each
  * activity state, as a v297 control plane reports it; `legacy=1` is what an older one reported for
  * the same facts (Active for owed cleanup, Blocked for stuck work, and no lists). */
@@ -466,6 +533,7 @@ const projectionFor = (rev: number) => campaignProjection(
       records: [], truncated: false } } : {}),
     ...ownerProjection,
     ...ownerScopeProjection,
+    ...(fullControlScenario ? fullControlProjection(fullControlScenario) : {}),
   },
 );
 

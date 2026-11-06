@@ -33,6 +33,32 @@ evidence and retention notes, and Campaign Behavior return when Custom is chosen
 Customize… Decisions tab, Full Control likewise hides Descendant Requests and the per-gate owners.
 A row that has a problem blocking the launch stays visible.
 
+## After Launch: Campaign Status
+
+Because nothing is reviewed before launch, the facts a preflight would have shown appear after it,
+in Campaign Status's **Full Control** section: the objective (truncated behind Show All), the
+operations, issue authority (Maximum Issues, Related Follow-Ups, Closure Reasons), the authorized
+limits and the boundary revision; **Human Required**, listing person-marked rules and any decision
+the boundary leaves out or Wollipog can't delegate now; **Capabilities**, every non-verified
+capability the launch or enable recorded, with its state and reason; and **Evidence**, the recorded
+destination, screenshot reviewer and handling, the provider retention disclosure, and the live
+screenshot and video review status. The admission stores the preflight's capabilities and evidence
+block (never the destination or organization identifier) beside the boundary as
+`orchestratorPolicy.launchDisclosure`, and the campaign projection carries it. An enable records
+its own; a revoke drops it. A campaign authorized before the record existed reads Not Recorded.
+When the section is shown, the Scope Grant section leaves out the Maximum Issues and operations
+rows it would repeat.
+
+The readiness line states only what the server's live facts prove. "The Orchestrator runs this
+campaign end to end." appears only when no Human Required rule exists, every decision and request
+class (questions, tool approvals, policy asks) the campaign makes is the Orchestrator's, no recovery
+item waits for the person or is blocked, screenshot review is available, and automatic recovery
+isn't blocked by missing authority or capability. Otherwise it is qualified ("…except the decisions listed under
+Human Required", or "some capabilities it needs are limited, so it may not finish unattended"),
+and a server that doesn't report these facts gets no readiness claim. Orchestrator Controls and the
+session row's Campaign Active description use the same rule and point to Campaign Status. Video
+the Orchestrator can't watch is not a limit, since it asks for screenshots instead.
+
 ## The First Message Is the Task
 
 A launch that names no task, issue numbers or objective (`FullControlLaunchRequest` with only a

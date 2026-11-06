@@ -44,9 +44,10 @@ closing the provider. The runner sends its final checkpoint only after retiremen
 checkpoint, or a reconnect inventory without the session, releases the slot after a Stop,
 verification with Stop and Archive, archival or provider exit, without reloading history and even
 when its final usage has not settled yet. A pending, provisional or unretired stop keeps the slot.
-A provider that exits by itself with a non-zero code is reported `failed` at once, but it has retired
-only when its driver proves that every process it started, descendants included, is gone; the runner
-then reports the checkpoint (#3788). A stopped provider follows the same rule (#4257): neither its
+A provider that exits by itself is reported at once (#4256): `completed` for a clean exit (code 0)
+between turns, `failed` for a non-zero code, a signal, or a clean exit that cut a turn short. It has
+retired only when its driver proves that every process it started, descendants included, is gone;
+the runner then reports the checkpoint (#3788). A stopped provider follows the same rule (#4257): neither its
 graceful close nor its root's exit retires it, because a descendant can outlive the root. Its
 retirement ends only when the exact driver, after disposing it, proves its whole process tree gone
 (the non-killing proof after the root's own exit, when its disposal failed). A parked or handed-off
@@ -55,10 +56,29 @@ the slot until a shutdown proves it. The runner records each retirement in progr
 no runner process, a restarted one included, attests a final checkpoint for that generation. A
 runner shutdown that interrupts a retirement proves it only once every provider process tree is
 reaped; it then stores the checkpoint, and the restarted runner's negotiated session snapshots deliver
-it. A shutdown without that proof, or a runner that crashes, leaves the slot held. Each provider
-of a generation needs its own proof, a relaunch under the same generation keeps the fence, and
-nothing a later runner process proves lifts a fence an earlier process left.
-Its unspent reservation stays outstanding until its usage settles. Every campaign read settles ended workers whose hydrated history covers
+it. Each provider of a generation needs its own proof, and a relaunch under the same generation
+keeps the fence.
+
+A runner that crashes, or whose shutdown cannot prove the reaping, leaves the fence behind (#4256).
+Each fence records every runner process that has run a provider of its generation since the fence
+was set, each with its provider-HOME lease evidence: its boot, its process start time, its launch
+marker and its provider cgroup. A runner that relaunches the session under the fenced generation
+adds itself. On startup, a restarted runner tries to prove every earlier runner on the list gone
+with every process it launched. Only a whole-tree proof counts: the host has rebooted, or the
+runner's provider cgroup is empty (or its unit was removed). Cgroup membership survives a child
+that clears its environment; the launch marker does not, so a clean marker scan never releases a
+slot. Once every earlier runner is proven gone, it lifts the fence and stores the final
+checkpoint, which its negotiated session snapshots deliver, so the slot is released without a
+history reload. Without that proof the slot stays held, and the runner repeats the same proof,
+backing off to every ten minutes; a later proof reports the checkpoint at once. If its own provider
+of that generation is still retiring, the fence passes to that provider's retirement instead. Only
+host-native providers record this evidence. A fence that any of its runners could not record
+evidence for (a WSL, container or cloud provider, a platform without it, or a fence an older runner
+set) is never lifted by a later runner process, so its slot stays held. On a host without
+delegated cgroup v2, only a reboot proves a crashed runner's providers gone.
+
+In every case a worker's unspent reservation stays outstanding until its usage settles from the
+durable checkpoint, exactly once. Every campaign read settles ended workers whose hydrated history covers
 their checkpoint, so a campaign that held slots or reservations for already-ended workers is
 repaired on its next read or startup without changing its allowance.
 

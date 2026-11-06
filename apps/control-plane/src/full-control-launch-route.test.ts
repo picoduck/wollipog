@@ -1203,6 +1203,63 @@ test("an existing campaign enables Full Control through one exact reviewed autho
   } finally { await server.close(); f.db.close(); }
 });
 
+test("a launch records its preflight's capabilities and evidence for Campaign Status; revoke drops it, enable records its own (#2940)", async () => {
+  const f = fixture({ images: false });
+  const { server } = await app(f);
+  try {
+    const { preflight: checked } = await preflight(server, launch);
+    assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
+    const before = Date.now();
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...launch, requestId: "disclosure-launch", preflightDigest: checked!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const rootId = admitted.json().id as string;
+    const recorded = f.db.getSession(rootId)!.orchestratorPolicy!.launchDisclosure!;
+    assert.ok(recorded, "the admitted launch records its disclosure with the boundary");
+    assert.equal(recorded.source, "launch");
+    assert.ok(recorded.recordedAt >= before && recorded.recordedAt <= Date.now());
+    // Every capability exactly as the person's preflight showed it, the non-verified ones included.
+    assert.deepEqual(recorded.capabilities, checked!.capabilities.map(({ id, capability, state, reason, mandatory }) => ({ id, capability, state, reason, mandatory })));
+    assert.equal(recorded.capabilities.find((item) => item.id === "image_evidence")!.state, "orchestrator_decides");
+    assert.equal(recorded.evidence.statement, checked!.summary.evidence.statement);
+    assert.equal(recorded.evidence.destination, "private_session_artifacts");
+    assert.equal(recorded.evidence.provider, null, "an Orchestrator that can't view images receives no screenshot bytes");
+    // No organization, account or destination identifier is kept.
+    assert.doesNotMatch(JSON.stringify(recorded), new RegExp(`${f.human.organizationId}|${f.human.userId}|session_artifacts:`));
+    const projection = f.db.campaignProjection(rootId)!;
+    assert.deepEqual(projection.launchDisclosure, recorded);
+    assert.equal(projection.maxIssuesSource, undefined, "a launch with a task has no first-message scope grant");
+
+    const revision = f.db.getSession(rootId)!.parentControlPolicy!.revision;
+    const revoked = f.sessions.setCampaignControl(rootId, { mode: "custom" }, revision, f.human);
+    assert.ok(revoked.ok, revoked.error ?? "revocation succeeded");
+    assert.equal(f.db.getSession(rootId)!.orchestratorPolicy!.launchDisclosure, undefined, "a revoke drops the record with its boundary");
+    assert.equal(f.db.campaignProjection(rootId)!.launchDisclosure, undefined);
+
+    // Enabling again records what its own preflight disclosed.
+    const url = `/api/sessions/${rootId}/orchestrator-campaign/full-control`;
+    const enableChecked = await server.inject({ method: "POST", url: `${url}/preflight`, headers: { authorization: "Bearer human" }, payload: {} });
+    assert.equal(enableChecked.statusCode, 200, enableChecked.body);
+    const { preflight: enablePreflight, expectedRevision } = enableChecked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    const enabled = await server.inject({ method: "POST", url, headers: { authorization: "Bearer human" },
+      payload: { expectedRevision, preflightDigest: enablePreflight.digest } });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    const reenabled = f.db.getSession(rootId)!.orchestratorPolicy!.launchDisclosure!;
+    assert.equal(reenabled.source, "enable");
+    assert.deepEqual(reenabled.capabilities.map((item) => [item.id, item.state, item.reason]),
+      enablePreflight.capabilities.map((item) => [item.id, item.state, item.reason]));
+    assert.deepEqual(f.db.campaignProjection(rootId)!.launchDisclosure, reenabled);
+
+    // A malformed stored record is informational, so it is dropped on read rather than failing the policy.
+    const stored = JSON.parse((f.db.raw().prepare("SELECT orchestrator_policy FROM sessions WHERE id=?").get(rootId) as { orchestrator_policy: string }).orchestrator_policy);
+    stored.launchDisclosure.capabilities[0].state = "ready";
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(stored), rootId);
+    assert.equal(f.db.getSession(rootId)!.orchestratorPolicy!.control!.mode, "full_control");
+    assert.equal(f.db.getSession(rootId)!.orchestratorPolicy!.launchDisclosure, undefined);
+    assert.equal(f.db.campaignProjection(rootId)!.launchDisclosure, undefined);
+  } finally { await server.close(); f.db.close(); }
+});
+
 test("enabling an existing campaign is blocked only by another person's scope; participant ceilings and no budget are informational", async () => {
   const f = fixture();
   const { server } = await app(f);
@@ -1395,6 +1452,8 @@ test("the owner's first message reaches the Orchestrator unread: an empty scope,
       derivedLimits: { acceptedFollowUps: true, maxIssues: true } });
     assert.equal(grant!.status, "proposal");
     assert.deepEqual(grant!.namedIssues, []);
+    // Campaign Status's Full Control section reads the derived limit from the projection (#2940).
+    assert.equal(f.db.campaignProjection(id)!.maxIssuesSource, "derived");
     assert.equal(grant!.occurrenceId, undefined);
     assert.equal(f.decision.calls.length, 0, "no Decision Model reads the first message");
     assert.equal(f.db.listCampaignDecisionOccurrences(id).length, 0);
@@ -1544,6 +1603,7 @@ test("each deterministic floor refuses a proposal with its fixed code and the is
 
     // An explicit Maximum Issues is never exceeded.
     const capped = await proposalCampaign(f, server, "Fix #21, #22 and #23.", { issues: { maxIssues: 2 } });
+    assert.equal(f.db.campaignProjection(capped.id)!.maxIssuesSource, "explicit");
     await refusedWith(await capped.propose([named(21), named(22), named(23)]), { code: "capacity_exhausted", limit: 2, requested: 3 });
     assert.equal((await capped.propose([named(21), named(22)])).ok, true);
   } finally { await server.close(); f.db.close(); }

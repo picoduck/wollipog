@@ -1,3 +1,4 @@
+import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
 import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
 import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, PROJECT_LOCATION_INSPECTION_FAILURES,
   type CampaignExcludedLocation, type CampaignLocationJoin, type CampaignPendingLocation, type CampaignRepositoryBoundaryView } from "@wollipog/protocol";
@@ -21106,7 +21107,10 @@ export class ControlPlaneDb {
     established?: { issueScope: import("@wollipog/protocol").CampaignIssueScope; firstMessage: boolean },
     /** This authorization's own limit provenance (#2940): a waiting campaign keeps only the limits
      * this request left to the server, never an earlier authorization's. */
-    derivedLimits?: import("@wollipog/protocol").FullControlDerivedLimits): boolean {
+    derivedLimits?: import("@wollipog/protocol").FullControlDerivedLimits,
+    /** What this Full Control authorization disclosed (#2940). It replaces any earlier record, and
+     * a revoke, or an authorization without one, drops it so no stale record outlives its boundary. */
+    launchDisclosure?: import("@wollipog/protocol").CampaignLaunchDisclosure): boolean {
     const campaign = this.sessionOrchestratorPolicy(id);
     const policy = this.parentControlPolicy(id);
     if (!campaign || !policy || policy.revision !== expectedRevision || !validCampaignControl(control) ||
@@ -21137,6 +21141,9 @@ export class ControlPlaneDb {
       campaign.firstMessageScope = { ...rest, ...(control.mode === "full_control" && derivedLimits ? { derivedLimits: { ...derivedLimits } } : {}) };
     }
     campaign.control = structuredClone(control);
+    if (control.mode === "full_control" && launchDisclosure && validCampaignLaunchDisclosure(launchDisclosure)) {
+      campaign.launchDisclosure = structuredClone(launchDisclosure);
+    } else delete campaign.launchDisclosure;
     this.db.exec("BEGIN");
     try {
       const changed = this.stmt(`UPDATE sessions SET orchestrator_policy=?, parent_control_policy_revision=parent_control_policy_revision+1,
@@ -22978,6 +22985,20 @@ export class ControlPlaneDb {
       })(),
       ...(policy.control?.mode === "full_control"
         ? { fullControlHumanRequired: fullControlStandingHumanRequired(humanRequiredRulesExist(this.listGovernancePolicies())) } : {}),
+      // What the launch or enable disclosed (#2940), to the same audience as `control`.
+      ...(policy.control?.mode === "full_control" && policy.launchDisclosure &&
+        this.campaignRootAudienceCanSee(campaignSessionId)(resolvedCampaignId)
+        ? { launchDisclosure: structuredClone(policy.launchDisclosure) } : {}),
+      ...(() => {
+        // With a first-message scope grant (#4102), whether Maximum Issues is still derived, read as
+        // the Issue Scope view reads it: only a limit both the grant and the current authorization
+        // derived moves with the selection count.
+        const first = policy.firstMessageScope;
+        const grant = first && first.state !== "pending" ? first.grant : undefined;
+        if (policy.control?.mode !== "full_control" || !grant || !this.campaignRootAudienceCanSee(campaignSessionId)(resolvedCampaignId)) return {};
+        return { maxIssuesSource: first!.derivedLimits?.maxIssues === true && grant.ceilings.maxIssuesSource === "derived"
+          ? "derived" as const : "explicit" as const };
+      })(),
       ...(handoffs.length
         ? { handoffs: { total: handoffs.length, items: handoffs.slice(0, CAMPAIGN_HANDOFFS_LIMIT).map((item) => structuredClone(item)) } }
         : {}),
@@ -34839,6 +34860,10 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
   if (value.issueNumbersSource !== undefined && value.issueNumbersSource !== "human_launch_request") return null;
   // Informational only (#4117): a malformed list is dropped instead of discarding the policy.
   if (value.excludedLocations !== undefined && !validExcludedLocations(value.excludedLocations)) delete value.excludedLocations;
+  // Informational only (#2940), and only beside the Full Control boundary it describes.
+  if (value.launchDisclosure !== undefined && (value.control?.mode !== "full_control" || !validCampaignLaunchDisclosure(value.launchDisclosure))) {
+    delete value.launchDisclosure;
+  }
   if (value.pendingLocations !== undefined && !validPendingLocations(value.pendingLocations)) delete value.pendingLocations;
   if (value.locationJoins !== undefined && !validLocationJoins(value.locationJoins)) delete value.locationJoins;
   const validSources = new Set([

@@ -56,7 +56,13 @@ export function ScopeProposalFacts({ repository, proposal, explanation }: { repo
 /** Campaign Status's Scope Proposal section (#4282): the Orchestrator reads the owner's first message
  * and proposes the scope. It shows each proposal with its rationale and what it led to; until one is
  * admitted, nothing is dispatched. */
-export function CampaignScopeProposalSection({ grant, proposals }: { grant: FullControlScopeGrant; proposals: readonly CampaignScopeProposalView[] }) {
+export function CampaignScopeProposalSection({ grant, proposals, ceilingsShown = false }: {
+  grant: FullControlScopeGrant;
+  proposals: readonly CampaignScopeProposalView[];
+  /** The Full Control section shows the boundary's Maximum Issues and operations (#2940); then this
+   * section leaves those two rows out instead of repeating them. */
+  ceilingsShown?: boolean;
+}) {
   const headingId = useId();
   const repository = grant.ceilings.repositories[0] ?? "";
   return <section className="campaign-detail-section" aria-labelledby={headingId}>
@@ -65,9 +71,9 @@ export function CampaignScopeProposalSection({ grant, proposals }: { grant: Full
       The Orchestrator reads your first message and proposes the campaign's issue scope. Nothing is dispatched until it is admitted.
     </Notice>}
     <dl className="facts">
-      <div><dt>Maximum Issues</dt><dd>{grant.ceilings.maxIssues} <StatusBadge noDot label={grant.ceilings.maxIssuesSource === "explicit" ? "Set by You" : "Derived"} /></dd></div>
+      {!ceilingsShown && <div><dt>Maximum Issues</dt><dd>{grant.ceilings.maxIssues} <StatusBadge noDot label={grant.ceilings.maxIssuesSource === "explicit" ? "Set by You" : "Derived"} /></dd></div>}
       <div><dt>Repository</dt><dd>{grant.ceilings.repositories.join(", ")}</dd></div>
-      <div><dt>Operations</dt><dd>{grant.ceilings.operations.length ? grant.ceilings.operations.map(operationLabel).join(", ") : "None"}</dd></div>
+      {!ceilingsShown && <div><dt>Operations</dt><dd>{grant.ceilings.operations.length ? grant.ceilings.operations.map(operationLabel).join(", ") : "None"}</dd></div>}
     </dl>
     {proposals.map((view, index) => {
       const outcome = OUTCOMES[view.outcome];

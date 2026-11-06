@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
-  PROJECT_LOCATION_INSPECTION_FAILURES, supportsPacedVideoReviewPeer, humanRequiredRulesExist, runnerSupportsProtocol,
+  PROJECT_LOCATION_INSPECTION_FAILURES, supportsPacedVideoReviewPeer, humanRequiredRulesExist, runnerSupportsProtocol, campaignLaunchDisclosure,
   type CampaignLaunchInspectionResult, type CampaignIssueScope, type PreparedCampaignLaunch, type ProjectLocationInspection,
 } from "@wollipog/protocol";
 import type { AuthPrincipal } from "./identity.js";
@@ -205,6 +205,8 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
       ...creationContext,
       humanCampaignLaunch: { principal, requestId: body.requestId!, digest: preflight.digest, control, issueScope,
         ...(preflight.summary.excludedLocations?.length ? { excludedLocations: preflight.summary.excludedLocations } : {}),
+        // What the reviewed preflight disclosed, for Campaign Status after launch (#2940).
+        launchDisclosure: campaignLaunchDisclosure(preflight, "launch", now),
         ...(firstMessageLaunch(body) ? { firstMessage: { derivedLimits: derivedLaunchLimits(body.overrides) } } : {}),
         ...(evidence.envelope && evidence.provider?.reviewer.model ? { evidenceAuthority: {
           destinationConfigurationId: evidence.destination.configurationId,
@@ -325,7 +327,8 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
         destinationDisclosureRevision: evidence.destination.disclosureRevision,
         providers: [{ providerId: evidence.provider.providerId, disclosureRevision: evidence.provider.disclosureRevision,
           reviewers: [{ driver: evidence.provider.reviewer.driver as "claude-code" | "codex-app-server", modelId: evidence.provider.reviewer.model }] }],
-      } } : {}) }, revision, principal, derived ?? undefined, derivedLaunchLimits(body.overrides));
+      } } : {}) }, revision, principal, derived ?? undefined, derivedLaunchLimits(body.overrides),
+      campaignLaunchDisclosure(preflight, "enable", Date.now()));
     if (!result.ok || !result.data) return reply.code(result.status).send({ error: result.error ?? "Full Control was not enabled" });
     return result.data;
   });
