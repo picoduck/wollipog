@@ -630,3 +630,59 @@ test("a grant that arrives while the provider is still launching reaches the dri
   assert.deepEqual(launched?.issueNumbers, [issue, 124], "the launching provider starts with the granted numbers");
   assert.equal(launched?.issueScope, undefined);
 });
+
+test("a grant applied while a restart prepares survives the restart's metadata rebuild from its older spec (#4269, review round 1)", async (t) => {
+  const f = fixture(t);
+  ungranted(f);
+  f.store().patchMeta(sessionId, { status: "stopped" });
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let launched: import("./drivers/driver.js").DriverOptions["orchestrator"];
+  const manager = f.manager() as unknown as {
+    runWorktreeOperation<T>(id: string, operation: () => Promise<T>): Promise<T>;
+    createDriver: (kind: string, options: import("./drivers/driver.js").DriverOptions) => never;
+    start(spec: import("@wollipog/protocol").SessionLaunchSpec): Promise<boolean>;
+  };
+  const runWorktreeOperation = manager.runWorktreeOperation.bind(manager);
+  let held = false;
+  manager.runWorktreeOperation = async (id, operation) => {
+    // Hold the restart inside startGeneration, after its launch generation began and before it
+    // rebuilds the session row from its spec.
+    if (!held) { held = true; enter(); await gate; }
+    return runWorktreeOperation(id, operation);
+  };
+  manager.createDriver = (_kind, options) => { launched = options.orchestrator; throw new Error("capture-only driver"); };
+  // The restart's spec was built before the reading settled: no issue numbers.
+  const starting = manager.start({ sessionId, agentId: "claude", workspaceId: "repo", workspacePath: f.root, driver: "claude-code",
+    command: "claude", args: [], env: {}, context: { kind: "native" }, useWorktree: false, orchestrator: { strictProjectIsolation: true, integrationIsolation: false } });
+  try {
+    await entered;
+    const applied = await grantIssues(f);
+    assert.equal(applied.issueNumbersGrant, "applied", applied.error ?? "applied during the restart");
+  } finally { release(); }
+  await starting;
+  assert.deepEqual(launched?.issueNumbers, [issue, 124], "the replacement provider starts with the applied grant");
+  assert.deepEqual(f.diskMeta().orchestrator?.issueNumbers, [issue, 124], "the rebuilt row keeps the applied grant");
+});
+
+test("an applied grant never fills a later launch that holds issue numbers or a scope (#4269, review round 1)", async (t) => {
+  const f = fixture(t);
+  const g = ungranted(f);
+  g.live();
+  try { assert.equal((await grantIssues(f)).issueNumbersGrant, "applied"); } finally { g.active.delete(sessionId); }
+  const internals = f.manager() as unknown as {
+    withAppliedIssueGrant(id: string, orchestrator: SessionMeta["orchestrator"]): SessionMeta["orchestrator"];
+  };
+  const scope = { repository: "example/project", issueNumbers: [124], revision: 1, authorizedByUserId: "owner", authorizedAt: 1000 };
+  assert.deepEqual(internals.withAppliedIssueGrant(sessionId, { strictProjectIsolation: true, issueScope: scope, issueNumbers: [] }),
+    { strictProjectIsolation: true, issueScope: scope, issueNumbers: [] }, "a scope, even one that removed every issue, is never refilled");
+  assert.deepEqual(internals.withAppliedIssueGrant(sessionId, { strictProjectIsolation: true, issueNumbers: [124] }),
+    { strictProjectIsolation: true, issueNumbers: [124] }, "held numbers are never replaced or merged");
+  assert.equal(internals.withAppliedIssueGrant(sessionId, undefined), undefined, "a non-Orchestrator launch gains nothing");
+  assert.deepEqual(internals.withAppliedIssueGrant("s_other_session", { strictProjectIsolation: true }), { strictProjectIsolation: true },
+    "another session's launch gains nothing");
+  const empty = { strictProjectIsolation: true };
+  assert.deepEqual(internals.withAppliedIssueGrant(sessionId, empty), { strictProjectIsolation: true, issueNumbers: [issue, 124] });
+  assert.deepEqual(empty, { strictProjectIsolation: true }, "the spec is never mutated");
+});

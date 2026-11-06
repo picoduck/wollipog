@@ -1640,6 +1640,12 @@ export class SessionManager {
   private readonly deletedExpiry = new Map<string, ReturnType<typeof setTimeout>>();
   /** Every start captures one generation; delete/restart invalidates all older async continuations. */
   private readonly launchGenerations = new Map<string, number>();
+  /** The issue numbers this runner applied from a first-message reading's grant, per session (#4269).
+   * The control plane never clears a Custom campaign's issue numbers without an issue scope, so a
+   * later launch spec carrying neither numbers nor a scope predates the grant: a launch rebuilding
+   * its metadata from such a spec re-applies these instead of losing them. In memory only: after a
+   * runner restart the control plane's next spec carries the stored grant. */
+  private readonly grantedIssueNumbers = new Map<string, number[]>();
   /** The launch generation, per session, whose start asked to wait for a busy provider HOME
    * (#3240). Only that generation waits; a later launch of the same session does not. */
   private readonly providerHomeWaitLaunches = new Map<string, number>();
@@ -7345,7 +7351,8 @@ export class SessionManager {
         ? { retiringProviderGeneration: prior.retiringProviderGeneration } : {}),
       projectMemory: spec.projectMemory ?? prior?.projectMemory,
       artifactUploads: spec.artifactUploads ?? prior?.artifactUploads ?? "manual",
-      orchestrator: (prior?.orchestrator?.issueScope?.revision ?? 0) > (spec.orchestrator?.issueScope?.revision ?? 0) ? prior?.orchestrator : spec.orchestrator ?? prior?.orchestrator,
+      orchestrator: this.withAppliedIssueGrant(spec.sessionId,
+        (prior?.orchestrator?.issueScope?.revision ?? 0) > (spec.orchestrator?.issueScope?.revision ?? 0) ? prior?.orchestrator : spec.orchestrator ?? prior?.orchestrator),
       ...(spec.uiEvidenceReviewer ? { uiEvidenceReviewer: { reviewId: spec.uiEvidenceReviewer.reviewId } } : {}),
       ...(spec.review ? { review: {
         ...spec.review, checkout: repoPath, launchOwner: this.lockOwner,
@@ -9528,11 +9535,15 @@ export class SessionManager {
       if (meta.orchestrator && authoritativeScope && authoritativeScope.revision > (meta.orchestrator.issueScope?.revision ?? 0)) {
         meta.orchestrator.issueNumbers = [...authoritativeScope.issueNumbers];
         meta.orchestrator.issueScope = authoritativeScope;
-      } else if (meta.orchestrator && !meta.orchestrator.issueScope && !meta.orchestrator.issueNumbers?.length && !authoritativeScope &&
-          stored?.issueNumbers?.length) {
-        // Issue numbers a first-message reading granted while this launch prepared (#4269). They
+      } else if (meta.orchestrator && !meta.orchestrator.issueScope && !meta.orchestrator.issueNumbers?.length && !authoritativeScope) {
+        // Issue numbers a first-message reading granted while this launch prepared (#4269), stored
+        // or (when a restart's metadata replacement rewrote the row from an older spec) applied. They
         // only ever fill an empty grant, so a launch holding numbers or a scope never adopts them.
-        meta.orchestrator.issueNumbers = [...stored.issueNumbers];
+        const granted = stored?.issueNumbers?.length ? stored.issueNumbers : this.grantedIssueNumbers.get(sessionId);
+        if (granted?.length) {
+          meta.orchestrator.issueNumbers = [...granted];
+          if (stored && !stored.issueNumbers?.length) this.store.patchMeta(sessionId, { orchestrator: { ...stored, issueNumbers: [...granted] } });
+        }
       }
       driverConstructionStarted = true;
       if (meta.review?.harness === "codex") {
@@ -17645,6 +17656,7 @@ export class SessionManager {
           this.log(`requested worktree boundary cleanup for ${boundedSessionIdForLog(sessionId)} needs retry: ${errText(error)}`);
         });
       }
+      this.grantedIssueNumbers.delete(sessionId);
       this.log(`deleted session ${sessionId} from the box store`);
     } finally {
       this.deleting.delete(sessionId);
@@ -19930,17 +19942,28 @@ export class SessionManager {
     }
     if (live?.issueScope || live?.issueNumbers?.length) return refuse("issue_numbers_held", "The live session already holds issue authority");
     // Only a live provider, or one launching now, takes the numbers here; anything else gets them
-    // from the control plane at its next launch.
+    // from the control plane at its next launch. A restart of a stopped session still reads as
+    // stopped until its launch rewrites the row, so a launch under way counts as live.
     const launching = this.launchGenerations.has(sessionId) && !this.deleting.has(sessionId) && !this.deleted.has(sessionId) &&
       !this.store.isDeleted(sessionId);
-    if (isTerminal(meta.status) || !live && !launching) return refuse("not_live", "The session has no live provider");
+    if (!launching && (isTerminal(meta.status) || !live)) return refuse("not_live", "The session has no live provider");
     const updated = this.store.patchMeta(sessionId, { orchestrator: { ...meta.orchestrator, issueNumbers: granted } });
     if (!updated) return refuse("not_live", "Could not persist the granted issue numbers");
     // The Claude auto-approval closure reads this exact object on each ask: update it in place. A
     // launch still preparing adopts the stored numbers at its last synchronous boundary.
     if (live) live.issueNumbers = [...granted];
+    // A restart already under way may rebuild the row from a spec that predates this grant.
+    this.grantedIssueNumbers.set(sessionId, [...granted]);
     this.log(JSON.stringify({ event: "campaign_issue_numbers_granted", sessionId, issues: granted.length }));
     return { ...base, ok: true, issueNumbersGrant: "applied" };
+  }
+
+  /** `orchestrator` with the issue numbers this runner applied from a grant (#4269), when it holds
+   * no issue numbers and no issue scope; otherwise unchanged. Never mutates its argument. */
+  private withAppliedIssueGrant<T extends SessionMeta["orchestrator"]>(sessionId: string, orchestrator: T): T {
+    const granted = this.grantedIssueNumbers.get(sessionId);
+    if (!orchestrator || !granted?.length || orchestrator.issueScope || orchestrator.issueNumbers?.length) return orchestrator;
+    return { ...orchestrator, issueNumbers: [...granted] };
   }
 
   /** Execute only trusted, human-approved closures, with a durable fence before mutation. */

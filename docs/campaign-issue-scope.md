@@ -34,8 +34,10 @@ Orchestrator (#4269): it sends the campaign's runner a `campaign_issue_scope` `g
 operation naming the campaign session and the granted numbers. The runner sets them on the live
 launch policy, which the Claude Code routine-write classifier reads on each ask, and on the stored
 launch metadata, which its issue-closure checks read, so neither needs a relaunch. A provider still
-launching adopts them before it starts. The next launch carries the same numbers from the control
-plane. Only Claude Code classifies issue writes this way; other harnesses ask for each write.
+launching adopts them before it starts, including a restart (of a stopped session, too) whose spec
+predates the grant: the runner remembers each grant it applied and re-applies it wherever a launch
+rebuilds its metadata, but only to a policy holding no issue numbers and no issue scope. The next
+launch carries the same numbers from the control plane. Only Claude Code classifies issue writes this way; other harnesses ask for each write.
 
 The delivery can only fill an empty grant with numbers this control plane already granted:
 
