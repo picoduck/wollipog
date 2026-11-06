@@ -125,7 +125,7 @@ export type CampaignScopeAdmissionFailure =
   | "publication_already_admitted" | "publication_unapproved" | "publication_approved_under_earlier_boundary" | "publication_approver_not_owner"
   | "publication_authority_changed" | "recommendation_not_found" | "recommendation_not_accepted" | "resulting_issue_mismatch" | "origin_outside_scope" | "payload_mismatch"
   // Selection lineage (#4103): its deterministic floors, in the order they run.
-  | "selection_not_granted" | "selection_additions_only" | "repository_outside_boundary" | "not_an_issue" | "issue_not_open"
+  | "selection_not_granted" | "selection_additions_only" | "selection_launch_repository_only" | "repository_outside_boundary" | "not_an_issue" | "issue_not_open"
   | "already_in_scope" | "other_campaign_scope" | "selection_count_exhausted" | "human_required_label"
   // The Orchestrator's own scope proposal (#4282): its floors beyond those above.
   | "owner_named_not_in_message" | "proposal_additions_only" | "proposal_count_exceeded" | "requested_count_not_in_message"
@@ -161,8 +161,11 @@ export const CAMPAIGN_SCOPE_ADMISSION_REFUSALS: Readonly<Record<CampaignScopeAdm
   selection_not_granted: { status: 403, message: "Selection lineage needs a scope grant in which the owner's first message asked the campaign to choose " +
     `issues, and this campaign's grant has none. Name a human-authorized epic or the consumed publication of an accepted follow-up, or ${HUMAN_SCOPE_ROUTE}.` },
   selection_additions_only: { status: 400, message: "A selection proposal adds issues only; propose removals as their own change." },
+  selection_launch_repository_only: { status: 409, message: "A selection fills only the launch repository's part of the scope, so it can't add an " +
+    "issue in another of the campaign's repositories. The campaign's owner can add that issue from Campaign Status." },
   repository_outside_boundary: { status: 403, message: "A proposed issue is not in a repository in this campaign's boundary; " +
-    "propose issues from the campaign's own repositories." },
+    "propose issues from the campaign's own repositories. If the campaign's Project has a Location of that repository, ask the " +
+    "campaign's owner to add it with request_campaign_repository_addition, then retry once the addition is carried out." },
   not_an_issue: { status: 409, message: "A proposed number is a pull request, not an issue; propose issues only." },
   issue_not_open: { status: 409, message: "A proposed issue is closed; propose open issues only." },
   already_in_scope: { status: 409, message: "A proposed issue is already in this campaign's scope." },

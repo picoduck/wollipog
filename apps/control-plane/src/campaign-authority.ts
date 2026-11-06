@@ -268,6 +268,12 @@ export function evaluateCampaignAuthority(
     return { ...rest, owner: "human", basis: "human_required",
       reason: repositoryBound && closureProofIncomplete(controller, policy, protocol, controllerProtocol, snapshot) ? "closure_proof_incomplete" : "outside_boundary" };
   }
+  // A limit outlives Full Control (#4118): back in Custom, however its toggles are set, a gate of a
+  // repository the limit leaves out is still the person's.
+  if (!full && evaluated.owner === "orchestrator" && outsideLimit(gatedRepository)) {
+    const { requestClass: _requestClass, disposition: _disposition, ...rest } = evaluated;
+    return { ...rest, owner: "human", basis: "human_required", reason: "outside_boundary" };
+  }
   // #4119: nothing reported is never green, so a merge citing no checks is the person's in every mode.
   if (snapshot?.category === "pr_merge" && snapshot.checksBasis === "all_reported" && !snapshot.requiredChecks.checks.length) {
     const { requestClass: _requestClass, disposition: _disposition, ...rest } = evaluated;

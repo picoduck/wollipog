@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import {
   PROJECT_LOCATION_INSPECTION_FAILURES, campaignRepositoryLocation, runnerSupportsProtocol, validCampaignIssueFacts,
-  type CampaignIssueFacts, type CampaignLaunchInspectionFailure, type CampaignLaunchInspectionMessage, type CampaignLaunchInspectionResult, type ProjectLocationInspection, type ProjectLocationView,
+  type CampaignIssueFacts, type CampaignIssueRef, type CampaignLaunchInspectionFailure, type CampaignLaunchInspectionMessage, type CampaignLaunchInspectionResult, type ProjectLocationInspection, type ProjectLocationView,
   type ProjectLocationInspectionFailure, type RunnerProtocolCapability, type RunnerView,
 } from "@wollipog/protocol";
+import type { CampaignProjectLocation } from "./campaign-repository-boundary.js";
 import type { ControlPlaneDb } from "./db.js";
 import { RunnerRequestTimeoutError, type Hub } from "./hub.js";
+import type { AuthPrincipal } from "./identity.js";
 
 export const CAMPAIGN_LAUNCH_INSPECTION_TIMEOUT_MS = 60_000;
 /** Runners that inspect an authorized Location path and return closed failure codes (#4090). */
@@ -185,4 +187,74 @@ export async function verifyBoundaryPublishedIssue(
   timeoutMs = CAMPAIGN_LAUNCH_INSPECTION_TIMEOUT_MS,
 ): Promise<boolean> {
   return Boolean(await inspectPublicationAtLocation(dependencies, root, entry, publication, [issue], timeoutMs));
+}
+
+/** The Project Locations a campaign's repositories cover (#4117, #4118), for a Full Control launch
+ * and enable and a new Custom campaign alike: every active Location of the campaign's Project that
+ * the authorizing person can reach (the rest are left out entirely, never listed as excluded), when
+ * the root runner is v288 or newer. Each one other than the campaign's own Location is inspected in
+ * its own path, in parallel. `settled()` reads them again once every inspection has finished: one
+ * that left the Project or the person's reach meanwhile is left out; one now pointing at another
+ * runner, workspace or path is not the Location that was inspected, so it reads as unread; one added
+ * meanwhile was never inspected and waits for a later inspection. `onlyAddedBy` is for an enable and a
+ * new Custom campaign: nobody sees their survey, so a Location that person didn't add is never
+ * inspected and is listed as `waiting` instead (#4117). */
+export function projectLocationSurvey(db: ControlPlaneDb, hub: Hub, principal: AuthPrincipal, input: {
+  projectId: string | null; launchLocationId: string | null; rootProtocolVersion: number | null | undefined; timeoutMs?: number;
+  onlyAddedBy?: string;
+}) {
+  const { projectId, launchLocationId } = input;
+  const reachable = () => projectId && db.canAccessProject(principal, projectId) &&
+    runnerSupportsProtocol(input.rootProtocolVersion, "campaignRepositoryBoundary")
+    ? (db.getProject(projectId)?.locations ?? []).filter((location) => location.availability !== "runner_removed" &&
+      (location.id === launchLocationId || db.canAccessWorkspace(principal, location.runnerId, location.workspaceId))) : null;
+  const locations = reachable();
+  const waits = (location: { id: string }) => input.onlyAddedBy !== undefined && location.id !== launchLocationId &&
+    db.projectLocationAddedBy(location.id) !== input.onlyAddedBy;
+  const known = new Set((locations ?? []).map((location) => location.id));
+  const others = (locations ?? []).filter((location) => location.id !== launchLocationId && !waits(location));
+  // What each Location was when its inspection started.
+  const inspected = new Map(others.map((location) => [location.id, { runnerId: location.runnerId, workspaceId: location.workspaceId,
+    path: db.getWorkspacePath(location.runnerId, location.workspaceId) }]));
+  const inspections = new Map<string, ProjectLocationInspection>();
+  return {
+    async inspect(signal: AbortSignal): Promise<void> {
+      const results = await Promise.all(others.map((location) => inspectProjectLocation({ db, hub }, location.id, { projectId: projectId!,
+        signal, timeoutMs: input.timeoutMs, requireProtocol: "campaignRepositoryBoundary" })));
+      others.forEach((location, index) => inspections.set(location.id, results[index]!));
+    },
+    /** Reads each issue a launch names in another repository (#4118) through a Location of that
+     * repository, never through the launch runner, once `inspect` has said which is which. */
+    async readOtherIssues(issues: readonly CampaignIssueRef[], signal: AbortSignal): Promise<boolean> {
+      const groups = new Map<string, number[]>();
+      for (const issue of issues) groups.set(issue.repository, [...groups.get(issue.repository) ?? [], issue.number]);
+      const reads = await Promise.all([...groups].map(async ([repository, issueNumbers]) => {
+        const location = others.find((candidate) => {
+          const inspection = inspections.get(candidate.id);
+          return inspection?.ok && inspection.location.repository === repository;
+        });
+        if (!location) return false;
+        const read = await inspectProjectLocation({ db, hub }, location.id, { projectId: projectId!, signal,
+          timeoutMs: input.timeoutMs, requireProtocol: "campaignRepositoryBoundary", issueNumbers });
+        return read.ok && read.location.repository === repository;
+      }));
+      return reads.every(Boolean);
+    },
+    settled(): { launchLocationId: string | null; locations: CampaignProjectLocation[]; inspections: Map<string, ProjectLocationInspection>; waiting: CampaignProjectLocation[] } | null {
+      if (!locations) return null;
+      const current = reachable() ?? [];
+      // Read again: one re-added by someone else while it was inspected waits too.
+      const waiting = current.filter((location) => known.has(location.id) && waits(location));
+      const now = current.filter((location) => !waits(location) && (location.id === launchLocationId || inspected.has(location.id)));
+      for (const location of now) {
+        const before = inspected.get(location.id);
+        if (before && (before.runnerId !== location.runnerId || before.workspaceId !== location.workspaceId ||
+            before.path !== db.getWorkspacePath(location.runnerId, location.workspaceId))) {
+          inspections.set(location.id, { ok: false, locationId: location.id, failure: "read_failed", reason: PROJECT_LOCATION_INSPECTION_FAILURES.read_failed });
+        }
+      }
+      return { launchLocationId, locations: now.map((location) => ({ id: location.id, name: location.name })), inspections,
+        waiting: waiting.map((location) => ({ id: location.id, name: location.name })) };
+    },
+  };
 }

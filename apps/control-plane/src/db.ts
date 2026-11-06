@@ -17840,6 +17840,32 @@ export class ControlPlaneDb {
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
+  /** Record a Custom campaign's initial repositories (#4118), only while it is still the Custom
+   * campaign in the Project and Location that were inspected, and has no list yet: an approved
+   * addition recorded meanwhile, or Full Control enabled meanwhile, keeps what it set. */
+  recordCustomCampaignRepositories(rootId: string, inspected: { projectId: string; projectLocationId: string },
+    repositories: CampaignBoundaryRepository[], excluded: CampaignExcludedLocation[], now: number): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const session = this.getSession(rootId);
+      const policy = this.sessionOrchestratorPolicy(rootId);
+      if (!session || !policy || session.archived || session.parentSessionId || policy.control?.mode === "full_control" || policy.repositories ||
+          session.projectId !== inspected.projectId || session.projectLocationId !== inspected.projectLocationId ||
+          !validCampaignRepositoryList(repositories)) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      policy.repositories = structuredClone(repositories);
+      if (excluded.length) policy.excludedLocations = structuredClone(excluded);
+      this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(policy), now, rootId);
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   /** Record what a mid-campaign Location inspection found (#4117). Verified Locations join their
    * repository's boundary entry, or a new entry, at one new boundary revision authorized by the
    * campaign's owner, exactly as any owner-authorized boundary change: every Full Control member

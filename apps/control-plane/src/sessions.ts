@@ -38,7 +38,7 @@ import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignClosureIssueHeld, campaignRepositoryLimits, campaignControlForRunner, campaignControlRevisionForRunner, campaignLaunchRepository, campaignOtherRepository, campaignScopeRepositories, carriedCampaignRepositories } from "./campaign-authority.js";
 import { campaignRepositoryOutsideLimit } from "./campaign-authority.js";
-import { campaignBoundaryRepositoryAt } from "./campaign-repository-boundary.js";
+import { campaignBoundaryRepositoryAt, launchBoundaryRepositories } from "./campaign-repository-boundary.js";
 import { inspectBoundaryPublication, verifyBoundaryPublishedIssue } from "./project-location-inspection.js";
 import { campaignBoundaryRepository } from "@wollipog/protocol";
 import { genericRequestScreenData, implementationQuestionScreenData, ownerDecisionScreenData, screenCredentialRequest, type CredentialScreenSurface } from "./credential-screen.js";
@@ -369,7 +369,7 @@ import {
   claudeStableAliasFamily,
 } from "./claude-model-aliases.js";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
-import { inspectProjectLocation } from "./project-location-inspection.js";
+import { inspectProjectLocation, projectLocationSurvey } from "./project-location-inspection.js";
 import { SessionPromptOutbox, REVIEW_CONTINUATION_UNSUPPORTED_REASON } from "./session-prompt-outbox.js";
 import { automationCommandDigest, canonicalAutomationCommandJson } from "./automation-command-outbox.js";
 import { withHoldAdviceFor } from "./session-command-permissions.js";
@@ -4391,6 +4391,9 @@ export class SessionsService {
       const misplaced = place ? this.campaignPlacementRefusal(campaignAuthority, parent, place)
         : "Full Control children must use a Location of a repository in the campaign's boundary";
       if (misplaced) return fail(misplaced, 409);
+    } else if (campaignAuthority && place) {
+      const misplaced = this.campaignPlacementRefusal(campaignAuthority, parent, place);
+      if (misplaced) return fail(misplaced, 409);
     }
     const campaignPolicy = campaignAuthority?.orchestratorPolicy;
     const campaignBehavior = campaignPolicy?.behavior;
@@ -4813,6 +4816,9 @@ export class SessionsService {
       if (!preflight.supported || !campaignBoundaryCurrent(campaignController)) {
         return campaignRefusalFail(preflight.requirement ?? preflight.reason ?? "campaign authority boundary is stale");
       }
+      const misplaced = this.campaignPlacementRefusal(campaignController, parentSession, req);
+      if (misplaced) return fail(misplaced, 409);
+    } else if (campaignController) {
       const misplaced = this.campaignPlacementRefusal(campaignController, parentSession, req);
       if (misplaced) return fail(misplaced, 409);
     }
@@ -5825,7 +5831,46 @@ export class SessionsService {
     if (!capture && session.reviewPolicy) this.log.info(JSON.stringify({ event: "campaign_child_review_policy_snapshot",
       entryPoint: "create_session", sessionId: id, parentSessionId, ...session.reviewPolicy }));
     if (!capture && session.orchestratorPolicy?.issueScopeSeed?.state === "pending") this.startCampaignIssueScopeSeed(id, requestedText, delivery ? "unattributed" : "launch_request");
+    if (!capture && session.orchestratorPolicy && !session.parentSessionId && session.projectId && session.orchestratorPolicy.control?.mode !== "full_control") {
+      void this.establishCustomCampaignRepositories(id).catch((error: unknown) =>
+        this.log.warn(`Could not read the Project's repositories for campaign ${id}: ${error instanceof Error ? error.message : String(error)}`));
+    }
     return ok(this.db.getSession(id)!, 201);
+  }
+
+  /** A Custom campaign's initial repositories (#4118): every verified Location of its Project that
+   * its owner added and can reach, inspected in its own path, as a Full Control enable builds its
+   * boundary. It grants nothing: a person still approves every scope change, and any other Location
+   * still needs an approved repository addition. A Project with one such repository records nothing,
+   * so that campaign reads as it always has, and so does one whose own Location can't be read now. */
+  private async establishCustomCampaignRepositories(rootId: string): Promise<void> {
+    const root = this.db.getSession(rootId);
+    const scope = this.db.sessionScope(rootId);
+    const owner = scope?.owner.kind === "user" ? this.db.operatingHumanPrincipal(scope.owner.userId, scope.organizationId) : null;
+    const launchLocationId = root?.projectLocationId ?? null;
+    const rootProtocolVersion = root ? this.db.getRunner(root.runnerId)?.protocolVersion : undefined;
+    const ownBefore = launchLocationId ? this.db.getProjectLocation(launchLocationId) : null;
+    if (!root?.projectId || !owner || !launchLocationId || !ownBefore || !runnerSupportsProtocol(rootProtocolVersion, "campaignRepositoryAddition")) return;
+    const projectId = root.projectId;
+    const ownPath = this.db.getWorkspacePath(ownBefore.runnerId, ownBefore.workspaceId);
+    // Nobody sees this survey, so a Location the owner didn't add stays out. Otherwise an enable would
+    // carry it into the boundary as a Location the campaign already holds (#4117).
+    const survey = projectLocationSurvey(this.db, this.hub, owner, { projectId, launchLocationId, rootProtocolVersion, onlyAddedBy: owner.userId });
+    const [own] = await Promise.all([
+      inspectProjectLocation({ db: this.db, hub: this.hub }, launchLocationId, { projectId, requireProtocol: "campaignRepositoryBoundary" }),
+      survey.inspect(new AbortController().signal),
+    ]);
+    if (!own.ok) return;
+    // Everything is read again now that every inspection has finished: a Location that changed
+    // while another was pending is not the one that was inspected, the campaign's own included.
+    const settled = survey.settled();
+    const ownNow = this.db.getProjectLocation(launchLocationId);
+    if (!settled || ownNow?.runnerId !== ownBefore.runnerId || ownNow.workspaceId !== ownBefore.workspaceId ||
+        this.db.getWorkspacePath(ownNow.runnerId, ownNow.workspaceId) !== ownPath) return;
+    const { repositories, excluded } = launchBoundaryRepositories({ launchRepository: own.location.repository, ...settled });
+    if (repositories.length > 1 && this.db.recordCustomCampaignRepositories(rootId, { projectId, projectLocationId: launchLocationId }, repositories, excluded, Date.now())) {
+      this.hub.sessionChangedById(rootId);
+    }
   }
 
   promptFromUser(
@@ -6312,6 +6357,9 @@ export class SessionsService {
     const chosen = proposal.issues.find((issue) => issue.origin !== "owner_named");
     if (chosen) return refused("seed_owner_named_only", "A Custom campaign's first-message proposal adds only issues the person's message names " +
       "(origin owner_named). Propose an issue you chose through the person's scope approval instead.", { issue: chosen.number });
+    // The seed has no limit to keep, and ignoring one would grant more than the person's words (#4118).
+    if (proposal.repositoryNames?.length) return refused("seed_repository_limit", "A Custom campaign's first-message proposal can't carry a repository limit. " +
+      "Leave repositoryNames out and state the limit in constraints, so the check reads it against the person's message.");
     // Only the exact message the server recorded for this seed is checked against.
     const text = this.db.initialUserMessageText(sessionId)?.trim() ?? null;
     if (text === null || firstMessageDigest(text) !== messageDigest) return owner("configuration", ownerMessage);
@@ -10408,7 +10456,15 @@ export class SessionsService {
    * workflows all apply it. */
   private campaignPlacementRefusal(root: SessionView, parent: SessionView | null,
     place: { runnerId: string; workspaceId?: string | null; workspacePath?: string }): string | null {
-    if (root.orchestratorPolicy?.control?.mode !== "full_control") return null;
+    if (root.orchestratorPolicy?.control?.mode !== "full_control") {
+      // A limit outlives Full Control (#4118): a Custom child isn't bound to a repository, but it
+      // can't work in one the limit leaves out, as far as this campaign can tell which that is.
+      if (place.workspacePath || !place.workspaceId || !campaignRepositoryLimits(root.orchestratorPolicy).length) return null;
+      const known = place.runnerId === root.runnerId && place.workspaceId === root.workspaceId ? campaignLaunchRepository(root)
+        : this.db.campaignParticipantRepository(root, { id: "", runnerId: place.runnerId, workspaceId: place.workspaceId });
+      return known && campaignRepositoryOutsideLimit(root.orchestratorPolicy, known)
+        ? `The owner's first message limited this campaign to ${campaignRepositoryLimits(root.orchestratorPolicy).join(", ")}, so a child can't work in ${known}. Place it in a Location of one of those repositories.` : null;
+    }
     const repository = place.workspacePath ? null : campaignBoundaryRepositoryAt(this.db, root, place);
     const parentRepository = parent && parent.id !== root.id ? campaignBoundaryRepositoryAt(this.db, root, parent) : repository;
     // The launch entry a first-message limit leaves out stays only because the root runs there (#4117).
@@ -12895,9 +12951,8 @@ export class SessionsService {
     // boundary's, until multi-repository scope (#4118) lets a boundary repository carry its own.
     const repositories = boundaryRepositories(boundary);
     if (request.additions.some((r) => !r || typeof r.repository !== "string")) return malformed();
-    if (request.additions.some((r) => !repositories.includes(r.repository.toLowerCase()) || r.repository.toLowerCase() !== repository.toLowerCase())) {
-      return refuse("repository_outside_boundary");
-    }
+    if (request.additions.some((r) => !repositories.includes(r.repository.toLowerCase()))) return refuse("repository_outside_boundary");
+    if (request.additions.some((r) => r.repository.toLowerCase() !== repository.toLowerCase())) return refuse("selection_launch_repository_only");
     const additions = request.additions.map((r) => r.number);
     if (!boundedIssueNumbers(additions)) return malformed();
     let facts: CampaignIssueFacts[] | null = null;

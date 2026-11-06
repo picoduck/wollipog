@@ -1025,7 +1025,10 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      an older runner is never sent it, and a runner refuses `repository` on an older control
 //      plane, which would ignore it. (This change first claimed 319, 320 and 321, which no released
 //      version uses.)
-export const PROTOCOL_VERSION = 323;
+// 324: a new Custom campaign starts with the repositories its Project verified (#4118), in the
+//      `repositories` list v317 added, and a Custom seed proposal refuses `repositoryNames` by name
+//      rather than ignoring it. Both are the control plane's: no runner or client needs this version.
+export const PROTOCOL_VERSION = 324;
 
 export * from "./campaign-authority.js";
 export * from "./decision-questions.js";
@@ -3219,7 +3222,8 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   /** The Locations that joined the boundary after launch, newest last, bounded (#4117). */
   locationJoins?: import("./project-location-inspection.js").CampaignLocationJoin[];
   /** A Custom campaign's repositories (#4117): its own Location's repository first, then those its
-   * owner approved adding. Full Control keeps them in its authority boundary instead. */
+   * Project verified when it was created (#4118) and those its owner approved adding. Full Control
+   * keeps them in its authority boundary instead. */
   repositories?: import("./campaign-authority.js").CampaignBoundaryRepository[];
   /** The epic a Custom campaign's first message names, once its seed (below) found one; a proposal
    * seed, never authority. */
