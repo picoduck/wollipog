@@ -77,6 +77,9 @@ test("Full Control roots post a first report naming scope, unsupported paths and
   assert.match(report, /control\.mode full_control and this session is the root campaign Orchestrator \(get_session reports no parentSessionId\)/);
   assert.match(report, /user-visible first report .* before your first create_session/);
   assert.match(report, /objective and authorized issue scope/);
+  assert.match(report, /follow-up behavior and the operations the boundary permits/);
+  assert.match(report, /campaign limits \(limits and budget\)/);
+  assert.match(report, /evidence upload destination and reviewer provider disclosure/);
   assert.match(report, /fullControlHumanRequired/);
   assert.match(report, /uiEvidenceReview and videoEvidenceReview status with their reasons/);
   assert.match(report, /controlled review sessions or a native reviewer outside them/);

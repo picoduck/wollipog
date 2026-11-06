@@ -23,7 +23,8 @@ Do not claim atomic creation, omit required protected admission, or update the h
 make an unavailable interface appear. Report an unsupported mandatory path during preflight.
 Full Control launches with no preflight form or question (#2940), so the root Orchestrator posts
 this preflight as its first report, after `get_campaign` and before its first child: objective and
-issue scope, Human Required exceptions, unsupported or degraded capabilities, and each unresolved
+issue scope, permitted follow-ups and operations, limits, evidence destination and reviewer
+provider, Human Required exceptions, unsupported or degraded capabilities, and each unresolved
 mandatory human rule with its exact source and typed route to the owner. It asks nothing and waits
 for nobody; the shipped authority reference lists what it names.
 

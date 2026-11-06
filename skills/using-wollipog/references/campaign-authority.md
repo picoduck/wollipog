@@ -38,6 +38,9 @@ after launch, in one user-visible first report posted after `get_campaign` and b
 `create_session`. The report names:
 
 - the objective and the authorized issue scope;
+- the follow-up behavior and the operations the boundary permits;
+- campaign limits (`limits` and `budget`);
+- the evidence upload destination and reviewer provider disclosure;
 - the Human Required exceptions (`fullControlHumanRequired`, or none);
 - every unsupported or degraded capability: `uiEvidenceReview` and `videoEvidenceReview` status
   with their reasons, whether mandatory review runs through controlled review sessions or a native
