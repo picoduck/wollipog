@@ -4,17 +4,19 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { PROTOCOL_VERSION, type CampaignIssueScopeView, type RunDecisionMessage, type RunnerMetadata } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, type CampaignIssueScopeMessage, type CampaignIssueScopeResultMessage, type CampaignIssueScopeView,
+  type RunDecisionMessage, type RunnerMetadata } from "@wollipog/protocol";
 import { campaignSeedHoldsDelegation, campaignSeedSubjectState, needsCampaignIssueScopeSeed, seedEpicCandidate } from "./campaign-issue-scope-seed.js";
 import { firstMessageDigest } from "./campaign-launch-admission.js";
 import { fakeDecisionKind, fakeDecisionRuntime, HEALTHY_VERDICTS, type FakeDecisionStep } from "./credential-screen-test-fixture.js";
-import { ControlPlaneDb } from "./db.js";
+import { ControlPlaneDb, RUNNER_REPORTED_STOP } from "./db.js";
 import { DECISION_MAX_ATTEMPTS } from "./decision-runtime.js";
 import { Hub } from "./hub.js";
 import { EMPTY_GRANT, issues } from "./scope-grant-test-fixture.js";
 import { SessionsService } from "./sessions.js";
 
 type Reading = (message: RunDecisionMessage, attempt: number) => FakeDecisionStep | Promise<FakeDecisionStep>;
+type GrantMessage = Extract<CampaignIssueScopeMessage, { operation: "grant_issue_numbers" }>;
 type CampaignIssueScopeCandidate = NonNullable<CampaignIssueScopeView["candidates"]>[number];
 const EMPTY_FIELDS: Record<string, unknown> = { ...EMPTY_GRANT };
 
@@ -33,9 +35,15 @@ function harness(prompt: string, reading: Reading, members: Record<number, Campa
   db.registerRunner(metadata, 1, PROTOCOL_VERSION);
   const hub = new Hub(db);
   const inspections: number[] = [];
+  // The issue numbers each live-grant delivery carried (#4269), and how the fake runner answers it.
+  const grants: GrantMessage[] = [];
+  const runner: { grant: (message: GrantMessage) => CampaignIssueScopeResultMessage | Promise<CampaignIssueScopeResultMessage> } = {
+    grant: (message) => ({ type: "campaign_issue_scope_result", requestId: message.requestId, sessionId: message.sessionId, ok: true, issueNumbersGrant: "applied" }),
+  };
   hub.isRunnerOnline = () => true; hub.sessionChangedById = () => {}; hub.sendToRunner = () => true;
   hub.requestFromRunner = async (_runner, requestId, message) => {
     if (message.type !== "campaign_issue_scope") throw new Error("Unexpected runner command");
+    if (message.operation === "grant_issue_numbers") { grants.push(message); return runner.grant(message); }
     if (message.operation === "synchronize") return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: true,
       repository: "team/repo", revision: message.scope.revision };
     if (message.operation !== "inspect") throw new Error("Unexpected runner command");
@@ -63,7 +71,7 @@ function harness(prompt: string, reading: Reading, members: Record<number, Campa
     undefined, undefined, false, false, false, { parentSessionId: id });
   const policy = () => db.getSession(id)!.orchestratorPolicy!;
   const occurrences = () => db.listCampaignDecisionOccurrences(id).filter((occurrence) => occurrence.kind === "scope_grant");
-  return { db, svc, id, fake, inspections, policy, occurrences, delegate, settled: () => svc.campaignIssueScopeSeedSettled(id) };
+  return { db, svc, hub, id, fake, inspections, policy, occurrences, delegate, grants, runner, settled: () => svc.campaignIssueScopeSeedSettled(id) };
 }
 
 test("every first message that writes a digit string gets a reading, an explicit issue list included (#4259)", () => {
@@ -589,4 +597,135 @@ test("a first prompt from anyone other than the campaign's owner never grants is
     assert.equal(h.policy().issueScopeSeed!.state, "owner", "the owner decides through the one person-owned request");
     assert.equal(h.delegate().ok, false);
   } finally { h.db.close(); }
+});
+
+/** A launch prompt whose reading is held until `release`, so the test can change the session first. */
+function heldLaunch(prompt = "Orchestrate issues #12 and #13.") {
+  let release: (step: FakeDecisionStep) => void = () => {};
+  const held = new Promise<FakeDecisionStep>((resolve) => { release = resolve; });
+  const h = harness(prompt, () => held);
+  return { h, release };
+}
+
+/** Re-register the fixture's runner at `protocolVersion`. */
+function runnerAt(h: ReturnType<typeof harness>, protocolVersion: number): void {
+  const runner = h.db.getRunner("r")!;
+  h.db.registerRunner({ runnerId: "r", hostname: runner.hostname, os: runner.os, version: runner.version, workspaces: runner.workspaces, agents: runner.agents },
+    2, protocolVersion);
+}
+
+test("a supporting runner gets the granted issue numbers for the live Orchestrator once the reading settles, and the next launch carries them (#4269)", async () => {
+  const h = harness("Orchestrate issues #12 and #13.", () => named(13, 12));
+  try {
+    await h.settled();
+    assert.deepEqual(h.policy().issueNumbers, [12, 13], "the grant is stored first, as before");
+    assert.equal(h.grants.length, 1, "exactly one delivery");
+    const [grant] = h.grants;
+    assert.deepEqual([grant!.sessionId, grant!.campaignSessionId], [h.id, h.id], "only the campaign's own root Orchestrator");
+    assert.deepEqual(grant!.issueNumbers, [12, 13], "exactly the numbers the control plane granted");
+    assert.deepEqual(Object.keys(grant!).sort(), ["campaignSessionId", "issueNumbers", "operation", "requestId", "sessionId", "type"],
+      "the update names no repository, revision, scope or operation it could widen");
+    // The next provider launch carries the same numbers.
+    h.db.updateSessionStatus(h.id, "stopped", Date.now(), RUNNER_REPORTED_STOP);
+    const sent: Array<{ type: string; spec?: { sessionId: string; orchestrator?: { issueNumbers?: number[] } } }> = [];
+    h.hub.sendToRunner = (_runner, message) => { sent.push(message as typeof sent[number]); return true; };
+    const restarted = h.svc.restart(h.id);
+    assert.ok(restarted.ok, restarted.error ?? "restarted");
+    const start = sent.filter((message) => message.type === "start_session").at(-1);
+    assert.deepEqual(start?.spec?.orchestrator?.issueNumbers, [12, 13]);
+    assert.equal(h.grants.length, 1, "a relaunch sends no second delivery");
+  } finally { h.db.close(); }
+});
+
+test("a runner without the capability gets no new message and keeps today's next-launch behavior (#4269)", async () => {
+  const { h, release } = heldLaunch();
+  try {
+    runnerAt(h, RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueNumberGrant - 1);
+    release(named(12, 13));
+    await h.settled();
+    assert.deepEqual(h.policy().issueNumbers, [12, 13], "still granted and stored at once");
+    assert.equal(h.grants.length, 0, "an older runner is never sent the update");
+    assert.equal(await h.svc.deliverGrantedCampaignIssueNumbers(h.id, h.id, [12, 13]), "not_supported");
+    assert.equal(h.grants.length, 0);
+  } finally { h.db.close(); }
+});
+
+test("a stopped Orchestrator is never sent the grant; the stored numbers wait for its next launch (#4269)", async () => {
+  for (const status of ["stopped", "failed", "completed"] as const) {
+    const { h, release } = heldLaunch();
+    try {
+      h.db.updateSessionStatus(h.id, status, Date.now(), RUNNER_REPORTED_STOP);
+      release(named(12, 13));
+      await h.settled();
+      assert.deepEqual(h.policy().issueNumbers, [12, 13], status);
+      assert.equal(h.grants.length, 0, `${status}: no delivery to a session with no live provider`);
+    } finally { h.db.close(); }
+  }
+});
+
+test("a delivery is refused for another campaign's session, a member, a session holding an issue scope or other numbers (#4269)", async () => {
+  const a = harness("Orchestrate issues #12 and #13.", () => named(12, 13));
+  const b = harness("Orchestrate issues #12 and #13.", () => named(12, 13));
+  try {
+    await a.settled();
+    await b.settled();
+    a.grants.length = 0;
+    // Another campaign's root, holding the very same numbers, never gets this campaign's grant.
+    assert.equal(await a.svc.deliverGrantedCampaignIssueNumbers(a.id, "s_other_campaign", [12, 13]), "refused");
+    // Nor does a member of this campaign.
+    const child = a.delegate();
+    assert.ok(child.ok && child.data, child.error ?? "child");
+    assert.equal(await a.svc.deliverGrantedCampaignIssueNumbers(a.id, child.data.id, [12, 13]), "refused");
+    // Numbers this control plane did not grant, or more than it granted, are never delivered.
+    assert.equal(await a.svc.deliverGrantedCampaignIssueNumbers(a.id, a.id, [12, 13, 14]), "refused");
+    assert.equal(await a.svc.deliverGrantedCampaignIssueNumbers(a.id, a.id, [12]), "refused");
+    // A session holding an authorized issue scope keeps the synchronize path.
+    const scoped = a.db.sessionOrchestratorPolicy(a.id)!;
+    scoped.issueScope = { repository: "team/repo", issueNumbers: [12, 13], revision: 1, authorizedByUserId: "u", authorizedAt: 1 };
+    a.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(scoped), a.id);
+    assert.equal(await a.svc.deliverGrantedCampaignIssueNumbers(a.id, a.id, [12, 13]), "refused");
+    assert.equal(a.grants.length, 0, "no refused delivery reaches the runner");
+  } finally { a.db.close(); b.db.close(); }
+});
+
+test("a duplicate delivery is a no-op, and a runner refusal or failure changes nothing here (#4269)", async () => {
+  const h = harness("Orchestrate issues #12 and #13.", () => named(12, 13));
+  try {
+    await h.settled();
+    assert.equal(h.grants.length, 1);
+    // The runner already holds them: a replay reports unchanged and grants nothing new.
+    h.runner.grant = (message) => ({ type: "campaign_issue_scope_result", requestId: message.requestId, sessionId: message.sessionId, ok: true, issueNumbersGrant: "unchanged" });
+    assert.equal(await h.svc.deliverGrantedCampaignIssueNumbers(h.id, h.id, [13, 12]), "unchanged");
+    assert.deepEqual(h.grants[1]!.issueNumbers, h.grants[0]!.issueNumbers, "the same numbers, never more");
+    // A runner refusal (for example a session it finds already holding numbers) and a lost runner
+    // leave the stored grant as it is: the next launch still carries it.
+    h.runner.grant = (message) => ({ type: "campaign_issue_scope_result", requestId: message.requestId, sessionId: message.sessionId, ok: false, grantRefusal: "issue_numbers_held" });
+    assert.equal(await h.svc.deliverGrantedCampaignIssueNumbers(h.id, h.id, [12, 13]), "refused");
+    h.runner.grant = () => { throw new Error("runner did not respond in time"); };
+    assert.equal(await h.svc.deliverGrantedCampaignIssueNumbers(h.id, h.id, [12, 13]), "failed");
+    // An answer for another session is not this session's grant.
+    h.runner.grant = (message) => ({ type: "campaign_issue_scope_result", requestId: message.requestId, sessionId: "s_elsewhere", ok: true, issueNumbersGrant: "applied" });
+    assert.equal(await h.svc.deliverGrantedCampaignIssueNumbers(h.id, h.id, [12, 13]), "refused");
+    assert.deepEqual(h.policy().issueNumbers, [12, 13]);
+    // A replayed settlement never grants, so it never delivers again either.
+    const before = h.grants.length;
+    assert.equal(h.db.settleCampaignIssueScopeSeed(h.id, h.policy().issueScopeSeed!.messageDigest,
+      { state: "none", grant: { issueNumbers: [12, 13], launchRequest: true } }, Date.now()), false);
+    assert.equal(h.grants.length, before);
+  } finally { h.db.close(); }
+});
+
+test("a reading that grants nothing delivers nothing (#4269)", async () => {
+  for (const reading of [
+    { verdict: "uncertain", reason: "It is unclear which issues to work on.", fields: EMPTY_FIELDS },
+    { errorClass: "authentication" },
+    { verdict: "grant", fields: { ...EMPTY_GRANT, context: issues(12, 13) } },
+  ] as FakeDecisionStep[]) {
+    const h = harness("Orchestrate issues #12 and #13.", () => reading);
+    try {
+      await h.settled();
+      assert.equal(h.policy().issueNumbers, undefined);
+      assert.equal(h.grants.length, 0);
+    } finally { h.db.close(); }
+  }
 });

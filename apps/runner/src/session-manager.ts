@@ -9523,10 +9523,16 @@ export class SessionManager {
       }
       // Scope synchronization can finish during any preparation or provider-home wait.
       // Refresh at the last synchronous boundary before the driver captures its live policy.
-      const authoritativeScope = this.store.readMeta(sessionId)?.orchestrator?.issueScope;
+      const stored = this.store.readMeta(sessionId)?.orchestrator;
+      const authoritativeScope = stored?.issueScope;
       if (meta.orchestrator && authoritativeScope && authoritativeScope.revision > (meta.orchestrator.issueScope?.revision ?? 0)) {
         meta.orchestrator.issueNumbers = [...authoritativeScope.issueNumbers];
         meta.orchestrator.issueScope = authoritativeScope;
+      } else if (meta.orchestrator && !meta.orchestrator.issueScope && !meta.orchestrator.issueNumbers?.length && !authoritativeScope &&
+          stored?.issueNumbers?.length) {
+        // Issue numbers a first-message reading granted while this launch prepared (#4269). They
+        // only ever fill an empty grant, so a launch holding numbers or a scope never adopts them.
+        meta.orchestrator.issueNumbers = [...stored.issueNumbers];
       }
       driverConstructionStarted = true;
       if (meta.review?.harness === "codex") {
@@ -19829,6 +19835,7 @@ export class SessionManager {
     options: { agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
   ): Promise<import("@wollipog/protocol").CampaignIssueScopeResultMessage> {
     const base = { type: "campaign_issue_scope_result" as const, requestId: message.requestId, sessionId: message.sessionId };
+    if (message.operation === "grant_issue_numbers") return this.grantCampaignIssueNumbers(message);
     const meta = this.store.readMeta(message.sessionId);
     if (!meta?.orchestrator || !meta.repoPath) {
       return { ...base, ok: false, error: "Campaign issue scope requires a runner-local Orchestrator repository" };
@@ -19880,6 +19887,60 @@ export class SessionManager {
       return { ...base, ok: false, error: error instanceof CampaignIssueScopeRefusal ? error.message
         : "Cannot inspect or synchronize campaign scope; verify origin and gh or glab authentication" };
     }
+  }
+
+  /**
+   * The issue numbers a Custom campaign's first-message reading granted, delivered to its live
+   * Orchestrator (#4269), which launched before the reading settled and so holds none. They go on
+   * the live launch policy, which the Claude routine-write classifier reads on each ask, and on the
+   * stored launch metadata, which the issue-closure checks read. The next launch carries the same
+   * numbers from the control plane.
+   *
+   * It only ever fills an empty grant: a session holding other numbers or any issue scope, one with
+   * no live or launching provider, and a grant for another campaign are refused, and the numbers it
+   * already holds are a no-op. It names no repository, revision or operation, so it can't widen a
+   * scope, change a repository or grant anything else. Only the authenticated control-plane channel
+   * sends it.
+   */
+  private grantCampaignIssueNumbers(
+    message: Extract<import("@wollipog/protocol").CampaignIssueScopeMessage, { operation: "grant_issue_numbers" }>,
+  ): import("@wollipog/protocol").CampaignIssueScopeResultMessage {
+    const base = { type: "campaign_issue_scope_result" as const, requestId: message.requestId, sessionId: message.sessionId };
+    const sessionId = message.sessionId;
+    const refuse = (grantRefusal: import("@wollipog/protocol").CampaignIssueNumberGrantRefusal, error: string) => {
+      this.log(JSON.stringify({ event: "campaign_issue_numbers_grant_refused", requestId: message.requestId, sessionId, grantRefusal }));
+      return { ...base, ok: false, grantRefusal, error };
+    };
+    const numbers = message.issueNumbers;
+    if (!boundedIssueNumbers(numbers) || numbers.length < 1 || typeof message.campaignSessionId !== "string" || !message.campaignSessionId) {
+      return refuse("invalid", "Invalid granted issue numbers");
+    }
+    // A grant belongs to the campaign whose first message was read, and only its root Orchestrator holds it.
+    if (message.campaignSessionId !== sessionId) return refuse("other_campaign", "The granted issue numbers belong to another campaign");
+    const meta = this.store.readMeta(sessionId);
+    if (!meta?.orchestrator) return refuse("not_orchestrator", "Granted issue numbers require a runner-local Orchestrator");
+    if (meta.orchestrator.issueScope) return refuse("issue_scope_held", "The session already holds an authorized issue scope");
+    const granted = [...numbers].sort((a, b) => a - b);
+    const held = [...(meta.orchestrator.issueNumbers ?? [])].sort((a, b) => a - b);
+    const live = this.active.get(sessionId)?.orchestratorLaunchPolicy;
+    if (held.length) {
+      // A duplicate or replayed delivery finds exactly what it would set: nothing changes.
+      if (JSON.stringify(held) !== JSON.stringify(granted)) return refuse("issue_numbers_held", "The session already holds other issue numbers");
+      return { ...base, ok: true, issueNumbersGrant: "unchanged" };
+    }
+    if (live?.issueScope || live?.issueNumbers?.length) return refuse("issue_numbers_held", "The live session already holds issue authority");
+    // Only a live provider, or one launching now, takes the numbers here; anything else gets them
+    // from the control plane at its next launch.
+    const launching = this.launchGenerations.has(sessionId) && !this.deleting.has(sessionId) && !this.deleted.has(sessionId) &&
+      !this.store.isDeleted(sessionId);
+    if (isTerminal(meta.status) || !live && !launching) return refuse("not_live", "The session has no live provider");
+    const updated = this.store.patchMeta(sessionId, { orchestrator: { ...meta.orchestrator, issueNumbers: granted } });
+    if (!updated) return refuse("not_live", "Could not persist the granted issue numbers");
+    // The Claude auto-approval closure reads this exact object on each ask: update it in place. A
+    // launch still preparing adopts the stored numbers at its last synchronous boundary.
+    if (live) live.issueNumbers = [...granted];
+    this.log(JSON.stringify({ event: "campaign_issue_numbers_granted", sessionId, issues: granted.length }));
+    return { ...base, ok: true, issueNumbersGrant: "applied" };
   }
 
   /** Execute only trusted, human-approved closures, with a durable fence before mutation. */

@@ -6155,7 +6155,50 @@ export class SessionsService {
     if (author !== "launch_request" && author !== "owner") return settle({ state: "owner", occurrenceId });
     const verified = await this.verifiedMessageIssues(root, repository, candidates.explicit);
     if (verified.length !== candidates.explicit.length) return settle({ state: "owner", occurrenceId });
-    settle({ state: "none", occurrenceId, grant: { issueNumbers: verified, launchRequest: author === "launch_request" } });
+    const grant = { issueNumbers: verified, launchRequest: author === "launch_request" };
+    if (!this.db.settleCampaignIssueScopeSeed(rootId, messageDigest, { state: "none", occurrenceId, grant }, Date.now())) return;
+    this.hub.sessionChangedById(rootId);
+    // The Orchestrator launched before the reading settled: hand it the numbers now (#4269).
+    await this.deliverGrantedCampaignIssueNumbers(rootId, rootId, verified);
+  }
+
+  /**
+   * Deliver the issue numbers a Custom campaign's first-message reading granted to its live
+   * Orchestrator (#4269). `createSession` can't wait for the reading, so the provider launched with
+   * none; without this its routine-write classifier and the runner's issue-closure checks would see
+   * them only at the next launch. A v302 runner sets them on the live session; an older runner is
+   * sent nothing and keeps that next-launch path, since the numbers are already stored here.
+   *
+   * It delivers only what this control plane granted and stored: the campaign root itself, holding
+   * exactly these numbers and no issue scope. A session of another campaign (or any member) and a
+   * finished session are never sent it, and the runner refuses again for a session already holding
+   * other numbers or a scope. A delivery failure changes nothing: the next launch carries the numbers.
+   */
+  async deliverGrantedCampaignIssueNumbers(campaignSessionId: string, sessionId: string, issueNumbers: readonly number[]):
+      Promise<"applied" | "unchanged" | "refused" | "not_live" | "not_supported" | "failed"> {
+    const report = <T extends string>(outcome: T, extra: Record<string, unknown> = {}): T => {
+      this.log.info(JSON.stringify({ event: "campaign_issue_numbers_delivery", campaignSessionId, sessionId, outcome, ...extra }));
+      return outcome;
+    };
+    const session = this.db.getSession(sessionId);
+    const policy = session?.orchestratorPolicy;
+    const granted = [...issueNumbers].sort((a, b) => a - b);
+    const held = [...(policy?.issueNumbers ?? [])].sort((a, b) => a - b);
+    if (!session || !policy || sessionId !== campaignSessionId || session.parentSessionId || policy.issueScope ||
+        policy.control?.mode === "full_control" || !granted.length || !boundedIssueNumbers(granted) ||
+        JSON.stringify(held) !== JSON.stringify(granted)) return report("refused");
+    if (isTerminal(session.status) || session.archived) return report("not_live");
+    if (!runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "campaignIssueNumberGrant")) return report("not_supported");
+    const requestId = `issue_numbers_grant_${randomUUID()}`;
+    try {
+      const result = await this.hub.requestFromRunner(session.runnerId, requestId,
+        { type: "campaign_issue_scope", operation: "grant_issue_numbers", requestId, sessionId, campaignSessionId, issueNumbers: granted }, 30_000);
+      if (result.type === "campaign_issue_scope_result" && result.sessionId === sessionId && result.ok &&
+          (result.issueNumbersGrant === "applied" || result.issueNumbersGrant === "unchanged")) return report(result.issueNumbersGrant);
+      return report("refused", { grantRefusal: result.type === "campaign_issue_scope_result" ? result.grantRefusal ?? null : null });
+    } catch {
+      return report("failed");
+    }
   }
 
   /** The campaign repository the runner reads from the campaign's checkout, or null when it can't. */
