@@ -12412,7 +12412,7 @@ export class SessionsService {
 
   /** A relaunch's copy of its campaign control (#3363): the campaign root's current control, with
    * the root's policy revision that names it, so the runner orders it against any update still in
-   * flight. A pre-v309 runner keeps today's relaunch, which carries no control. */
+   * flight. A pre-v310 runner keeps today's relaunch, which carries no control. */
   private orderedRunnerControl(sessionId: string, protocolVersion: number | null | undefined): { control?: CampaignControl; controlRevision?: number } {
     if (!runnerSupportsProtocol(protocolVersion, "campaignControlRevision")) return {};
     const rootId = this.db.resolvedCampaignSessionId(sessionId) ?? sessionId;
@@ -12438,7 +12438,7 @@ export class SessionsService {
       try {
         const requestId = `issue_scope_sync_${randomUUID()}`;
         const protocolVersion = this.db.getRunner(member.runnerId)?.protocolVersion;
-        // A pre-v309 runner keeps today's synchronization: its member's own stored control.
+        // A pre-v310 runner keeps today's synchronization: its member's own stored control.
         const ordered = runnerSupportsProtocol(protocolVersion, "campaignControlRevision");
         const sent = ordered ? control : member.orchestratorPolicy?.control;
         const result = await this.hub.requestFromRunner(member.runnerId, requestId,
