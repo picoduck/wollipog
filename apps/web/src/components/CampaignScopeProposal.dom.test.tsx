@@ -91,7 +91,7 @@ test("each proposal shows its issues with who named or chose them and why, the c
       "Constraints It Read": "open",
       "Withheld Operations": "PR Merge",
       "Rationale": "Ranked by priority label, then age.",
-      "Checked By": "Deterministic checks, then your approval: it includes issues the Orchestrator chose, constraints it read and operations it withholds, which no Decision Model checks yet.",
+      "Checked By": "Deterministic checks, then your approval: it includes issues the Orchestrator chose, constraints it read and operations it withholds, which no Decision Model checked.",
     });
     assert.deepEqual([...latest!.querySelectorAll("li")].map((item) => item.textContent), [
       "team/repo#12 Crash on save Named by You: The owner names #12.",
@@ -101,6 +101,63 @@ test("each proposal shows its issues with who named or chose them and why, the c
     assert.equal(earlier!.querySelector("h4")!.textContent, "Earlier Proposal Replaced");
     assert.match(facts(earlier!)["Checked By"]!, /no model was asked/u);
   } finally { await unmount(); }
+});
+
+test("a checked proposal shows the Decision Model's verdict and each typed question with its answer and confidence (#4282)", async () => {
+  const typedAnswers = {
+    confidenceThreshold: 0.8,
+    questions: [
+      { questionId: "count_consistent", label: "Count Matches Your Message", text: "…", answer: { type: "choice" as const, values: ["consistent", "inconsistent", "cannot_tell"] } },
+      { questionId: "constraint_met__1", label: "team/repo#31 Slow sync — open", text: "…", parameter: "team/repo#31 Slow sync — open",
+        answer: { type: "choice" as const, values: ["satisfies", "violates", "cannot_tell"] } },
+    ],
+    answers: [
+      { questionId: "count_consistent", value: "consistent", confidence: 0.95, evidence: "The owner asks for two.", assessment: "satisfied" as const },
+      { questionId: "constraint_met__1", value: "cannot_tell", confidence: 0.6, evidence: "The body doesn't say.", assessment: "unknown" as const },
+    ],
+    decisive: { questionId: "constraint_met__1" },
+  };
+  const uncertain: CampaignScopeProposalView = { ...waiting, proposal: { ...waiting.proposal, ownerCause: "constraint_check_uncertain",
+    constraintCheck: { occurrenceId: "dec_1", verdict: "uncertain", reason: "The answer can't be settled for 'team/repo#31 Slow sync — open'." } },
+    check: { occurrenceId: "dec_1", state: "uncertain", verdict: "uncertain", reason: "The answer can't be settled for 'team/repo#31 Slow sync — open'.", typedAnswers } };
+  const admitted: CampaignScopeProposalView = { ...waiting, occurrenceId: "wd_3", outcome: "applied", proposal: { ...waiting.proposal, route: "admitted",
+    ownerCause: undefined, ownerMessage: undefined, constraintCheck: { occurrenceId: "dec_2", verdict: "admit" } },
+    check: { occurrenceId: "dec_2", state: "decided", verdict: "admit", reason: "Every answer is satisfied with at least 80% confidence.",
+      typedAnswers: { ...typedAnswers, answers: [typedAnswers.answers[0]!, { ...typedAnswers.answers[1]!, value: "satisfies", confidence: 0.9, assessment: "satisfied" as const }],
+        decisive: undefined } } };
+  const { host, unmount } = await mount([admitted, uncertain]);
+  try {
+    const [latest, earlier] = [...section(host, "Scope Proposal")!.querySelectorAll("article")];
+    assert.equal(facts(latest!)["Checked By"],
+      "Deterministic checks, then the Decision Model confirmed issues the Orchestrator chose, constraints it read and operations it withholds against your message.");
+    const verdictRow = (article: Element) => [...article.querySelectorAll("dl.facts > div")].find((row) => row.querySelector("dt")?.textContent === "Decision Model Verdict");
+    assert.match(verdictRow(latest!)!.querySelector("dd")!.textContent!, /^Within Your Message Every answer is satisfied/u);
+    // The checklist sits in an Answers row's value column, as in Decision Model Checks.
+    assert.ok(facts(latest!).Answers?.startsWith("Answers count at 80% confidence or more."));
+    assert.equal(latest!.querySelectorAll(":scope > dl.facts > div > dd .decision-answer-list").length, 1);
+    assert.deepEqual([...latest!.querySelectorAll(".decision-answer-claim")].map((node) => node.textContent),
+      ["Satisfies 'Count Matches Your Message'", "Satisfies 'team/repo#31 Slow sync — open'"]);
+    assert.equal(facts(earlier!)["Checked By"],
+      "Deterministic checks, then the Decision Model couldn't confirm issues the Orchestrator chose, constraints it read and operations it withholds, so it needs your approval.");
+    assert.match(verdictRow(earlier!)!.querySelector("dd")!.textContent!, /^Uncertain The answer can't be settled/u);
+    const lines = [...earlier!.querySelectorAll(".decision-answer")].map((node) => node.textContent);
+    assert.match(lines[1]!, /Unsure About 'team\/repo#31 Slow sync — open'Can't tell \(60% confidence\); this answer decided the verdict\./u);
+    assert.match(lines[0]!, /Satisfies 'Count Matches Your Message'Consistent \(95% confidence\)\./u);
+  } finally { await unmount(); }
+});
+
+test("with the Full Control section showing the ceilings, the Scope Proposal leaves out Maximum Issues and Operations (#4282)", async () => {
+  const client = { ...api, campaignIssueScope: async () => ({ campaignSessionId: "s_root", repository: "team/repo", issueNumbers: [], revision: 2,
+    supported: true, canPropose: false, outsideScope: [], scopeGrant: proposalGrant, policyRevision: 3, scopeProposals: [] }) satisfies CampaignIssueScopeView } as ApiClient;
+  const session = { id: "s_root", orchestratorPolicy: { issueScope: { revision: 2 } } } as unknown as SessionView;
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  try {
+    await act(async () => { root.render(<ApiProvider client={client}><CampaignIssueScopePanel session={session} campaignId="s_root" boundaryShown /></ApiProvider>); });
+    await settle();
+    assert.deepEqual(facts(section(host, "Scope Proposal")!), { "Repository": "team/repo" });
+  } finally { await act(async () => root.unmount()); }
 });
 
 test("the owner's scope approval card shows the proposal's facts instead of a bare rationale (#4282)", async () => {

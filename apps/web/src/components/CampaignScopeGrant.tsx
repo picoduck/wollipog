@@ -1,23 +1,11 @@
 import React, { useId, useState } from "react";
-import type { CampaignAuthorityOperation, CampaignScopeGrantReview, DecisionErrorClass, FullControlScopeGrant, ScopeGrantDropReason } from "@wollipog/protocol";
+import { campaignOperationLabel, type CampaignAuthorityOperation, type CampaignScopeGrantReview, type DecisionErrorClass, type FullControlScopeGrant,
+  type ScopeGrantDropReason } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { Notice } from "./Notice.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
-/** The operations a Full Control launch can grant, in Title Case. */
-const OPERATION_LABELS: Partial<Record<CampaignAuthorityOperation, string>> = {
-  implementation_question: "Implementation Questions",
-  pr_merge: "PR Merge",
-  merged_branch_deletion: "Merged Branch Deletion",
-  follow_up_issue_publication: "Follow-Up Issue Publication",
-  ui_evidence_approval: "UI Evidence Approval",
-  issue_closure: "Issue Closure",
-  campaign_issue_scope: "Issue Scope Changes",
-  question: "Questions",
-  tool_approval: "Tool Approvals",
-  policy_ask: "Policy Asks",
-};
 
 const DROP_REASONS: Record<ScopeGrantDropReason, string> = {
   not_in_message: "not written in the message",
@@ -44,8 +32,9 @@ const FAILURE_SENTENCES: Partial<Record<DecisionErrorClass, string>> = {
   refused: "The Decision Model's provider refused the request.",
 };
 
+/** The operations a Full Control launch can grant, in Title Case (one map with the Owner Question's). */
 export function operationLabel(operation: CampaignAuthorityOperation): string {
-  return OPERATION_LABELS[operation] ?? operation;
+  return campaignOperationLabel(operation);
 }
 
 export function scopeGrantFailureSentence(failureClass: DecisionErrorClass | undefined): string {

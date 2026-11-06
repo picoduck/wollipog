@@ -857,10 +857,16 @@ closed issue, one already in scope, one another active campaign holds, one past 
 Issues, and one with a label a Human Required rule names; revise and propose again rather than asking.
 A proposal of only owner-named issues that the message writes as issue references (`#12`,
 `owner/repo#12` or the issue's URL), with no constraint, withheld operation or other count, returns
-an Orchestrator-owned scope change that you resolve and apply yourself. Anything else becomes the
-owner's one approval, asked as an Owner Question with your proposal and rationale; proposing the same
-issues again returns that same request, and an answer in the owner's own words declines it and
-reaches you as a prompt. Later additions take the same route.
+an Orchestrator-owned scope change that you resolve and apply yourself. Anything else goes to the
+Decision Model's constraint check, which checks only what the owner's words allow (the count, which
+issues were asked for rather than mentioned, each stated constraint, omissions and withheld
+operations), never priority. Its admit also returns an Orchestrator-owned change. Its refusal names
+the question and issue: revise and propose again, since the same issues with another rationale get
+the same answer. When it is uncertain or fails, the proposal becomes the owner's one approval, asked
+as an Owner Question with your proposal and rationale; proposing the same issues again returns that
+same request, and an answer in the owner's own words declines it and reaches you as a prompt. A
+stated count must be one the message writes, your chosen issues stay within it (3 when none is
+stated), and later additions take the same route within the admitted count.
 
 A campaign whose stored Scope Grant predates this keeps it. When that grant failed or was uncertain,
 propose the issues you chose without lineage: the proposal goes to the owner as one typed approval,

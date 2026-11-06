@@ -199,13 +199,22 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
     const row = (term: string) => latest.locator("dl.facts > div").filter({ has: page.getByRole("term").getByText(term, { exact: true }) }).locator("dd");
     await expect(latest.getByRole("heading", { level: 4 })).toContainText("Waiting for You");
     await expect(row("Scope")).toHaveText("Initial Scope");
-    await expect(row("Count You Asked For")).toHaveText("5");
+    await expect(row("Count You Asked For")).toHaveText("3");
     await expect(row("Constraints It Read")).toHaveText("open; UI only");
     await expect(row("Withheld Operations")).toHaveText("PR Merge");
     await expect(row("Rationale")).toHaveText("You named #123 and #124. For the rest I ranked open UI issues by priority label, then by age.");
     await expect(row("Issues").getByText("Named by You", { exact: true })).toHaveCount(2);
     await expect(row("Issues").getByText("Chosen by Orchestrator", { exact: true })).toHaveCount(3);
+    await expect(row("Checked By")).toContainText("the Decision Model couldn't confirm");
     await expect(row("Checked By")).toContainText("your approval");
+    // The constraint check's verdict and each typed question with its answer and confidence (#4282).
+    await expect(row("Decision Model Verdict")).toContainText("Uncertain");
+    const answers = latest.getByRole("list", { name: "Answers" }).getByRole("listitem");
+    await expect(answers).toHaveCount(12);
+    await expect(answers.filter({ hasText: "Unsure About 'team/repo#152 Composer Hint Overlaps Send — UI only'" }))
+      .toContainText("Can't tell (55% confidence); this answer decided the verdict.");
+    await expect(answers.filter({ hasText: "Satisfies 'Count Matches Your Message'" })).toContainText("Consistent (93% confidence)");
+    await expect(answers.filter({ hasText: "Satisfies 'team/repo#123 Composer Epic'" })).toContainText("Asked for (93% confidence)");
     await expect(section.getByRole("article", { name: "Earlier Proposal 1" }).getByRole("heading", { level: 4 })).toContainText("Replaced");
     const geometry = await section.evaluate((element) => ({ client: element.clientWidth, scroll: element.scrollWidth }));
     expect(geometry.scroll).toBeLessThanOrEqual(geometry.client + 1);

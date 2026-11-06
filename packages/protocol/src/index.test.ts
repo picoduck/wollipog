@@ -360,6 +360,8 @@ test("session restart capability overlays controls without freezing the agent ca
 
 test("PROTOCOL_VERSION is 313", () => {
   assert.equal(PROTOCOL_VERSION, 313);
+  // A scope proposal's constraint check (#4282) is a typed Decision call, sent only to a v307 runner.
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.typedDecisionQuestions, 307);
   // Only a v308 runner sends a structured scope proposal, and only to a v308 control plane (#4282).
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.campaignScopeProposals, 308);
   // Only a v307 runner is sent a typed-question Decision call's larger schema and output (#4283).

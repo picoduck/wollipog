@@ -8,6 +8,7 @@ import type { ControlPlaneDb } from "./db.js";
 import { issueClosureActiveChildren } from "./github-issue-closure.js";
 import { campaignSeedHoldsDelegation } from "./campaign-issue-scope-seed.js";
 import { campaignLaunchRepository, campaignScopeRepositories } from "./campaign-authority.js";
+import { scopeCheckView } from "./scope-check.js";
 
 export function scopeParticipants(db: ControlPlaneDb, root: SessionView): SessionView[] {
   return [root, ...db.campaignDescendantIds(root.id).flatMap((id) => { const s = db.getSession(id); return s?.orchestratorPolicy && !s.archived && !isTerminal(s.status) ? [s] : []; })];
@@ -263,7 +264,8 @@ export function scopeProposalViews(db: ControlPlaneDb, rootId: string): Campaign
     const outcome: CampaignScopeProposalView["outcome"] = decision.status === "consumed" ? owner ? "owner_approved" : "applied"
       : decision.status === "pending" || decision.status === "approved" ? owner ? "waiting_for_owner" : "admitted"
         : decision.status === "denied" ? "owner_declined" : "replaced";
+    const checked = snapshot.scopeProposal.constraintCheck ? db.getDecisionOccurrence(snapshot.scopeProposal.constraintCheck.occurrenceId) : null;
     return [{ occurrenceId: decision.occurrenceId, createdAt: decision.createdAt, explanation: snapshot.explanation,
-      proposal: snapshot.scopeProposal, outcome }];
+      proposal: snapshot.scopeProposal, outcome, ...(checked ? { check: scopeCheckView(checked) } : {}) }];
   });
 }

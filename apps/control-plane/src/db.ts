@@ -12590,6 +12590,30 @@ export class ControlPlaneDb {
     return row ? this.decisionOccurrenceFromRow(row) : null;
   }
 
+  /** Every issue an applied (consumed) Orchestrator scope proposal of this campaign added as its own
+   * choice (#4282), whether or not it is still in scope: removing an issue never frees room under the
+   * owner's count. Unbounded, for enforcement. */
+  appliedProposalChosenIssues(rootId: string): number[] {
+    const rows = this.stmt(`SELECT resource_snapshot FROM workflow_decisions WHERE controlling_session_id=? AND session_id=?
+      AND category='campaign_issue_scope' AND status='consumed' AND json_extract(resource_snapshot, '$.scopeProposal') IS NOT NULL`)
+      .all(rootId, rootId) as Array<{ resource_snapshot: string }>;
+    const chosen = new Set<number>();
+    for (const row of rows) {
+      const issues = (JSON.parse(row.resource_snapshot) as { scopeProposal?: { issues?: Array<{ number: number; origin: string }> } }).scopeProposal?.issues ?? [];
+      for (const issue of issues) if (issue.origin === "orchestrator_chosen" && Number.isSafeInteger(issue.number)) chosen.add(issue.number);
+    }
+    return [...chosen].sort((a, b) => a - b);
+  }
+
+  /** A campaign's occurrences whose idempotency key starts with `prefix` (#4282: every constraint check
+   * of one set of additions at one boundary and scope revision), oldest first and bounded. */
+  decisionOccurrencesByKeyPrefix(campaignSessionId: string, prefix: string, limit = 20): DecisionOccurrenceRecord[] {
+    const escaped = prefix.replace(/[\\%_]/gu, (character) => `\\${character}`);
+    return (this.stmt(`SELECT * FROM decision_occurrences WHERE campaign_session_id=? AND occurrence_key LIKE ? ESCAPE '\\'
+      ORDER BY created_at, occurrence_id LIMIT ?`).all(campaignSessionId, `${escaped}%`, limit) as unknown as DecisionOccurrenceRow[])
+      .map((row) => this.decisionOccurrenceFromRow(row));
+  }
+
   /** Record what a campaign occurrence affected (#4104). The first record wins. */
   recordCampaignDecisionSubject(input: { occurrenceId: string; campaignSessionId: string } & Omit<CampaignDecisionSubject, "classification">, now: number): void {
     this.stmt(

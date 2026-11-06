@@ -112,12 +112,12 @@ for (const [label, viewport] of [["1440", { width: 1440, height: 1900 }], ["390"
     await expect(answers(0)).toHaveCount(5);
     await expect(items.nth(1)).toContainText("Issue 140 violates 'Skip Security'.");
     await expect(answers(1)).toHaveText([
-      /^Satisfies 'Count Matches'Answered yes with 96% confidence\./u,
+      /^Satisfies 'Count Matches'Yes \(96% confidence\)\./u,
       /^Issue 140 Satisfies 'UI Only'/u,
-      /^Issue 140 Violates 'Skip Security'Answered violates with 92% confidence; this answer decided the verdict\. It is labeled security\.$/u,
+      /^Issue 140 Violates 'Skip Security'Violates \(92% confidence\); this answer decided the verdict\. It is labeled security\.$/u,
     ]);
     await expect(answers(2).nth(1)).toContainText("Issue 141 Unsure About 'UI Only'");
-    await expect(answers(2).nth(1)).toContainText("55% confidence; this answer decided the verdict");
+    await expect(answers(2).nth(1)).toContainText("(55% confidence); this answer decided the verdict");
     await section.scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath(`typed-answers-${label}.png`) });
     const geometry = await section.evaluate((element) => ({ clientWidth: element.clientWidth, scrollWidth: element.scrollWidth }));
@@ -145,26 +145,26 @@ for (const [label, viewport] of [["1440", { width: 1440, height: 1500 }], ["390"
       await expect(items).toHaveCount(count);
       if (name === "credential-screen") {
         await expect(answers(0)).toHaveText([
-          /^Satisfies 'No Credential Handed Over'Answered no with 97% confidence\./u,
+          /^Satisfies 'No Credential Handed Over'No \(97% confidence\)\./u,
           /^Satisfies 'No Sign-In Performed'/u,
           /^Satisfies 'No Access Granted'/u,
         ]);
         await expect(items.nth(1)).toContainText("Asks for Access");
         await expect(answers(1).nth(0)).toHaveText(
-          /^Violates 'No Credential Handed Over'Answered yes with 98% confidence; this answer decided the verdict\. "Paste a GitHub token here\."$/u);
+          /^Violates 'No Credential Handed Over'Yes \(98% confidence\); this answer decided the verdict\. "Paste a GitHub token here\."$/u);
         // A failed screen has no answers and is classified as before.
         await expect(items.nth(2).getByRole("list", { name: "Answers" })).toHaveCount(0);
         await expect(items.nth(2).getByRole("button")).toHaveText(["Decline", "Let the Orchestrator Answer", "Open Session"]);
         await expect(answers(3).nth(1)).toContainText("Unsure About 'No Sign-In Performed'");
-        await expect(answers(3).nth(1)).toContainText("60% confidence; this answer decided the verdict");
+        await expect(answers(3).nth(1)).toContainText("Yes (60% confidence); this answer decided the verdict");
         await expect(items.nth(3).getByRole("button")).toHaveText(["Decline", "Let Me Answer", "Open Session"]);
       } else {
-        await expect(answers(0)).toHaveText([/^Satisfies 'Related to the Requested Work'Answered gap found in requested work with 91% confidence\./u]);
+        await expect(answers(0)).toHaveText([/^Satisfies 'Related to the Requested Work'A gap found in the requested work \(91% confidence\)\./u]);
         await expect(items.nth(1)).toContainText("The answer violates 'Related to the Requested Work'.");
-        await expect(answers(1)).toHaveText([/^Violates 'Related to the Requested Work'Answered separate work with 93% confidence; this answer decided the verdict\./u]);
+        await expect(answers(1)).toHaveText([/^Violates 'Related to the Requested Work'Separate work \(93% confidence\); this answer decided the verdict\./u]);
         await expect(items.nth(2)).toContainText("Reason Doesn't Fit");
         await expect(answers(2)).toHaveText([
-          /^Violates 'Evidence Supports the Reason'Answered does not support with 88% confidence; this answer decided the verdict\./u,
+          /^Violates 'Evidence Supports the Reason'Doesn't support \(88% confidence\); this answer decided the verdict\./u,
           /^Satisfies 'Explanation Matches the Evidence'/u,
         ]);
         await expect(items.nth(3).getByRole("list", { name: "Answers" })).toHaveCount(0);
