@@ -25,3 +25,12 @@ test("an Orchestrator's proposal without lineage says why it waits for the owner
   assert.ok(plain.includes("so it needs your approval. Denying leaves the scope unchanged."));
   assert.equal(plain.includes("<dt>Maximum Issues</dt>"), false);
 });
+
+test("scope approval qualifies every repository's change by its own repository (#4118)",()=>{
+  const markup=renderToStaticMarkup(<CampaignIssueScopeSummary snapshot={{category:"campaign_issue_scope",repository:"owner/app",expectedRevision:2,
+    before:[5],additions:[],removals:[5],otherRepositories:[{repository:"owner/api",before:[5],additions:[40],removals:[]}],explanation:"Move work",
+    affectedAssignments:[{sessionId:"app-child",issue:5},{sessionId:"api-child",issue:5,repository:"owner/api"}],affectedDecisions:[],activeChildren:[]}}/>);
+  assert.match(markup,/<dt>Additions<\/dt><dd>owner\/api#40<\/dd>/u);
+  assert.match(markup,/<dt>Removals<\/dt><dd>owner\/app#5<\/dd>/u);
+  assert.match(markup,/<dt>Affected Assignments<\/dt><dd>owner\/app#5: app-child, owner\/api#5: api-child<\/dd>/u);
+});

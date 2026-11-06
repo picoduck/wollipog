@@ -822,15 +822,20 @@ gate only in prose.
 ## Inspecting and Changing Campaign Issue Scope
 
 Before delegating an epic, use `get_campaign_issue_scope` (CLI: `wollipog issue-scope get --epic <number>`).
-It returns authorized repository-qualified issues, a revision, recorded work outside scope, and reviewable
-umbrella/member candidates. Native GitHub sub-issues and leading checklist entries under Units, Members,
+It returns authorized repository-qualified issues grouped by repository under `repositories` (one entry
+per campaign repository, the launch repository first, with whether one of its Locations is online), a
+revision, recorded work outside scope, and reviewable umbrella/member candidates. Native GitHub sub-issues and leading checklist entries under Units, Members,
 Child Issues, Sub-Issues, or Implementation Issues are candidates; dependencies and incidental references
 are not members and never grant authority. Inspect candidates and select the intended members.
 
 To recover or extend an existing campaign, use `request_campaign_issue_scope_change` (CLI:
 `wollipog issue-scope request --proposal '<json>'`) with `requestId`, `expectedRevision`, `explanation`,
-and exact `additions` and `removals`, each an array of `{ "repository": "owner/repo", "number": 123 }`.
-Custom requires an authenticated human to approve the exact change. In Full Control with a separate
+and exact `additions` and `removals`, each an array of `{ "repository": "owner/repo", "number": 123 }`
+in any of the campaign's repositories. The same number in two repositories is two separate issues. Each
+repository's part is verified through one of its own online Locations; a repository with none online
+refuses the whole request by name. A repository outside the campaign is refused with
+`repository_outside_boundary` before any runner call: if the campaign's Project has a Location of it,
+ask the owner to include it, then retry. Custom requires an authenticated human to approve the exact change. In Full Control with a separate
 human-established issue boundary, use `lineage: {kind: "epic", epic: <number>}` for verified intended
 members or `{kind: "follow_up", publicationOccurrenceId: <id>}` for an exact authorized publication.
 A publication the boundary's author or a campaign owner approved as a person under the current
@@ -885,8 +890,9 @@ Pending, denied, stale and replayed proposals leave scope unchanged. After appro
 Humans can inspect, resolve epic candidates, and request changes in Campaign Status's Authorized Issue Scope.
 
 Scope changes preserve conversation and work history. Removals display affected assignments and revoke
-outstanding action decisions; issue closure retains its separate exact decision. Active Orchestrator
-participants must use the campaign's runner and repository workspace. Updates require protocol v208
+outstanding action decisions; issue closure retains its separate exact decision. Every active
+Orchestrator participant must run in a Location of one of the campaign's repositories, and stores only
+its own repository's issues; one outside the launch repository needs protocol v313. Updates require protocol v208
 on the control plane and participating runners; unsupported peers must be updated and reconnected.
 The authoritative revision is persisted on both sides, delivered on reconnect and restart, and checked
 again by closure execution. An offline or unsynchronized runner cannot execute a revised closure.

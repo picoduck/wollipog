@@ -35,13 +35,14 @@ import { PullRequestWatches } from "./pull-request-watches.js";
 import { SessionWaits } from "./session-waits.js";
 import { ReviewSettingsStore, type ReviewPolicyCapture } from "./review-settings.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
+import { campaignScopeChangeBefore, campaignScopeChangeGroups, campaignScopeChangeResult, campaignScopeForRepository, campaignScopeIssues, campaignScopeNumbers, campaignScopeWithIssues, canonicalCampaignIssues } from "@wollipog/protocol";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
 import {
   isProviderLoginFailureCode, isSessionLaunchFailureCode, type SessionLaunchFailureCode, PROJECT_CREATION_REQUEST_WINDOW_MS,
   validProviderHomeLaunchRefusal, validProviderHomeWait, validWorktreeSwitch,
 } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
-import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignDispatchScopeRefusal, campaignBoundaryCurrent, remintCampaignBoundary } from "./campaign-authority.js";
+import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignDispatchScopeRefusal, campaignBoundaryCurrent, campaignIssueInScope, campaignLaunchRepository, campaignScopeRepositories, remintCampaignBoundary } from "./campaign-authority.js";
 import { genericRequestScreenData, storedCredentialScreenFact } from "./credential-screen.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
 import { grantReviewMaxIssues, ownerReviewMaxIssues, proposalMaxIssues } from "./scope-grant.js";
@@ -6344,8 +6345,10 @@ export class ControlPlaneDb {
       if (!page.ok) return { state: "recovery_held", recoveryIds: [] };
       for (const item of page.data.items) {
         if (handedOff.has(item.id)) continue;
+        // Delivery is proven in the launch repository only until per-repository gates (#4119) land:
+        // an item in another campaign repository stays the campaign's ordinary unfinished work.
         if (item.commitment !== "committed" || !item.issue || item.issue.repository.toLowerCase() !== scope.repository.toLowerCase() ||
-            !scope.issueNumbers.includes(item.issue.number) || !policy.issueNumbers?.includes(item.issue.number)) continue;
+            !campaignIssueInScope(policy, item.issue)) continue;
         // A never-dispatched placeholder of an epic this campaign closed from its members (#4060) is
         // finished by that closure. Any item with an attempt still needs its own delivery.
         if (item.attemptCount === 0 && !item.currentAttempt && this.memberProvenEpicClosure(campaignId, item.issue.repository, item.issue.number)) continue;
@@ -17647,6 +17650,24 @@ export class ControlPlaneDb {
     return root.runnerId === member.runnerId && root.workspaceId === member.workspaceId && path(root) === path(member);
   }
 
+  /** The repository of the Location a campaign participant runs in (#4118): the launch repository
+   * when it shares the root's runner and workspace, otherwise the campaign repository whose
+   * verified Locations include one on its runner and workspace. Null when it is in none. */
+  campaignParticipantRepository(root: SessionView, member: Pick<SessionView, "id" | "runnerId" | "workspaceId">): string | null {
+    const launch = campaignLaunchRepository(root);
+    if (!launch) return null;
+    if (this.campaignSharesRepositoryWorkspace(root, member)) return launch;
+    if (!member.workspaceId || this.getAdHocWorkspacePath(member.id)) return null;
+    for (const entry of campaignScopeRepositories(root)) {
+      for (const id of entry.locationIds) {
+        const location = this.getProjectLocation(id);
+        if (location && location.availability !== "runner_removed" &&
+            location.runnerId === member.runnerId && location.workspaceId === member.workspaceId) return entry.repository;
+      }
+    }
+    return null;
+  }
+
   /** The newest Human decision on admitting this follow-up past the campaign's approval limit (#2940). */
   campaignFollowUpAdmission(rootId: string, subject: CampaignFollowUpSubject): WorkflowDecisionView | null {
     return workflowDecisionFromRow(this.stmt(`SELECT * FROM workflow_decisions WHERE controlling_session_id=? AND session_id=?
@@ -17901,7 +17922,9 @@ export class ControlPlaneDb {
       if (derived) {
         const most = previous + (100 - issues.maxIssues);
         if (count > most) return refuse(400, `Enter a count from 0 to ${most}: a campaign holds at most 100 issues.`);
-        const held = (policy.issueNumbers?.length ?? 0) + this.unsettledPublicationSlots(rootId, []);
+        // The whole repository-qualified scope (#4118), not only the launch repository's numbers.
+        const held = (policy.issueScope ? campaignScopeIssues(policy.issueScope).length : policy.issueNumbers?.length ?? 0) +
+          this.unsettledPublicationSlots(rootId, []);
         maxIssues = Math.max(1, held, issues.maxIssues + count - previous);
       } else {
         const most = Math.max(0, issues.maxIssues - grant.namedIssues.length);
@@ -17948,28 +17971,35 @@ export class ControlPlaneDb {
       const snapshot = decision?.resourceSnapshot;
       const root = decision ? this.getSession(decision.sessionId) : null;
       const policy = root?.orchestratorPolicy;
+      // The change starts from exactly the scope the campaign holds, in every repository (#4118).
+      const held = policy?.issueScope ? campaignScopeIssues(policy.issueScope)
+        : (policy?.issueNumbers ?? []).map((number) => ({ repository: snapshot?.category === "campaign_issue_scope" ? snapshot.repository : "", number }));
       if (!decision || decision.status !== "pending" || decision.authority !== (agentSessionId ? "orchestrator" : "human") || snapshot?.category !== "campaign_issue_scope" ||
           !root || !policy || (policy.issueScope?.revision ?? 0) !== snapshot.expectedRevision ||
-          JSON.stringify([...(policy.issueNumbers ?? [])].sort((a,b) => a-b)) !== JSON.stringify(snapshot.before)) {
+          JSON.stringify([...(policy.issueNumbers ?? [])].sort((a,b) => a-b)) !== JSON.stringify(snapshot.before) ||
+          (policy.issueScope && policy.issueScope.repository.toLowerCase() !== snapshot.repository) ||
+          JSON.stringify(canonicalCampaignIssues(held)) !== JSON.stringify(campaignScopeChangeBefore(snapshot))) {
         this.db.exec("ROLLBACK"); return null;
       }
+      const after = campaignScopeChangeResult(snapshot);
       const boundary = policy.control?.mode === "full_control" ? policy.control.boundary : null;
-      const scopeSize = snapshot.before.length + snapshot.additions.length - snapshot.removals.length;
       // An Orchestrator proposal the floors admitted (#4282) grows a derived Maximum Issues to fit,
       // as a first message naming those issues derived it before; it never withholds operations.
-      const agentGrown = agentSessionId && boundary ? proposalMaxIssues(policy, snapshot, boundary, scopeSize) : undefined;
+      const agentGrown = agentSessionId && boundary ? proposalMaxIssues(policy, snapshot, boundary, after.length) : undefined;
       if (agentSessionId && (!boundary?.issueAuthority || !snapshot.issueAdmission || agentSessionId !== root.id ||
           snapshot.issueAdmission.boundaryRevision !== boundary.revision || decision.policyRevision !== boundary.revision ||
           boundary.issueScopeRevision !== snapshot.expectedRevision || userId !== boundary.authorizedByUserId ||
           snapshot.scopeProposal?.withheldOperations.length ||
-          scopeSize > this.campaignIssueLimit(root.id, agentGrown ?? boundary.issueAuthority.maxIssues))) {
+          after.length > this.campaignIssueLimit(root.id, agentGrown ?? boundary.issueAuthority.maxIssues))) {
         this.db.exec("ROLLBACK"); return null;
       }
-      const scope: import("@wollipog/protocol").CampaignIssueScope = { repository: snapshot.repository,
-        issueNumbers: [...snapshot.before.filter((n) => !snapshot.removals.includes(n)), ...snapshot.additions].sort((a,b) => a-b),
-        revision: snapshot.expectedRevision + 1, authorizedByUserId: userId,
+      // Every repository the change names must still be one of the campaign's (#4118).
+      const repositories = new Set([snapshot.repository, ...campaignScopeRepositories(root).map((entry) => entry.repository)]);
+      if (after.some((issue) => !repositories.has(issue.repository))) { this.db.exec("ROLLBACK"); return null; }
+      const scope: import("@wollipog/protocol").CampaignIssueScope = campaignScopeWithIssues({ repository: snapshot.repository,
+        issueNumbers: [], revision: snapshot.expectedRevision + 1, authorizedByUserId: userId,
         authorizedAt: agentSessionId ? policy.issueScope!.authorizedAt : now,
-        ...(agentSessionId ? { disposition: { bySessionId: agentSessionId, at: now, occurrenceId, boundaryRevision: boundary!.revision } } : {}) };
+        ...(agentSessionId ? { disposition: { bySessionId: agentSessionId, at: now, occurrenceId, boundaryRevision: boundary!.revision } } : {}) }, after);
       // A Human's approval is the authority for the scope it establishes (#2940): under Full Control
       // the boundary is re-minted from that Human in this transaction, so the campaign never holds a
       // scope its boundary does not name. A boundary stale for any other reason is not extended.
@@ -17977,8 +18007,8 @@ export class ControlPlaneDb {
         ? remintCampaignBoundary(boundaryWithScopedEpics(boundary, scope.issueNumbers), scope, userId, now) : null;
       // The owner approving the proposal a failed or uncertain scope grant routed to them (#4102)
       // also sets the derived issue limit that grant could not.
-      const grown = reminted?.mode === "full_control" ? proposalMaxIssues(policy, snapshot, reminted.boundary, scope.issueNumbers.length) ??
-        grantReviewMaxIssues(policy, snapshot, reminted.boundary, scope.issueNumbers.length) : undefined;
+      const grown = reminted?.mode === "full_control" ? proposalMaxIssues(policy, snapshot, reminted.boundary, after.length) ??
+        grantReviewMaxIssues(policy, snapshot, reminted.boundary, after.length) : undefined;
       if (grown !== undefined && reminted?.mode === "full_control") reminted.boundary.issueAuthority!.maxIssues = grown;
       // The owner approving an Orchestrator's proposal (#4282) also withholds the operations it says
       // the message withholds: narrowing only. An approval that cannot re-mint the boundary applies nothing.
@@ -17997,7 +18027,7 @@ export class ControlPlaneDb {
       }
       // The re-minted boundary's issue limit holds the scope and every slot a consumed publication
       // still reserves, as an explicit authorization's does.
-      if (reminted?.mode === "full_control" && reminted.boundary.issueAuthority && scope.issueNumbers.length +
+      if (reminted?.mode === "full_control" && reminted.boundary.issueAuthority && after.length +
           this.unsettledPublicationSlots(root.id, scopeSettlements(snapshot)) > this.campaignIssueLimit(root.id, reminted.boundary.issueAuthority.maxIssues)) {
         this.db.exec("ROLLBACK"); return null;
       }
@@ -18005,9 +18035,12 @@ export class ControlPlaneDb {
         const memberPolicy = this.sessionOrchestratorPolicy(id);
         if (!memberPolicy) continue;
         const member = this.getSession(id)!;
-        // Retired participants may belong to a different repository. Record the revision, but
-        // never transfer this repository's issue numbers into their launch permission policy.
-        const memberScope = this.campaignSharesRepositoryWorkspace(root, member) ? scope : { ...scope, issueNumbers: [] };
+        // The root holds the whole scope. Each other participant holds only its own Location
+        // repository's part (#4118), as its runner does, so a number is never read in the wrong
+        // repository; a retired participant in no campaign repository records the revision only.
+        const memberRepository = id === root.id ? null : this.campaignParticipantRepository(root, member);
+        const memberScope = id === root.id ? scope : memberRepository ? campaignScopeForRepository(scope, memberRepository)
+          : { ...campaignScopeForRepository(scope, scope.repository), issueNumbers: [] };
         // The first scope applied under the propose-then-check flow is the campaign's initial scope
         // (#4282), whoever approved it: dispatch can start.
         const first = memberPolicy.firstMessageScope;
@@ -18119,7 +18152,7 @@ export class ControlPlaneDb {
         scope.authorizedByUserId === userId && this.boundaryTrailsHumanScope(rootId, policy)
         ? remintCampaignBoundary(boundaryWithScopedEpics(control.boundary, scope.issueNumbers), scope, userId, scope.authorizedAt) : null;
       if (reminted?.mode !== "full_control" || reminted.boundary.issueAuthority &&
-          scope!.issueNumbers.length + this.unsettledPublicationSlots(rootId) > this.campaignIssueLimit(rootId, reminted.boundary.issueAuthority.maxIssues)) {
+          campaignScopeIssues(scope!).length + this.unsettledPublicationSlots(rootId) > this.campaignIssueLimit(rootId, reminted.boundary.issueAuthority.maxIssues)) {
         this.db.exec("ROLLBACK"); return null;
       }
       for (const id of [rootId, ...this.campaignDescendantIds(rootId)]) {
@@ -34889,6 +34922,12 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
       typeof value.issueScope.authorizedByUserId !== "string" || !value.issueScope.authorizedByUserId ||
       !Number.isSafeInteger(value.issueScope.authorizedAt) || value.issueScope.authorizedAt < 1 ||
       JSON.stringify(value.issueScope.issueNumbers) !== JSON.stringify(value.issueNumbers ?? []))) return null;
+  // A repository-qualified scope (#4118) is canonical, and its launch numbers are derived from it.
+  if (value.issueScope?.issues !== undefined) {
+    const issues = canonicalCampaignIssues(value.issueScope.issues);
+    if (!issues || JSON.stringify(issues) !== JSON.stringify(value.issueScope.issues) ||
+        JSON.stringify(campaignScopeNumbers(value.issueScope, value.issueScope.repository)) !== JSON.stringify([...value.issueScope.issueNumbers].sort((a, b) => a - b))) return null;
+  }
   if (value.issueNumbers) value.issueNumbers = [...new Set(value.issueNumbers)];
   const first = value.firstMessageScope as unknown as Record<string, unknown> | undefined;
   const digest = (v: unknown) => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
@@ -35054,9 +35093,13 @@ function ownerDecisionSummary(snapshot: WorkflowDecisionView["resourceSnapshot"]
       case "campaign_issue_scope": {
         // An Orchestrator's proposal waiting for the owner names its exact change (#4267).
         if (!snapshot.ownerReview) return `Change the campaign's issue scope in ${snapshot.repository}`;
-        const refs = (numbers: number[]) => numbers.map((n) => `${snapshot.repository}#${n}`).join(", ");
+        // Every repository's part, each issue qualified by its own repository (#4118).
+        const groups = campaignScopeChangeGroups(snapshot);
+        const refs = (pick: (group: (typeof groups)[number]) => number[]) =>
+          groups.flatMap((group) => pick(group).map((n) => `${group.repository}#${n}`)).join(", ");
+        const removals = refs((group) => group.removals);
         const raise = snapshot.ownerReview.maxIssuesIncrease;
-        return `Add ${refs(snapshot.additions)}${snapshot.removals.length ? ` and remove ${refs(snapshot.removals)}` : ""}` +
+        return `Add ${refs((group) => group.additions)}${removals ? ` and remove ${removals}` : ""}` +
           (raise ? `, raising Maximum Issues from ${raise.from} to ${raise.from + raise.increase}` : "");
       }
       case "ui_evidence_approval": return `Review ${snapshot.evidence.length} UI evidence item${snapshot.evidence.length === 1 ? "" : "s"}`;

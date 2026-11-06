@@ -1,7 +1,7 @@
 import type { CampaignScopeGrantReview, SessionView } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import { issueBoundary } from "./campaign-issue-authority.js";
-import { scopeCompatibility, scopeParticipants } from "./campaign-issue-scope.js";
+import { participantScopeRefusal, scopeCompatibility, scopeParticipants } from "./campaign-issue-scope.js";
 
 /** Why the server refused an issue-closure request before it inspected anything (#3382). A malformed
  * request, a campaign with no authorized issue scope, and an issue outside a non-empty scope are
@@ -69,9 +69,10 @@ export function issueClosureRequestInvalid(fields: string[]): IssueClosureReques
 function scopeChangeUnavailable(db: ControlPlaneDb, root: SessionView): string | null {
   const requirement = scopeCompatibility(db, root);
   if (requirement) return requirement.error;
-  if (scopeParticipants(db, root).some((member) => !db.campaignSharesRepositoryWorkspace(root, member))) {
-    return "Every active Orchestrator participant must use the campaign's runner and repository workspace before its issue scope can change; " +
-      "move or finish the other participants first.";
+  // The participant rule a scope proposal applies (#4118): any Location of a campaign repository.
+  for (const member of scopeParticipants(db, root)) {
+    const refusal = participantScopeRefusal(db, root, member);
+    if (refusal) return refusal.error;
   }
   return null;
 }
