@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { CampaignIssueScopeMessage, ExecutionTargetRef, HostExecutionTargetRefusalReason, GithubIssueClosureSnapshot } from "@wollipog/protocol";
+import type { GhRunner } from "./campaign-forge-status.js";
 import { classifyRoutineClaudeOrchestratorPermission } from "./orchestrator-provider-permissions.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
@@ -246,6 +247,32 @@ test("a closure at a Location runs in that path on this runner with no session o
   const missing = await inspect({ ...location, workspacePath: join(f.root, "missing") });
   assert.deepEqual([missing.ok, missing.failure], [false, "runner_failed"]);
   assert.equal(f.commands.length, before);
+});
+
+test("forge facts at a Location are read in its path with no session here, and only for its own repository (#4119)", async (t) => {
+  const f = fixture(t);
+  const location = { workspaceId: "api", workspacePath: f.root, repository: "Example/Project" };
+  const observe = (pullRequests: Array<{ repository: string; number: number }>, at = location, gh?: GhRunner) =>
+    f.manager().campaignForgeObserve({ type: "campaign_forge_observe", requestId: "forge", sessionId: "s_on_another_runner", pullRequests, location: at },
+      gh ? { gh } : {});
+
+  // The read names no session of this runner's, and every command runs in the Location's own path.
+  const before = f.commands.length;
+  await observe([{ repository: "example/project", number: 1 }]);
+  const commands = f.commands.slice(before);
+  assert.ok(commands.length > 0 && commands.every((command) => command.file === "gh" && command.cwd === realpathSync(f.root)), JSON.stringify(commands));
+
+  // A pull request of any other repository is refused before the forge is asked.
+  let asked = 0;
+  const gh: GhRunner = async () => { asked++; throw new Error("A refused read must never reach the forge"); };
+  const elsewhere = await observe([{ repository: "example/project", number: 1 }, { repository: "example/other", number: 2 }], location, gh);
+  assert.deepEqual([elsewhere.ok, elsewhere.failure], [false, "forge_unsupported"]);
+  // So is a Location frame that names no usable path, and a path this runner doesn't have is a failure, never a read.
+  const blank = await observe([{ repository: "example/project", number: 1 }], { ...location, workspacePath: " " }, gh);
+  assert.deepEqual([blank.ok, blank.failure], [false, "forge_unsupported"]);
+  const missing = await observe([{ repository: "example/project", number: 1 }], { ...location, workspacePath: join(f.root, "missing") }, gh);
+  assert.deepEqual([missing.ok, missing.failure], [false, "forge_error"]);
+  assert.equal(asked, 0);
 });
 
 test("a Location's commit wait starts at its fence, so slow forge checks don't use it up (#4119)", async (t) => {

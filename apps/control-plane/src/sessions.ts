@@ -38,7 +38,7 @@ import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignClosureIssueHeld, campaignRepositoryLimits, campaignControlForRunner, campaignControlRevisionForRunner, campaignLaunchRepository, campaignOtherRepository, campaignScopeRepositories, carriedCampaignRepositories } from "./campaign-authority.js";
 import { campaignRepositoryOutsideLimit } from "./campaign-authority.js";
-import { campaignBoundaryRepositoryAt, launchBoundaryRepositories } from "./campaign-repository-boundary.js";
+import { campaignBoundaryRepositoryAt, campaignRepositoryPlaces, launchBoundaryRepositories } from "./campaign-repository-boundary.js";
 import { inspectBoundaryPublication, verifyBoundaryPublishedIssue } from "./project-location-inspection.js";
 import { campaignBoundaryRepository } from "@wollipog/protocol";
 import { genericRequestScreenData, implementationQuestionScreenData, ownerDecisionScreenData, screenCredentialRequest, type CredentialScreenSurface } from "./credential-screen.js";
@@ -4486,7 +4486,7 @@ export class SessionsService {
     if (context.rootSessionId !== root.id || context.childSessionId !== child.id ||
       JSON.stringify(context.boundary) !== JSON.stringify(control.boundary) ||
       JSON.stringify(context.evidenceAuthority) !== JSON.stringify(control.boundary.evidenceAuthority) ||
-      !scope || !scope.issueNumbers.includes(context.issue) || scope.revision !== context.issueScopeRevision ||
+      !scope || !campaignClosureIssueHeld(root.orchestratorPolicy, { repository: context.repository, number: context.issue }) || scope.revision !== context.issueScopeRevision ||
       !rootAudience || !childAudience || !this.db.scopeAudienceContainedWithMembership(rootAudience, childAudience) ||
       // The peer runs in a Location of the child's own boundary repository (#4119).
       request.workspacePath || !campaignBoundaryRepositoryAt(this.db, root, request) ||
@@ -13323,15 +13323,9 @@ export class SessionsService {
     const other = campaignOtherRepository(root, repository);
     if (!other) return { runnerId: root.runnerId };
     const entry = campaignScopeRepositories(root).find((candidate) => candidate.repository === other);
-    for (const id of entry?.locationIds ?? []) {
-      const location = this.db.getProjectLocation(id);
-      if (!location || location.availability === "runner_removed" || !root.projectId || location.projectId !== root.projectId ||
-          !this.hub.isRunnerOnline(location.runnerId) ||
-          !runnerSupportsProtocol(this.db.getRunner(location.runnerId)?.protocolVersion, "locationIssueClosure")) continue;
-      const workspacePath = this.db.getWorkspacePath(location.runnerId, location.workspaceId);
-      if (workspacePath) return { runnerId: location.runnerId, location: { workspaceId: location.workspaceId, workspacePath, repository: other } };
-    }
-    return null;
+    const place = entry && campaignRepositoryPlaces(this.db, root, entry).find((candidate) => this.hub.isRunnerOnline(candidate.runnerId) &&
+      runnerSupportsProtocol(this.db.getRunner(candidate.runnerId)?.protocolVersion, "locationIssueClosure"));
+    return place ? { runnerId: place.runnerId, location: { workspaceId: place.workspaceId, workspacePath: place.workspacePath, repository: other } } : null;
   }
 
   /** The runner's authoritative read of every excluded pull request, past the observer's cache and

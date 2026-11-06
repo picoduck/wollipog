@@ -27,6 +27,8 @@ import { syntheticInspectedVideoRuns, syntheticMediaReviewerAttestation, synthet
 import type { AgentPrincipal, AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
 import { campaignBoundaryRepositoryAt } from "./campaign-repository-boundary.js";
+import { CampaignForgeObserver } from "./campaign-forge-observations.js";
+import { forgeFactsForPrincipal } from "./campaign-status-routes.js";
 import { inspectCampaignWorkspace, inspectProjectLocation } from "./project-location-inspection.js";
 import { CampaignRepositoryAdditions } from "./campaign-repository-additions.js";
 import { CampaignLocations, registerCampaignLocationRoutes } from "./campaign-locations.js";
@@ -5344,6 +5346,154 @@ test("a Custom campaign's child in another Location receives that repository's s
     const foreign = await f.sessions.requestGithubIssueClosure(id, closureRequest("close-third", 40, "third/repo"));
     assert.deepEqual(foreign.errorDetails, repositoryOutsideBoundary("third/repo").errorDetails);
   } finally { f.db.close(); }
+});
+
+test("a Custom campaign's publication and merge in another repository are its child's there, each with a person's approval (#4119)", async () => {
+  const f = fixture();
+  const p = multiRepositoryProject(f);
+  f.db.registerRunner({ runnerId: "r2", hostname: "r2", os: "linux", version: "test",
+    workspaces: [{ id: "a", name: "r2 a", path: "/fixture/two/other" }, { id: "b", name: "r2 b", path: "/fixture/two/repository" }],
+    agents: [{ id: "claude", name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code", context: { kind: "native" }, available: true,
+      capabilities: { models: [{ id: "claude-opus-5-5", default: true }], effortLevels: ["high"], slashCommands: [],
+        permissionModes: ["default", "orchestrator"], supportsImages: true, supportsApprovals: true } }],
+    runtime: { ...runtime, campaignLaunchInspection: { version: 4 } } }, Date.now(), PROTOCOL_VERSION);
+  const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+  policy.issueScope = { repository: "owner/repo", issueNumbers: [12], revision: 1, authorizedByUserId: f.human.userId, authorizedAt: 1,
+    issues: [{ repository: "other/repo", number: 40 }, { repository: "owner/repo", number: 12 }] };
+  policy.issueNumbers = [12];
+  policy.repositories = [{ repository: "owner/repo", locationIds: [p.launchLocation.id] }, { repository: "other/repo", locationIds: [p.other.id] }];
+  const id = "custom-multi-repository-gates";
+  f.db.createSession({ id, runnerId: "r", workspaceId: "w", projectId: p.project.id, projectLocationId: p.launchLocation.id, agentId: "claude", title: "Deliver", useWorktree: false,
+    driver: "claude-code", creationActor: "human", scope: f.scope, config: { model: "claude-opus-5-5", permissionMode: "orchestrator" }, now: 2,
+    role: "orchestrator", orchestratorPolicy: policy, parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } } });
+  f.db.updateSessionStatus(id, "running", 3);
+  const preflights: Array<{ runnerId: string; pullRequest: number }> = [];
+  const send = f.hub.sendToRunner.bind(f.hub);
+  f.hub.sendToRunner = (runnerId, message) => {
+    if (message.type !== "github_merge_preflight") return send(runnerId, message);
+    preflights.push({ runnerId, pullRequest: message.pullRequest });
+    const closures = [{ issue: message.pullRequest === 7 ? "other/repo#40" : "other/repo#99", sources: ["linked" as const] }];
+    queueMicrotask(() => f.hub.resolveRunnerRequest({ type: "github_merge_preflight_result", requestId: message.requestId, sessionId: message.sessionId, ok: true,
+      check: { checkedAt: Date.now(), closures } }, runnerId));
+    return true;
+  };
+  try {
+    const created = f.sessions.createSession({ runnerId: "r2", workspaceId: "a", agentId: "claude", title: "Child", prompt: "Deliver #40", useWorktree: false, config: {} },
+      undefined, f.scope, false, false, false, { parentSessionId: id });
+    assert.equal(created.ok, true, created.error ?? "created");
+    const child = created.data!.id;
+    f.db.updateSessionStatus(child, "running", Date.now());
+    const asPerson = (occurrenceId: string) => f.sessions.resolveWorkflowDecision(id, child, occurrenceId, { outcome: "approve" }, "human", { kind: "human", id: f.human.userId }, () => true);
+    const asOrchestrator = (occurrenceId: string) => f.sessions.resolveWorkflowDecision(id, child, occurrenceId, { outcome: "approve" }, "orchestrator", { kind: "agent", id }, () => true);
+
+    // A publication in that repository is requested by its child and decided by a person, under the
+    // same snapshot a Full Control one carries; the Orchestrator can't approve it.
+    const publication: WorkflowDecisionResourceSnapshot = { category: "follow_up_issue_publication", repository: "other/repo", sanitizedTitle: "Other Repair", labels: [],
+      sanitizedBody: "## Problem\nRelated failure\n## Proposed Behavior\nRepair it\n## Acceptance Criteria\n- Verified repair\n## Security and Compatibility\nNone" };
+    const published = await f.sessions.createWorkflowDecisionWithVideo(child, { requestId: "publish", resourceKey: "publish", resourceSnapshot: publication });
+    assert.equal(published.ok, true, published.error ?? "");
+    assert.deepEqual([published.data!.sessionId, published.data!.controllingSessionId, published.data!.authority], [child, id, "human"]);
+    assert.equal(asOrchestrator(published.data!.occurrenceId).ok, false, "a Custom publication is never the Orchestrator's to approve");
+    assert.equal(asPerson(published.data!.occurrenceId).ok, true);
+    const consumed = await f.sessions.consumeWorkflowDecision(child, published.data!.occurrenceId, { resourceSnapshot: published.data!.resourceSnapshot });
+    assert.equal(consumed.ok, true, consumed.error ?? "");
+
+    // A merge in that repository reads its closures through the child's own runner, and a person decides it.
+    const head = "a".repeat(40);
+    const merge = (pullRequest: number, intendedClosures: string[]): WorkflowDecisionResourceSnapshot => ({ category: "pr_merge", repository: "other/repo", pullRequest, headSha: head, reviewResult: "merge",
+      intendedClosures, requiredChecks: { headSha: head, status: "passed", checkedAt: 1, checks: [{ name: "CI", state: "passed" }] } });
+    const merged = await f.sessions.createWorkflowDecisionWithVideo(child, { requestId: "merge", resourceKey: "merge", resourceSnapshot: merge(7, ["other/repo#40"]) });
+    assert.equal(merged.ok, true, merged.error ?? "");
+    assert.deepEqual([merged.data!.controllingSessionId, merged.data!.authority], [id, "human"]);
+    assert.deepEqual(preflights, [{ runnerId: "r2", pullRequest: 7 }], "read through the child's runner, never the root's");
+    assert.deepEqual(merged.data!.closingReferenceCheck?.closures.map((closure) => closure.issue), ["other/repo#40"]);
+    assert.equal(asOrchestrator(merged.data!.occurrenceId).ok, false, "a Custom merge under this policy is never the Orchestrator's to approve");
+    assert.equal(asPerson(merged.data!.occurrenceId).ok, true);
+
+    // A merge that would close an issue its snapshot doesn't declare is refused here too, before a decision exists.
+    const undeclared = await f.sessions.createWorkflowDecisionWithVideo(child, { requestId: "merge-undeclared", resourceKey: "merge-undeclared", resourceSnapshot: merge(8, ["other/repo#40"]) });
+    assert.equal(undeclared.status, 409);
+    assert.match(undeclared.error!, /other\/repo#99/);
+  } finally { f.db.close(); }
+});
+
+test("a closure's delivery facts are read by a Location of the pull request's repository, and the root's login never stands in (#4119)", async () => {
+  const { f, server, id, propose, approve } = await multiRepositoryCampaign();
+  try {
+    f.db.updateSessionStatus(id, "running", Date.now());
+    const seeded = await propose("both-repositories", [["other/repo", 40], ["other/repo", 41]]);
+    assert.equal(approve(seeded.data!.occurrenceId).ok, true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const { closures } = closureRunners(f);
+    const head = "b".repeat(40), mergeCommit = "c".repeat(40);
+    const rollup = { state: "passing" as const, passing: 1, failing: 0, pending: 0 };
+    const merged = { state: "merged" as const, draft: false, headSha: head, baseRef: "main", reviewDecision: "approved" as const, checks: rollup, requiredChecks: rollup, mergeQueue: null, mergeCommitSha: mergeCommit };
+    const reads: Array<{ runnerId: string; refs: string[]; location: unknown }> = [];
+    const send = f.hub.sendToRunner.bind(f.hub);
+    f.hub.sendToRunner = (runnerId, message) => {
+      if (message.type !== "campaign_forge_observe") return send(runnerId, message);
+      reads.push({ runnerId, refs: message.pullRequests.map((ref) => `${ref.repository}#${ref.number}`), location: message.location ?? null });
+      queueMicrotask(() => f.hub.resolveRunnerRequest({ type: "campaign_forge_observe_result", requestId: message.requestId, sessionId: message.sessionId, observedAt: Date.now(), ok: true,
+        results: message.pullRequests.map((ref) => ({ ref, ok: true as const, observation: merged })) }, runnerId));
+      return true;
+    };
+    let count = 0;
+    const observer = new CampaignForgeObserver({
+      observingRunner: (campaignId, repository) => f.db.campaignForgeObservingRunner(campaignId, repository, (runnerId) => f.hub.isRunnerOnline(runnerId)),
+      requestFromRunner: (runnerId, requestId, message, timeout) => f.hub.requestFromRunner(runnerId, requestId, message, timeout),
+      store: f.db.campaignForgeObservations, backgroundTargets: () => [], changed: () => undefined, warn: () => undefined, newRequestId: () => `forge_${++count}`,
+    });
+    f.sessions.campaignForgeRefresh = (campaignId, refs) => observer.refresh(campaignId, refs);
+    f.sessions.campaignForgeReadNow = (campaignId, refs) => observer.readNow(campaignId, refs);
+
+    // Delivered work on other/repo#40 whose pull request's facts come only from the store.
+    const pull = { repository: "other/repo", number: 10 };
+    const item = () => ({ id: "wi-40", issue: { repository: "other/repo", number: 40 }, primaryState: "delivered", currentAttempt: null, attempts: [],
+      verifications: [{ outcome: "delivered", report: { digest: "d".repeat(64) } }],
+      observed: { pullRequests: f.db.campaignForgeObservations.facts(id, [pull], Date.now()) } }) as unknown as CampaignWorkItemDetail;
+    const ledger = f.db.campaignWorkLedger;
+    ledger.page = (() => ({ ok: true, data: { items: [item()] } })) as unknown as typeof ledger.page;
+    ledger.detail = (() => item()) as unknown as typeof ledger.detail;
+
+    // The proof is complete, so the closure is the Orchestrator's, and only other/repo's Location's runner read for it.
+    const location = { workspaceId: "a", workspacePath: "/fixture/two/other", repository: "other/repo" };
+    const requested = await f.sessions.requestGithubIssueClosure(id, { requestId: "close-40", issue: 40, repository: "other/repo", reason: "completed", explanation: "Delivered", evidence: ["Merged"] });
+    assert.equal(requested.ok, true, requested.error ?? "");
+    assert.equal(requested.data!.decision!.authority, "orchestrator", JSON.stringify(requested.data!.decision!.authorityEvaluation));
+    assert.deepEqual(reads, [{ runnerId: "r2", refs: ["other/repo#10"], location }]);
+    assert.equal((f.db.raw().prepare("SELECT runner_id FROM campaign_forge_observations WHERE campaign_session_id=? AND number=10").get(id) as { runner_id: string }).runner_id, "r2");
+    assert.deepEqual(closures.map(({ runnerId }) => runnerId), ["r2", "r2"], "its inspection and delivery check too");
+    reads.length = 0;
+
+    // A batch naming both repositories splits by reader, and an authoritative read keeps the asked order.
+    const launchPull = { repository: "owner/repo", number: 9 };
+    const answers = await observer.readNow(id, [pull, launchPull, { repository: "other/repo", number: 11 }]);
+    assert.deepEqual(answers?.map((answer) => `${answer.ref.repository}#${answer.ref.number}`), ["other/repo#10", "owner/repo#9", "other/repo#11"]);
+    assert.deepEqual(reads.map((read) => [read.runnerId, read.refs, read.location]).sort(), [["r", ["owner/repo#9"], null], ["r2", ["other/repo#10", "other/repo#11"], location]]);
+    reads.length = 0;
+
+    // With its Location offline nothing reads it: the root's runner is never asked in its place.
+    const online = f.hub.isRunnerOnline;
+    f.hub.isRunnerOnline = (runnerId) => runnerId !== "r2" && online(runnerId);
+    const unseen = { repository: "other/repo", number: 12 };
+    await observer.refresh(id, [unseen]);
+    assert.equal(await observer.readNow(id, [unseen]), null);
+    assert.deepEqual(reads, []);
+    f.hub.isRunnerOnline = online;
+
+    // Nor is a runner that predates the capability asked; its facts say why.
+    f.db.registerRunner({ runnerId: "r2", hostname: "r2", os: "linux", version: "test", agents: [], runtime: { ...runtime, campaignLaunchInspection: { version: 3 } },
+      workspaces: [{ id: "a", name: "r2 a", path: "/fixture/two/other" }, { id: "b", name: "r2 b", path: "/fixture/two/repository" }] },
+    Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.locationForgeObservation - 1);
+    await observer.refresh(id, [unseen]);
+    assert.deepEqual(reads, []);
+    assert.deepEqual(f.db.campaignForgeObservations.facts(id, [unseen], Date.now())[0]!.fact, { availability: "unavailable", reason: "runner_unsupported" });
+
+    // A viewer who can't reach that runner neither sees its facts nor causes a read through its login.
+    assert.deepEqual(forgeFactsForPrincipal(item(), (repository) => repository !== "other/repo").observed.pullRequests,
+      [{ ref: pull, fact: { availability: "unavailable", reason: "not_authorized" } }]);
+    observer.dispose();
+  } finally { await server.close(); f.db.close(); }
 });
 
 test("a child created in a second boundary repository's Location gets only that repository's issue numbers, at launch and in every synchronization (#4119, #4118)", async () => {

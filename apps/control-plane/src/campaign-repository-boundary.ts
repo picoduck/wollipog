@@ -3,6 +3,30 @@ import {
   type CampaignAvailableLocation, type CampaignBoundaryRepository, type CampaignPendingLocation, type CampaignExcludedLocation, type ProjectLocationInspection, type ProjectLocationView, type SessionView,
 } from "@wollipog/protocol";
 
+/** One place a gate of a campaign repository can run (#4119). */
+export interface CampaignRepositoryPlace {
+  runnerId: string;
+  workspaceId: string;
+  workspacePath: string;
+  repository: string;
+}
+
+/** An entry's active Locations in the root's Project with a path on their runner, in entry order.
+ * Callers add what their own gate needs of the runner: being online, a protocol capability. */
+export function campaignRepositoryPlaces(
+  db: { getProjectLocation(locationId: string): ProjectLocationView | null; getWorkspacePath(runnerId: string, workspaceId: string): string | null },
+  root: Partial<Pick<SessionView, "projectId">>,
+  entry: CampaignBoundaryRepository,
+): CampaignRepositoryPlace[] {
+  if (!root.projectId) return [];
+  return entry.locationIds.flatMap((id) => {
+    const location = db.getProjectLocation(id);
+    if (!location || location.availability === "runner_removed" || location.projectId !== root.projectId) return [];
+    const workspacePath = db.getWorkspacePath(location.runnerId, location.workspaceId);
+    return workspacePath ? [{ runnerId: location.runnerId, workspaceId: location.workspaceId, workspacePath, repository: entry.repository.toLowerCase() }] : [];
+  });
+}
+
 /** The repository whose listed Location a runner and workspace are, lower-cased, or null: an active
  * Location of the root's Project that one of `entries` lists (#4118, #4119). */
 export function campaignLocationRepository(
