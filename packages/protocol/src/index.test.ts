@@ -120,7 +120,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 317);
+  assert.equal(PROTOCOL_VERSION, 318);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -358,8 +358,11 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 317", () => {
-  assert.equal(PROTOCOL_VERSION, 317);
+test("PROTOCOL_VERSION is 318", () => {
+  assert.equal(PROTOCOL_VERSION, 318);
+  // Another repository's proposed issues are read through a v318 Location's runner (#4118).
+  assert.equal(runnerSupportsProtocol(317, "repositoryQualifiedProposals"), false);
+  assert.equal(runnerSupportsProtocol(318, "repositoryQualifiedProposals"), true);
   // Merges on every reported check need a v315 runner to read them (#4119).
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.githubMergeChecksBasis, 315);
   assert.equal(runnerSupportsProtocol(RUNNER_CAPABILITY_MIN_PROTOCOL.githubMergeChecksBasis - 1, "githubMergeChecksBasis"), false);

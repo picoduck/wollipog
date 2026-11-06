@@ -36,6 +36,29 @@ test("registered workspace inspection reads exact issues and returns only saniti
   } finally { await rm(path, { recursive: true, force: true }); }
 });
 
+test("a facts inspection reports each issue's bounded facts, a pull request included, and nothing else from the forge (#4118)", async () => {
+  const path = await mkdtemp(join(tmpdir(), "campaign-launch-inspection-"));
+  try {
+    const run = async (_cwd: string, command: string, args: string[]) => {
+      if (command === "git") return args[0] === "remote" ? "https://github.com/owner/repo.git" : args.includes("--is-inside-work-tree") ? "true" : "a".repeat(40);
+      const number = Number(args.at(-1)!.split("/").at(-1));
+      return JSON.stringify(number === 2
+        ? { number, title: "A pull request", body: "", state: "open", html_url: `https://github.com/owner/repo/pull/${number}`, pull_request: {}, labels: [], assignees: [] }
+        : { number, title: "An issue", body: "The body", state: "closed", html_url: `https://github.com/owner/repo/issues/${number}`, labels: [{ name: "bug" }], assignees: [] });
+    };
+    const result = await inspectCampaignLaunch({ type: "campaign_launch_inspect", requestId: "facts-1", workspaceId: "w", issueNumbers: [2, 1], facts: true }, [{ id: "w", path }], run);
+    assert.equal(result.ok, true, result.error ?? "");
+    assert.deepEqual(result.issueNumbers, [1, 2]);
+    assert.deepEqual(result.issueFacts!.map((fact) => [fact.number, fact.kind, fact.state, fact.labels]).sort((a, b) => (a[0] as number) - (b[0] as number)),
+      [[1, "issue", "closed", ["bug"]], [2, "pull_request", "open", []]]);
+    assert.doesNotMatch(JSON.stringify(result), /github\.com|\/tmp\//);
+    const plain = await inspectCampaignLaunch({ type: "campaign_launch_inspect", requestId: "facts-2", workspaceId: "w", issueNumbers: [1] }, [{ id: "w", path }], run);
+    assert.equal(plain.issueFacts, undefined, "only a caller that asked gets issue text");
+    const invalid = await inspectCampaignLaunch({ type: "campaign_launch_inspect", requestId: "facts-3", workspaceId: "w", issueNumbers: [1], facts: "yes" } as unknown as CampaignLaunchInspectionMessage, [{ id: "w", path }], run);
+    assert.equal(invalid.failure, "invalid_request");
+  } finally { await rm(path, { recursive: true, force: true }); }
+});
+
 test("inspection errors cannot expose credential-bearing origin or environment diagnostics", async () => {
   const result = await inspectCampaignLaunch({ type: "campaign_launch_inspect", requestId: "read-1", workspaceId: "w", issueNumbers: [1] }, [{ id: "w", path: tmpdir() }],
     async () => { throw new Error("https://secret:token@github.com/owner/repo PRIVATE_ENV=value"); });
@@ -180,6 +203,9 @@ test("a publication inspection runs the root's duplicate search in the Location'
     const extra =await inspectCampaignLaunch({ ...message, publication: { ...publication, repository: "other/repo" } } as CampaignLaunchInspectionMessage,
       [{ id: "w", path }], async () => { executed = true; return ""; });
     assert.deepEqual([extra.ok, extra.failure, executed], [false, "invalid_request", false]);
+    // A facts read reports a pull request rather than refusing it, so it can never check a payload.
+    const both = await inspectCampaignLaunch({ ...message, issueNumbers: [77], facts: true }, [{ id: "w", path }], async () => { executed = true; return ""; });
+    assert.deepEqual([both.ok, both.failure, executed], [false, "invalid_request", false]);
   } finally { await rm(path, { recursive: true, force: true }); }
 });
 

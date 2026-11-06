@@ -99,8 +99,11 @@ export interface CampaignLaunchInspectionMessage {
   /** Version 4 (#4119): a follow-up's exact sanitized payload, checked in the Location's repository
    * as the root checks its own. With no issue numbers: content screening and the duplicate search
    * by subject, before publishing. With one issue number: that issue must be published with
-   * exactly this payload, before it joins the scope. */
+   * exactly this payload, before it joins the scope. Never sent with `facts`: a runner refuses both. */
   publication?: { sanitizedTitle: string; sanitizedBody: string; labels: string[] };
+  /** Also report each of `issueNumbers` as `issueFacts` (#4118): sent only to a runner with
+   * `locationIssueFacts`, and an older one refuses it as invalid. */
+  facts?: true;
 }
 
 export const CAMPAIGN_LAUNCH_INSPECTION_ERRORS = {
@@ -129,6 +132,8 @@ export interface CampaignLaunchInspectionResult {
   repository?: string;
   issueNumbers?: number[];
   digest?: string;
+  /** Each requested number's bounded facts, with a pull request reported rather than refused. */
+  issueFacts?: import("./index.js").CampaignIssueFacts[];
   error?: string;
   failure?: CampaignLaunchInspectionFailure;
   /** Set when the inspection stopped because its request was cancelled. Never admits a launch. */

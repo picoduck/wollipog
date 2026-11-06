@@ -66,7 +66,7 @@ export type ScopeCheckAnswerOverride = { value: string; confidence?: number; evi
 /** The satisfying value of each `scope_check` question template. */
 const SCOPE_CHECK_SATISFIED: Record<string, string> = {
   count_consistent: "consistent", named_asked_for: "asked_for", constraint_met: "satisfies",
-  constraints_complete: "complete", nothing_omitted: "complete", operations_respected: "respected",
+  constraints_complete: "complete", repository_limit: "limits_work", nothing_omitted: "complete", operations_respected: "respected",
 };
 
 /** The question parameters a `scope_check` attempt carries, by instance id, read from its rendered input. */

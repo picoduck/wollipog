@@ -129,6 +129,7 @@ export type CampaignScopeAdmissionFailure =
   | "already_in_scope" | "other_campaign_scope" | "selection_count_exhausted" | "human_required_label"
   // The Orchestrator's own scope proposal (#4282): its floors beyond those above.
   | "owner_named_not_in_message" | "proposal_additions_only" | "proposal_count_exceeded" | "requested_count_not_in_message"
+  | "repository_name_not_in_message" | "repository_constraint_mismatch"
   // The Decision Model's constraint check of that proposal (#4282) refused it.
   | "constraint_check_refused";
 
@@ -171,7 +172,11 @@ export const CAMPAIGN_SCOPE_ADMISSION_REFUSALS: Readonly<Record<CampaignScopeAdm
   human_required_label: { status: 403, message: "A proposed issue has a label that a Human Required rule names, so only the campaign owner " +
     "can add it; choose another issue or ask the owner to propose it from Campaign Status." },
   owner_named_not_in_message: { status: 409, message: "A proposed issue is marked as named by the owner, but the owner's message doesn't " +
-    "write its number for this campaign's repository. Mark it as your own choice, with your rationale, or leave it out." },
+    "write its number for that issue's repository; a bare number means the launch repository. Mark it as your own choice, with your rationale, or leave it out." },
+  repository_name_not_in_message: { status: 409, message: "The proposal names a repository the owner's message doesn't write. " +
+    "Send the message's own words for the repository, or leave repositoryName out." },
+  repository_constraint_mismatch: { status: 409, message: "A proposed issue is outside the one repository the owner's message limits the work to; " +
+    "propose issues from that repository only." },
   proposal_additions_only: { status: 400, message: "A scope proposal adds issues only; propose removals as their own change." },
   proposal_count_exceeded: { status: 409, message: "The proposal chooses more issues than the owner's count allows: the count the owner " +
     "stated, the campaign's admitted count, or 3 when the owner stated none. Choose fewer issues." },

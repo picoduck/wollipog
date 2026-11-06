@@ -39,7 +39,10 @@ export async function inspectCampaignLaunch(
   let failure: CampaignLaunchInspectionFailure = "invalid_request";
   try {
     const publication = message.publication;
-    if (Object.keys(message).some((key) => !["type", "requestId", "workspaceId", "workspacePath", "issueNumbers", "publication"].includes(key)) ||
+    if (Object.keys(message).some((key) => !["type", "requestId", "workspaceId", "workspacePath", "issueNumbers", "facts", "publication"].includes(key)) ||
+        (message.facts !== undefined && message.facts !== true) ||
+        // A facts read reports a pull request rather than refusing it, so it never checks a payload.
+        (message.facts !== undefined && publication !== undefined) ||
         (publication !== undefined && (!publication || typeof publication !== "object" || Array.isArray(publication) ||
           Object.keys(publication).some((key) => !["sanitizedTitle", "sanitizedBody", "labels"].includes(key)) ||
           typeof publication.sanitizedTitle !== "string" || typeof publication.sanitizedBody !== "string" ||
@@ -66,23 +69,27 @@ export async function inspectCampaignLaunch(
     if (!githubSlug(origin) && !gitlabIssueOrigin(origin)) throw new Error("unsupported origin");
     failure = "issue_read_failed";
     const issueNumbers = [...message.issueNumbers].sort((a, b) => a - b);
-    const read = (command: string, args: string[]) =>
+    const forge = (command: string, args: string[]) =>
       command === "git" && args[0] === "remote" ? Promise.resolve(origin) : owned(cwd, command, args);
     // #4119: with an issue number, the issue must be published with exactly this payload; the read
     // refuses any difference in its title, body or labels. The root reads its own the same way.
     const published = issueNumbers.length ? publication : undefined;
     if (published) failure = "publication_refused";
-    const { repository, candidates } = await inspectCampaignIssueScope(read, undefined, issueNumbers, published);
-    if (JSON.stringify(candidates.map((c) => c.issue.number).sort((a, b) => a - b)) !== JSON.stringify(issueNumbers)) throw new Error("issue mismatch");
+    const { repository, candidates, issueFacts } = await inspectCampaignIssueScope(forge, undefined, issueNumbers, published, message.facts === true);
+    // A facts read reports a pull request rather than refusing it, so it is the list that must match.
+    const read = message.facts ? (issueFacts ?? []).map((fact) => fact.number) : candidates.map((c) => c.issue.number);
+    if (JSON.stringify([...read].sort((a, b) => a - b)) !== JSON.stringify(issueNumbers)) throw new Error("issue mismatch");
     // #4119: with none, the same publication inspection the root runs in its own checkout, here in
     // this Location's repository, with this runner's own forge login.
     failure = "publication_refused";
-    const inspected = publication && !published ? await inspectCampaignPublication(read, publication) : undefined;
+    const inspected = publication && !published ? await inspectCampaignPublication(forge, publication) : undefined;
     if (inspected && inspected.repository !== repository) throw new Error("publication repository mismatch");
     if (signal.aborted) throw new InspectionCancelled();
-    // No origin URL, issue body/title, local path, command output or environment leaves this helper.
+    // No origin URL, local path, command output or environment leaves this helper; issue text only
+    // as the bounded, untrusted facts a caller asked for.
     const digest = createHash("sha256").update(JSON.stringify([cwd, repository, head, issueNumbers])).digest("hex");
     return { ...base, ok: true, repository, issueNumbers, digest,
+      ...(message.facts ? { issueFacts: issueFacts! } : {}),
       ...(inspected ? { publicationDigest: inspected.publicationDigest, duplicateSearch: inspected.duplicateSearch } : {}) };
   } catch {
     if (signal.aborted) return { ...base, ok: false, cancelled: true, error: "Inspection was cancelled before it completed; no launch was admitted." };

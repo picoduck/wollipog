@@ -43,6 +43,21 @@ const replacedEarlier: CampaignScopeProposalView = { occurrenceId: "wd_1", creat
   proposal: { ...waiting.proposal, issues: [waiting.proposal.issues[0]!], checks: [], route: "admitted", ownerCause: undefined, ownerMessage: undefined,
     requestedCount: null, constraints: [], withheldOperations: [] } };
 
+test("a proposal names each issue by its own repository and shows the repository the owner named (#4118)", async () => {
+  const proposal: CampaignScopeProposalView = { ...waiting, proposal: { ...waiting.proposal, issues: [{ number: 12, origin: "owner_named", rationale: "Named.", title: "Launch" },
+    { repository: "team/api", number: 12, origin: "orchestrator_chosen", rationale: "Chosen.", title: "Same number" }],
+    repositoryConstraint: { name: "the api repo", repository: null }, checks: ["chosen_issues", "repository_name_unresolved"], ownerCause: "repository_name_unresolved" } };
+  const { host, unmount } = await mount([proposal]);
+  try {
+    const text = host.textContent ?? "";
+    assert.ok(text.includes("team/repo#12 Launch"), text);
+    assert.ok(text.includes("team/api#12 Same number"), text);
+    assert.ok(text.includes("Repository You Named"), text);
+    assert.ok(text.includes("the api repo: matches no repository in this campaign, or more than one"), text);
+    assert.ok(text.includes("the repository your message names decides nothing"), text);
+  } finally { await unmount(); }
+});
+
 async function mount(proposals: CampaignScopeProposalView[]) {
   const client = {
     ...api,

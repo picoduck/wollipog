@@ -7,9 +7,10 @@ import { test } from "node:test";
 import type { CampaignAuthorityBoundary } from "@wollipog/protocol";
 import { DECISION_KINDS, decisionOutputSchema, renderDecisionInput, validateDecisionOutput } from "./decision-kinds.js";
 import {
-  boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, onlyOtherRepositories, resolveGrantRepository,
-  scopeGrantCandidates, writtenAsCount, writtenAsDigits, writtenAsRange, type ScopeGrantFields,
+  boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, onlyOtherRepositories, repositoryNameInMessage, resolveGrantRepository, resolveRepositoryName,
+  scopeGrantCandidates, writtenAsCount, writtenAsDigits, writtenAsRange, writtenForRepository, type ScopeGrantFields,
 } from "./scope-grant.js";
+import { issueReferencesAcrossRepositories } from "./campaign-launch-admission.js";
 import { EMPTY_GRANT, issues } from "./scope-grant-test-fixture.js";
 
 const BOUNDARY = { repository: "Owner/Repo" };
@@ -30,6 +31,40 @@ test("the repository floor resolves against every repository in the campaign's b
   // With several boundary repositories (#4118), an unqualified name is ambiguous and grants nothing.
   assert.equal(resolveGrantRepository("", ["owner/repo", "owner/web"]), null);
   assert.equal(resolveGrantRepository("owner/web", ["owner/repo", "owner/web"]), "owner/web");
+});
+
+test("a repository name means one boundary repository, or nothing (#4118)", () => {
+  const entries = [{ repository: "owner/app", locationNames: ["Web Client"] }, { repository: "Owner/API", locationNames: ["Backend", "Shared"] },
+    { repository: "other/tools", locationNames: ["Shared"] }, { repository: "fork/tools" }];
+  for (const name of ["owner/api", "OWNER/API", "api", "the api repo", "The API repository", "Backend", "the backend repo"]) assert.equal(resolveRepositoryName(name, entries), "owner/api", name);
+  assert.equal(resolveRepositoryName("web client", entries), "owner/app");
+  // Several matches, by short name or Location name, or none: nothing.
+  for (const name of ["tools", "the tools repo", "shared", "billing", "repo", "the", " "]) assert.equal(resolveRepositoryName(name, entries), null, name);
+  assert.equal(repositoryNameInMessage("Fix bugs in  The API\nrepo please.", "the api repo"), true);
+  assert.equal(repositoryNameInMessage("Fix bugs please.", "the api repo"), false);
+  // Whole words only: a name inside a longer word was never written.
+  assert.equal(repositoryNameInMessage("Fix this rapidly.", "api"), false);
+  assert.equal(repositoryNameInMessage("Fix the api-gateway first.", "api"), false);
+  assert.equal(repositoryNameInMessage("Fix the top bug in api.", "api"), true);
+  assert.equal(repositoryNameInMessage("Fix owner/api (the top bug).", "owner/api"), true);
+  assert.equal(repositoryNameInMessage("Fix my-org/my.repo first.", "my-org/my.repo"), true);
+  assert.equal(repositoryNameInMessage("Fix my-org/myxrepo first.", "my-org/my.repo"), false, "the name is literal text");
+  assert.equal(repositoryNameInMessage("Fix it.", " "), false);
+});
+
+test("a number is written for a repository only where the message qualifies it so; a bare one is the launch repository's (#4118)", () => {
+  const text = "Fix #12, owner/api#40, https://github.com/owner/api/issues/41 and owner/app#7. Also other/repo#9.";
+  assert.equal(writtenForRepository(text, 12, "owner/app", "owner/app"), true);
+  assert.equal(writtenForRepository(text, 12, "owner/api", "owner/app"), false, "a bare number names nothing in another repository");
+  assert.equal(writtenForRepository(text, 40, "OWNER/API", "owner/app"), true);
+  assert.equal(writtenForRepository(text, 40, "owner/app", "owner/app"), false, "qualified by another repository, it is that repository's");
+  assert.equal(writtenForRepository(text, 41, "owner/api", "owner/app"), true);
+  assert.equal(writtenForRepository(text, 7, "owner/app", "owner/app"), true);
+  assert.equal(writtenForRepository(text, 9, "owner/app", "owner/app"), false);
+  assert.deepEqual(issueReferencesAcrossRepositories(text, "owner/app", ["owner/app", "owner/api"]), [{ repository: "owner/app", number: 7 },
+    { repository: "owner/app", number: 12 }, { repository: "owner/api", number: 40 }, { repository: "owner/api", number: 41 }]);
+  assert.deepEqual(boundaryRepositories({ repository: "Owner/App", repositories: [{ repository: "owner/app", locationIds: ["l"] }, { repository: "Owner/API", locationIds: ["m"] }] }),
+    ["owner/app", "owner/api"]);
 });
 
 test("a number counts only where the message writes it as a whole digit string", () => {

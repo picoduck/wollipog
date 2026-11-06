@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
-  PROJECT_LOCATION_INSPECTION_FAILURES, campaignRepositoryLocation, runnerSupportsProtocol,
-  type CampaignLaunchInspectionFailure, type CampaignLaunchInspectionMessage, type CampaignLaunchInspectionResult, type ProjectLocationInspection, type ProjectLocationView,
+  PROJECT_LOCATION_INSPECTION_FAILURES, campaignRepositoryLocation, runnerSupportsProtocol, validCampaignIssueFacts,
+  type CampaignIssueFacts, type CampaignLaunchInspectionFailure, type CampaignLaunchInspectionMessage, type CampaignLaunchInspectionResult, type ProjectLocationInspection, type ProjectLocationView,
   type ProjectLocationInspectionFailure, type RunnerProtocolCapability, type RunnerView,
 } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
@@ -17,7 +17,7 @@ export const LOCATION_PUBLICATION_INSPECTION_MIN_VERSION = 4;
  * drops the pending request (so a late result is discarded, never admitted) and, on a version-2
  * runner, stops that one inspection. Older runners stay bounded by their per-command timeouts. */
 export async function inspectCampaignWorkspace(hub: Hub, runner: RunnerView, workspaceId: string, issueNumbers: number[],
-  signal: AbortSignal, timeoutMs = CAMPAIGN_LAUNCH_INSPECTION_TIMEOUT_MS, workspacePath?: string,
+  signal: AbortSignal, timeoutMs = CAMPAIGN_LAUNCH_INSPECTION_TIMEOUT_MS, workspacePath?: string, facts = false,
   publication?: NonNullable<CampaignLaunchInspectionMessage["publication"]>): Promise<CampaignLaunchInspectionResult | undefined> {
   const version = runner.runtime?.campaignLaunchInspection?.version ?? 0;
   if (version < (publication ? LOCATION_PUBLICATION_INSPECTION_MIN_VERSION : PROJECT_LOCATION_INSPECTION_MIN_VERSION) ||
@@ -32,7 +32,8 @@ export async function inspectCampaignWorkspace(hub: Hub, runner: RunnerView, wor
   signal.addEventListener("abort", onAbort, { once: true });
   try {
     const result = await hub.requestFromRunner(runner.runnerId, requestId, {
-      type: "campaign_launch_inspect", requestId, workspaceId, workspacePath, issueNumbers, ...(publication ? { publication } : {}),
+      type: "campaign_launch_inspect", requestId, workspaceId, workspacePath, issueNumbers,
+      ...(facts ? { facts: true as const } : {}), ...(publication ? { publication } : {}),
     }, timeoutMs);
     if (signal.aborted || result.type !== "campaign_launch_inspection_result" || result.requestId !== requestId) return undefined;
     return result;
@@ -66,7 +67,10 @@ export async function inspectProjectLocation(
     requireProtocol?: RunnerProtocolCapability;
     /** Issues the runner must also read in the Location's repository (#4118); any it cannot read
      * as an issue there fails the inspection. */
-    issueNumbers?: readonly number[] } = {},
+    issueNumbers?: readonly number[];
+    /** Also return those issues' facts (#4118), with a pull request reported rather than failing.
+     * A runner too old to report them fails as `runner_too_old`. */
+    facts?: boolean } = {},
 ): Promise<ProjectLocationInspection> {
   const { db, hub } = dependencies;
   const fail = (failure: ProjectLocationInspectionFailure): ProjectLocationInspection =>
@@ -82,12 +86,13 @@ export async function inspectProjectLocation(
   const runner = db.getRunner(location.runnerId);
   if (!runner || !hub.isRunnerOnline(location.runnerId)) return fail("runner_offline");
   if ((runner.runtime?.campaignLaunchInspection?.version ?? 0) < PROJECT_LOCATION_INSPECTION_MIN_VERSION ||
-      (options.requireProtocol && !runnerSupportsProtocol(runner.protocolVersion, options.requireProtocol))) return fail("runner_too_old");
+      (options.requireProtocol && !runnerSupportsProtocol(runner.protocolVersion, options.requireProtocol)) ||
+      (options.facts && !runnerSupportsProtocol(runner.protocolVersion, "repositoryQualifiedProposals"))) return fail("runner_too_old");
   const workspacePath = db.getWorkspacePath(location.runnerId, location.workspaceId);
   if (!workspacePath) return fail("path_missing");
   const issueNumbers = [...options.issueNumbers ?? []].sort((a, b) => a - b);
   const result = await inspectCampaignWorkspace(hub, runner, location.workspaceId, issueNumbers,
-    options.signal ?? new AbortController().signal, options.timeoutMs, workspacePath);
+    options.signal ?? new AbortController().signal, options.timeoutMs, workspacePath, options.facts);
   // Runner frames are not validated on the wire: only an exact success for this workspace verifies.
   if (result?.ok !== true || result.cancelled !== undefined || result.workspaceId !== location.workspaceId ||
       JSON.stringify(result.issueNumbers ?? []) !== JSON.stringify(issueNumbers) ||
@@ -96,6 +101,9 @@ export async function inspectProjectLocation(
       ? RUNNER_FAILURES[result.failure] : undefined;
     return fail(failure ?? "read_failed");
   }
+  // Facts out of their bounds, or missing a requested number, verify nothing.
+  const issueFacts = options.facts ? issueNumbers.map((n) => result.issueFacts?.find((fact) => validCampaignIssueFacts(fact) && fact.number === n)) : [];
+  if (issueFacts.some((fact) => !fact)) return fail("read_failed");
   // The answer describes the path that was inspected; a Location removed, moved to another Project
   // or repointed meanwhile is not the Location the caller asked about.
   const current = active();
@@ -105,7 +113,7 @@ export async function inspectProjectLocation(
   return { ok: true, location: {
     locationId, projectId: current.projectId, runnerId: current.runnerId, workspaceId: current.workspaceId,
     repository: result.repository!.toLowerCase(), digest: result.digest, verifiedAt: (options.now ?? Date.now)(),
-  } };
+  }, ...(options.facts ? { issueFacts: issueFacts as CampaignIssueFacts[] } : {}) };
 }
 
 /** Check a follow-up's payload in a boundary repository other than the root's own (#4119), through
@@ -130,7 +138,7 @@ async function inspectPublicationAtLocation(
   const workspacePath = location ? db.getWorkspacePath(location.runnerId, location.workspaceId) : undefined;
   if (!location || !runner || !workspacePath) return null;
   const result = await inspectCampaignWorkspace(hub, runner, location.workspaceId, issueNumbers, new AbortController().signal, timeoutMs,
-    workspacePath, publication);
+    workspacePath, false, publication);
   // Runner frames are not validated on the wire.
   if (result?.ok !== true || result.cancelled !== undefined || result.workspaceId !== location.workspaceId ||
       typeof result.repository !== "string" || result.repository.toLowerCase() !== entry.repository.toLowerCase() ||
