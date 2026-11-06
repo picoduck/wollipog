@@ -7,7 +7,7 @@ import { ControlPlaneDb } from "./db.js";
 import { Hub, RunnerRequestTimeoutError, RunnerRequestNotSentError } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
-import { projectCampaignHandoffsForUi } from "./campaign-status-compatibility.js";
+import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
 import type { ForgeReadResult } from "./campaign-forge-observations.js";
 
 /** A Full Control campaign over picoduck/wollipog#4070 with two children and two original items.
@@ -76,18 +76,18 @@ test("a campaign whose only unfinished work is handed to a person completes with
   const h = fixture();
   try {
     finishChildren(h);
-    assert.equal(h.db.campaignProjection("root")!.status, "blocked", "an unhanded original item still holds the campaign");
+    assert.equal(h.db.campaignProjection("root")!.status, "stuck", "an unhanded original item still holds the campaign");
     assert.equal(h.db.campaignProjection("root")!.handoffs, undefined);
 
     for (const actor of ["orchestrator", "child"] as const) {
       assert.ok(handOff(h, h.advisory, actor).ok);
-      assert.equal(h.db.campaignProjection("root")!.status, "blocked", `a handoff to ${actor} is still agent work`);
+      assert.equal(h.db.campaignProjection("root")!.status, "stuck", `a handoff to ${actor} is still agent work`);
     }
 
     assert.ok(handOff(h, h.advisory, "human").ok);
     const projection = h.db.campaignProjection("root")!;
-    assert.equal(projection.status, "complete_with_handoffs");
-    assert.equal(h.db.campaignStatusOnly("root"), "complete_with_handoffs", "the summary status agrees with the projection");
+    assert.equal(projection.status, "complete_needs_cleanup");
+    assert.equal(h.db.campaignStatusOnly("root"), "complete_needs_cleanup", "the summary status agrees with the projection");
     assert.equal(projection.handoffs?.total, 1);
     assert.deepEqual(projection.handoffs?.items.map((item) => [item.workItemId, item.title, item.issue?.number,
       item.handoff.responsibleActor, item.handoff.reason, item.handoff.nextAction]), [[h.advisory, "File the Advisory", 4070,
@@ -109,7 +109,7 @@ test("a campaign whose only unfinished work is handed to a person completes with
     assert.equal(item.handoff?.responsibleActor, "human");
     // An outside party is a handoff too.
     assert.ok(handOff(h, h.advisory, "external").ok);
-    assert.equal(h.db.campaignProjection("root")!.status, "complete_with_handoffs");
+    assert.equal(h.db.campaignProjection("root")!.status, "complete_needs_cleanup");
   } finally { h.db.close(); }
 });
 
@@ -118,7 +118,7 @@ test("new unhanded work, or an agent taking the item back, reopens a campaign co
   try {
     finishChildren(h);
     assert.ok(handOff(h, h.advisory, "human").ok);
-    assert.equal(h.db.campaignProjection("root")!.status, "complete_with_handoffs");
+    assert.equal(h.db.campaignProjection("root")!.status, "complete_needs_cleanup");
     assert.equal(h.db.campaignWorkLedger.summary("root", { campaignCreatedAt: 1, complete: true, childSessionIds: [],
       cleanupPending: 0 }).elapsed.endedAt !== null, true);
 
@@ -127,18 +127,18 @@ test("new unhanded work, or an agent taking the item back, reopens a campaign co
     assert.ok(added.ok, added.error ?? "refused");
     const docs = added.data!.items[0]!.workItemId;
     const reopened = h.db.campaignProjection("root")!;
-    assert.equal(reopened.status, "blocked", "unhanded follow-up work is agent work");
+    assert.equal(reopened.status, "stuck", "unhanded follow-up work is agent work");
     assert.equal(reopened.handoffs?.total, 1, "the handed-off item stays listed while the campaign is open");
     assert.equal(reopened.work?.elapsed.endedAt, null, "Campaign Elapsed resumes");
     assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: docs,
       commitment: { state: "scope_removed", reason: "Folded into the advisory." } }).ok);
-    assert.equal(h.db.campaignProjection("root")!.status, "complete_with_handoffs");
+    assert.equal(h.db.campaignProjection("root")!.status, "complete_needs_cleanup");
 
     // Assigning the item again clears its handoff: the agent took it back.
     assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.advisory, childSessionId: "other" }).ok);
     assert.equal(h.db.campaignWorkLedger.detail("root", h.advisory, Date.now())!.handoff, null);
     const taken = h.db.campaignProjection("root")!;
-    assert.notEqual(taken.status, "complete_with_handoffs");
+    assert.notEqual(taken.status, "complete_needs_cleanup");
     assert.equal(taken.handoffs, undefined);
   } finally { h.db.close(); }
 });
@@ -148,7 +148,7 @@ test("queued, running, or unverified work beside a handoff keeps the campaign ou
   try {
     finishChildren(h);
     assert.ok(handOff(h, h.advisory, "human").ok);
-    assert.equal(h.db.campaignProjection("root")!.status, "complete_with_handoffs");
+    assert.equal(h.db.campaignProjection("root")!.status, "complete_needs_cleanup");
 
     // Queued, never dispatched.
     const queued = h.svc.recordCampaignPlan("root", { planComplete: true, items: [{ key: "follow-up:queued",
@@ -157,13 +157,13 @@ test("queued, running, or unverified work beside a handoff keeps the campaign ou
     const queuedId = queued.data!.items[0]!.workItemId;
     let projection = h.db.campaignProjection("root")!;
     assert.equal(projection.work?.counts.byState.queued, 1);
-    assert.equal(projection.status, "blocked");
+    assert.equal(projection.status, "stuck");
 
     // Assigned to a child that has finished its turn: the Orchestrator owes a verification.
     assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: queuedId, childSessionId: "other" }).ok);
     projection = h.db.campaignProjection("root")!;
     assert.equal(projection.work?.obligations.verification, 1);
-    assert.notEqual(projection.status, "complete_with_handoffs");
+    assert.notEqual(projection.status, "complete_needs_cleanup");
 
     // The child is working on it again.
     h.db.updateSessionStatus("other", "running", Date.now());
@@ -174,28 +174,35 @@ test("queued, running, or unverified work beside a handoff keeps the campaign ou
   } finally { h.db.close(); }
 });
 
-test("dashboards older than v275 read complete_with_handoffs as waiting for a person, never as active work", () => {
+test("older dashboards read Complete, Needs Cleanup as an existing value that is never active work (#4070, #4146)", () => {
   const h = fixture();
   try {
     finishChildren(h);
     assert.ok(handOff(h, h.advisory, "human").ok);
     const session = h.db.getSession("root")!;
-    assert.equal(session.fullControlCampaignStatus, "complete_with_handoffs");
-    assert.equal(session.orchestratorCampaign?.status, "complete_with_handoffs");
-    const legacy = projectCampaignHandoffsForUi({ type: "session_upsert", session },
+    // #4146: handed-off work is cleanup the owner settles, so a current server reports it as
+    // Complete, Needs Cleanup; v275-v296 dashboards read it as Complete with Handoffs.
+    assert.equal(session.fullControlCampaignStatus, "complete_needs_cleanup");
+    assert.equal(session.orchestratorCampaign?.status, "complete_needs_cleanup");
+    const legacy = projectCampaignStatusForUi({ type: "session_upsert", session },
       RUNNER_CAPABILITY_MIN_PROTOCOL.campaignHandoffs - 1);
     assert.equal(legacy.session.fullControlCampaignStatus, "waiting_human");
     assert.equal(legacy.session.orchestratorCampaign?.status, "waiting_human");
-    assert.equal(session.fullControlCampaignStatus, "complete_with_handoffs", "the projection copies, never mutates");
-    const listed = projectCampaignHandoffsForUi({ sessions: [session] }, null);
+    assert.equal(session.fullControlCampaignStatus, "complete_needs_cleanup", "the projection copies, never mutates");
+    const handoffsDashboard = projectCampaignStatusForUi({ session }, RUNNER_CAPABILITY_MIN_PROTOCOL.campaignActivityStatus - 1);
+    assert.equal(handoffsDashboard.session.fullControlCampaignStatus, "complete_with_handoffs");
+    const listed = projectCampaignStatusForUi({ sessions: [session] }, null);
     assert.equal(listed.sessions[0]!.orchestratorCampaign?.status, "waiting_human");
     const current = { session };
-    assert.equal(projectCampaignHandoffsForUi(current, PROTOCOL_VERSION), current);
+    assert.equal(projectCampaignStatusForUi(current, PROTOCOL_VERSION), current);
     const projection = h.db.campaignProjection("root")!;
-    assert.equal(projectCampaignHandoffsForUi(projection, 200).status, "waiting_human");
+    assert.equal(projectCampaignStatusForUi(projection, 200).status, "waiting_human");
     const identity = h.db.localIdentityContext();
-    assert.equal(JSON.parse(h.db.sessionListJsonForPrincipal({ ...identity, kind: "human", actorId: identity.userId }, false, true, false))
+    const person = { ...identity, kind: "human" as const, actorId: identity.userId };
+    assert.equal(JSON.parse(h.db.sessionListJsonForPrincipal(person, false, true, 274))
       .sessions.find((row: { id: string }) => row.id === "root").fullControlCampaignStatus, "waiting_human");
+    assert.equal(JSON.parse(h.db.sessionListJsonForPrincipal(person, false, true, 296))
+      .sessions.find((row: { id: string }) => row.id === "root").fullControlCampaignStatus, "complete_with_handoffs");
   } finally { h.db.close(); }
 });
 
@@ -226,7 +233,7 @@ test("the Orchestrator records delivery after reuse from the child's exact repor
   const h = reusedChild();
   try {
     assert.equal(h.db.campaignWorkLedger.detail("root", h.delivery, Date.now())!.primaryState, "planned");
-    assert.equal(h.db.campaignProjection("root")!.status, "blocked", "the reused child's earlier item cannot finish");
+    assert.equal(h.db.campaignProjection("root")!.status, "stuck", "the reused child's earlier item cannot finish");
     // verify_campaign_child records only the child's open attempt.
     assert.equal(h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: h.firstReport,
       followUpsAccounted: true, workItem: { id: h.delivery, outcome: "delivered" } }).status, 409);
@@ -400,19 +407,19 @@ test("withdrawing the last handoff, or handing the item to an agent, reopens rat
       title: "File the Advisory", origin: "follow_up" }] });
     assert.ok(added.ok, added.error ?? "refused");
     const followUp = added.data!.items[0]!.workItemId;
-    assert.equal(h.db.campaignProjection("root")!.status, "blocked", "an unhanded follow-up is agent work under Full Control");
+    assert.equal(h.db.campaignProjection("root")!.status, "stuck", "an unhanded follow-up is agent work under Full Control");
     assert.ok(handOff(h, followUp, "human").ok);
-    assert.equal(h.db.campaignProjection("root")!.status, "complete_with_handoffs");
+    assert.equal(h.db.campaignProjection("root")!.status, "complete_needs_cleanup");
     assert.notEqual(h.db.campaignProjection("root")!.work?.elapsed.endedAt, null);
 
     assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: followUp, handoff: null }).ok);
     let projection = h.db.campaignProjection("root")!;
-    assert.equal(projection.status, "blocked");
+    assert.equal(projection.status, "stuck");
     assert.equal(projection.work?.elapsed.endedAt, null, "Campaign Elapsed resumes");
     for (const actor of ["child", "orchestrator"] as const) {
       assert.ok(handOff(h, followUp, actor).ok);
       projection = h.db.campaignProjection("root")!;
-      assert.equal(projection.status, "blocked", `a handoff to ${actor} is agent work`);
+      assert.equal(projection.status, "stuck", `a handoff to ${actor} is agent work`);
       assert.equal(projection.work?.elapsed.endedAt, null);
     }
   } finally { h.db.close(); }
@@ -435,7 +442,7 @@ test("reassigning an item to the child that still holds it clears the item's han
       followUpsAccounted: true });
     assert.ok(verified.ok, verified.error ?? "verification refused");
     assert.ok(handOff(h, followUp, "human").ok);
-    assert.equal(h.db.campaignProjection("root")!.status, "complete_with_handoffs");
+    assert.equal(h.db.campaignProjection("root")!.status, "complete_needs_cleanup");
 
     const before = h.db.campaignWorkLedger.revision("root");
     const again = h.svc.assignCampaignWorkItem("root", { workItemId: followUp, childSessionId: "other" });
@@ -452,7 +459,7 @@ test("reassigning an item to the child that still holds it clears the item's han
     assert.equal(again.data!.revision, after);
     // The agent owns unfinished work again, so the remaining handoff no longer completes the campaign.
     const projection = h.db.campaignProjection("root")!;
-    assert.equal(projection.status, "blocked");
+    assert.equal(projection.status, "stuck");
     assert.deepEqual(projection.handoffs?.items.map((handed) => handed.workItemId), [h.advisory]);
 
     // With no handoff left to clear, reassigning the holder is a no-op.

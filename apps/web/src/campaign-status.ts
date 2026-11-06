@@ -520,11 +520,15 @@ export function forgePullRequestView(
   return { kind: "observed", forge: "GitHub", current, observedAt: fact.observedAt, status: seen(status), rows };
 }
 
+/** The campaign's status in its own words (#4146). `blocked` and `complete_with_handoffs` come only
+ * from control planes older than v297. */
 const CAMPAIGN_LIFECYCLE_LABELS: Record<OrchestratorCampaignProjection["status"], string> = {
   waiting_human: "Waiting for Human",
-  active: "Active",
+  active: "Campaign Active",
+  complete_needs_cleanup: "Complete, Needs Cleanup",
+  verified_complete: "Campaign Complete",
+  stuck: "Campaign Stuck",
   blocked: "Blocked",
-  verified_complete: "Verified Complete",
   complete_with_handoffs: "Complete with Handoffs",
 };
 

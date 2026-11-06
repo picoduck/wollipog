@@ -40,7 +40,7 @@ export type CampaignLoadStatus = "loading" | "ready" | "error";
 export interface CampaignSummaryState {
   status: CampaignLoadStatus;
   summary: CampaignWorkSummary | null;
-  campaign: (Pick<OrchestratorCampaignProjection, "status" | "limits" | "heldChildren" | "handoffs" | "ownerDecisions" | "budget" | "recovery" | "policyRevision" | "repositoryBoundary"> &
+  campaign: (Pick<OrchestratorCampaignProjection, "status" | "limits" | "heldChildren" | "handoffs" | "ownerDecisions" | "budget" | "recovery" | "policyRevision" | "repositoryBoundary" | "cleanup" | "stuck" | "activity"> &
     Partial<CampaignAuthorityView>) | null;
   /** The root session's title, for a member's "part of" line. */
   campaignTitle: string | null;

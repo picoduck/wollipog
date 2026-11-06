@@ -108,6 +108,9 @@ function campaignStatusMeta(status: OrchestratorCampaignProjection["status"]): S
   switch (status) {
     case "waiting_human": return statusMeta("workflow", "awaiting_decision");
     case "active": return statusMeta("workflow", "running");
+    // #4146: finished with cleanup left reads as complete, informational; stuck needs a person.
+    case "complete_needs_cleanup": return statusMeta("session", "campaign_needs_cleanup");
+    case "stuck": return statusMeta("session", "campaign_stuck");
     case "blocked": return statusMeta("campaignWork", "blocked");
     case "verified_complete": return statusMeta("workflow", "succeeded");
     // Finished, but the owner has handed-off items left: Campaign Status lists them.
