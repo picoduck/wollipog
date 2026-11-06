@@ -991,7 +991,7 @@ test("verified children with an unfinished original scoped PR admit exactly one 
       h.db.setSessionArchived(child, true, now);
     }
     h.db.updateSessionStatus("root", "idle", now);
-    assert.equal(h.db.campaignProjection("root")!.status, "blocked", "child reports alone cannot finish an original open PR");
+    assert.equal(h.db.campaignProjection("root")!.status, "stuck", "child reports alone cannot finish an original open PR");
     h.recovery.maintain(now);
     h.svc.retryDuePrompts(now + 31_000);
     const continuation = h.db.latestCampaignContinuation("root")!;
@@ -1069,7 +1069,7 @@ for (const completion of ["retain", "stop_and_archive"] as const) {
         }
       }
       assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held");
-      assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+      assert.equal(h.db.campaignProjection("root")!.status, "stuck");
       assert.equal(h.db.campaignContinuationAdmission("root").state, "lifecycle_held");
       assert.equal(h.db.campaignRecovery.activeRecords("root").length, 0, "incomplete is not authority to invent a repair");
     } finally { h.db.close(); }
@@ -1106,7 +1106,7 @@ test("an epic placeholder item is finished by its closure proven from members, a
       items: [{ key: "epic:2938", issue: { repository: "picoduck/wollipog", number: 2938 } }] });
     assert.ok(placeholder.ok, placeholder.error ?? "plan refused");
     assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held", "a never-dispatched item is unfinished by default");
-    assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+    assert.equal(h.db.campaignProjection("root")!.status, "stuck");
     // Only an Orchestrator-owned, member-proven completed closure the runner confirmed closed counts.
     for (const [occurrence, change] of [["human", { authority: "human" }], ["uncertain", { outcome: "uncertain" }],
       ["already", { outcome: "already_closed" }], ["items", { members: false }], ["unadmitted", { admitted: false }]] as const) {
@@ -1124,7 +1124,7 @@ test("an epic closure proven from members does not finish the epic's own dispatc
   try {
     recordEpicClosure(h, "closure-proven");
     assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held", "an item with an attempt keeps its own proof");
-    assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+    assert.equal(h.db.campaignProjection("root")!.status, "stuck");
   } finally { h.db.close(); }
 });
 
@@ -1161,7 +1161,7 @@ test("verification insertion chronology preserves incomplete work with equal tim
     h.db.raw().prepare("UPDATE campaign_work_verifications SET verified_at=?, id=CASE outcome WHEN 'delivered' THEN ? ELSE ? END WHERE work_item_id=?")
       .run(h.now, "cver_zzzz_older_delivered", "cver_aaaa_newer_incomplete", h.workItemId);
     assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held");
-    assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+    assert.equal(h.db.campaignProjection("root")!.status, "stuck");
   } finally { h.db.close(); }
 });
 
@@ -1199,7 +1199,7 @@ for (const outcome of ["incomplete", "delivered"] as const) {
       assert.equal(h.db.getSession("root")!.orchestratorPolicy!.control!.mode, "full_control");
       assert.equal(h.db.campaignContinuationAdmission("root").state, "authority_unavailable");
       assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, outcome === "incomplete" ? "recovery_held" : "complete");
-      assert.equal(h.db.campaignProjection("root")!.status, outcome === "incomplete" ? "blocked" : "verified_complete");
+      assert.equal(h.db.campaignProjection("root")!.status, outcome === "incomplete" ? "stuck" : "verified_complete");
       const checks = { state: "failing" as const, failing: 1, passing: 0, pending: 0 };
       h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref,
         observation: { ...h.observation, state: "open", mergeCommitSha: null, checks, requiredChecks: checks } }], h.now);
@@ -1252,7 +1252,7 @@ test("an original unknown outcome cannot reopen a child-verified campaign or spe
     assert.equal(record.resource.occurrenceId, recoveryCoordinate("original-submission"));
     assert.equal(h.db.listSteeringAttempts("child")[0]!.state, "uncertain");
     assert.equal(h.db.latestCampaignContinuation("root"), null);
-    assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+    assert.equal(h.db.campaignProjection("root")!.status, "stuck");
   } finally { h.db.close(); }
 });
 
@@ -1308,7 +1308,7 @@ test("all four scoped repair reservations deliver; a fifth head cannot reset the
     const exhausted = h.db.campaignRecovery.projection("root").records[0]!;
     assert.equal(exhausted.reason, "attempts_exhausted");
     assert.equal(exhausted.attempts, 4);
-    assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+    assert.equal(h.db.campaignProjection("root")!.status, "stuck");
   } finally { h.db.close(); }
 });
 
@@ -1325,8 +1325,10 @@ function completeLatestContinuation(h: ReturnType<typeof completedPrFixture>, at
   h.db.updateSessionStatus("root", "idle", at);
   return { ...continuation, text, settledAt: settled.updatedAt };
 }
+// Recovery's own wakes. The server's one repair wake for an idle campaign (#4146) is its own event
+// kind, keyed to the leftovers rather than to a recovery record, so it is not one of them.
 const recoveryEvents = (h: ReturnType<typeof completedPrFixture>) =>
-  (h.db.raw().prepare("SELECT event_id FROM orchestrator_campaign_events WHERE campaign_session_id='root' ORDER BY seq").all() as
+  (h.db.raw().prepare("SELECT event_id FROM orchestrator_campaign_events WHERE campaign_session_id='root' AND kind<>'campaign_idle' ORDER BY seq").all() as
     Array<{ event_id: string }>).map(row => row.event_id);
 
 test("an unanswered dispatched wake is woken again with backoff, then exhausts instead of staying automatic (#2938 AC8)", () => {
@@ -1370,7 +1372,7 @@ test("an unanswered dispatched wake is woken again with backoff, then exhausts i
       exhausted.records[0]!.requiredInput], ["attempts_exhausted", "blocked", 4, "none"]);
     assert.deepEqual([exhausted.unattendedReady, exhausted.automatic, exhausted.blocked], [false, 0, 1]);
     assert.equal(h.db.latestCampaignContinuation("root")!.continuationId, before, "an exhausted record is never woken again");
-    assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+    assert.equal(h.db.campaignProjection("root")!.status, "stuck");
     assert.equal(JSON.stringify(exhausted).includes("Component fixture"), false, "the exception carries no transcript content");
   } finally { h.db.close(); }
 });
