@@ -57,7 +57,7 @@ import { scopeGrantDigest, scopeReviewInputDigest, scopeReviewInputs, scopeRevie
 import { boundedIssueNumbers, validCampaignIssueFacts, type CampaignIssueFacts, type CampaignScopeGrantReview, type CampaignScopeOwnerReview, type DecisionErrorClass, type FullControlScopeGrant } from "@wollipog/protocol";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
-  everyOutstandingScopeDecision, campaignAwaitsInitialScope, campaignScopeIsProposed, admittedChosenIssues } from "./campaign-issue-scope.js";
+  everyOutstandingScopeDecision, campaignAwaitsInitialScope, campaignScopeIsProposed } from "./campaign-issue-scope.js";
 import { boundedDecisionString, issueClosureRequestInvalid, issueClosureRequestInvalidFields, issueClosureScopeRefusal } from "./issue-closure-request-refusal.js";
 import { needsCampaignIssueScopeSeed, readingNamesIssues, seedEpicCandidate } from "./campaign-issue-scope-seed.js";
 import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
@@ -12184,9 +12184,13 @@ export class SessionsService {
     // What the proposal needs checked beyond the floors; nothing is the no-model fast path.
     // The fast path also needs every owner-named number written as an issue reference of the campaign
     // repository, not a bare number such as a count; this only narrows the fast path, never admits.
-    // A reference already in scope was admitted before, so a later addition leaves nothing open about it.
+    // A reference already in scope was admitted before, so a later addition leaves nothing open about
+    // it. A later addition's owner-named issue is always checked: one the owner asked for belongs in
+    // the initial scope, and an earlier check may have found it only mentioned.
+    const laterNamed = !initial && Boolean(proposal?.issues.some((issue) => issue.origin === "owner_named"));
     const checks: ScopeProposalCheck[] = proposal
-      ? scopeProposalChecks(proposal, issueReferencesInMessage(ownerMessage, repository).filter((n) => !before.includes(n)))
+      ? [...scopeProposalChecks(proposal, issueReferencesInMessage(ownerMessage, repository).filter((n) => !before.includes(n))),
+        ...(laterNamed ? ["later_named_issues" as const] : [])]
       : ["proposal_unstructured"];
     const issues = proposal?.issues ?? additions.map((number) => ({ number, origin: "orchestrator_chosen" as const, rationale: "" }));
     // The proposal as recorded, before any route: the floors' facts beside the Orchestrator's words.
@@ -12219,9 +12223,9 @@ export class SessionsService {
     }
     // Floor 8: the issues the Orchestrator chose stay within the count the owner stated, the admitted
     // one for a later addition, or the default of 3 (as #4102). The check still confirms the count.
-    // A later addition counts the chosen issues earlier proposals already admitted.
+    // A later addition counts every chosen issue earlier proposals admitted, even one since removed.
     const chosenCount = base.issues.filter((issue) => issue.origin === "orchestrator_chosen").length +
-      (first.initialScope ? admittedChosenIssues(this.db, sessionId, before).length : 0);
+      (first.initialScope ? this.db.appliedProposalChosenIssues(sessionId).length : 0);
     const chosenLimit = scopeProposalChosenLimit(base, first.initialScope);
     if (structured && chosenCount > chosenLimit) return refuse("proposal_count_exceeded", { limit: chosenLimit, requested: chosenCount });
     const scopeRequest: CampaignIssueScopeRequest = { requestId: request.requestId, expectedRevision: request.expectedRevision,

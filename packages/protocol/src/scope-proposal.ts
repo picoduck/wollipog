@@ -74,9 +74,12 @@ export interface CampaignScopeProposalInput {
  * a bare number, never as an issue reference (`#12`, `owner/repo#12` or the issue's URL), so the
  * floor alone can't tell it from a count or a version. `unproposed_references`: the owner's message
  * references an issue of the campaign repository that the proposal doesn't add as owner-named, so
- * whether the owner asked for it, or only mentioned it as background, needs the check. */
-export type ScopeProposalCheck = "requested_count" | "chosen_issues" | "unreferenced_named_issues" | "unproposed_references" | "constraints" |
-  "withheld_operations" | "proposal_unstructured";
+ * whether the owner asked for it, or only mentioned it as background, needs the check.
+ * `later_named_issues`: a later addition marks an issue owner-named. An issue the owner asked for
+ * belongs in the initial scope, and an earlier check may have found it only mentioned, so a later
+ * one is always checked. */
+export type ScopeProposalCheck = "requested_count" | "chosen_issues" | "unreferenced_named_issues" | "unproposed_references" | "later_named_issues" |
+  "constraints" | "withheld_operations" | "proposal_unstructured";
 
 /** Why a proposal is the owner's one approval. `constraint_check_uncertain` and
  * `constraint_check_failed`: the Decision Model's constraint check could not settle it, or failed
@@ -157,8 +160,8 @@ export interface CampaignScopeCheckView {
 
 const OPERATIONS: readonly CampaignAuthorityOperation[] = ["implementation_question", "pr_merge", "merged_branch_deletion",
   "follow_up_issue_publication", "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"];
-const CHECKS: readonly ScopeProposalCheck[] = ["requested_count", "chosen_issues", "unreferenced_named_issues", "unproposed_references", "constraints",
-  "withheld_operations", "proposal_unstructured"];
+const CHECKS: readonly ScopeProposalCheck[] = ["requested_count", "chosen_issues", "unreferenced_named_issues", "unproposed_references",
+  "later_named_issues", "constraints", "withheld_operations", "proposal_unstructured"];
 const OWNER_CAUSES: readonly ScopeProposalOwnerCause[] = ["constraint_check_uncertain", "constraint_check_failed", "constraint_check_unavailable",
   "proposal_unstructured"];
 
@@ -289,6 +292,7 @@ const CHECK_PHRASES: Record<ScopeProposalCheck, string> = {
   requested_count: "a count you asked for",
   unreferenced_named_issues: "issues it says you named that your message writes only as plain numbers",
   unproposed_references: "issues your message mentions that it doesn't propose as ones you named",
+  later_named_issues: "issues it says you named but proposes only now",
   constraints: "constraints it read from your message",
   withheld_operations: "operations your message rules out",
   proposal_unstructured: "a proposal the Orchestrator's machine can't structure",

@@ -12587,6 +12587,21 @@ export class ControlPlaneDb {
     return row ? this.decisionOccurrenceFromRow(row) : null;
   }
 
+  /** Every issue an applied (consumed) Orchestrator scope proposal of this campaign added as its own
+   * choice (#4282), whether or not it is still in scope: removing an issue never frees room under the
+   * owner's count. Unbounded, for enforcement. */
+  appliedProposalChosenIssues(rootId: string): number[] {
+    const rows = this.stmt(`SELECT resource_snapshot FROM workflow_decisions WHERE controlling_session_id=? AND session_id=?
+      AND category='campaign_issue_scope' AND status='consumed' AND json_extract(resource_snapshot, '$.scopeProposal') IS NOT NULL`)
+      .all(rootId, rootId) as Array<{ resource_snapshot: string }>;
+    const chosen = new Set<number>();
+    for (const row of rows) {
+      const issues = (JSON.parse(row.resource_snapshot) as { scopeProposal?: { issues?: Array<{ number: number; origin: string }> } }).scopeProposal?.issues ?? [];
+      for (const issue of issues) if (issue.origin === "orchestrator_chosen" && Number.isSafeInteger(issue.number)) chosen.add(issue.number);
+    }
+    return [...chosen].sort((a, b) => a - b);
+  }
+
   /** A campaign's occurrences whose idempotency key starts with `prefix` (#4282: every constraint check
    * of one set of additions at one boundary and scope revision), oldest first and bounded. */
   decisionOccurrencesByKeyPrefix(campaignSessionId: string, prefix: string, limit = 20): DecisionOccurrenceRecord[] {

@@ -1753,14 +1753,17 @@ test("an uncertain constraint check gets exactly one owner approval, as an Owner
         : { code: "requested_count_not_in_message", requested: 6 });
     }
     assert.equal(f.decision.checkCalls.length, before);
-    // An owner-named later addition is still the fast path's.
-    const named7 = await proposalCampaign(f, server, "Fix #70 now; later also #71.");
+    // An owner-named later addition is always checked: an issue the owner asked for belongs in the
+    // initial scope, so a later one may be one an earlier check found only mentioned.
+    const named7 = await proposalCampaign(f, server, "Fix #70 now; see #71 for background.");
     const firstNamed = await named7.propose([named(70)]);
-    assert.equal(firstNamed.data!.authority, "orchestrator", "the check confirms #71 was left for later");
+    assert.equal(firstNamed.data!.authority, "orchestrator", "the check confirms #71 was background");
     assert.equal(named7.apply(firstNamed.data!.occurrenceId).ok, true);
+    f.decision.state.check = checkAnswering((parameter) => parameter.startsWith("owner/repo#71 "), "only_mentioned", "Cited for background.");
+    const checksBefore = f.decision.checkCalls.length;
     const laterNamed = await named7.propose([named(71)]);
-    assert.equal(laterNamed.data!.authority, "orchestrator");
-    assert.equal((laterNamed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.initial, false);
+    assert.equal(laterNamed.errorDetails?.code, "constraint_check_refused", "#71 is never admitted past the check as owner-named");
+    assert.equal(f.decision.checkCalls.length, checksBefore + 1);
   } finally { await server.close(); f.db.close(); }
 });
 

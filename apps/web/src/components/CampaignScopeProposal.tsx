@@ -23,6 +23,7 @@ const CHECKS: Partial<Record<ScopeProposalCheckName, string>> = {
   requested_count: "a count you asked for",
   unreferenced_named_issues: "issues your message writes only as plain numbers",
   unproposed_references: "issues your message mentions that it doesn't propose as ones you named",
+  later_named_issues: "issues it says you named but proposes only now",
   constraints: "constraints it read",
   withheld_operations: "operations it withholds",
 };
