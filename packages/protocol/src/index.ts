@@ -1004,8 +1004,10 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 // 321: issue closure through a Location (#4119). A `github_issue_closure` message may name a
 //      `location`: the runner inspects or closes the issue in that Location's own path, with its
 //      own forge login, instead of in an Orchestrator session's checkout, refuses an origin other
-//      than the named repository, and records each execution in a durable attempt file. A closure
-//      in a campaign repository other than the launch one needs such a Location's runner at v321;
+//      than the named repository, and records each execution in a durable attempt file. Its `execute`
+//      stops at the mutation fence and answers `prepared`, and a `commit` lets it go on once the
+//      control plane has rechecked the campaign's authority. A closure in a campaign
+//      repository other than the launch one needs such a Location's runner at v321;
 //      an older runner is never sent it, and a runner refuses `repository` on an older control
 //      plane, which would ignore it. (319 and 320 are claimed by open pull requests.)
 export const PROTOCOL_VERSION = 321;
@@ -10750,6 +10752,10 @@ export type GithubIssueClosureMessage = {
       /** v278 (#4060): also read the issue's epic members into the inspection and its digest. */
       epicMembers?: true }
   | { operation: "execute"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot }
+  /** v321 (#4119): only with `location`. A Location's runner holds no copy of the campaign's scope,
+   * so its `execute` stops at the mutation fence and answers `prepared`. The control plane rechecks
+   * the campaign's authority after those forge reads, and this lets the prepared closure go on. */
+  | { operation: "commit"; occurrenceId: string }
 );
 
 export interface GithubIssueClosureResultMessage {
@@ -10760,6 +10766,8 @@ export interface GithubIssueClosureResultMessage {
   ok: boolean;
   inspection?: GithubIssueClosureInspection;
   result?: GithubIssueClosureResult;
+  /** v321 (#4119): a Location's `execute` passed every forge check and waits for `commit`. Nothing was written. */
+  prepared?: true;
   error?: string;
   /** Classification of an `ok: false` reply (#4059), one of `GITHUB_ISSUE_CLOSURE_FAILURE_REASONS`.
    * Older runners omit it, and the control plane then records `runner_failed`. */

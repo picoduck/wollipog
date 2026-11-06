@@ -160,8 +160,10 @@ test("a closure at a Location runs in that path on this runner with no session o
   const location = { workspaceId: "api", workspacePath: f.root, repository: "Example/Project" };
   const attempts = join(f.store().rootPath(), ".runner-data", "location-issue-closures");
   const inspect = (at = location) => f.manager().githubIssueClosure({ type: "github_issue_closure", operation: "inspect", requestId: "inspect", sessionId: "s_on_another_runner", issue, location: at });
-  const execute = (snapshot: GithubIssueClosureSnapshot, occurrenceId = "approved-once") => f.manager().githubIssueClosure({
-    type: "github_issue_closure", operation: "execute", requestId: "execute", sessionId: "s_on_another_runner", occurrenceId, snapshot, location });
+  const execute = (snapshot: GithubIssueClosureSnapshot, occurrenceId = "approved-once", options: { locationCommitWaitMs?: number } = {}) => f.manager().githubIssueClosure({
+    type: "github_issue_closure", operation: "execute", requestId: "execute", sessionId: "s_on_another_runner", occurrenceId, snapshot, location }, options);
+  const commit = (occurrenceId = "approved-once") => f.manager().githubIssueClosure({
+    type: "github_issue_closure", operation: "commit", requestId: "commit", sessionId: "s_on_another_runner", occurrenceId, location });
 
   // No Orchestrator session exists here for that id: the control plane holds the campaign's scope.
   const inspected = await inspect();
@@ -182,18 +184,52 @@ test("a closure at a Location runs in that path on this runner with no session o
   assert.equal(f.mutations().length, 0);
   assert.equal(existsSync(attempts), false, "nothing was recorded for a closure that never reached its fence");
 
-  // The record is durable before the mutation, and a replay or a restart can't pass it again.
-  const closed = await execute(snapshot);
+  // A commit with nothing prepared writes nothing, and neither does a non-Location commit.
+  const unprepared = await commit("never-prepared");
+  assert.deepEqual([unprepared.ok, unprepared.failure], [false, "runner_failed"]);
+  const noLocation = await f.manager().githubIssueClosure({ type: "github_issue_closure", operation: "commit", requestId: "commit", sessionId, occurrenceId: "approved-once" });
+  assert.deepEqual([noLocation.ok, noLocation.failure], [false, "runner_failed"]);
+
+  // The forge changing during its checks is answered at once, with no fence reached.
+  const original = f.repository.issue.title;
+  f.repository.issue.title = "Changed task";
+  const changed = await execute(snapshot, "changed");
+  assert.deepEqual([changed.prepared, changed.result?.outcome, changed.result?.refusal?.reason], [undefined, "refused", "issue_changed"]);
+  f.repository.issue.title = original;
+
+  // Prepared means every forge check passed and nothing was written: it waits for the commit, and
+  // without one in time it writes nothing, ever.
+  const abandoned = await execute(snapshot, "abandoned", { locationCommitWaitMs: 10 });
+  assert.deepEqual([abandoned.ok, abandoned.prepared], [true, true], abandoned.error ?? "");
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  const late = await commit("abandoned");
+  assert.deepEqual([late.ok, late.failure], [false, "runner_failed"]);
+  assert.equal(f.mutations().length, 0);
+  assert.equal(existsSync(attempts), false, "a closure that got no commit recorded no attempt");
+
+  // Only one closure of an approval waits at the fence.
+  const prepared = await execute(snapshot);
+  assert.deepEqual([prepared.ok, prepared.prepared, prepared.result], [true, true, undefined], prepared.error ?? "");
+  const again = await execute(snapshot);
+  assert.deepEqual([again.ok, again.failure], [false, "runner_failed"]);
+  assert.equal(f.mutations().length, 0);
+  assert.equal(existsSync(attempts), false);
+
+  // The commit lets it go on. The record is durable before the mutation, and a replay or a restart can't pass it again.
+  const closed = await commit();
+  assert.equal(closed.requestId, "commit");
   assert.equal(closed.result?.outcome, "closed", closed.error ?? "");
   const recorded = readdirSync(attempts);
   assert.equal(recorded.length, 1);
   assert.equal(readFileSync(join(attempts, recorded[0]!), "utf8").trim(), digest(snapshot));
   assert.equal(f.mutations().length, 1);
   f.repository.issue.state = "OPEN";
-  const replay = await execute(snapshot);
+  assert.equal((await execute(snapshot)).prepared, true);
+  const replay = await commit();
   assert.equal(replay.result?.refusal?.reason, "mutation_fence_unavailable");
   f.restart();
-  const afterRestart = await execute(snapshot);
+  assert.equal((await execute(snapshot)).prepared, true);
+  const afterRestart = await commit();
   assert.equal(afterRestart.result?.refusal?.reason, "mutation_fence_unavailable");
   assert.equal(f.mutations().length, 1);
 

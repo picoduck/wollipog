@@ -191,10 +191,11 @@ Custom closure approval is human-owned.
 A closure in another campaign repository (#4119) names it with `repository`; the root stays the requester.
 The issue is inspected and closed on the runner of the first of that repository's Locations that is in the
 campaign's Project and online at v321 or later, in that Location's path, with that runner's own forge login.
-That runner holds no copy of the campaign's scope, so the control plane rechecks the scope revision, the
-boundary revision and the evidence digest immediately before it consumes the approval and dispatches. The
-runner fences what only it can see: the checkout's origin, the forge digest, and one durable attempt record
-per occurrence. A repository that is not one of the campaign's is refused before anything is inspected, and
+That runner holds no copy of the campaign's scope, so it can't reread it at its mutation fence as the root's
+runner does. Its `execute` runs every forge check and answers `prepared`; the control plane then rechecks the
+scope, the boundary, the active children, the evidence digest and the Location's path, and only then sends
+`commit`. Without a commit in time, nothing is written. The runner fences what only it can see: the checkout's
+origin, the forge digest, and one durable attempt record per occurrence. A repository that is not one of the campaign's is refused before anything is inspected, and
 an owner's approved `campaign_repository_addition` is the way in. A scope change whose changed repository is
 not the closure's still invalidates it, as it always has.
 

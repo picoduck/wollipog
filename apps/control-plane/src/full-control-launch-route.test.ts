@@ -4095,18 +4095,24 @@ test("each Orchestrator participant's runner stores only its own Location reposi
 });
 
 /** Answers each closure message as the runner it reached would, and records where it went. A
- * Location's closure reads that Location's origin; the root's reads the launch repository's. */
+ * Location's closure reads that Location's origin, and its `execute` stops at the mutation fence
+ * until `commit`; the root's reads the launch repository's and closes at once. `duringChecks` runs
+ * while a Location's `execute` is reading the forge, before it answers. */
 function closureRunners(f: ReturnType<typeof fixture>) {
   const closures: Array<{ runnerId: string; message: Extract<ControlPlaneToRunner, { type: "github_issue_closure" }> }> = [];
-  const state = { origin: null as string | null };
+  const state = { origin: null as string | null, duringChecks: null as (() => unknown) | null, prepareAnswer: { prepared: true } as { prepared?: true } };
   const send = f.hub.sendToRunner.bind(f.hub);
   f.hub.sendToRunner = (runnerId, message) => {
     if (message.type !== "github_issue_closure") return send(runnerId, message);
     closures.push({ runnerId, message });
     const base = { type: "github_issue_closure_result" as const, requestId: message.requestId, sessionId: message.sessionId };
     const repository = state.origin ?? message.location?.repository ?? "owner/repo";
-    queueMicrotask(() => f.hub.resolveRunnerRequest(message.operation === "execute"
-      ? { ...base, ok: true, result: { outcome: "closed", completedAt: Date.now() } }
+    const closed = { ...base, ok: true, result: { outcome: "closed" as const, completedAt: Date.now() } };
+    if (message.operation === "execute" && message.location) {
+      void Promise.resolve(state.duringChecks?.()).then(() => f.hub.resolveRunnerRequest({ ...base, ok: true, ...state.prepareAnswer }, runnerId));
+      return true;
+    }
+    queueMicrotask(() => f.hub.resolveRunnerRequest(message.operation !== "inspect" ? closed
       : { ...base, ok: true, inspection: { repository, issue: message.issue, title: `Issue ${message.issue}`, url: `https://github.com/${repository}/issues/${message.issue}`,
         state: "OPEN", forgeDigest: "f".repeat(64), openPullRequests: [],
         ...(message.deliveryPullRequests ? { delivery: message.deliveryPullRequests.map((pr) => ({ ...pr, mergeCommitSha: "c".repeat(40) })) } : {}) } }, runnerId));
@@ -4143,7 +4149,7 @@ test("a closure in another boundary repository is inspected and executed through
     assert.equal(approve(decision.occurrenceId).ok, true);
     const executed = await f.sessions.executeGithubIssueClosure(id, decision.occurrenceId, decision.resourceDigest);
     assert.equal(executed.ok, true, executed.error ?? "");
-    assert.deepEqual(where(), [["r2", "execute", location]]);
+    assert.deepEqual(where(), [["r2", "execute", location], ["r2", "commit", location]]);
     assert.equal(f.db.workflowDecisionByOccurrence(decision.occurrenceId)?.status, "consumed");
 
     // A closure carried across a scope change reads that repository's part of it (#3915).
@@ -4218,6 +4224,64 @@ test("a closure in another boundary repository is inspected and executed through
   } finally { await server.close(); f.db.close(); }
 });
 
+test("a Location's closure gets no commit when the campaign's authority changes during its forge checks, or its runner gives no valid answer (#4119)", async () => {
+  const { f, p, server, id, propose, approve } = await multiRepositoryCampaign();
+  try {
+    f.db.updateSessionStatus(id, "running", Date.now());
+    const seeded = await propose("both-repositories", [["other/repo", 40], ["other/repo", 41]]);
+    assert.equal(approve(seeded.data!.occurrenceId).ok, true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const { closures, state } = closureRunners(f);
+    const operations = () => closures.splice(0).map(({ message }) => message.operation);
+    const approved = async (requestId: string, issue: number) => {
+      const decision = (await f.sessions.requestGithubIssueClosure(id, closureRequest(requestId, issue, "other/repo"))).data!.decision!;
+      assert.equal(approve(decision.occurrenceId).ok, true);
+      closures.length = 0;
+      return decision;
+    };
+    const refused = (occurrenceId: string, reason: string) => {
+      const after = f.db.workflowDecisionByOccurrence(occurrenceId)!;
+      assert.equal(after.status, "consumed");
+      assert.deepEqual([after.issueClosureResult?.outcome, after.issueClosureResult?.refusal?.reason], ["refused", reason]);
+      assert.deepEqual(operations(), ["execute"], "the Location's runner never got a commit, so it wrote nothing");
+    };
+
+    // The Location is repointed while its checks run: its path is no longer the one they read.
+    const moved = await approved("close-41-moved", 41);
+    const workspacePath = f.db.getWorkspacePath.bind(f.db);
+    state.duringChecks = () => { f.db.getWorkspacePath = (runnerId, workspaceId) => workspaceId === "a" ? "/fixture/elsewhere" : workspacePath(runnerId, workspaceId); };
+    assert.equal((await f.sessions.executeGithubIssueClosure(id, moved.occurrenceId, moved.resourceDigest)).ok, true);
+    refused(moved.occurrenceId, "campaign_authority_changed");
+    f.db.getWorkspacePath = workspacePath;
+
+    // A malformed answer can't prove readiness, and no write can have happened without a commit.
+    const silent = await approved("close-41-silent", 41);
+    state.duringChecks = null;
+    state.prepareAnswer = {};
+    assert.equal((await f.sessions.executeGithubIssueClosure(id, silent.occurrenceId, silent.resourceDigest)).ok, true);
+    refused(silent.occurrenceId, "runner_failed");
+    state.prepareAnswer = { prepared: true };
+
+    // The owner removes the issue from the scope while the checks run, after the last check before
+    // dispatch: a scope that reached no runner here must still stop the close.
+    const removed = await approved("close-41-removed", 41);
+    state.duringChecks = async () => {
+      const removal = await propose("remove-41", [], [["other/repo", 41]]);
+      assert.equal(removal.ok, true, removal.error ?? "");
+      assert.equal(approve(removal.data!.occurrenceId).ok, true);
+    };
+    assert.equal((await f.sessions.executeGithubIssueClosure(id, removed.occurrenceId, removed.resourceDigest)).ok, true);
+    refused(removed.occurrenceId, "campaign_authority_changed");
+    assert.equal(p.other.runnerId, "r2");
+
+    // The campaign ends while the checks run.
+    const ended = await approved("close-40-ended", 40);
+    state.duringChecks = () => { f.db.updateSessionStatus(id, "completed", Date.now()); };
+    assert.equal((await f.sessions.executeGithubIssueClosure(id, ended.occurrenceId, ended.resourceDigest)).ok, true);
+    refused(ended.occurrenceId, "campaign_authority_changed");
+  } finally { await server.close(); f.db.close(); }
+});
+
 test("bounded closure proof reads the issue's own repository entry, and is the Orchestrator's through that repository's Location (#4119)", async () => {
   const { f, server, id, propose, approve } = await multiRepositoryCampaign();
   try {
@@ -4271,7 +4335,7 @@ test("bounded closure proof reads the issue's own repository entry, and is the O
     assert.equal(executed.ok, true, executed.error ?? "");
     // Inspection, the delivery check at its exact head and the mutation all reached that Location's runner.
     assert.deepEqual(closures.map(({ runnerId, message }) => [runnerId, message.operation, message.location?.workspacePath]),
-      [["r2", "inspect", "/fixture/two/other"], ["r2", "inspect", "/fixture/two/other"], ["r2", "execute", "/fixture/two/other"]]);
+      [["r2", "inspect", "/fixture/two/other"], ["r2", "inspect", "/fixture/two/other"], ["r2", "execute", "/fixture/two/other"], ["r2", "commit", "/fixture/two/other"]]);
     assert.deepEqual(closures[1]!.message.operation === "inspect" && closures[1]!.message.deliveryPullRequests, [{ number: 10, headSha: "b".repeat(40) }]);
 
     // A merge in that repository is checked against its own part of the scope.
@@ -4327,7 +4391,7 @@ test("a Custom campaign's child in another Location receives that repository's s
     const executed = await f.sessions.executeGithubIssueClosure(id, decision.occurrenceId, decision.resourceDigest);
     assert.equal(executed.ok, true, executed.error ?? "");
     assert.deepEqual(closures.map(({ runnerId, message }) => [runnerId, message.operation, message.location?.workspacePath]),
-      [["r2", "inspect", "/fixture/two/other"], ["r2", "execute", "/fixture/two/other"]]);
+      [["r2", "inspect", "/fixture/two/other"], ["r2", "execute", "/fixture/two/other"], ["r2", "commit", "/fixture/two/other"]]);
     // A Custom campaign's other repository outside its list is refused the same way.
     const foreign = await f.sessions.requestGithubIssueClosure(id, closureRequest("close-third", 40, "third/repo"));
     assert.deepEqual(foreign.errorDetails, repositoryOutsideBoundary("third/repo").errorDetails);
