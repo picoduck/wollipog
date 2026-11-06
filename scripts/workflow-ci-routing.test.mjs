@@ -44,7 +44,7 @@ test("only the isolated dispatch benchmark can reduce manual coverage and its pr
     for (const benchmark of [false, true]) for (const caller of ["CI", "Main Rolling Validation", "PR Browser Benchmark"]) {
       const args = [event, "", "", false, false, "synchronize", "", "", "skipped", benchmark, caller];
       const isolated = event === "workflow_dispatch" && benchmark;
-      assert.deepEqual(Array.from(evaluate(matrix, ...args)), isolated ? [1] : [1, 2, 3, 4, 5]);
+      assert.deepEqual(Array.from(evaluate(matrix, ...args)), isolated ? [1] : [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
       assert.equal(Boolean(evaluate(prepare, ...args)), isolated);
       assert.equal(evaluate(benchmarkFlag, ...args), isolated ? "true" : "false");
       assert.equal(Boolean(evaluate(expression(job("check"), "if"), ...args)), true,
@@ -109,7 +109,7 @@ test("reduced dispatch fails the literal protected aggregate even when every wor
 test("failed, cancelled and missing PR plans cannot reduce browser work using retained outputs", () => {
   for (const result of ["failure", "cancelled", "skipped", "", "unknown"]) {
     const args = ["pull_request", "enabled", "fast", false, false, "synchronize", "", "", "skipped", false, "CI", result];
-    assert.deepEqual(Array.from(evaluate(matrix, ...args)), [1, 2, 3, 4, 5]);
+    assert.deepEqual(Array.from(evaluate(matrix, ...args)), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     assert.equal(evaluate(fast, ...args), "false");
   }
 });
@@ -123,7 +123,7 @@ test("off switches preserve full work; case-variant plan admission cannot change
       assert.equal(evaluate(admission, event, variable, mode), active);
       assert.equal(evaluate(enabled, event, variable, mode), String(active));
       assert.equal(evaluate(fast, event, variable, mode), String(active && mode === "fast"));
-      assert.deepEqual(Array.from(evaluate(matrix, event, variable, mode)), active && mode === "fast" ? [1] : [1, 2, 3, 4, 5]);
+      assert.deepEqual(Array.from(evaluate(matrix, event, variable, mode)), active && mode === "fast" ? [1] : [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
       for (const id of ["checks", "unit", "browser", "win32", "webkit", "delegated_pipeline", "check"]) {
         const condition = expression(job(id), "if");
         assert.equal(evaluate(condition, event, variable, mode), true, `${event}/${variable}/${id}`);
@@ -154,7 +154,7 @@ test("every gate and routing variable, mode and event keeps full coverage unless
         assert.equal(evaluate(fast, ...args), String(prActive && mode === "fast"));
         assert.equal(evaluate(admission, ...args), prActive);
         assert.deepEqual(Array.from(evaluate(matrix, ...args)),
-          (prActive && mode === "fast") || groupReduced ? [1] : [1, 2, 3, 4, 5], `${event}/${gate}/${gateResult}/${gateMode}`);
+          (prActive && mode === "fast") || groupReduced ? [1] : [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], `${event}/${gate}/${gateResult}/${gateMode}`);
         for (const id of ["checks", "unit", "browser", "win32", "webkit", "delegated_pipeline", "check"]) {
           assert.equal(evaluate(expression(job(id), "if"), ...args), true, `${event}/${gate}/${id}`);
         }

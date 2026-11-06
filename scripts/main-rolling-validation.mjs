@@ -7,6 +7,7 @@ import { attemptRecord, listJobs } from "./merge-queue-wait-report.mjs";
 import { candidateReceipt, candidatePlan, cleanCandidates, queueCandidate, validCandidates } from "./main-validation-candidates.mjs";
 
 import { isSupersededWorkerAttempt } from "./main-rolling-outcomes.mjs";
+import { BROWSER_SHARDS } from "./browser-shard-count.mjs";
 export { isSupersededWorkerAttempt } from "./main-rolling-outcomes.mjs";
 
 export const STATE_REF = "refs/heads/ci/main-rolling-state";
@@ -24,7 +25,7 @@ const ACTIVE = ["queued", "in_progress", "waiting", "pending", "requested"];
 export const UNIT_SHARDS = [1, 2, 3].map((i) => `Unit Tests (${i})`);
 export const REQUIRED = [
   "Full Validation / Typecheck & Bundles",
-  ...[1, 2, 3, 4, 5].map((i) => `Full Validation / Browser End-to-End Tests (${i})`),
+  ...BROWSER_SHARDS.map((i) => `Full Validation / Browser End-to-End Tests (${i})`),
   "Full Validation / WebKit End-to-End Tests",
   "Full Validation / Settings-Rows win32 Baselines / Detect Settings-Rows Changes",
   "Full Validation / Settings-Rows win32 Baselines / Compare win32 Settings-Rows Baselines",
@@ -95,7 +96,7 @@ export function validationRecord(repository, run, jobs, blobs) {
     Object.values(outcomes).every((s) => ["success", "failure", "timed_out"].includes(s));
   // Reuse the collector's ordinary-CI name model, then restore actual API names for evidence.
   const record = attemptRecord(repository, run, jobs.map((j) => ({ ...j, name: j.name.replace(/^Full Validation \/ /, "") })),
-    { since: run.created_at, until: run.updated_at });
+    { since: run.created_at, until: run.updated_at }, false, BROWSER_SHARDS.length);
   record.jobs = record.jobs.map((j, i) => ({ ...j, measurementName: j.name, name: jobs[i].name }));
   return { ...record, ...identity, schema: "main-rolling-validation-v1", testedSha: identity.targetSha,
     sha: identity.targetSha, dispatcherSha: run.head_sha, suiteRevision: identity.targetSha,

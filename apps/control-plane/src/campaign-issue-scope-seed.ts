@@ -2,16 +2,22 @@ import type { CampaignIssueScopeSeed, OrchestratorCampaignPolicy } from "@wollip
 import type { ScopeGrantFields } from "./scope-grant.js";
 
 /**
- * A Custom campaign's epic seed (#4104). The Decision Model reads the person's first message
- * (`scope_grant`) and the runner checks what it named; no word list decides whether a message
- * names an epic.
+ * A Custom campaign's first-message reading (#4104, #4259). The Decision Model reads the person's
+ * first message (`scope_grant`) and the runner checks what it named; no word list or grammar decides
+ * whether a message names an epic or which issues it grants.
  */
 
-/** Whether a Custom campaign's first message gets a seed at all: it writes a digit string, so it
- * can name an issue, and the explicit issue-list request (`orchestratorIssueNumbersFromInitialPrompt`)
- * found none. A message without digits names no issue number and makes no Decision call. */
-export function needsCampaignIssueScopeSeed(text: string, explicitIssueNumbers: readonly number[]): boolean {
-  return explicitIssueNumbers.length === 0 && /(?<![0-9])[1-9][0-9]{0,15}(?![0-9])/u.test(text);
+/** Whether a Custom campaign's first message gets a reading at all: it writes a digit string, so it
+ * can name an issue. A message without digits names no issue number and makes no Decision call; this
+ * is a floor that only ever withholds a grant, never one that makes it. */
+export function needsCampaignIssueScopeSeed(text: string): boolean {
+  return /(?<![0-9])[1-9][0-9]{0,15}(?![0-9])/u.test(text);
+}
+
+/** Whether a healthy reading names any issue to work on: an explicit issue or a range. Context
+ * references and a selection without numbers name none, so they grant nothing here. */
+export function readingNamesIssues(fields: Pick<ScopeGrantFields, "explicit" | "ranges">): boolean {
+  return fields.explicit.length > 0 || fields.ranges.length > 0;
 }
 
 /** The one issue a healthy reading names as the work, when that is all it names: no range and no

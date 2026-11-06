@@ -5,7 +5,7 @@ import test from "node:test";
 import { browserEvidence, BROWSER_SELECTION_MARKER } from "./ci-pr-browser-route.mjs";
 import { CRITICAL_BROWSER_FILES, PR_BROWSER_POLICY } from "./ci-pr-browser-policy.mjs";
 import {
-  applyTimingContext, attemptRecord, dependencyCandidates, combineReports, collectEvents, eventSummary, listJobs, outcome, queueHistory, readTimingLog,
+  applyTimingContext, attemptRecord, reprojectAttempt, dependencyCandidates, combineReports, collectEvents, eventSummary, listJobs, outcome, queueHistory, readTimingLog,
   AGGREGATOR, compareReports, collect, listRemovals, main, markdown, MAX_PAGES, options, pullRequestOf, quantile, runMetrics, summarize,
 } from "./merge-queue-wait-report.mjs";
 
@@ -18,6 +18,28 @@ const job = (name, created, started, completed, conclusion = "success") => ({
 const run = (id, n, completed = 60) => ({
   id, run_attempt: 1, event: "merge_group", path: ".github/workflows/ci.yml", status: "completed", conclusion: "success",
   head_branch: branch(n), created_at: at(0), updated_at: at(completed),
+});
+
+test("explicit shard inventories keep historical five and current ten distinct, including missing high legs", () => {
+  const shards = Array.from({ length: 10 }, (_, i) => ({ ...job(`Browser End-to-End Tests (${i + 1})`, 0, 1, 10),
+    steps: [{ name: "Executed Work", conclusion: "success", started_at: at(1), completed_at: at(10) }] }));
+  const record = (items, expected = 5, truncated = false) => attemptRecord(repository, run(1, 1), items, {}, truncated, expected);
+  const historical = record(shards.slice(0, 5));
+  const current = record(shards, 10);
+  assert.equal(historical.metrics.browserShardImbalance.complete, true);
+  assert.equal(current.metrics.browserShardImbalance.complete, true);
+  for (const row of [historical, current]) assert.deepEqual(reprojectAttempt(row).metrics.browserShardImbalance, row.metrics.browserShardImbalance);
+  for (const missing of [shards.slice(0, 5), shards.slice(0, 9), [...shards.slice(0, 9), shards[0]], [...shards, shards[0]]])
+    assert.equal(record(missing, 10).metrics.browserShardImbalance.complete, false);
+  assert.equal(record(shards).metrics.browserShardImbalance.complete, false, "ten observed jobs cannot be reinterpreted as five");
+  assert.equal(record(shards, 10, true).metrics.browserShardImbalance.complete, false);
+  assert.equal(record(shards.map((j, i) => i === 9 ? { ...j, completed_at: null } : j), 10).metrics.browserShardImbalance.complete, false);
+  assert.equal(options(["--repo", repository, "--all-events", "--browser-shards", "10"]).browserShards, 10);
+  for (const value of ["0", "1.5", "101", "NaN"]) assert.throws(() => options(["--repo", repository, "--all-events", "--browser-shards", value]));
+  assert.throws(() => options(["--repo", repository, "--browser-shards", "10"]));
+  assert.throws(() => options(["--input", "old.json", "--all-events", "--browser-shards", "10"]));
+  const routing = job("PR Suite Routing", 0, 0, 1);
+  assert.deepEqual(dependencyCandidates(shards[9], [routing, ...shards], {}), [routing]);
 });
 
 test("queue branches name their pull request", () => {

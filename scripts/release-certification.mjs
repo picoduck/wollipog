@@ -27,12 +27,14 @@ export function fullTestStepsPassed(jobs) {
   };
   const passed = (job, name) => job?.steps?.some((s) => s.name === name && s.conclusion === "success");
   const required = REQUIRED.map(exact);
-  return CORE_STEPS.every((name) => passed(required[0], name)) &&
-    required.slice(1, 6).every((job) => passed(job, "Remote-Instance Browser End-to-End Tests")) &&
-    passed(required[1], "Rendered Production Browser Smoke") &&
-    passed(required[6], "WebKit Browser End-to-End Tests") &&
-    passed(required[7], "Compare the Diff Against the Settings-Rows Paths") &&
-    passed(required[8], "Compare Against the Committed win32 Baselines") &&
+  const named = (name) => exact(`Full Validation / ${name}`);
+  return CORE_STEPS.every((name) => passed(named("Typecheck & Bundles"), name)) &&
+    REQUIRED.filter((name) => /^Full Validation \/ Browser End-to-End Tests \(\d+\)$/.test(name))
+      .every((name) => passed(exact(name), "Remote-Instance Browser End-to-End Tests")) &&
+    passed(named("Browser End-to-End Tests (1)"), "Rendered Production Browser Smoke") &&
+    passed(named("WebKit End-to-End Tests"), "WebKit Browser End-to-End Tests") &&
+    passed(named("Settings-Rows win32 Baselines / Detect Settings-Rows Changes"), "Compare the Diff Against the Settings-Rows Paths") &&
+    passed(named("Settings-Rows win32 Baselines / Compare win32 Settings-Rows Baselines"), "Compare Against the Committed win32 Baselines") &&
     UNIT_SHARDS.every((name) => passed(required.find((job) => job?.name === `Full Validation / ${name}`), "Unit Tests")) &&
     passed(required.find((job) => job?.name === "Full Validation / Delegated Pipeline Recovery"), "Verify Recorded-Boundary Pipeline Recovery") &&
     passed(required.at(-1), "Require Every Job to Have Succeeded");
