@@ -60,18 +60,22 @@ it. Each provider of a generation needs its own proof, and a relaunch under the 
 keeps the fence.
 
 A runner that crashes, or whose shutdown cannot prove the reaping, leaves the fence behind (#4256).
-Each fence records the runner process that set it with the provider-HOME lease evidence: its boot,
-its process start time, the marker every process it launches inherits, and its provider cgroup. On
-startup, a restarted runner tries to prove that process gone with every process it launched: the
-host has rebooted, its provider cgroup is empty, or no readable process of this user carries its
-marker, with none left uninspected. On that proof it lifts the fence and stores the final
+Each fence records every runner process that has run a provider of its generation since the fence
+was set, each with its provider-HOME lease evidence: its boot, its process start time, its launch
+marker and its provider cgroup. A runner that relaunches the session under the fenced generation
+adds itself. On startup, a restarted runner tries to prove every earlier runner on the list gone
+with every process it launched. Only a whole-tree proof counts: the host has rebooted, or the
+runner's provider cgroup is empty (or its unit was removed). Cgroup membership survives a child
+that clears its environment; the launch marker does not, so a clean marker scan never releases a
+slot. Once every earlier runner is proven gone, it lifts the fence and stores the final
 checkpoint, which its negotiated session snapshots deliver, so the slot is released without a
-history reload. Without it the slot stays held, and the runner repeats the same proof, backing off
-to every ten minutes; a later proof reports the checkpoint at once. If the session was relaunched
-under the same generation meanwhile, the fence passes to that provider's own retirement instead.
-Only host-native providers record this evidence. A fence without it (a WSL, container or cloud
-provider, a platform without process evidence, or a fence an older runner set) is never lifted by
-a later runner process, so its slot stays held.
+history reload. Without that proof the slot stays held, and the runner repeats the same proof,
+backing off to every ten minutes; a later proof reports the checkpoint at once. If its own provider
+of that generation is still retiring, the fence passes to that provider's retirement instead. Only
+host-native providers record this evidence. A fence that any of its runners could not record
+evidence for (a WSL, container or cloud provider, a platform without it, or a fence an older runner
+set) is never lifted by a later runner process, so its slot stays held. On a host without
+delegated cgroup v2, only a reboot proves a crashed runner's providers gone.
 
 In every case a worker's unspent reservation stays outstanding until its usage settles from the
 durable checkpoint, exactly once. Every campaign read settles ended workers whose hydrated history covers

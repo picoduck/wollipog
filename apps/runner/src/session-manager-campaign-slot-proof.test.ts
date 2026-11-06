@@ -9,18 +9,20 @@ import { ControlPlaneDb } from "../../control-plane/src/db.js";
 import { Hub } from "../../control-plane/src/hub.js";
 import { SessionsService } from "../../control-plane/src/sessions.js";
 import { publishNegotiatedSessionSnapshots } from "./control-plane-transport.js";
-import { SessionManager, type RetirementProcessProof } from "./session-manager.js";
+import type { LeaseProcessProbe } from "./provider-home-lease-evidence.js";
+import { leaseRetirementProcessProof, SessionManager, type RetirementProcessProof } from "./session-manager.js";
 import { SessionStore } from "./session-store.js";
 
 /** Runner processes of the simulated host, by pid: each records its own evidence with the fences
  * it sets, and a later one proves an earlier one gone only once the test marks it gone (#4256). */
 function host() {
   const gone = new Set<number>();
-  const runner = (pid: number): RetirementProcessProof => ({
-    current: () => ({ pid, process: { bootId: "00000000-0000-4000-8000-000000000000", startTime: String(pid), marker: "a".repeat(32) } }),
-    abandoned: (earlier) => gone.has(earlier.pid),
+  const asked: number[] = [];
+  const runner = (pid: number, bootId = "00000000-0000-4000-8000-000000000000"): RetirementProcessProof => ({
+    current: () => ({ pid, process: { bootId, startTime: "100", marker: "a".repeat(32) } }),
+    abandoned: (earlier) => { asked.push(earlier.pid); return gone.has(earlier.pid); },
   });
-  return { gone, runner };
+  return { gone, asked, runner };
 }
 
 // A campaign child keeps its concurrency slot until the runner proves its provider retired (#3788).
@@ -488,7 +490,7 @@ test("a restarted runner that proves the earlier runner gone releases the slot i
         provider.callbacks.onEvent({ kind: "token_usage", model: "claude-opus-5-5", inputTokens: 1, costUsd: 0.6 });
         assert.ok(h.svc.stop("worker").ok);
         first.stop("worker");
-        assert.equal(new SessionStore(h.dir).readMeta("worker")!.retiringProviderRunner?.pid, 1001,
+        assert.deepEqual(new SessionStore(h.dir).readMeta("worker")!.retiringProviderRunners?.map((runner) => runner.pid), [1001],
           `${what}: the fence records the runner process that set it`);
         if (ending === "unproven shutdown") {
           assert.equal(first.shutdownAll(), true);
@@ -516,7 +518,7 @@ test("a restarted runner that proves the earlier runner gone releases the slot i
         }
         const meta = new SessionStore(h.dir).readMeta("worker")!;
         assert.equal(meta.retiringProviderGeneration, undefined, `${what}: the fence is lifted`);
-        assert.equal(meta.retiringProviderRunner, undefined);
+        assert.equal(meta.retiringProviderRunners, undefined);
         const checkpoint = restarted.snapshotForControlPlane(meta).campaignBudgetCheckpoint!;
         assert.ok(checkpoint, `${what}: the snapshot carries the final checkpoint`);
         assert.equal(checkpoint.generation, dispatch.generation);
@@ -553,7 +555,7 @@ test("an earlier runner proven gone after a same-generation relaunch hands the f
     resumed.callbacks.onExit(3);
     machine.gone.add(1001);
     assert.equal(restarted.proveEarlierRunnerRetirements(true), false, "the earlier runner is proven gone");
-    assert.equal(new SessionStore(h.dir).readMeta("worker")!.retiringProviderRunner?.pid, 1002,
+    assert.deepEqual(new SessionStore(h.dir).readMeta("worker")!.retiringProviderRunners?.map((runner) => runner.pid), [1002],
       "the fence now belongs to the relaunched provider's own retirement");
     assert.equal(h.statuses.some((status) => status.campaignBudgetCheckpoint), false, "whose tree may still run");
     assert.equal(h.occupied(), 1);
@@ -583,6 +585,97 @@ test("a fence recorded without process evidence is never lifted by a later runne
     assert.equal(h.occupied(), 1);
     h.refused("and a replacement is refused");
   } finally { first.shutdownAll(); restarted?.shutdownAll(); h.cleanup(); }
+});
+
+test("every runner that ran a provider of a fenced generation must be proven gone before a later runner lifts the fence (#4256)", async () => {
+  const h = harness();
+  const machine = host();
+  const first = h.manager(undefined, machine.runner(1001));
+  let second: SessionManager | undefined;
+  let third: SessionManager | undefined;
+  try {
+    await h.launch(first);
+    assert.ok(h.svc.stop("worker").ok);
+    first.stop("worker");
+    // The first runner crashes. The second cannot prove it gone and relaunches the same generation.
+    second = h.manager(undefined, machine.runner(1002));
+    second.reconcileStore();
+    await h.reconnect(second);
+    const resumed = await h.launch(second);
+    assert.deepEqual(new SessionStore(h.dir).readMeta("worker")!.retiringProviderRunners?.map((runner) => runner.pid), [1001, 1002],
+      "the relaunching runner joins the fence");
+    // Its provider exits with its tree unproven, and the second runner crashes too.
+    resumed.callbacks.onExit(3);
+    machine.gone.add(1001);
+    third = h.manager(undefined, machine.runner(1003));
+    third.reconcileStore();
+    await h.reconnect(third);
+    third.rearmGovernance("worker", {}, undefined, h.db.campaignBudgets.dispatch("worker"));
+    assert.ok(new SessionStore(h.dir).readMeta("worker")!.retiringProviderGeneration, "proof about the first runner alone lifts nothing");
+    assert.equal(h.statuses.some((status) => status.campaignBudgetCheckpoint), false);
+    assert.equal(h.occupied(), 1, "the second runner's provider may still run");
+    h.refused("so a replacement is refused");
+    machine.gone.add(1002);
+    assert.equal(third.proveEarlierRunnerRetirements(true), false, "both runners are proven gone");
+    assert.ok(h.statuses.at(-1)!.campaignBudgetCheckpoint, "which releases the slot");
+    assert.equal(h.occupied(), 0);
+    h.child("replacement");
+  } finally { first.shutdownAll(); second?.shutdownAll(); third?.shutdownAll(); h.cleanup(); }
+});
+
+test("a fence this pid recorded in an earlier boot is proven like any earlier runner's, not taken for this runner's own (#4256)", async () => {
+  const h = harness();
+  const machine = host();
+  const earlierBoot = "00000000-0000-4000-8000-000000000000";
+  const first = h.manager(undefined, machine.runner(1001, earlierBoot));
+  let restarted: SessionManager | undefined;
+  try {
+    await h.launch(first);
+    assert.ok(h.svc.stop("worker").ok);
+    first.stop("worker");
+    assert.equal(first.proveEarlierRunnerRetirements(), false, "the runner that set the fence proves its own providers itself");
+    assert.deepEqual(machine.asked, []);
+    // After a reboot the same pid and start-time tick name a different process.
+    machine.gone.add(1001);
+    restarted = h.manager(undefined, machine.runner(1001, "11111111-1111-4111-8111-111111111111"));
+    restarted.reconcileStore();
+    await h.reconnect(restarted);
+    assert.deepEqual(machine.asked, [1001], "the earlier boot's runner is proven, not skipped");
+    assert.equal(new SessionStore(h.dir).readMeta("worker")!.retiringProviderGeneration, undefined);
+    assert.equal(h.occupied(), 0);
+    h.child("replacement");
+  } finally { first.shutdownAll(); restarted?.shutdownAll(); h.cleanup(); }
+});
+
+test("only a reboot or an empty provider cgroup proves an earlier runner gone, never a clean marker scan (#4256)", () => {
+  const recordedBoot = "22222222-2222-4222-8222-222222222222";
+  let boot = recordedBoot;
+  let containment: "empty" | "populated" | "unit_removed" | "unverifiable" = "empty";
+  const probe: LeaseProcessProbe = {
+    bootId: () => boot,
+    // The earlier runner is gone, and no readable process carries its marker.
+    startTime: (pid) => pid === process.pid ? "100" : null,
+    scan: () => ({ marked: [], uninspectable: [] }),
+    containment: () => containment,
+  };
+  const proof = leaseRetirementProcessProof(probe);
+  const runner = (evidence: Record<string, unknown>) => ({ pid: 4242, process: { bootId: recordedBoot, startTime: "100",
+    marker: "b".repeat(32), version: 2 as const, containment: evidence as never } });
+  const markerOnly = runner({ kind: "marker-parent-links", reason: "cgroup-not-delegated" });
+  const contained = runner({ kind: "linux-cgroup-v2", bootId: recordedBoot, mountRoot: "/", cgroupPath: "user.slice/wollipog-providers-x", inode: "42" });
+  assert.equal(proof.abandoned(markerOnly), false, "a child that cleared its environment would escape a marker scan");
+  assert.equal(proof.abandoned(contained), true, "an empty provider cgroup holds no descendant");
+  containment = "populated";
+  assert.equal(proof.abandoned(contained), false, "a populated one may");
+  containment = "unverifiable";
+  assert.equal(proof.abandoned(contained), false, "an unverifiable one proves nothing");
+  boot = "33333333-3333-4333-8333-333333333333";
+  assert.equal(proof.abandoned(markerOnly), true, "a reboot ended every process");
+
+  assert.ok(proof.current({ context: { kind: "native" } }), "a host-native provider records evidence");
+  assert.equal(proof.current({ context: { kind: "wsl", distro: "Ubuntu" } }), undefined, "a WSL provider can outlive the runner's evidence");
+  assert.equal(proof.current({ context: { kind: "native" }, executionTarget: { adapter: "container" } as never }), undefined,
+    "so can a container provider");
 });
 
 test("a provider that exits by itself with code 0 or by a signal gets an accurate status and frees its slot only on its tree proof (#4256)", async () => {
