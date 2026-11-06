@@ -22,10 +22,13 @@
  * `owners=after` gives the owner a decision they kept and a merge the Orchestrator handed to them
  * (#4064); `owners=before` is the same campaign as a server without owner decisions reports it, the
  * merge still the Orchestrator's and the owner's decision nowhere in Wollipog.
+ * `activity=active|cleanup|complete|stuck` shows each activity state (#4146), and `automation=` holds
+ * its recovery automation (#3361).
  */
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  CAMPAIGN_AUTOMATION_HOLD_REASONS,
   campaignIssueLimitsRequirement,
   campaignIssueScopeChangesRequirement,
   PROTOCOL_VERSION,
@@ -307,6 +310,14 @@ function handoffProjection(state: "before" | "after"): Partial<import("@wollipog
  * the same facts (Active for owed cleanup, Blocked for stuck work, and no lists). */
 const activityScenario = (["active", "cleanup", "complete", "stuck"] as const).find((value) => params.get("activity") === value) ?? null;
 const activityLegacy = params.get("legacy") === "1";
+/** `automation=complete|held|unsupported` (#3361) holds the recovery automation with the server's
+ * reason for a campaign with nothing left to recover (as servers before #4070 sent it on a finished
+ * campaign too), for original work no recovery can continue, or for an unsupported provider. */
+const automationHold = params.get("automation") === "complete"
+  ? { state: "lifecycle_held" as const, reason: CAMPAIGN_AUTOMATION_HOLD_REASONS.complete }
+  : params.get("automation") === "held" ? { state: "lifecycle_held" as const, reason: CAMPAIGN_AUTOMATION_HOLD_REASONS.recoveryHeld }
+  : params.get("automation") === "unsupported"
+    ? { state: "unsupported_capability" as const, reason: "The current provider cannot enforce authorized recovery." } : null;
 // Each state's work matches its facts: delivered states have every committed item delivered; Active
 // keeps the Campaign Status Panel item running in its child, its PR waiting in the merge queue.
 if (activityScenario === "active" || activityScenario === "cleanup" || activityScenario === "complete") {
@@ -451,6 +462,8 @@ const projectionFor = (rev: number) => campaignProjection(
     }],
     ...(handoffScenario ? handoffProjection(handoffScenario) : {}),
     ...(activityScenario ? activityProjection(activityScenario) : {}),
+    ...(automationHold ? { recovery: { unattendedReady: false, automation: automationHold, automatic: 0, waitingHuman: 0, blocked: 0,
+      records: [], truncated: false } } : {}),
     ...ownerProjection,
   },
 );

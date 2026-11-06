@@ -7,10 +7,12 @@
  * zero; and a cost says where it came from (provider-reported, estimated, partially priced).
  */
 import {
+  CAMPAIGN_AUTOMATION_HOLD_REASONS,
   CAMPAIGN_FORGE_OBSERVATION,
   CAMPAIGN_WORK_ITEM_PRIMARY_STATES,
   CAMPAIGN_WORK_ITEM_UNFINISHED_STATES,
   campaignRepositoryLocation,
+  campaignStatusTerminal,
   type CampaignCostValue,
   type CampaignElapsed,
   type CampaignForgeCheckRollup,
@@ -535,6 +537,36 @@ const CAMPAIGN_LIFECYCLE_LABELS: Record<OrchestratorCampaignProjection["status"]
 export function campaignLifecycleLabel(status: string): string {
   return CAMPAIGN_LIFECYCLE_LABELS[status as OrchestratorCampaignProjection["status"]]
     ?? titleCaseLabel(status.replaceAll("_", " "));
+}
+
+/** How Campaign Status shows the recovery automation's hold, or null when it shows nothing (#3361). */
+export interface CampaignRecoveryAutomationNotice {
+  tone: "neutral" | "warning";
+  title: string;
+  body: string;
+}
+
+/**
+ * The recovery automation's hold, told apart by what it means (#3361). A finished campaign
+ * (Campaign Complete, Complete, Needs Cleanup, or Complete with Handoffs) has nothing to recover, so
+ * its hold shows nothing: servers since #4070 already send no reason then, and an older server's
+ * reason is not a blocker either. Outside those, the hold the server gives for a campaign with no
+ * unfinished original scoped obligation reads as neutral No Recovery Needed, unless the campaign is
+ * Campaign Stuck or Blocked, where nothing is progressing and it stays a warning. Every other reason
+ * (lifecycle or recovery hold, authority, capability, budget) is a real blocker and keeps its
+ * warning. This only chooses words: what the server admits or resumes is unchanged.
+ */
+export function campaignRecoveryAutomationNotice(
+  status: OrchestratorCampaignProjection["status"] | undefined,
+  automation: NonNullable<OrchestratorCampaignProjection["recovery"]>["automation"],
+): CampaignRecoveryAutomationNotice | null {
+  const reason = automation?.reason;
+  if (!reason || campaignStatusTerminal(status)) return null;
+  if (automation?.state === "lifecycle_held" && reason === CAMPAIGN_AUTOMATION_HOLD_REASONS.complete &&
+      status !== "stuck" && status !== "blocked") {
+    return { tone: "neutral", title: "No Recovery Needed", body: reason };
+  }
+  return { tone: "warning", title: "Authorized Recovery Unavailable", body: reason };
 }
 
 /* ------------------------------------------------------------------------------------------------
