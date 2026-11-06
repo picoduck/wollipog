@@ -50,7 +50,10 @@ export function epicChecklistMembers(body: string, repository: string): number[]
 
 export function normalizeCampaignIssueScopeSnapshot(input: Record<string, unknown>): CampaignIssueScopeSnapshot | null {
   if (!validIssueAdmission(input.issueAdmission) || !validIssueLineage(input.lineage) || !validScopeGrantReview(input.grantReview) ||
-      !validSelectionReview(input.selectionReview)) return null;
+      !validSelectionReview(input.selectionReview) || !validScopeOwnerReview(input.ownerReview)) return null;
+  // An owner review is the owner's decision (#4267): it never carries an admission, a grant review or lineage.
+  if (input.ownerReview !== undefined && (input.issueAdmission !== undefined || input.grantReview !== undefined ||
+      input.selectionReview !== undefined || input.lineage !== undefined)) return null;
   if (input.verifiedPublications !== undefined && (!Array.isArray(input.verifiedPublications) || input.verifiedPublications.length > 100 ||
       input.verifiedPublications.some((p) => !p || typeof p !== "object" || Object.keys(p).length !== 2 || typeof p.publicationOccurrenceId !== "string" ||
         !p.publicationOccurrenceId || p.publicationOccurrenceId.length > 256 || !Number.isSafeInteger(p.issue) || p.issue < 1 ||
@@ -88,7 +91,8 @@ export function normalizeCampaignIssueScopeSnapshot(input: Record<string, unknow
     ...(input.issueAdmission === undefined ? {} : { issueAdmission: structuredClone(input.issueAdmission) as CampaignIssueScopeSnapshot["issueAdmission"] }),
     ...(input.verifiedPublications === undefined ? {} : { verifiedPublications: structuredClone(input.verifiedPublications) as CampaignIssueScopeSnapshot["verifiedPublications"] }),
     ...(input.grantReview === undefined ? {} : { grantReview: structuredClone(input.grantReview) as CampaignIssueScopeSnapshot["grantReview"] }),
-    ...(input.selectionReview === undefined ? {} : { selectionReview: structuredClone(input.selectionReview) as CampaignIssueScopeSnapshot["selectionReview"] }) };
+    ...(input.selectionReview === undefined ? {} : { selectionReview: structuredClone(input.selectionReview) as CampaignIssueScopeSnapshot["selectionReview"] }),
+    ...(input.ownerReview === undefined ? {} : { ownerReview: structuredClone(input.ownerReview) as CampaignIssueScopeSnapshot["ownerReview"] }) };
 }
 
 export function validIssueAdmission(value: unknown): boolean {
@@ -135,6 +139,19 @@ export function validScopeGrantReview(value: unknown): boolean {
     (s === undefined || Boolean(s && typeof s === "object" && !Array.isArray(s) && Object.keys(s).length === 4 &&
       Number.isSafeInteger(s.count) && (s.count as number) >= 0 && (s.count as number) <= 100 && typeof s.defaulted === "boolean" &&
       boundedText(s.criteria, 300) && Array.isArray(s.constraints) && s.constraints.length <= 10 && s.constraints.every((c) => boundedText(c, 200))));
+}
+
+/** The exact shape of an owner review (#4267): server-derived, bounded, and with nothing outside it.
+ * A Maximum Issues increase is positive and stays within the 100-issue ceiling. */
+export function validScopeOwnerReview(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  const m = v.maxIssuesIncrease as Record<string, unknown> | undefined;
+  return Object.keys(v).every((key) => key === "cause" || key === "maxIssuesIncrease") && v.cause === "lineage_missing" &&
+    (m === undefined || Boolean(m && typeof m === "object" && !Array.isArray(m) && Object.keys(m).length === 2 &&
+      Number.isSafeInteger(m.from) && (m.from as number) >= 1 && Number.isSafeInteger(m.increase) && (m.increase as number) >= 1 &&
+      (m.from as number) + (m.increase as number) <= 100));
 }
 
 export function validIssueLineage(value: unknown): boolean {

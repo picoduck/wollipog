@@ -778,13 +778,27 @@ follow-ups, or closing an epic), a root on control plane and runner protocol v28
 as a typed request instead:
 
 - `request_owner_decision` (CLI `wollipog decision ask-owner --request-id <id> --resource-key <key>
-  --question <text> --options '<json-array>' [--recommended <option-id>] [--material <text>]`) asks
-  the owner a question with explicit options. Put the decision material in `material`: links, the
-  exact head SHA, check state and what each option does. It waits in the owner's Inbox and Campaign
-  Status without stopping your turn or other work, and only the owner can answer it. The chosen
-  option, or Do Not Proceed, comes back to you as a Workflow Decision prompt; `get_workflow_decision`
-  reads it at any time. You may withdraw your own pending one with `withdraw_workflow_decision`.
-  Full Control asks nobody for credentials or sign-in, so a question asking for a value is refused.
+  --question <text> [--kind question|approval] --options '<json-array>' [--recommended <option-id>]
+  [--material <text>]`) asks the owner. Choose the kind by what the answer does:
+  - **Owner Question** (`kind: "question"`, protocol v303): design choices, clarifications and
+    preferences. This is the default for anything that does not authorize an exact action. The owner
+    sees a normal question with your 0 to 12 suggested options (mark one with `recommendedOptionId`),
+    an Other choice and a free-text answer, so they can add nuance, combine options or say "do X,
+    but also Y". Their answer (the option chosen, their own words, or both) comes back to you as a
+    Wollipog Owner Answer prompt. It grants nothing, and scope, boundary or policy changes never
+    revoke it: it ends only when the owner answers or dismisses it, you withdraw it, or a newer
+    question under the same `resourceKey` replaces it.
+  - **Owner Approval** (`kind: "approval"`, the default when `kind` is omitted): an exact action the
+    owner kept that has no typed category, with 2 to 12 explicit options. The chosen option, or Do
+    Not Proceed, comes back to you as a Workflow Decision prompt. For a gate that has a typed
+    category (a child's `pr_merge`, an issue closure, a publication), file that typed decision or
+    hand it over with `hand_workflow_decision_to_owner` instead.
+
+  Put the background in `material`, as Markdown: links, the exact head SHA, check state and what
+  each option does. Either kind waits in the owner's Inbox and Campaign Status without stopping your
+  turn or other work, and only the owner can answer it. `get_workflow_decision` reads it at any time,
+  and you may withdraw your own pending one with `withdraw_workflow_decision`. Full Control asks
+  nobody for credentials or sign-in, so a question asking for a value is refused.
 - `hand_workflow_decision_to_owner` (CLI `wollipog decision hand-to-owner <occurrence-id> --reason
   <text> [--session <child-id>]`) gives the owner one pending decision you own, such as a child's
   `pr_merge` or your own issue closure. It is one way: you and every child are refused if you try
@@ -831,9 +845,13 @@ label a Human Required rule names; choose another issue rather than asking. A pr
 is reviewed by the Decision Model against the owner's words: an admitted one returns an
 Orchestrator-owned scope change that you resolve and apply yourself; a refused one returns its
 `reason`, so propose a different issue; an uncertain or failed review becomes the owner's one typed
-approval, and proposing the same issues again returns that same request. The server
-refuses incidental references, foreign repositories and changes beyond human-set limits, naming the
-failed condition in a bounded `code`; a campaign owner can still propose the change from Campaign Status.
+approval, and proposing the same issues again returns that same request. For any other addition,
+such as an issue the owner asks for mid-run, propose it without lineage: it becomes the owner's one
+typed approval, stating any Maximum Issues increase it needs, and the returned occurrence tells you
+what to ask the owner to approve in their Inbox or Campaign Status; proposing the same issues again
+returns that same request. The server refuses incidental references, foreign repositories and
+lineage changes beyond human-set limits, naming the failed condition in a bounded `code`; a campaign
+owner can still propose the change from Campaign Status.
 Resolution applies and consumes scope atomically; do not separately consume it. A root can resolve
 only an eligible occurrence backed by its standing human authorization: when the effective owner is
 `orchestrator`, resolve it with `resolve_descendant_workflow_decision` and its own session ID as

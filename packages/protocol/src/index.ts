@@ -933,16 +933,24 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      that live root Orchestrator and only while it holds no issue numbers and no issue scope; the
 //      same numbers again are a no-op. An older runner is never sent it and keeps the next-launch
 //      path. (299 to 301 are claimed by pull requests still open.)
+// 303: Owner Questions (#4270). request_owner_decision takes `kind: "question"`: an owner_decision
+//      whose snapshot reads `kind: "question"` takes 0 to 12 suggested options, is presented as an
+//      agent question with a free-text answer, and is answered through the session's question
+//      route; the answer reaches the root as a prompt. It grants nothing, so scope, boundary and
+//      policy changes leave it pending. A v303 runner sends the field only to a v303 control plane;
+//      a v303 control plane accepts it only from a v303 root runner. (299-301 are claimed by open
+//      pull requests.)
 // 304: campaign control metadata carries its own authoritative ordering (#3363). A campaign
 //      issue scope synchronization, and an Orchestrator launch policy, add `controlRevision`: the
 //      campaign root's policy revision the control was read at. A runner keeps the newest control
 //      it was sent and never lets a delayed or reordered update replace it with an older one, even
 //      within one issue-scope revision. A pre-v304 runner is never sent the field and keeps
-//      replacing control with each synchronization. (303 is claimed by a pull request still open.)
+//      replacing control with each synchronization.
 export const PROTOCOL_VERSION = 304;
 
 export * from "./campaign-authority.js";
 export * from "./workflow-decision-owner-rule.js";
+export * from "./owner-question.js";
 export * from "./closing-references.js";
 export * from "./gitlab-closing-references.js";
 export * from "./issue-closure-refusal.js";
@@ -1074,6 +1082,7 @@ import type {
 } from "./campaign-work-ledger.js";
 export type { ConversationHandoffDraft, InPlaceHandoffTurn } from "./conversation-handoff.js";
 import { pendingRequests, prioritizedPendingRequests } from "./worker-attention.js";
+import { isOwnerQuestionRequest } from "./owner-question.js";
 export {
   attentionRequestRank,
   pendingRequests,
@@ -1337,6 +1346,10 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * and a one-way handoff of an Orchestrator-owned occurrence to that owner. Checked against the
    * root's runner by the control plane and against the control plane by the runner. */
   ownerDecisions: 281,
+  /** v303 (#4270): Owner Questions, `kind: "question"` on request_owner_decision. Checked against
+   * the control plane by the runner, because an older control plane would ignore the field and ask
+   * the question as an approval, and against the root's runner by the control plane. */
+  ownerQuestions: 303,
   /** v296 (#4137): `ownerRule` on request_workflow_decision. Checked against the control plane by
    * the runner, because an older control plane ignores the field and would let the Orchestrator
    * decide a gate its owner kept. */
@@ -5047,13 +5060,21 @@ function singleSessionAttentionStatus(
   const pending = requests[0] ?? session.pendingApproval;
   if (requests.length > 1) {
     const children = requests.filter((request) => request.ownerToolUseId).length;
-    const questions = requests.filter((request) => request.kind === "question").length;
+    const questions = requests.filter((request) => request.kind === "question" || isOwnerQuestionRequest(request)).length;
     const authentication = requests.filter((request) => request.kind === "authentication").length;
     const approvals = requests.length - questions - authentication;
     return {
       kind: "input_required",
       label: `${requests.length} Actions Required`,
       description: `${requests.length} unresolved requests: ${approvals} approvals, ${questions} questions, ${authentication} authentication requests; ${children} belong to child agents. Open Agents to inspect each request.`,
+    };
+  }
+  if (isOwnerQuestionRequest(pending)) {
+    // An Owner Question (#4270) is the Orchestrator asking the person, not an approval it waits on.
+    return {
+      kind: "input_required",
+      label: "Needs Your Input",
+      description: "The Orchestrator asked you a question and keeps working while it waits for your answer.",
     };
   }
   if (pending?.kind === "question" && pending.recoveryReason === "provider_restart") {
@@ -5410,6 +5431,21 @@ export interface CampaignIssueScopeSnapshot {
   /** The Decision Model's `admit` of a selection proposal (#4103), which the server's
    * `issueAdmission` evidence binds: the review occurrence, the grant it read and its reason. */
   selectionReview?: CampaignSelectionReview;
+  /** Present when a Full Control Orchestrator proposed additions that no lineage or selection grant
+   * admits, so the proposal is the owner's one typed approval rather than a refusal (#4267).
+   * Server-derived; it changes who decides, never what is granted. */
+  ownerReview?: CampaignScopeOwnerReview;
+}
+
+/** Why an Orchestrator's scope proposal waits for the owner (#4267), and the Maximum Issues increase
+ * its additions need. Approving applies the change and raises Maximum Issues by exactly `increase`;
+ * denying applies neither. */
+export interface CampaignScopeOwnerReview {
+  /** The proposal named no epic, published follow-up or selection lineage. */
+  cause: "lineage_missing";
+  /** Present when the scope plus publication reservations would exceed the campaign's issue limit:
+   * the Maximum Issues the boundary held when it was requested, and how many more the additions need. */
+  maxIssuesIncrease?: { from: number; increase: number };
 }
 
 export interface CampaignSelectionReview {
@@ -5742,12 +5778,18 @@ export interface OwnerDecisionSnapshot {
   question: string;
   options: WorkflowDecisionOption[];
   recommendedOptionId?: string;
-  /** What the owner needs to decide: links, head SHAs, check state, what each option does. */
+  /** What the owner needs to decide: links, head SHAs, check state, what each option does. Shown
+   * as Markdown. */
   material?: string;
+  /** v303 (#4270): an Owner Question, a design choice, clarification or preference the owner
+   * answers in their own words. It grants nothing, takes 0 to 12 suggested options and is never
+   * revoked by a scope, boundary or policy change. Absent: an Owner Approval, as before. */
+  kind?: "question";
 }
 
-/** Bounds of an owner decision, shared by the runner tool and the control plane. */
-export const OWNER_DECISION_LIMITS = { question: 4000, material: 8000, minOptions: 2, maxOptions: 12 } as const;
+/** Bounds of an owner decision, shared by the runner tool and the control plane. An Owner Question
+ * (#4270) takes as few as `minQuestionOptions` suggested options. */
+export const OWNER_DECISION_LIMITS = { question: 4000, material: 8000, minOptions: 2, minQuestionOptions: 0, maxOptions: 12 } as const;
 
 export type WorkflowDecisionResourceSnapshot =
   | AutomationCreationSnapshot
@@ -5979,6 +6021,9 @@ export interface CreateOwnerDecisionRequest {
   options: WorkflowDecisionOption[];
   recommendedOptionId?: string;
   material?: string;
+  /** v303 (#4270): `question` asks an Owner Question, answered in the owner's own words; `approval`
+   * (the default) asks for an exact choice among 2 to 12 options. */
+  kind?: "question" | "approval";
 }
 
 /** v281 (#4064): hand one pending Orchestrator-owned occurrence to the campaign's owner. */

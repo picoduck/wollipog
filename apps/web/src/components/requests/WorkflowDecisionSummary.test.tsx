@@ -51,6 +51,17 @@ test("an owner decision shows the question, its material and its options, and sa
     "You kept this decision, so only you can make it. The Orchestrator keeps working while it waits.");
 });
 
+test("an owner decision's material renders as Markdown with working links, and an Owner Question reads as a question (#4270)", () => {
+  const snapshot = { category: "owner_decision", kind: "question", question: "Which name should the bridge use?",
+    material: "See [the design note](https://example.com/design) and **both** drafts.", options: [] } as const satisfies WorkflowDecisionResourceSnapshot;
+  const markup = renderToStaticMarkup(<WorkflowDecisionSummary snapshot={snapshot} />);
+  assert.doesNotMatch(markup, /code-well|<pre>/u, "not a monospace block");
+  assert.match(markup, /<a [^>]*href="https:\/\/example\.com\/design"[^>]*>/u);
+  assert.match(markup, /<strong>both<\/strong>/u);
+  assert.doesNotMatch(markup, /<ul>/u, "a question with no suggestions lists none");
+  assert.match(text(snapshot), /The Orchestrator asked you this question\. Only you can answer it, in your own words/u);
+});
+
 test("an owner rule shows its source and quote as plain text, whoever reads the card (#4137)", () => {
   const markup = renderToStaticMarkup(<OwnerRuleSummary rule={{ source: "~/.claude/skills/issue-workflow/SKILL.md",
     quote: "Ask <script>alert(1)</script> & wait for \"yes\"." }} />);

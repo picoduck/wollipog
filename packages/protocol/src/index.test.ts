@@ -360,6 +360,9 @@ test("session restart capability overlays controls without freezing the agent ca
 
 test("PROTOCOL_VERSION is 304", () => {
   assert.equal(PROTOCOL_VERSION, 304);
+  // Owner Questions need a v303 control plane and root runner (#4270).
+  assert.equal(runnerSupportsProtocol(302, "ownerQuestions"), false);
+  assert.equal(runnerSupportsProtocol(303, "ownerQuestions"), true);
   // Only a v302 runner takes a granted issue-number delivery to a live Orchestrator (#4269).
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueNumberGrant, 302);
   assert.equal(runnerSupportsProtocol(301, "campaignIssueNumberGrant"), false);

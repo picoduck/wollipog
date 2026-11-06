@@ -759,20 +759,22 @@ function forgeActionSummary(decision: unknown): string {
 }
 
 /** A pre-v281 control plane has no owner-decision routes (#4064). Refuse by name: nothing reached
- * the owner, and the decision keeps the owner it had. */
-async function ownerDecisionCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
-  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions;
+ * the owner, and the decision keeps the owner it had. A pre-v303 control plane would ignore an Owner
+ * Question's `kind` (#4270) and ask it as an approval, so a question needs v303. */
+async function ownerDecisionCompatibilityError(deps: McpDeps, question = false): Promise<ToolResult | null> {
+  const required = question ? RUNNER_CAPABILITY_MIN_PROTOCOL.ownerQuestions : RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions;
+  const noun = question ? "owner questions" : "owner decisions";
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
     const result = await cpFetch(deps, "GET", "/api/compatibility");
     if (!result.ok) {
-      return controlPlaneUpdateRequired(wollipogSupportUnverified("owner decisions", result.message), required);
+      return controlPlaneUpdateRequired(wollipogSupportUnverified(noun, result.message), required);
     }
     actual = result.data?.protocolVersion;
   }
   return Number.isInteger(actual) && actual! >= required
     ? null
-    : controlPlaneUpdateRequired(needsNewerWollipog("Owner decisions need",
+    : controlPlaneUpdateRequired(needsNewerWollipog(question ? "Owner questions need" : "Owner decisions need",
       "Update Wollipog; nothing reached the owner."), required, actual);
 }
 
@@ -1481,7 +1483,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_campaign_issue_scope_change",
-    description: "Propose exact repository-qualified issue additions/removals at the current scope revision. Custom requires a human. A human-established Full Control issue boundary admits verified epic or exact published follow-up lineage within its limits. When the owner's first message asked the campaign to choose issues (a selection grant), propose the issues you chose with lineage {kind:\"selection\"} and your ranking as the explanation, additions only: the server refuses, with a fixed code and no model call, an issue outside the campaign's repositories, a pull request, a closed issue, one already in scope, one in another active campaign's scope, one past the selection count or Maximum Issues, and one with a Human Required label; otherwise the owner decides. Resolution atomically applies and consumes scope; do not consume it yourself. Pending, denied, stale and replayed requests never widen authority.",
+    description: "Propose exact repository-qualified issue additions/removals at the current scope revision. Custom requires a human. A human-established Full Control issue boundary admits verified epic or exact published follow-up lineage within its limits. When the owner's first message asked the campaign to choose issues (a selection grant), propose the issues you chose with lineage {kind:\"selection\"} and your ranking as the explanation, additions only: the server refuses, with a fixed code and no model call, an issue outside the campaign's repositories, a pull request, a closed issue, one already in scope, one in another active campaign's scope, one past the selection count or Maximum Issues, and one with a Human Required label; otherwise the owner decides. Under Full Control, additions without lineage that no grant admits become the owner's one typed approval, stating any Maximum Issues increase they need; tell the owner to approve it, and a repeat while it is pending returns the same request. Resolution atomically applies and consumes scope; do not consume it yourself. Pending, denied, stale and replayed requests never widen authority.",
     inputSchema: { type: "object", properties: {
       requestId: { type: "string" }, expectedRevision: { type: "integer", minimum: 0 }, explanation: { type: "string", minLength: 1, maxLength: 4000 },
       additions: { type: "array", maxItems: 100, items: { type: "object", properties: { repository: { type: "string" }, number: { type: "integer", minimum: 1 } }, required: ["repository", "number"], additionalProperties: false } },
@@ -2782,16 +2784,20 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_owner_decision",
-    description: "Full Control root Orchestrator only: give your campaign's owner a decision they kept for themselves (for example a credential design, risk consent to merge a pull request, publishing follow-ups, or closing an epic), as a typed request with explicit options. Put everything the owner needs in material: links, the exact head SHA, check state and what each option does. It waits in the owner's Inbox and Campaign Status without stopping your turn or any other work; only the owner can answer it, never you or a child. Their chosen option (or Do Not Proceed) comes back to you as a Wollipog Workflow Decision prompt, and get_workflow_decision reads it at any time. A newer request under the same resourceKey replaces an unanswered one; withdraw_workflow_decision withdraws it. Full Control never asks anyone for credentials or sign-in, so a request for a value is refused. Requires control plane v281.",
+    description: "Full Control root Orchestrator only: ask your campaign's owner something only they can decide. " +
+      "Use kind \"question\" (an Owner Question) for a design choice, clarification or preference: the owner sees it as a normal question, with your 0 to 12 suggested options (mark one with recommendedOptionId) plus a free-text answer, and can answer in their own words. It grants nothing, and scope, boundary or policy changes never revoke it. " +
+      "Use kind \"approval\" (the default, an Owner Approval) only for an exact action the owner kept that has no typed category, with 2 to 12 explicit options; for a gate that has one (a child's pr_merge, an issue closure, a publication) use the typed decision or hand_workflow_decision_to_owner instead. " +
+      "Put everything the owner needs in material, as Markdown: links, the exact head SHA, check state and what each option does. It waits in the owner's Inbox and Campaign Status without stopping your turn or any other work; only the owner can answer it, never you or a child. A question's answer (the option chosen, their own words, or both) comes back as a Wollipog Owner Answer prompt; an approval's chosen option (or Do Not Proceed) as a Wollipog Workflow Decision prompt; get_workflow_decision reads either at any time. A newer request under the same resourceKey replaces an unanswered one; withdraw_workflow_decision withdraws it. Full Control never asks anyone for credentials or sign-in, so a request for a value is refused. Requires control plane v281, and v303 for kind \"question\".",
     inputSchema: {
       type: "object",
       properties: {
         requestId: { type: "string", minLength: 1, maxLength: 256 },
         resourceKey: { type: "string", minLength: 1, maxLength: 512 },
+        kind: { type: "string", enum: ["question", "approval"] },
         question: { type: "string", minLength: 1, maxLength: OWNER_DECISION_LIMITS.question },
         options: {
           type: "array",
-          minItems: OWNER_DECISION_LIMITS.minOptions,
+          minItems: OWNER_DECISION_LIMITS.minQuestionOptions,
           maxItems: OWNER_DECISION_LIMITS.maxOptions,
           items: {
             type: "object",
@@ -2813,12 +2819,19 @@ export const TOOLS: McpTool[] = [
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("a session identity is required");
       if (args?.sessionId !== undefined) return errorResult("an owner decision is self-scoped and does not accept sessionId");
-      const compatibilityError = await ownerDecisionCompatibilityError(deps);
+      const { requestId, resourceKey, question, options, recommendedOptionId, material, kind } = args ?? {};
+      if (kind !== undefined && kind !== "question" && kind !== "approval") return errorResult("kind must be question or approval");
+      // An approval offers the owner an exact choice; only a question (#4270) may suggest fewer than two.
+      if (kind !== "question" && (!Array.isArray(options) || options.length < OWNER_DECISION_LIMITS.minOptions)) {
+        return errorResult(`an Owner Approval needs ${OWNER_DECISION_LIMITS.minOptions} to ${OWNER_DECISION_LIMITS.maxOptions} options; ` +
+          "ask a design or clarification question with kind \"question\" instead");
+      }
+      const compatibilityError = await ownerDecisionCompatibilityError(deps, kind === "question");
       if (compatibilityError) return compatibilityError;
-      const { requestId, resourceKey, question, options, recommendedOptionId, material } = args ?? {};
       const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/owner-decisions`, {
         requestId, resourceKey, question, options,
         ...(recommendedOptionId !== undefined ? { recommendedOptionId } : {}), ...(material !== undefined ? { material } : {}),
+        ...(kind === "question" ? { kind } : {}),
       });
       return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
     },
