@@ -54,7 +54,19 @@ test("a proposal names each issue by its own repository and shows the repository
     assert.ok(text.includes("team/api#12 Same number"), text);
     assert.ok(text.includes("Repository You Named"), text);
     assert.ok(text.includes("the api repo: matches no repository in this campaign, or more than one"), text);
-    assert.ok(text.includes("the repository your message names decides nothing"), text);
+    assert.ok(text.includes("a repository your message names matches nothing or several, so no repository limit applies"), text);
+  } finally { await unmount(); }
+});
+
+test("a proposal limited to several repositories lists each name and what it matched (#4117)", async () => {
+  const proposal: CampaignScopeProposalView = { ...waiting, proposal: { ...waiting.proposal, repositoryConstraints: [{ name: "the api repo", repository: "team/api" },
+    { name: "web", repository: null }], checks: ["chosen_issues", "repository_name_unresolved"], ownerCause: "repository_name_unresolved" } };
+  const { host, unmount } = await mount([proposal]);
+  try {
+    const text = host.textContent ?? "";
+    assert.ok(text.includes("Repositories You Named"), text);
+    assert.ok(text.includes("the api repo: team/api"), text);
+    assert.ok(text.includes("web: matches no repository in this campaign, or more than one"), text);
   } finally { await unmount(); }
 });
 

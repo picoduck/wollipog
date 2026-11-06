@@ -38,6 +38,15 @@ export function repositoryNameInMessage(text: string, name: string): boolean {
   return new RegExp(`(?<![\\p{L}\\p{N}_-])${escaped}(?![\\p{L}\\p{N}_-])`, "u").test(flat(text));
 }
 
+/** Whether the message writes the name of one of these repositories as words of its own (#4117): its
+ * full name, its name without the owner, or a Location's name. `owner/repo#12` or an issue's URL
+ * points at an issue and says nothing about limiting the work, so it doesn't count. */
+export function messageNamesRepository(text: string, entries: ReadonlyArray<{ repository: string; locationNames?: readonly string[] }>): boolean {
+  const words = text.replace(/\S*[\w.-]+\/[\w.-]+(?:#\d+|\/(?:issues|pull)\/\d+)\S*/gu, " ");
+  return entries.some((entry) => [entry.repository, entry.repository.slice(entry.repository.lastIndexOf("/") + 1), ...entry.locationNames ?? []]
+    .some((name) => repositoryNameInMessage(words, name)));
+}
+
 /** The repository a name the model returned resolves to: an empty name is the boundary's only
  * repository, and any other must match exactly one boundary entry. Anything else is null, so the
  * reference grants nothing. */

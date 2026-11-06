@@ -20,7 +20,9 @@ type Outcome = { ok: true; data: { joined: boolean; revision: number } } | { ok:
  * - the owner's Include in Campaign of a Location someone else added, or one with no recorded adder.
  *   Reconnecting never adds one of those: nobody has seen which repository it is, so it waits.
  * Agents have no route that reaches any of these, and a Location nobody added never joins on its
- * own. Every join is inspected in the Location's own path first. */
+ * own. Every join is inspected in the Location's own path first. While the owner's first message
+ * limits the campaign, recording a join of a repository with no entry leaves the Location available
+ * instead, whichever of these it came from: only an approved repository addition adds that entry. */
 export class CampaignLocations {
   private readonly queues = new Map<string, Promise<unknown>>();
 

@@ -7,7 +7,7 @@ import { test } from "node:test";
 import type { CampaignAuthorityBoundary } from "@wollipog/protocol";
 import { DECISION_KINDS, decisionOutputSchema, renderDecisionInput, validateDecisionOutput } from "./decision-kinds.js";
 import {
-  boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, onlyOtherRepositories, repositoryNameInMessage, resolveGrantRepository, resolveRepositoryName,
+  boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, messageNamesRepository, onlyOtherRepositories, repositoryNameInMessage, resolveGrantRepository, resolveRepositoryName,
   scopeGrantCandidates, writtenAsCount, writtenAsDigits, writtenAsRange, writtenForRepository, type ScopeGrantFields,
 } from "./scope-grant.js";
 import { issueReferencesAcrossRepositories } from "./campaign-launch-admission.js";
@@ -50,6 +50,15 @@ test("a repository name means one boundary repository, or nothing (#4118)", () =
   assert.equal(repositoryNameInMessage("Fix my-org/my.repo first.", "my-org/my.repo"), true);
   assert.equal(repositoryNameInMessage("Fix my-org/myxrepo first.", "my-org/my.repo"), false, "the name is literal text");
   assert.equal(repositoryNameInMessage("Fix it.", " "), false);
+  // A repository's name as words of the message's own, never inside an issue reference (#4117).
+  const named = [{ repository: "owner/api", locationNames: ["Docs Folder"] }, { repository: "owner/web" }];
+  assert.equal(messageNamesRepository("Fix bugs in owner/api.", named), true);
+  assert.equal(messageNamesRepository("Fix bugs in the web repo.", named), true);
+  assert.equal(messageNamesRepository("Fix bugs in docs folder.", named), true);
+  assert.equal(messageNamesRepository("Fix owner/api#12 and owner/web#3.", named), false);
+  assert.equal(messageNamesRepository("Fix https://github.com/owner/web/issues/3 rapidly.", named), false);
+  assert.equal(messageNamesRepository("Fix owner/web#3, then the api.", named), true);
+  assert.equal(messageNamesRepository("Fix everything.", named), false);
 });
 
 test("a number is written for a repository only where the message qualifies it so; a bare one is the launch repository's (#4118)", () => {

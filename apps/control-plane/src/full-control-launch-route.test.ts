@@ -5,7 +5,7 @@ import {
   CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CONTROLLED_REVIEW_PROFILE, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, WORKFLOW_DECISION_CATEGORIES,
   campaignWorkflowOwner, SCOPE_GRANT_DEFAULT_SELECTION_COUNT, SCOPE_PROPOSAL_ANSWER_ID, SCOPE_PROPOSAL_APPROVE_LABEL,
   type CampaignIssueFacts, type CampaignIssueScopeRequest, type CampaignIssueScopeSnapshot, type FullControlScopeGrant, type CampaignLaunchInspectionResult, type CampaignLaunchPreflight, type CampaignLaunchProposal, type ControlledReviewCapability,
-  isOwnerQuestionRequest, pendingRequests, presentOwnerQuestionRequest, scopeProposalOfRequest,
+  isOwnerQuestionRequest, pendingRequests, presentOwnerQuestionRequest, scopeProposalMaterial, scopeProposalOfRequest,
   type CampaignWorkItemDetail, type ControlPlaneToRunner, type ExecutionTargetDefinition, type CreateSessionRequest, type FullControlFirstMessageScope, type FullControlLaunchRequest, type GithubIssueClosureSnapshot, type RunnerMetadata, type RunnerRuntimeInfo,
   type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
@@ -1675,7 +1675,7 @@ test("\"Find the 5 highest-priority open issues and fix them\": the check confir
     // Only checkable questions: the count, each chosen issue against "open", completeness and operations.
     const asked = Object.keys((call.outputSchema as { properties: object }).properties);
     assert.deepEqual(asked, ["count_consistent", "constraint_met__1", "constraint_met__2", "constraint_met__3", "constraint_met__4",
-      "constraint_met__5", "constraints_complete", "nothing_omitted", "operations_respected"]);
+      "constraint_met__5", "constraints_complete", "repository_limits_complete", "nothing_omitted", "operations_respected"]);
     assert.deepEqual(Object.values(scopeCheckParametersOf(call)), [31, 32, 33, 34, 35].map((n) => `owner/repo#${n} Issue ${n} — open`));
     // Nothing asks about priority, importance, impact or effort, whatever the ranking words in the message.
     const questionText = [...call.input.matchAll(/<question [^>]*>\n([^<]*)/gu)].map((match) => match[1]!).join("\n");
@@ -1689,7 +1689,7 @@ test("\"Find the 5 highest-priority open issues and fix them\": the check confir
     const [view] = (await f.sessions.campaignIssueScope(c.id)).data!.scopeProposals!;
     assert.equal(view!.outcome, "applied");
     assert.deepEqual([view!.check!.state, view!.check!.verdict], ["decided", "admit"]);
-    assert.equal(view!.check!.typedAnswers!.answers.length, 9);
+    assert.equal(view!.check!.typedAnswers!.answers.length, 10);
     assert.ok(view!.check!.typedAnswers!.answers.every((answer) => answer.assessment === "satisfied" && answer.confidence >= 0.8));
     assert.equal(f.decision.calls.length + f.decision.reviewCalls.length, 0, "no first-message reading, no selection review");
   } finally { await server.close(); f.db.close(); }
@@ -3903,27 +3903,27 @@ test("a repository the owner's message names limits the proposal when it means o
   const { f, p, server, propose, ownerRequests, answer, id } = await multiRepositoryProposals("Fix the top bug in r2 a, or the top bug in the repo.");
   try {
     assert.equal(f.db.getProjectLocation(p.other.id)!.name, "r2 a");
-    const refused = await propose([otherChosen(50)], { repositoryName: "the api repository" });
+    const refused = await propose([otherChosen(50)], { repositoryNames: ["the api repository"] });
     assert.deepEqual(refused.errorDetails, { code: "repository_name_not_in_message" });
     // A Location's name means its repository, so an issue anywhere else is refused by name.
-    const stray = await propose([chosen(50)], { repositoryName: "r2 a" });
+    const stray = await propose([chosen(50)], { repositoryNames: ["r2 a"] });
     assert.deepEqual(stray.errorDetails, { code: "repository_constraint_mismatch", issue: 50 });
     assert.equal(f.decision.checkCalls.length, 0);
     f.decision.state.check = (message) => scopeCheckAnswer(message);
-    const fits = await propose([otherChosen(50)], { repositoryName: "r2 a" });
+    const fits = await propose([otherChosen(50)], { repositoryNames: ["r2 a"] });
     assert.equal(fits.ok, true, fits.error ?? "");
-    assert.deepEqual((fits.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.repositoryConstraint, { name: "r2 a", repository: "other/repo" });
+    assert.deepEqual((fits.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.repositoryConstraints, [{ name: "r2 a", repository: "other/repo" }]);
 
     // "repo" is the name of both repositories without their owners: it means nothing, so it is the owner's, with no model call.
     const calls = f.decision.checkCalls.length;
-    const ambiguous = await propose([otherChosen(51)], { repositoryName: "repo" });
+    const ambiguous = await propose([otherChosen(51)], { repositoryNames: ["repo"] });
     assert.equal(ambiguous.ok, true, ambiguous.error ?? "");
     assert.equal(ambiguous.data!.authority, "human");
     const recorded = (ambiguous.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!;
-    assert.deepEqual([recorded.route, recorded.ownerCause, recorded.repositoryConstraint], ["owner", "repository_name_unresolved", { name: "repo", repository: null }]);
+    assert.deepEqual([recorded.route, recorded.ownerCause, recorded.repositoryConstraints], ["owner", "repository_name_unresolved", [{ name: "repo", repository: null }]]);
     assert.equal(f.decision.checkCalls.length, calls);
-    assert.equal((await propose([otherChosen(51)], { repositoryName: "repo" })).data!.occurrenceId, ambiguous.data!.occurrenceId, "a repeat returns the same request");
-    const another = await propose([otherChosen(52)], { repositoryName: "repo" });
+    assert.equal((await propose([otherChosen(51)], { repositoryNames: ["repo"] })).data!.occurrenceId, ambiguous.data!.occurrenceId, "a repeat returns the same request");
+    const another = await propose([otherChosen(52)], { repositoryNames: ["repo"] });
     assert.notEqual(another.data!.occurrenceId, ambiguous.data!.occurrenceId, "another repository's other issue is another request");
     assert.equal(ownerRequests().length, 1, "the newer request replaced it, so the owner has one approval");
     assert.equal(answer({ [SCOPE_PROPOSAL_ANSWER_ID]: SCOPE_PROPOSAL_APPROVE_LABEL }).ok, true);
@@ -3935,9 +3935,9 @@ test("a named repository is only the agent's claim of a limit: the check judges 
   // "Don't touch" writes the name without limiting the work to it, and "api" isn't written in "rapidly".
   const excluded = await multiRepositoryProposals("Fix other/repo#40 rapidly, and don't touch r2 a's other issues.");
   try {
-    assert.deepEqual((await excluded.propose([otherNamed(40)], { repositoryName: "api" })).errorDetails, { code: "repository_name_not_in_message" }, "a name inside a word isn't written");
-    excluded.f.decision.state.check = (message) => scopeCheckAnswer(message, (id) => id.startsWith("repository_limit") ? { value: "does_not_limit" } : undefined);
-    const refused = await excluded.propose([otherNamed(40)], { repositoryName: "r2 a" });
+    assert.deepEqual((await excluded.propose([otherNamed(40)], { repositoryNames: ["api"] })).errorDetails, { code: "repository_name_not_in_message" }, "a name inside a word isn't written");
+    excluded.f.decision.state.check = (message) => scopeCheckAnswer(message, (id) => id.startsWith("repository_limit__") ? { value: "does_not_limit" } : undefined);
+    const refused = await excluded.propose([otherNamed(40)], { repositoryNames: ["r2 a"] });
     assert.equal(excluded.f.decision.checkCalls.length, 1, "naming a repository always reaches the model, even with nothing else to check");
     assert.deepEqual(Object.values(scopeCheckParametersOf(excluded.f.decision.checkCalls[0]!)).at(-1), "r2 a — other/repo");
     assert.equal(refused.errorDetails?.code, "constraint_check_refused");
@@ -3948,23 +3948,282 @@ test("a named repository is only the agent's claim of a limit: the check judges 
   const { f, server, propose, apply, id } = await multiRepositoryProposals("Fix the top 3 bugs in r2 a, and only there.");
   try {
     f.decision.state.check = (message) => scopeCheckAnswer(message);
-    const admitted = await propose([otherChosen(50)], { requestedCount: 3, repositoryName: "r2 a" });
+    const admitted = await propose([otherChosen(50)], { requestedCount: 3, repositoryNames: ["r2 a"] });
     assert.equal(admitted.ok, true, admitted.error ?? "");
     assert.equal(admitted.data!.authority, "orchestrator");
     assert.deepEqual((admitted.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.checks, ["chosen_issues", "requested_count", "repository_limit"]);
     assert.equal(apply(admitted.data!.occurrenceId).ok, true);
     const first = f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!;
-    assert.equal(first.state === "established" ? first.initialScope?.repositoryLimit : null, "other/repo");
+    assert.deepEqual(first.state === "established" ? first.initialScope?.repositoryLimits : null, ["other/repo"]);
 
     // Leaving the name out, or naming another repository, doesn't leave the admitted limit.
     assert.deepEqual((await propose([chosen(60)], {})).errorDetails, { code: "repository_constraint_mismatch", issue: 60 });
-    assert.deepEqual((await propose([chosen(60)], { repositoryName: "repo" })).errorDetails, { code: "repository_constraint_mismatch", issue: 60 });
+    assert.deepEqual((await propose([chosen(60)], { repositoryNames: ["repo"] })).errorDetails, { code: "repository_constraint_mismatch", issue: 60 });
     const calls = f.decision.checkCalls.length;
     assert.equal((await propose([otherChosen(51)], {})).ok, true, "inside the limit stays open");
     assert.equal(f.decision.checkCalls.length, calls + 1);
-    const campaign = JSON.parse(JSON.parse(/<untrusted_data name="campaign">\n(.*?)\n<\/untrusted_data>/su.exec(f.decision.checkCalls.at(-1)!.input)![1]!) as string) as { admitted: { repositoryLimit: string } };
-    assert.equal(campaign.admitted.repositoryLimit, "other/repo");
+    const campaign = JSON.parse(JSON.parse(/<untrusted_data name="campaign">\n(.*?)\n<\/untrusted_data>/su.exec(f.decision.checkCalls.at(-1)!.input)![1]!) as string) as { admitted: { repositoryLimits: string[] } };
+    assert.deepEqual(campaign.admitted.repositoryLimits, ["other/repo"]);
   } finally { await server.close(); f.db.close(); }
+});
+
+/** A first-message campaign in a Project of three repositories, with the mid-campaign Location
+ * machinery (#4117): owner/repo (launch), other/repo ("r2 a") and third/repo ("r2 c"). */
+async function threeRepositoryProposals(message: string) {
+  const f = fixture();
+  const p = multiRepositoryProject(f);
+  f.db.registerRunner({ runnerId: "r2", hostname: "r2", os: "linux", version: "test", agents: [], runtime: { ...runtime, campaignLaunchInspection: { version: 3 } },
+    workspaces: [{ id: "a", name: "r2 a", path: "/fixture/two/other" }, { id: "b", name: "r2 b", path: "/fixture/two/repository" },
+      { id: "c", name: "r2 c", path: "/fixture/two/third" }, { id: "f", name: "r2 f", path: "/fixture/two/other-copy" }, { id: "g", name: "r2 g", path: "/fixture/two/other-copy-2" },
+      { id: "h", name: "r2 h", path: "/fixture/two/third-copy" }] }, Date.now(), PROTOCOL_VERSION);
+  const third = f.db.addProjectLocation(p.project.id, { runnerId: "r2", workspaceId: "c", addedByUserId: f.human.userId });
+  const inspect = f.state.inspect;
+  const extra: Record<string, string> = { "/fixture/two/third": "third/repo", "/fixture/two/other-copy": "other/repo", "/fixture/two/other-copy-2": "other/repo",
+    "/fixture/two/third-copy": "third/repo" };
+  f.state.inspect = (frame) => {
+    const repository = extra[frame.workspacePath ?? ""];
+    const answer = repository ? { type: "campaign_launch_inspection_result" as const, requestId: frame.requestId, workspaceId: frame.workspaceId, ok: true as const,
+      repository, issueNumbers: frame.issueNumbers, digest: "d".repeat(64) } : inspect(frame);
+    return answer?.ok && frame.facts ? { ...answer, issueFacts: frame.issueNumbers.map((number): CampaignIssueFacts => ({ number, kind: "issue", state: "open",
+      labels: [], assignees: [], title: `Issue ${number}`, bodyExcerpt: "" })) } : answer;
+  };
+  const send = f.hub.sendToRunner.bind(f.hub);
+  f.hub.sendToRunner = (runnerId, frame) => {
+    if (runnerId !== "r" && frame.type === "campaign_issue_scope" && frame.operation === "synchronize") {
+      queueMicrotask(() => f.hub.resolveRunnerRequest({ type: "campaign_issue_scope_result", requestId: frame.requestId, sessionId: frame.sessionId,
+        ok: true, repository: frame.scope.repository, revision: frame.scope.revision }, runnerId));
+      return true;
+    }
+    return send(runnerId, frame);
+  };
+  const { server } = await app(f);
+  const c = await proposalCampaign(f, server, message, {}, { projectId: p.project.id, projectLocationId: p.launchLocation.id });
+  const policy = () => f.db.getSession(c.id)!.orchestratorPolicy!;
+  const boundary = () => (policy().control as Extract<CampaignControl, { mode: "full_control" }>).boundary;
+  const locations = new CampaignLocations({ db: f.db, hub: f.hub, synchronize: (id) => f.sessions.synchronizeCampaignIssueScope(id),
+    settle: (before, revoked, owner, now) => f.sessions.settleCampaignBoundaryChange(before, revoked, owner, now), log: { warn() {} } });
+  const orchestrator: AgentPrincipal = { kind: "agent", actorId: "root-agent", credentialSessionId: c.id, orchestrator: true,
+    organizationId: f.human.organizationId, delegatedScope: f.scope };
+  const additions = new CampaignRepositoryAdditions({ db: f.db, hub: f.hub, sessions: f.sessions,
+    inspect: (locationId, options) => inspectProjectLocation({ db: f.db, hub: f.hub }, locationId, { ...options, requireProtocol: "campaignRepositoryBoundary" }),
+    synchronize: (id) => f.sessions.synchronizeCampaignIssueScope(id) });
+  return { f, p, third, server, policy, boundary, locations, additions, orchestrator, ...c };
+}
+/** The launch repository, then the others by name: Locations added in one millisecond have no fixed Project order. */
+const repositoriesOf = (boundary: { repositories?: Array<{ repository: string }> }) => {
+  const [launch, ...others] = boundary.repositories!.map((entry) => entry.repository);
+  return [launch!, ...others.sort()];
+};
+const thirdChosen = (number: number): ProposalIssue => ({ ...chosen(number), repository: "third/repo" });
+
+test("a first message limited to two of three repositories narrows the boundary when the Orchestrator's proposal is admitted (#4117)", async () => {
+  const c = await threeRepositoryProposals("Fix the top bug in Fixture Repo and the top bug in r2 c, and leave everything else alone.");
+  const { f, id } = c;
+  try {
+    assert.deepEqual(repositoriesOf(c.boundary()), ["owner/repo", "other/repo", "third/repo"]);
+    const before = c.boundary().revision;
+    f.decision.state.check = (message) => scopeCheckAnswer(message);
+    // An issue in the repository the names leave out is refused by name, before any model call.
+    const stray = await c.propose([chosen(50), otherChosen(50)], { repositoryNames: ["Fixture Repo", "r2 c"] });
+    assert.deepEqual(stray.errorDetails, { code: "repository_constraint_mismatch", issue: 50, repository: "other/repo" });
+    assert.equal(f.decision.checkCalls.length, 0);
+    const question = f.sessions.createWorkflowDecision(id, { requestId: "q-limit", resourceKey: "design-question",
+      resourceSnapshot: { category: "implementation_question", question: "Which design?", options: [{ optionId: "a", label: "Option A" }, { optionId: "b", label: "Option B" }] } }, () => true);
+    assert.equal(question.ok, true, question.error ?? "");
+    const proposed = await c.propose([chosen(50), thirdChosen(50)], { repositoryNames: ["Fixture Repo", "r2 c"] });
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "orchestrator", "the check admitted it");
+    const asked = Object.entries(scopeCheckParametersOf(f.decision.checkCalls[0]!)).filter(([key]) => key.startsWith("repository_limit")).map(([, value]) => value);
+    assert.deepEqual(asked, ["Fixture Repo — owner/repo", "r2 c — third/repo"], "each name is judged");
+    assert.deepEqual((proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.repositoryConstraints,
+      [{ name: "Fixture Repo", repository: "owner/repo" }, { name: "r2 c", repository: "third/repo" }]);
+    assert.deepEqual(repositoriesOf(c.boundary()), ["owner/repo", "other/repo", "third/repo"], "nothing narrows until it is applied");
+
+    assert.equal(c.apply(proposed.data!.occurrenceId).ok, true);
+    assert.deepEqual(repositoriesOf(c.boundary()), ["owner/repo", "third/repo"]);
+    assert.equal(c.boundary().revision, before + 1, "at a new revision");
+    assert.ok(campaignBoundaryCurrent(f.db.getSession(id)!), "the policy revision follows it");
+    assert.equal(f.db.workflowDecisionByOccurrence(question.data!.occurrenceId)!.status, "revoked", "what was bound to the old boundary is revoked");
+    const first = c.policy().firstMessageScope!;
+    assert.deepEqual(first.state === "established" ? first.initialScope?.repositoryLimits : null, ["owner/repo", "third/repo"]);
+    assert.deepEqual(c.policy().availableLocations, [{ locationId: c.p.other.id, name: "r2 a", repository: "other/repo" }]);
+    const view = f.db.campaignProjection(id)!.repositoryBoundary!;
+    assert.deepEqual(view.availableLocations, [{ locationId: c.p.other.id, name: "r2 a", repository: "other/repo" }]);
+    assert.deepEqual(view.repositoryLimits, ["owner/repo", "third/repo"]);
+    assert.equal(campaignBoundaryRepositoryAt(f.db, f.db.getSession(id)!, { runnerId: "r2", workspaceId: "a" }), null, "no child can be placed there");
+    // A later addition stays inside the limit, whatever it names.
+    assert.deepEqual((await c.propose([otherChosen(51)])).errorDetails, { code: "repository_outside_boundary", repository: "other/repo" });
+  } finally { await c.server.close(); c.f.db.close(); }
+});
+
+test("one good repository name beside an unresolvable one limits nothing, and goes to the owner's one approval (#4117)", async () => {
+  const c = await threeRepositoryProposals("Fix the top bug in r2 c and the repo, and nothing else.");
+  const { f, id } = c;
+  try {
+    const before = c.boundary().revision;
+    // "repo" is the name of all three repositories without their owners, so the whole limit means nothing.
+    const proposed = await c.propose([thirdChosen(50)], { repositoryNames: ["r2 c", "repo"] });
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "human");
+    const recorded = (proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!;
+    assert.deepEqual([recorded.route, recorded.ownerCause, recorded.repositoryConstraints],
+      ["owner", "repository_name_unresolved", [{ name: "r2 c", repository: "third/repo" }, { name: "repo", repository: null }]]);
+    assert.equal(recorded.checks.includes("repository_limit"), false, "no model judges a list that can't apply");
+    assert.equal(f.decision.checkCalls.length, 0);
+    assert.equal(c.ownerRequests().length, 1);
+    assert.equal(c.answer({ [SCOPE_PROPOSAL_ANSWER_ID]: SCOPE_PROPOSAL_APPROVE_LABEL }).ok, true);
+    // Approving admits the issues and applies no part of the limit.
+    assert.deepEqual(repositoriesOf(c.boundary()), ["owner/repo", "other/repo", "third/repo"]);
+    const first = c.policy().firstMessageScope!;
+    assert.equal(first.state === "established" ? first.initialScope?.repositoryLimits : null, undefined);
+    assert.equal(c.policy().availableLocations, undefined);
+    assert.equal(c.boundary().revision, before + 1, "the owner's approval re-minted it, as any does");
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issues, [{ repository: "third/repo", number: 50 }]);
+  } finally { await c.server.close(); c.f.db.close(); }
+});
+
+test("a repository limit can't add a repository: a name outside the boundary resolves to nothing and an approval adds no entry (#4117)", async () => {
+  const c = await threeRepositoryProposals("Fix the top bug in rogue/elsewhere only.");
+  try {
+    const proposed = await c.propose([chosen(50)], { repositoryNames: ["rogue/elsewhere"] });
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "human", "the owner decides, and nothing is checked by a model");
+    assert.equal(c.answer({ [SCOPE_PROPOSAL_ANSWER_ID]: SCOPE_PROPOSAL_APPROVE_LABEL }).ok, true);
+    assert.deepEqual(repositoriesOf(c.boundary()), ["owner/repo", "other/repo", "third/repo"]);
+    assert.equal(campaignScopeRepositories(c.f.db.getSession(c.id)!).some((entry) => entry.repository === "rogue/elsewhere"), false);
+    assert.equal((await c.propose([{ ...chosen(51), repository: "rogue/elsewhere" }])).errorDetails?.code, "repository_outside_boundary");
+  } finally { await c.server.close(); c.f.db.close(); }
+});
+
+test("a limit the check can't confirm goes to the owner, whose approval applies it; to the launch repository it leaves one entry (#4117)", async () => {
+  const c = await threeRepositoryProposals("Fix the top bug in Fixture Repo.");
+  const { f } = c;
+  try {
+    f.decision.state.check = (message) => scopeCheckAnswer(message, (question) => question.startsWith("repository_limit__") ? { value: "cannot_tell" } : undefined);
+    const proposed = await c.propose([chosen(50)], { repositoryNames: ["Fixture Repo"] });
+    assert.equal(proposed.data!.authority, "human", proposed.error ?? "");
+    assert.equal((proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.ownerCause, "constraint_check_uncertain");
+    const material = scopeProposalMaterial(proposed.data!.resourceSnapshot as Parameters<typeof scopeProposalMaterial>[0]);
+    assert.match(material, /limits the campaign to owner\/repo; another repository can come back only if you approve adding it/u, "the owner sees what approving does");
+    assert.deepEqual(repositoriesOf(c.boundary()), ["owner/repo", "other/repo", "third/repo"], "it never applies on its own");
+    assert.equal(c.answer({ [SCOPE_PROPOSAL_ANSWER_ID]: SCOPE_PROPOSAL_APPROVE_LABEL }).ok, true);
+    assert.deepEqual(repositoriesOf(c.boundary()), ["owner/repo"], "a one-entry boundary");
+    assert.deepEqual(c.policy().availableLocations!.map((item) => item.repository).sort(), ["other/repo", "third/repo"]);
+  } finally { await c.server.close(); c.f.db.close(); }
+});
+
+test("a message naming a repository with no limit proposed always reaches the check, and a limit left out goes to the owner (#4117)", async () => {
+  const c = await threeRepositoryProposals("Fix #12, in r2 c's sibling only if it reads the same; stay in Fixture Repo.");
+  const { f } = c;
+  try {
+    f.decision.state.check = (message) => scopeCheckAnswer(message, (question) => question === "repository_limits_complete" ? { value: "omits_limit" } : undefined);
+    const proposed = await c.propose([named(12)]);
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    const recorded = (proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!;
+    assert.ok(recorded.checks.includes("repository_mentioned"), "never the no-model path");
+    assert.equal(f.decision.checkCalls.length, 1);
+    assert.equal(proposed.data!.authority, "human", "a limit left out is neither refused nor silently dropped");
+    assert.equal(recorded.ownerCause, "constraint_check_uncertain");
+    assert.equal(c.ownerRequests().length, 1);
+    assert.deepEqual(repositoriesOf(c.boundary()), ["owner/repo", "other/repo", "third/repo"]);
+  } finally { await c.server.close(); c.f.db.close(); }
+});
+
+test("while a limit stands, another repository's Location stays available however it arrives; only an approved addition brings it in (#4117)", async () => {
+  const c = await threeRepositoryProposals("Fix the top bug in r2 c, and nothing else.");
+  const { f, id, locations, additions, orchestrator } = c;
+  try {
+    f.decision.state.check = (message) => scopeCheckAnswer(message);
+    const admitted = await c.propose([thirdChosen(50)], { repositoryNames: ["r2 c"] });
+    assert.equal(c.apply(admitted.data!.occurrenceId).ok, true);
+    // The limit names another repository than the launch one: the launch entry stays first, and its issues stay refused.
+    assert.deepEqual(repositoriesOf(c.boundary()), ["owner/repo", "third/repo"]);
+    assert.deepEqual((await c.propose([chosen(60)])).errorDetails, { code: "repository_constraint_mismatch", issue: 60 });
+    // Epic lineage skips the proposal route, and is held to the limit all the same.
+    const epicAddition = await f.sessions.proposeCampaignIssueScope(id, { requestId: randomUUID(), expectedRevision: c.revision(),
+      additions: [{ repository: "owner/repo", number: 61 }], removals: [], explanation: "A member of the epic.", lineage: { kind: "epic", epic: 7 } });
+    assert.deepEqual(epicAddition.errorDetails, { code: "repository_constraint_mismatch", issue: 61, repository: "owner/repo" });
+    const revision = c.boundary().revision;
+
+    // The owner's own new Location of the left-out repository is available and doesn't join.
+    const owned = f.db.addProjectLocation(c.p.project.id, { runnerId: "r2", workspaceId: "f", addedByUserId: f.human.userId });
+    await locations.locationAdded(owned.id, f.human);
+    assert.equal(c.boundary().revision, revision);
+    assert.ok(c.policy().availableLocations!.some((item) => item.locationId === owned.id && item.repository === "other/repo"));
+    // A Location of a repository the campaign holds still joins as it did.
+    const held = f.db.addProjectLocation(c.p.project.id, { runnerId: "r2", workspaceId: "h", addedByUserId: f.human.userId });
+    await locations.locationAdded(held.id, f.human);
+    assert.equal(c.boundary().revision, revision + 1);
+    assert.ok(c.boundary().repositories!.find((entry) => entry.repository === "third/repo")!.locationIds.includes(held.id));
+    // Someone else's waits, and Include in Campaign shows what it is without adding it.
+    const other: HumanPrincipal = { ...f.human, userId: "usr_other", actorId: "usr_other" };
+    const theirs = f.db.addProjectLocation(c.p.project.id, { runnerId: "r2", workspaceId: "g", addedByUserId: other.userId });
+    await locations.locationAdded(theirs.id, other);
+    assert.ok(c.policy().pendingLocations!.some((item) => item.locationId === theirs.id));
+    const included = await locations.include(id, theirs.id, f.human);
+    assert.deepEqual(included, { ok: true, data: { joined: false, revision: revision + 1 } });
+    assert.equal(c.policy().pendingLocations?.some((item) => item.locationId === theirs.id) ?? false, false);
+    assert.ok(c.policy().availableLocations!.some((item) => item.locationId === theirs.id));
+    // A reconnecting runner's excluded Location of that repository is available too.
+    const policy = c.policy();
+    policy.excludedLocations = [{ locationId: owned.id, name: "r2 f", failure: "runner_offline", reason: PROJECT_LOCATION_INSPECTION_FAILURES.runner_offline }];
+    policy.availableLocations = policy.availableLocations!.filter((item) => item.locationId !== owned.id);
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), id);
+    await locations.runnerReconnected("r2");
+    assert.equal(c.boundary().revision, revision + 1);
+    assert.ok(c.policy().availableLocations!.some((item) => item.locationId === owned.id));
+    assert.equal(c.policy().excludedLocations, undefined);
+    assert.deepEqual(repositoriesOf(c.boundary()), ["owner/repo", "third/repo"]);
+
+    // Only an approved addition gives it an entry, and its issues then pass the limit.
+    f.db.raw().prepare(`INSERT INTO orchestrator_campaign_follow_ups (id, campaign_session_id, origin_session_id, repository, title, recommendation_key, normalized_key, duplicate_of, created_at)
+      VALUES ('fu_limit', ?, NULL, 'other/repo', 'Needs the Other Repository', NULL, 'other/repo:fu_limit', NULL, ?)`).run(id, Date.now());
+    const requested = await additions.request(id, { requestId: "add-other", locationId: c.p.other.id, reason: "The follow-up lives there.", work: { kind: "follow_up", id: "fu_limit" } }, orchestrator);
+    assert.equal(requested.status, 201, requested.error ?? "");
+    assert.equal(requested.data!.authority, "human", "the decision is the owner's");
+    assert.equal((await additions.execute(id, requested.data!.occurrenceId, requested.data!.resourceDigest, orchestrator)).ok, false, "a request alone adds nothing");
+    assert.equal(f.sessions.resolveWorkflowDecision(id, id, requested.data!.occurrenceId, { outcome: "approve" }, "human", { kind: "human", id: f.human.userId }, () => true).ok, true);
+    const executed = await additions.execute(id, requested.data!.occurrenceId, requested.data!.resourceDigest, orchestrator);
+    assert.equal(executed.ok, true, executed.error ?? "");
+    assert.deepEqual(repositoriesOf(c.boundary()), ["owner/repo", "other/repo", "third/repo"]);
+    const first = c.policy().firstMessageScope!;
+    assert.deepEqual(first.state === "established" ? first.initialScope?.repositoryLimits : null, ["third/repo", "other/repo"]);
+    assert.equal(c.policy().availableLocations, undefined, "nothing of that repository is left out any more");
+    // Its other Locations wait for Include in Campaign: the approval named one.
+    assert.deepEqual(c.policy().pendingLocations!.map((item) => item.locationId).sort(), [owned.id, theirs.id].sort());
+    const inside = await c.propose([otherChosen(61)]);
+    assert.equal(inside.ok, true, inside.error ?? "");
+    assert.deepEqual((await c.propose([chosen(62)])).errorDetails, { code: "repository_constraint_mismatch", issue: 62 });
+  } finally { await c.server.close(); c.f.db.close(); }
+});
+
+test("a re-authorization and a reviewed enable keep a first-message limit; an enable leaves another repository available (#4117)", async () => {
+  const c = await threeRepositoryProposals("Fix the top bug in r2 c, and nothing else.");
+  const { f, id, server } = c;
+  try {
+    f.decision.state.check = (message) => scopeCheckAnswer(message);
+    const admitted = await c.propose([thirdChosen(50)], { repositoryNames: ["r2 c"] });
+    assert.equal(c.apply(admitted.data!.occurrenceId).ok, true);
+    const narrowed = c.boundary();
+    const reauthorized = f.sessions.setCampaignControl(id, { mode: "full_control", objective: narrowed.objective, operations: narrowed.operations,
+      delegatablePolicyIds: narrowed.delegatablePolicyIds, issueAuthority: narrowed.issueAuthority, budgetAuthority: narrowed.budgetAuthority },
+      f.db.getSession(id)!.parentControlPolicy!.revision, f.human);
+    assert.equal(reauthorized.ok, true, reauthorized.error ?? "");
+    assert.deepEqual(repositoriesOf(c.boundary()), ["owner/repo", "third/repo"], "a re-authorization carries the narrowed list");
+    assert.deepEqual(c.policy().availableLocations, [{ locationId: c.p.other.id, name: "r2 a", repository: "other/repo" }]);
+    const revoked = f.sessions.setCampaignControl(id, { mode: "custom" }, f.db.getSession(id)!.parentControlPolicy!.revision, f.human);
+    assert.equal(revoked.ok, true, revoked.error ?? "");
+    saveBudget(f, savedBudget);
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control/preflight`, headers: { authorization: "Bearer human" }, payload: {} });
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    assert.deepEqual(reviewed.summary.repositories!.map((entry) => entry.repository), ["owner/repo", "third/repo"]);
+    assert.deepEqual(reviewed.summary.availableLocations, [{ locationId: c.p.other.id, name: "r2 a", repository: "other/repo" }]);
+    const enabled = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    assert.deepEqual(repositoriesOf(c.boundary()), ["owner/repo", "third/repo"]);
+    assert.deepEqual(c.policy().availableLocations, [{ locationId: c.p.other.id, name: "r2 a", repository: "other/repo" }]);
+  } finally { await c.server.close(); c.f.db.close(); }
 });
 
 test("an explicit Maximum Issues counts a proposal's additions in every repository (#4118, #4282)", async () => {

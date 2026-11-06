@@ -1,7 +1,7 @@
 import {
-  campaignAuthorityPreflight, campaignBoundaryRepositories, campaignScopeHolds, resolveCampaignAuthority, runnerSupportsProtocol, validCampaignControl,
+  campaignAuthorityPreflight, campaignBoundaryRepositories, campaignScopeHolds, initialScopeRepositoryLimits, resolveCampaignAuthority, runnerSupportsProtocol, validCampaignControl,
   type CampaignAuthorityEvaluation, type CampaignBoundaryRepository, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope, type CredentialScreenFact,
-  type ParentControlPolicy, type PendingApproval, type SessionView, type WorkflowDecisionResourceSnapshot,
+  type OrchestratorCampaignPolicy, type ParentControlPolicy, type PendingApproval, type SessionView, type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
 import type { HumanPrincipal } from "./identity.js";
 
@@ -36,6 +36,14 @@ export function carriedCampaignRepositories(session: SessionView, scopeRepositor
   const policy = session.orchestratorPolicy;
   const list = policy?.control?.mode === "full_control" ? policy.control.boundary.repositories : policy?.repositories;
   return list?.length && list[0]!.repository.toLowerCase() === scopeRepository.toLowerCase() ? structuredClone(list) : undefined;
+}
+
+/** The repositories the owner's first message limits a campaign to (#4117), or none. A limit is
+ * narrowing only: nothing here adds a repository, and while one stands only an approved
+ * `campaign_repository_addition` gives another repository an entry. */
+export function campaignRepositoryLimits(policy: Pick<OrchestratorCampaignPolicy, "firstMessageScope"> | null | undefined): string[] {
+  const first = policy?.firstMessageScope;
+  return first?.state === "established" ? initialScopeRepositoryLimits(first.initialScope) : [];
 }
 
 /** The runner's diagnostic copy of a campaign's control. A pre-v288 runner rejects a boundary with

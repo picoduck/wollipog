@@ -67,6 +67,27 @@ test("Repositories lists each boundary repository's Locations, exclusions and Lo
   } finally { unmount(); }
 });
 
+test("a Location the owner's first message left out is shown as available, with no way to include it here (#4117)", async () => {
+  const limited: CampaignRepositoryBoundaryView = { ...boundary, excludedLocations: [], pendingLocations: [],
+    availableLocations: [{ locationId: "loc_docs", name: "Shared Docs", repository: "picoduck/shared-docs" }],
+    repositoryLimits: ["picoduck/wollipog", "picoduck/dev-box-setup"] };
+  const { container, unmount } = await render(<CampaignRepositories campaignId="s_root" boundary={limited} canInclude />);
+  try {
+    assert.deepEqual([...container.querySelectorAll("h4")].map((node) => node.textContent), ["Available but Not in This Campaign"]);
+    assert.match(container.textContent!, /Your first message limited this campaign to picoduck\/wollipog, picoduck\/dev-box-setup\./);
+    assert.match(container.textContent!, /they join only if the Orchestrator asks to add their repository and you approve it/);
+    const list = container.querySelector('ul[aria-label="Locations Available but Not in This Campaign"]')!;
+    assert.equal(list.textContent, "Shared Docspicoduck/shared-docs");
+    assertNoDomNode(includeButton(container), "only an approved addition brings it in");
+    assertNoDomNode(list.querySelector("button"), "a left-out Location has no action");
+  } finally { unmount(); }
+  // A control plane before v320 sends neither field.
+  const older = await render(<CampaignRepositories campaignId="s_root" boundary={{ ...boundary, excludedLocations: [], pendingLocations: [] }} canInclude />);
+  try {
+    assertNoDomNode(older.container.querySelector("h4"), "nothing is left out");
+  } finally { older.unmount(); }
+});
+
 test("Include in Campaign asks the server, and a refusal is shown (#4117)", async () => {
   const original = api.includeCampaignLocation;
   const calls: Array<[string, string]> = [];

@@ -36,7 +36,7 @@ import { acknowledgementRepairFrame } from "./claude-cost-repair.js";
 import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
-import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignControlForRunner, campaignControlRevisionForRunner, campaignLaunchRepository, campaignScopeRepositories, carriedCampaignRepositories } from "./campaign-authority.js";
+import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignRepositoryLimits, campaignControlForRunner, campaignControlRevisionForRunner, campaignLaunchRepository, campaignScopeRepositories, carriedCampaignRepositories } from "./campaign-authority.js";
 import { campaignBoundaryRepositoryAt } from "./campaign-repository-boundary.js";
 import { genericRequestScreenData, implementationQuestionScreenData, ownerDecisionScreenData, screenCredentialRequest, type CredentialScreenSurface } from "./credential-screen.js";
 import { DECISION_TOTAL_BOUND_MS, DecisionRuntime, hubDecisionTransport, type DecisionOutcome } from "./decision-runtime.js";
@@ -45,9 +45,9 @@ import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, credentialFormFloor, type CredentialScreenFact, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, fullControlAutomaticResponse, type CampaignAuthorityEvaluation, type FullControlAutomaticResponse, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesAcrossRepositories, issueReferencesInMessage } from "./campaign-launch-admission.js";
 import { digitRangeMembers, firstMessageTargetEpics } from "./first-message-issue-intent.js";
-import { onlyOtherRepositories, proposalMaxIssues, repositoryNameInMessage, resolveRepositoryName, writtenForRepository } from "./scope-grant.js";
-import { normalizeScopeProposalInput, scopeProposalAgentQuestions, scopeProposalAnswer, scopeProposalChecks, scopeProposalOfRequest,
-  type CampaignScopeProposal, type ScopeProposalCheck, type ScopeProposalOwnerCause } from "@wollipog/protocol";
+import { messageNamesRepository, onlyOtherRepositories, proposalMaxIssues, repositoryNameInMessage, resolveRepositoryName, writtenForRepository } from "./scope-grant.js";
+import { initialScopeRepositoryLimits, normalizeScopeProposalInput, scopeProposalAgentQuestions, scopeProposalAnswer, scopeProposalChecks, scopeProposalOfRequest,
+  scopeProposalRepositoryLimits, type CampaignScopeProposal, type ScopeProposalCheck, type ScopeProposalOwnerCause } from "@wollipog/protocol";
 import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, ownerReviewMaxIssues, writtenAsCount, writtenAsDigits } from "./scope-grant.js";
 import { recordUnfinishedDecision, runCampaignCheck, type CampaignCheckOutcome } from "./campaign-decision-checks.js";
 import { DecisionInputError, type DecisionInputs } from "./decision-kinds.js";
@@ -10606,7 +10606,8 @@ export class SessionsService {
    * every verified Location of the campaign's Project, exactly as a launch does. Server-derived;
    * no caller proposal carries them. */
   projectRepositories?: { repositories: import("@wollipog/protocol").CampaignBoundaryRepository[];
-    excludedLocations: import("@wollipog/protocol").CampaignExcludedLocation[] }): ServiceResult<SessionView> {
+    excludedLocations: import("@wollipog/protocol").CampaignExcludedLocation[];
+    availableLocations?: import("@wollipog/protocol").CampaignAvailableLocation[] }): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session || principal.kind !== "human" || !this.db.isSessionOwner(principal, sessionId)) return fail("campaign not found", 404);
     const root = this.orchestratorCampaignController(session);
@@ -10687,7 +10688,8 @@ export class SessionsService {
         mintedScope ? { issueScope: mintedScope, firstMessage: derivedScope!.firstMessage } : undefined,
         proposal.mode === "full_control" ? derivedLimits : undefined,
         proposal.mode === "full_control" ? launchDisclosure : undefined,
-        control.mode === "full_control" ? projectRepositories?.excludedLocations : undefined)) return fail("campaign authority revision changed; refresh and retry", 409);
+        control.mode === "full_control" ? projectRepositories?.excludedLocations : undefined,
+        control.mode === "full_control" ? projectRepositories?.availableLocations : undefined)) return fail("campaign authority revision changed; refresh and retry", 409);
     } catch (error) { return fail((error as Error).message, 409); }
     // The runner holds the scope it enforces issue writes against, and a diagnostic copy of this
     // control: every change synchronizes both now, at the new policy revision (#3363), rather than
@@ -12191,6 +12193,15 @@ export class SessionsService {
         (request.additions.length > 0 || campaignAwaitsInitialScope(root))) {
       return this.proposeOrchestratorScope(root, view.data.repository, request, canAccess);
     }
+    // Epic and follow-up lineage skip the proposal route, and stay inside a first-message limit too (#4117).
+    const repositoryLimits = human ? [] : campaignRepositoryLimits(root.orchestratorPolicy);
+    const outsideLimit = repositoryLimits.length ? (request.additions ?? []).find((ref) => ref && typeof ref.repository === "string" &&
+      !repositoryLimits.includes(ref.repository.toLowerCase())) : undefined;
+    if (outsideLimit) {
+      const refusal = CAMPAIGN_SCOPE_ADMISSION_REFUSALS.repository_constraint_mismatch;
+      return { ok: false, status: refusal.status, error: refusal.message,
+        errorDetails: { code: "repository_constraint_mismatch", issue: outsideLimit.number, repository: outsideLimit.repository.toLowerCase() } };
+    }
     // Issues the Orchestrator chose to fill the owner's selection take their own route (#4103). A
     // proposal without lineage takes it too, so a runner that predates the lineage still can.
     const selection = human ? undefined : this.scopeGrantReview(root);
@@ -12492,23 +12503,30 @@ export class SessionsService {
     const ownerMessage = exact !== null && firstMessageDigest(exact) === first.messageDigest ? exact : boundary.objective;
     const unnamed = proposal?.issues.find((issue) => issue.origin === "owner_named" && !writtenForRepository(ownerMessage, issue.number, issue.repository, launch));
     if (unnamed) return refuse("owner_named_not_in_message", issueDetails(unnamed));
-    // A repository the Orchestrator says the owner's message limits the work to (#4118): a name the
-    // owner never wrote limits nothing, and every issue must be in the one repository it means. Whether
-    // the words really limit the work is the check's (`repository_limit`). A name that matches none
-    // or several grants nothing: the proposal is the owner's, whatever else it states. A later
-    // addition stays inside the limit the initial scope was admitted with, named again or not.
-    const admittedLimit = first.initialScope?.repositoryLimit;
-    const outsideLimit = admittedLimit && refs.find((r) => r.repository !== admittedLimit);
+    // The repositories the Orchestrator says the owner's message limits the work to (#4117, #4118): a
+    // name the owner never wrote limits nothing, and every issue must be in a repository the names
+    // mean. Whether the words really limit the work is the check's (`repository_limit`). Any name that
+    // matches none or several grants nothing, for the whole list, so a partly resolved list never
+    // applies in part: the proposal is the owner's, whatever else it states. A name resolves only
+    // against the boundary, so it can't add a repository. A later addition stays inside the limit the
+    // initial scope was admitted with, named again or not.
+    const admittedLimits = initialScopeRepositoryLimits(first.initialScope);
+    const outsideLimit = admittedLimits.length ? refs.find((r) => !admittedLimits.includes(r.repository)) : undefined;
     if (outsideLimit) return refuse("repository_constraint_mismatch", issueDetails(outsideLimit));
-    let repositoryConstraint: CampaignScopeProposal["repositoryConstraint"];
-    if (proposal?.repositoryName !== undefined) {
-      if (!repositoryNameInMessage(ownerMessage, proposal.repositoryName)) return refuse("repository_name_not_in_message");
-      const named = resolveRepositoryName(proposal.repositoryName, campaignScopeRepositories(root).map((entry) => ({ repository: entry.repository,
-        locationNames: entry.locationIds.flatMap((id) => this.db.getProjectLocation(id)?.name ?? []) })));
-      repositoryConstraint = { name: proposal.repositoryName, repository: named };
-      const stray = named && refs.find((r) => r.repository !== named);
+    const scopeEntries = campaignScopeRepositories(root).map((entry) => ({ repository: entry.repository,
+      locationNames: entry.locationIds.flatMap((id) => this.db.getProjectLocation(id)?.name ?? []) }));
+    let repositoryConstraints: CampaignScopeProposal["repositoryConstraints"];
+    if (proposal?.repositoryNames !== undefined) {
+      if (proposal.repositoryNames.some((name) => !repositoryNameInMessage(ownerMessage, name))) return refuse("repository_name_not_in_message");
+      repositoryConstraints = proposal.repositoryNames.map((name) => ({ name, repository: resolveRepositoryName(name, scopeEntries) }));
+      const limits = scopeProposalRepositoryLimits({ repositoryConstraints });
+      const stray = limits.length ? refs.find((r) => !limits.includes(r.repository)) : undefined;
       if (stray) return refuse("repository_constraint_mismatch", issueDetails(stray));
     }
+    // A message that writes a campaign repository's name may limit the work to it, so an initial
+    // proposal that states no limit never takes the no-model path: the check asks if it left one out.
+    const repositoryMentioned = initial && Boolean(proposal) && !repositoryConstraints && scopeEntries.length > 1 &&
+      messageNamesRepository(ownerMessage, scopeEntries);
     // Floor 3: real, open issues, each read with its facts through its own repository: the campaign
     // runner for the launch repository, and one of its own Locations for any other (#4118).
     let facts: CampaignIssueFacts[] | null = null;
@@ -12576,11 +12594,12 @@ export class SessionsService {
     // it. A later addition's owner-named issue is always checked: one the owner asked for belongs in
     // the initial scope, and an earlier check may have found it only mentioned.
     const laterNamed = !initial && Boolean(proposal?.issues.some((issue) => issue.origin === "owner_named"));
-    const unresolvedName = repositoryConstraint?.repository === null;
+    const unresolvedName = Boolean(repositoryConstraints?.some((item) => item.repository === null));
     const checks: ScopeProposalCheck[] = proposal
       ? [...scopeProposalChecks(proposal, issueReferencesAcrossRepositories(ownerMessage, launch, repositories).filter((r) => !inScope(r))),
         ...(laterNamed ? ["later_named_issues" as const] : []), ...(unresolvedName ? ["repository_name_unresolved" as const] : []),
-        ...(repositoryConstraint?.repository ? ["repository_limit" as const] : [])]
+        ...(repositoryConstraints && !unresolvedName ? ["repository_limit" as const] : []),
+        ...(repositoryMentioned ? ["repository_mentioned" as const] : [])]
       : ["proposal_unstructured"];
     const issues = proposal?.issues ?? refs.map((r) => ({ ...r, origin: "orchestrator_chosen" as const, rationale: "" }));
     // The proposal as recorded, before any route: the floors' facts beside the Orchestrator's words.
@@ -12588,7 +12607,7 @@ export class SessionsService {
       issues: issues.map((issue) => ({ ...(issue.repository === launch ? {} : { repository: issue.repository }), number: issue.number, origin: issue.origin, rationale: issue.rationale,
         title: (titles.get(issueKey(issue)) ?? "").replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").trim().slice(0, 300) })),
       requestedCount: proposal?.requestedCount ?? null, constraints: proposal?.constraints ?? [], withheldOperations: proposal?.withheldOperations ?? [],
-      ...(repositoryConstraint ? { repositoryConstraint } : {}), checks, route: "admitted" };
+      ...(repositoryConstraints ? { repositoryConstraints } : {}), checks, route: "admitted" };
     const ownerRecord = (cause: ScopeProposalOwnerCause, constraintCheck?: CampaignScopeProposal["constraintCheck"]): CampaignScopeProposal => ({
       ...base, route: "owner", ownerCause: cause, ownerMessage: boundary.objective.replace(/[\p{Cc}]+/gu, " ").slice(0, 4000),
       ...(constraintCheck ? { constraintCheck } : {}) });
@@ -12683,7 +12702,8 @@ export class SessionsService {
     }
     const occurrence = await this.scopeProposalCheck(latest, organizationId, checkKey,
       scopeCheckInputs(ownerMessage, base, request.explanation, [...facts ?? [], ...otherFacts.map(({ repository: other, fact }) => ({ ...fact, repository: other }))], {
-        repository, operations: latestBoundary.operations, inScope: before, otherInScope: latestScope ? campaignScopeIssues(latestScope).filter((r) => r.repository !== launch) : [],
+        repository, repositories: scopeEntries.map((entry) => entry.repository), operations: latestBoundary.operations, inScope: before,
+        otherInScope: latestScope ? campaignScopeIssues(latestScope).filter((r) => r.repository !== launch) : [],
         ...(first.initialScope ? { admitted: first.initialScope } : {}) }));
     const reason = occurrence.reason ? occurrence.reason.slice(0, 300) : undefined;
     const constraintCheck = (verdict: NonNullable<CampaignScopeProposal["constraintCheck"]>["verdict"]) =>

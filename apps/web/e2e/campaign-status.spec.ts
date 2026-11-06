@@ -211,6 +211,25 @@ for (const theme of ["dark", "light"] as const) {
       if (REPOSITORIES_EVIDENCE_DIR) await section.screenshot({ path: `${REPOSITORIES_EVIDENCE_DIR}/repositories-included-${device}-${theme}.png` });
     });
 
+    test(`a repository the first message left out shows as available on a ${device} ${theme} viewport (#4117)`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.goto(`/campaign-status-e2e.html?scenario=campaign&repositories=limited&theme=${theme}`);
+      const section = page.locator("section.campaign-detail-section", { has: page.locator("h3", { hasText: /^Repositories$/ }) });
+      await expect(section.locator("dt")).toHaveText(["picoduck/wollipog", "picoduck/dev-box-setup", "Boundary Revision"]);
+      await expect(section.getByRole("heading", { name: "Available but Not in This Campaign" })).toBeVisible();
+      await expect(section).toContainText("Your first message limited this campaign to picoduck/wollipog, picoduck/dev-box-setup.");
+      const available = section.getByRole("list", { name: "Locations Available but Not in This Campaign" });
+      await expect(available.getByRole("listitem")).toHaveCount(2);
+      await expect(available).toContainText("picoduck/shared-docs");
+      await expect(available.getByRole("button")).toHaveCount(0);
+      await section.scrollIntoViewIfNeeded();
+      await assertNoHorizontalOverflow(page, ".campaign-status");
+      if (REPOSITORIES_EVIDENCE_DIR) {
+        await section.screenshot({ path: `${REPOSITORIES_EVIDENCE_DIR}/repositories-limited-${device}-${theme}.png` });
+        if (device === "desktop") await page.screenshot({ path: `${REPOSITORIES_EVIDENCE_DIR}/repositories-limited-viewport-${theme}.png` });
+      }
+    });
+
     test(`a Custom campaign's repository list shows no boundary revision on a ${device} ${theme} viewport (#4117)`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&repositories=custom&theme=${theme}`);

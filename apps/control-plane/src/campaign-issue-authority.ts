@@ -167,9 +167,9 @@ export const CAMPAIGN_SCOPE_ADMISSION_REFUSALS: Readonly<Record<CampaignScopeAdm
   owner_named_not_in_message: { status: 409, message: "A proposed issue is marked as named by the owner, but the owner's message doesn't " +
     "write its number for that issue's repository; a bare number means the launch repository. Mark it as your own choice, with your rationale, or leave it out." },
   repository_name_not_in_message: { status: 409, message: "The proposal names a repository the owner's message doesn't write. " +
-    "Send the message's own words for the repository, or leave repositoryName out." },
-  repository_constraint_mismatch: { status: 409, message: "A proposed issue is outside the one repository the owner's message limits the work to; " +
-    "propose issues from that repository only." },
+    "Send the message's own words for each repository, or leave repositoryNames out." },
+  repository_constraint_mismatch: { status: 409, message: "A proposed issue is outside the repositories the owner's message limits the work to; " +
+    "propose issues from those repositories only." },
   proposal_additions_only: { status: 400, message: "A scope proposal adds issues only; propose removals as their own change." },
   proposal_count_exceeded: { status: 409, message: "The proposal chooses more issues than the owner's count allows: the count the owner " +
     "stated, the campaign's admitted count, or 3 when the owner stated none. Choose fewer issues." },

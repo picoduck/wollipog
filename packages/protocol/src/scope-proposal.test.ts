@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, isOwnerQuestionRequest, normalizeCampaignIssueScopeSnapshot, normalizeScopeProposalInput,
-  presentOwnerQuestionRequest, runnerSupportsProtocol, scopeProposalAnswer, scopeProposalChecks, validScopeProposal,
+  initialScopeRepositoryLimits, presentOwnerQuestionRequest, runnerSupportsProtocol, scopeProposalAnswer, scopeProposalChecks, scopeProposalRepositoryConstraints, scopeProposalRepositoryLimits, validScopeProposal,
   type CampaignScopeProposal, type PendingApproval, type WorkflowDecisionView,
 } from "./index.js";
 
@@ -61,9 +61,41 @@ test("a recorded repository name that resolved to nothing is always the owner's 
   assert.equal(validScopeProposal({ ...base, issues: [{ ...base.issues[0], repository: "not a repository" }], checks: ["chosen_issues"], route: "owner", ownerCause: "constraint_check_unavailable" }), false);
   const additions = [{ repository: "owner/api", number: 1 }];
   const input = { issues: [{ repository: "OWNER/API", number: 1, origin: "owner_named", rationale: "r" }], requestedCount: null, constraints: [], withheldOperations: [] };
-  assert.deepEqual((normalizeScopeProposalInput({ ...input, repositoryName: "  the  api repo " }, additions) as { repositoryName: string }).repositoryName, "the api repo");
-  assert.match(normalizeScopeProposalInput({ ...input, repositoryName: " " }, additions) as string, /repositoryName/u);
-  assert.match(normalizeScopeProposalInput({ ...input, repositoryName: "x".repeat(201) }, additions) as string, /repositoryName/u);
+  assert.deepEqual((normalizeScopeProposalInput({ ...input, repositoryName: "  the  api repo " }, additions) as { repositoryNames: string[] }).repositoryNames, ["the api repo"], "an older runner's one name reads as a one-entry list");
+  assert.match(normalizeScopeProposalInput({ ...input, repositoryName: " " }, additions) as string, /repositoryNames/u);
+  assert.match(normalizeScopeProposalInput({ ...input, repositoryName: "x".repeat(201) }, additions) as string, /repositoryNames/u);
+});
+
+test("a repository limit is a list: a record with one name reads as one entry, and a partly resolved list limits nothing (#4117)", () => {
+  const additions = [{ repository: "owner/api", number: 1 }];
+  const input = { issues: [{ repository: "owner/api", number: 1, origin: "owner_named", rationale: "r" }], requestedCount: null, constraints: [], withheldOperations: [] };
+  assert.deepEqual((normalizeScopeProposalInput({ ...input, repositoryNames: [" the  api repo", "web", "web"] }, additions) as { repositoryNames: string[] }).repositoryNames, ["the api repo", "web"]);
+  for (const repositoryNames of [[], [" "], "web", Array.from({ length: 11 }, (_, index) => `repo ${index}`)]) {
+    assert.match(normalizeScopeProposalInput({ ...input, repositoryNames }, additions) as string, /repositoryNames/u);
+  }
+  assert.match(normalizeScopeProposalInput({ ...input, repositoryName: "web", repositoryNames: ["web"] }, additions) as string, /repositoryNames/u);
+
+  const one = { name: "the api repo", repository: "owner/api" };
+  assert.deepEqual(scopeProposalRepositoryConstraints({ repositoryConstraint: one }), [one]);
+  assert.deepEqual(scopeProposalRepositoryLimits({ repositoryConstraint: one }), ["owner/api"]);
+  assert.deepEqual(scopeProposalRepositoryLimits({ repositoryConstraints: [one, { name: "api", repository: "owner/api" }, { name: "web", repository: "owner/web" }] }), ["owner/api", "owner/web"]);
+  assert.deepEqual(scopeProposalRepositoryLimits({ repositoryConstraints: [one, { name: "web", repository: null }] }), [], "no part of it applies");
+  assert.deepEqual(scopeProposalRepositoryLimits({}), []);
+  assert.deepEqual(initialScopeRepositoryLimits({ repositoryLimit: "owner/api" }), ["owner/api"]);
+  assert.deepEqual(initialScopeRepositoryLimits({ repositoryLimits: ["owner/api", "owner/web"] }), ["owner/api", "owner/web"]);
+  assert.deepEqual(initialScopeRepositoryLimits(undefined), []);
+
+  const base = { initial: true, messageDigest: "a".repeat(64), issues: [{ repository: "owner/api", number: 1, origin: "orchestrator_chosen", rationale: "r", title: "" }],
+    requestedCount: null, constraints: [], withheldOperations: [], ownerMessage: "Fix the api and web repos." };
+  const owner = { route: "owner", ownerCause: "constraint_check_unavailable" };
+  assert.equal(validScopeProposal({ ...base, ...owner, repositoryConstraints: [one, { name: "web", repository: "owner/web" }], checks: ["chosen_issues", "repository_limit"] }), true);
+  const partly = { ...base, repositoryConstraints: [one, { name: "web", repository: null }] };
+  assert.equal(validScopeProposal({ ...partly, route: "owner", ownerCause: "repository_name_unresolved", checks: ["chosen_issues", "repository_name_unresolved"] }), true);
+  assert.equal(validScopeProposal({ ...partly, ...owner, checks: ["chosen_issues", "repository_limit"] }), false, "a partly resolved list is never judged as a limit");
+  assert.equal(validScopeProposal({ ...partly, route: "owner", ownerCause: "repository_name_unresolved", checks: ["chosen_issues", "repository_name_unresolved", "repository_limit"] }), false);
+  assert.equal(validScopeProposal({ ...base, ...owner, repositoryConstraints: [], checks: ["chosen_issues"] }), false);
+  assert.equal(validScopeProposal({ ...base, ...owner, repositoryConstraint: one, repositoryConstraints: [one], checks: ["chosen_issues", "repository_limit"] }), false, "one shape per record");
+  assert.equal(validScopeProposal({ ...base, ...owner, checks: ["chosen_issues", "repository_mentioned"] }), true);
 });
 
 test("only owner-named issues with nothing else stated take the no-model fast path; ranking is never a check (#4282)", () => {
