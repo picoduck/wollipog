@@ -21260,7 +21260,9 @@ export class ControlPlaneDb {
     derivedLimits?: import("@wollipog/protocol").FullControlDerivedLimits,
     /** What this Full Control authorization disclosed (#2940). It replaces any earlier record, and
      * a revoke, or an authorization without one, drops it so no stale record outlives its boundary. */
-    launchDisclosure?: import("@wollipog/protocol").CampaignLaunchDisclosure): boolean {
+    launchDisclosure?: import("@wollipog/protocol").CampaignLaunchDisclosure,
+    /** A reviewed enable's excluded Project Locations (#4117), replacing any earlier list. */
+    excludedLocations?: import("@wollipog/protocol").CampaignExcludedLocation[]): boolean {
     const campaign = this.sessionOrchestratorPolicy(id);
     const policy = this.parentControlPolicy(id);
     if (!campaign || !policy || policy.revision !== expectedRevision || !validCampaignControl(control) ||
@@ -21294,6 +21296,17 @@ export class ControlPlaneDb {
     if (control.mode === "full_control" && launchDisclosure && validCampaignLaunchDisclosure(launchDisclosure)) {
       campaign.launchDisclosure = structuredClone(launchDisclosure);
     } else delete campaign.launchDisclosure;
+    if (excludedLocations) {
+      // A waiting Location someone else added leaves the wait only once the owner has reviewed the
+      // repository it verified as. One that couldn't be read keeps waiting for Include in Campaign
+      // and isn't recorded as excluded, since an exclusion would join on reconnect with no owner step.
+      const joined = new Set((control.mode === "full_control" ? control.boundary.repositories ?? [] : []).flatMap((entry) => entry.locationIds));
+      const pending = (campaign.pendingLocations ?? []).filter((item) => !joined.has(item.locationId));
+      if (pending.length) campaign.pendingLocations = pending; else delete campaign.pendingLocations;
+      const stillWaiting = new Set(pending.map((item) => item.locationId));
+      const excluded = excludedLocations.filter((item) => !stillWaiting.has(item.locationId));
+      if (excluded.length) campaign.excludedLocations = structuredClone(excluded); else delete campaign.excludedLocations;
+    }
     this.db.exec("BEGIN");
     try {
       const changed = this.stmt(`UPDATE sessions SET orchestrator_policy=?, parent_control_policy_revision=parent_control_policy_revision+1,

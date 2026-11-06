@@ -11,7 +11,8 @@ import type { SessionsService } from "./sessions.js";
 import type { OrchestratorSettings } from "./orchestrator-settings.js";
 import type { EvidenceAuthorityDisclosures } from "./evidence-authority.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
-import { authorizeFullControl } from "./campaign-authority.js";
+import { authorizeFullControl, carriedCampaignRepositories } from "./campaign-authority.js";
+import type { CampaignProjectLocation } from "./campaign-repository-boundary.js";
 import { evaluateUiEvidenceReviewClient } from "./ui-evidence-review.js";
 import { campaignLaunchDigest, campaignLaunchPreflight, derivedLaunchLimits, firstMessageLaunch, fullControlRootPlacementRefusal, launchSessionRequest,
   parseFullControlEnableRequest, parseFullControlLaunchRequest, type VideoLaunchCertification } from "./campaign-launch-admission.js";
@@ -105,30 +106,16 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
     // is inspected in its own path, in parallel with the launch Location and within its lifetime.
     const projectId = initial.plan.projectId ?? null;
     const launchLocationId = initial.plan.projectLocationId ?? null;
-    // Only Locations the launching person can reach themselves are inspected or named; the rest
-    // are left out entirely, never listed as excluded.
-    const reachableLocations = () => projectId && db.canAccessProject(principal, projectId) &&
-      runnerSupportsProtocol(runner.protocolVersion, "campaignRepositoryBoundary")
-      ? (db.getProject(projectId)?.locations ?? []).filter((location) => location.availability !== "runner_removed" &&
-        (location.id === launchLocationId || db.canAccessWorkspace(principal, location.runnerId, location.workspaceId))) : null;
-    const projectLocations = reachableLocations();
-    // What each secondary Location was when its inspection started, so a Location that changes
-    // while any inspection is still pending is caught after all of them settle.
-    const inspected = new Map((projectLocations ?? []).filter((location) => location.id !== launchLocationId).map((location) =>
-      [location.id, { runnerId: location.runnerId, workspaceId: location.workspaceId,
-        path: db.getWorkspacePath(location.runnerId, location.workspaceId) }]));
+    const survey = projectLocationSurvey(db, hub, principal, { projectId, launchLocationId,
+      rootProtocolVersion: runner.protocolVersion, timeoutMs: dependencies.inspectionTimeoutMs });
     let inspection: CampaignLaunchInspectionResult | undefined;
-    const inspections = new Map<string, ProjectLocationInspection>();
     try {
-      const others = (projectLocations ?? []).filter((location) => location.id !== launchLocationId);
-      const [launched, ...results] = await Promise.all([
+      const [launched] = await Promise.all([
         inspectCampaignWorkspace(hub, runner, initial.plan.workspaceId, [...(body.issueNumbers ?? [])].sort((a, b) => a - b),
           lifetime.signal, dependencies.inspectionTimeoutMs, workspacePath),
-        ...others.map((location) => inspectProjectLocation({ db, hub }, location.id, { projectId: projectId!, signal: lifetime.signal,
-          timeoutMs: dependencies.inspectionTimeoutMs, requireProtocol: "campaignRepositoryBoundary" })),
+        survey.inspect(lifetime.signal),
       ]);
       inspection = launched;
-      others.forEach((location, index) => inspections.set(location.id, results[index]!));
     } finally { reply.raw.off("close", onClose); }
     if (lifetime.signal.aborted) {
       request.log.info({ event: "full_control_launch_preflight_cancelled", requestId: request.id,
@@ -151,25 +138,11 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
         (plan.projectLocationId ?? null) !== launchLocationId) {
       return reply.code(409).send({ error: "project location changed during inspection; refresh the preflight" });
     }
-    // Every secondary Location is read again now that all inspections have settled. One that left
-    // the Project or the launching person's reach meanwhile is left out entirely; one now pointing
-    // at another runner, workspace or path is not the Location that was inspected, so it reads as
-    // unread. A Location added meanwhile was never inspected and is left for a later inspection.
-    const settledLocations = projectLocations ? (reachableLocations() ?? []).filter((location) =>
-      location.id === launchLocationId || inspected.has(location.id)) : null;
-    for (const location of settledLocations ?? []) {
-      const before = inspected.get(location.id);
-      if (before && (before.runnerId !== location.runnerId || before.workspaceId !== location.workspaceId ||
-          before.path !== db.getWorkspacePath(location.runnerId, location.workspaceId))) {
-        inspections.set(location.id, { ok: false, locationId: location.id, failure: "read_failed", reason: PROJECT_LOCATION_INSPECTION_FAILURES.read_failed });
-      }
-    }
     const agent = runnerNow.agents.find((candidate) => candidate.id === plan.agentId);
     const policyIds = body.overrides?.delegatablePolicyIds ?? [];
     const { preflight, proposal } = campaignLaunchPreflight({
       request: body, plan, runner: runnerNow, inspection, organizationId: principal.organizationId,
-      projectLocations: settledLocations ? { launchLocationId: plan.projectLocationId ?? null,
-        locations: settledLocations.map((location) => ({ id: location.id, name: location.name })), inspections } : null,
+      projectLocations: survey.settled(),
       projectDefaults: plan.projectId ? db.projectChildSessionDefaults(plan.projectId) : null,
       accountingError: (costProtected) => db.campaignBudgetAccountingError(plan.driver, plan.config.model, costProtected),
       dailyLimit: db.getUsageDailyBudget(plan.scope.organizationId).perUserUsd !== null,
@@ -227,6 +200,49 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
   registerFullControlEnableRoutes(app, dependencies);
 }
 
+/** The Project Locations a Full Control authorization covers (#4117), for a launch and an enable
+ * alike: every active Location of the campaign's Project that the authorizing person can reach
+ * (the rest are left out entirely, never listed as excluded), when the root runner is v288 or
+ * newer. Each one other than the campaign's own Location is inspected in its own path, in parallel.
+ * `settled()` reads them again once every inspection has finished: one that left the Project or the
+ * person's reach meanwhile is left out; one now pointing at another runner, workspace or path is
+ * not the Location that was inspected, so it reads as unread; one added meanwhile was never
+ * inspected and waits for a later inspection. */
+function projectLocationSurvey(db: ControlPlaneDb, hub: Hub, principal: AuthPrincipal, input: {
+  projectId: string | null; launchLocationId: string | null; rootProtocolVersion: number | null | undefined; timeoutMs?: number;
+}) {
+  const { projectId, launchLocationId } = input;
+  const reachable = () => projectId && db.canAccessProject(principal, projectId) &&
+    runnerSupportsProtocol(input.rootProtocolVersion, "campaignRepositoryBoundary")
+    ? (db.getProject(projectId)?.locations ?? []).filter((location) => location.availability !== "runner_removed" &&
+      (location.id === launchLocationId || db.canAccessWorkspace(principal, location.runnerId, location.workspaceId))) : null;
+  const locations = reachable();
+  const others = (locations ?? []).filter((location) => location.id !== launchLocationId);
+  // What each Location was when its inspection started.
+  const inspected = new Map(others.map((location) => [location.id, { runnerId: location.runnerId, workspaceId: location.workspaceId,
+    path: db.getWorkspacePath(location.runnerId, location.workspaceId) }]));
+  const inspections = new Map<string, ProjectLocationInspection>();
+  return {
+    async inspect(signal: AbortSignal): Promise<void> {
+      const results = await Promise.all(others.map((location) => inspectProjectLocation({ db, hub }, location.id, { projectId: projectId!,
+        signal, timeoutMs: input.timeoutMs, requireProtocol: "campaignRepositoryBoundary" })));
+      others.forEach((location, index) => inspections.set(location.id, results[index]!));
+    },
+    settled(): { launchLocationId: string | null; locations: CampaignProjectLocation[]; inspections: Map<string, ProjectLocationInspection> } | null {
+      if (!locations) return null;
+      const now = (reachable() ?? []).filter((location) => location.id === launchLocationId || inspected.has(location.id));
+      for (const location of now) {
+        const before = inspected.get(location.id);
+        if (before && (before.runnerId !== location.runnerId || before.workspaceId !== location.workspaceId ||
+            before.path !== db.getWorkspacePath(location.runnerId, location.workspaceId))) {
+          inspections.set(location.id, { ok: false, locationId: location.id, failure: "read_failed", reason: PROJECT_LOCATION_INSPECTION_FAILURES.read_failed });
+        }
+      }
+      return { launchLocationId, locations: now.map((location) => ({ id: location.id, name: location.name })), inspections };
+    },
+  };
+}
+
 /** Human-only enable on an existing live root campaign. The preflight reuses the launch
  * evaluation with the campaign's own Human-established scope in place of the inspection; enabling
  * recomputes it and requires the exact reviewed digest and policy revision before the existing
@@ -279,6 +295,23 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
     // A campaign with no issue scope yet gets the one a launch would derive: its repository and the
     // issues its first message names. With no message yet, the next one is the task.
     const derived = issueScope ? null : await sessions.campaignScopeFromFirstMessage(id);
+    // #4117: enabling covers the Project's verified Locations exactly as a launch does. The
+    // campaign's own Location is its scope's repository; every other one is inspected in its own
+    // path, for as long as this request lives.
+    const ownProjectId = session.projectId ?? null;
+    const ownLocationId = session.projectLocationId ?? null;
+    const survey = projectLocationSurvey(db, dependencies.hub, principal, { projectId: ownProjectId, launchLocationId: ownLocationId,
+      rootProtocolVersion: runner.protocolVersion, timeoutMs: dependencies.inspectionTimeoutMs });
+    const lifetime = new AbortController();
+    const onClose = () => { if (!reply.raw.writableFinished) lifetime.abort(); };
+    reply.raw.once("close", onClose);
+    try { await survey.inspect(lifetime.signal); } finally { reply.raw.off("close", onClose); }
+    if (lifetime.signal.aborted) return reply;
+    const settled = db.getSession(id);
+    if ((settled?.projectId ?? null) !== ownProjectId || (settled?.projectLocationId ?? null) !== ownLocationId) {
+      return reply.code(409).send({ error: "the campaign's Project Location changed during inspection; refresh the preflight" });
+    }
+    const surveyed = survey.settled();
     const agent = runner.agents.find((candidate) => candidate.id === session.agentId);
     const revision = session.parentControlPolicy?.revision ?? 0;
     const { preflight: evaluated, proposal } = campaignLaunchPreflight({
@@ -288,6 +321,7 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
       campaignScope: issueScope ? { repository: issueScope.repository, issueNumbers: issueScope.issueNumbers,
         authorizedByCaller: issueScope.authorizedByUserId === principal.userId }
         : { repository: derived?.repository ?? "", issueNumbers: derived?.issueNumbers ?? [], authorizedByCaller: true },
+      projectLocations: surveyed && { ...surveyed, carried: carriedCampaignRepositories(settled!, issueScope?.repository ?? derived?.repository ?? "") },
       participantCeiling: db.campaignDescendantIds(id).some((childId) => {
         const child = db.getSession(childId);
         return Boolean(child && !["completed", "failed", "stopped"].includes(child.status) && ceiling(limits(childId)));
@@ -328,7 +362,8 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
         providers: [{ providerId: evidence.provider.providerId, disclosureRevision: evidence.provider.disclosureRevision,
           reviewers: [{ driver: evidence.provider.reviewer.driver as "claude-code" | "codex-app-server", modelId: evidence.provider.reviewer.model }] }],
       } } : {}) }, revision, principal, derived ?? undefined, derivedLaunchLimits(body.overrides),
-      campaignLaunchDisclosure(preflight, "enable", Date.now()));
+      campaignLaunchDisclosure(preflight, "enable", Date.now()),
+      proposal.repositories ? { repositories: proposal.repositories, excludedLocations: preflight.summary.excludedLocations ?? [] } : undefined);
     if (!result.ok || !result.data) return reply.code(result.status).send({ error: result.error ?? "Full Control was not enabled" });
     return result.data;
   });
