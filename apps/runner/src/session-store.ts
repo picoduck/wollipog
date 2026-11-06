@@ -538,6 +538,12 @@ export interface DurableBackgroundJob {
   continuationMissingResultAt?: number;
   /** Capacity retries ended before provider acceptance; results remain available for inspection. */
   continuationRetryExhaustedAt?: number;
+  /** Runner-private (#3542): consecutive attempts of this job's continuation that failed before the
+   * provider accepted it, such as a provider process that could not start. Never projected. */
+  continuationLaunchFailures?: number;
+  /** Runner-private (#3542): automatic attempts stopped after the bounded launch failures. The result
+   * stays owed: Restart, or a person's turn the provider accepts, retries it. Never projected. */
+  continuationLaunchHeldAt?: number;
   assistantResultPersistedAt?: number;
   /** Runner-private proof that v82 structured delivery evidence was durably published. */
   structuredDeliveryPublishedAt?: number;

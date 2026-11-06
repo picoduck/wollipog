@@ -19,7 +19,15 @@ test("source and an actual Node SEA retain synthetic duplicate and removed-accou
     assert.equal(result.status, 0, `${String(result.error ?? "")}\n${result.stderr}\n${result.stdout}`);
     return result.stdout;
   };
-  const sourceHome = join(root, "source"); mkdirSync(sourceHome);
+  // Account publication requires an owned, non-writable-by-others config parent.
+  // Restore the exact fixture mode after mkdir, whose mode is filtered by umask.
+  const privateHome = (name: string) => {
+    const home = join(root, name);
+    mkdirSync(home, { mode: 0o700 });
+    chmodSync(home, 0o700);
+    return home;
+  };
+  const sourceHome = privateHome("source");
   assert.match(run(process.execPath, ["--import", "tsx", entry, sourceHome]), /synthetic retention verified/u);
 
   const bundle = join(root, "retention.cjs"), binary = join(root, "retention-sea");
@@ -44,6 +52,6 @@ test("source and an actual Node SEA retain synthetic duplicate and removed-accou
     + ").catch(e=>{console.error(e);process.exitCode=1;});");
   run(process.execPath, [injector]);
   if (process.platform === "darwin") run("/usr/bin/codesign", ["--sign", "-", binary]);
-  const packagedHome = join(root, "packaged"); mkdirSync(packagedHome);
+  const packagedHome = privateHome("packaged");
   assert.match(run(binary, [packagedHome]), /synthetic retention verified/u);
 });

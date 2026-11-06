@@ -206,7 +206,7 @@ test("the group is Session Titles with a Title Source row, in words a person use
   try {
     const group = view.container.querySelector("section.settings-group")!;
     assert.equal(group.querySelector(".settings-group-title")?.textContent, "Session Titles");
-    assert.equal(group.querySelector(".settings-group-scope")?.textContent, "Your Account");
+    assert.equal(group.querySelector(".settings-group-scope")?.textContent, "This Organization");
     const titles = [...group.querySelectorAll(".setting-row-title")].map((title) => title.textContent);
     assert.deepEqual(titles, ["Title Source"], "First Message has nothing to summarize");
     const trigger = group.querySelector<HTMLButtonElement>('[aria-label^="Title Source:"]')!;

@@ -11,6 +11,7 @@ import {
   MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL,
   MANAGED_WORKTREE_ESCAPE_REFUSAL,
   MANAGED_WORKTREE_REFUSAL,
+  MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL,
   MANAGED_WORKTREE_UNRESOLVED_REFUSAL,
   PLACELESS_CWD,
   type ManagedWorktreeProtection,
@@ -21,6 +22,38 @@ const protection: ManagedWorktreeProtection[] = [{
   worktreePath: protectedPath,
   repoPath: "/projects/repo",
 }];
+
+test("unmanaged cwd heredocs retain their verdict with accurate inspection guidance (Refs #1734)", (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "wollipog-message-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const target = join(cwd, "somedir");
+  mkdirSync(target);
+  const heredoc = "cat > note.txt <<'EOF'\nplain\nEOF";
+  for (const directory of [target, join(cwd, "missing")]) {
+    assert.equal(commandTargetsManagedWorktree(`cd ${directory} && ${heredoc}`, cwd, protection),
+      MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL);
+  }
+  assert.equal(commandTargetsManagedWorktree(`cd ${target} && echo plain > note.txt`, cwd, protection), null);
+  assert.equal(commandTargetsManagedWorktree(`cat > ${target}/note.txt <<'EOF'\nplain\nEOF`, cwd, protection), null);
+  // The tokenizer's parse-failure path also retains its refusal, including in nested scripts.
+  assert.equal(commandTargetsManagedWorktree("cd /tmp && echo ${", cwd, protection),
+    MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("sh -c 'cd /tmp && echo ${'", cwd, protection),
+    MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL);
+
+  for (const [command, from, expected] of [
+    [`rm -rf ${protectedPath}`, cwd, MANAGED_WORKTREE_REFUSAL],
+    ["echo plain > /projects/repo/.git/worktrees/session/commondir", cwd, MANAGED_WORKTREE_REFUSAL],
+    ["cd /tmp", protectedPath, MANAGED_WORKTREE_ESCAPE_REFUSAL],
+    ["rm -rf $UNKNOWN", cwd, MANAGED_WORKTREE_UNRESOLVED_REFUSAL],
+    ["git switch other", protectedPath, MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL],
+  ]) {
+    assert.equal(commandTargetsManagedWorktree(command!, from!, [{ ...protection[0]!, pinnedBranch: "agent/session" }]), expected);
+  }
+  assert.match(MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL, /absolute path without cd/u);
+  assert.match(MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL, /apply_patch \(Codex\).*Edit\/Write tools \(Claude Code\)/u);
+  assert.ok(!MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL.includes("discard_worktree"));
+});
 
 test("raw Git and filesystem retirement forms are refused with managed-discard guidance", () => {
   for (const command of [
@@ -87,13 +120,6 @@ test("raw Git and filesystem retirement forms are refused with managed-discard g
     "env --split-str='rm -rf .'",
     "env --uns PATH rm -rf .",
     "env --chd /tmp rm -rf .",
-    // GNU env -S separates arguments on \_, which shell-quote reads as quoting and joins instead,
-    // and concatenates ${VAR} with its neighbours, which shell-quote keeps as a separate token.
-    String.raw`env -S'rm\_-rf\_.'`,
-    String.raw`env --split-string='rm\_-rf\_.'`,
-    "X=m env -S'r${X} -rf .'",
-    "env -S'${REMOVER} -rf .'",
-    `env -S'rm -rf scratch x#foo ${protectedPath}'`,
     "printf '.\\0' | xargs -0 rm -rf",
     "printf '.\\0' | xargs -0 sudo -u root rm -rf",
     "rm -rf /runner/worktrees/session/requested/{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{managed,other}",
@@ -108,6 +134,19 @@ test("raw Git and filesystem retirement forms are refused with managed-discard g
   ]) {
     assert.equal(commandTargetsManagedWorktree(command, protectedPath, protection), MANAGED_WORKTREE_ESCAPE_REFUSAL,
       command);
+  }
+});
+
+test("unmodelled env split-string grammar keeps its refusal with inspection guidance", () => {
+  for (const command of [
+    String.raw`env -S'rm\_-rf\_.'`,
+    String.raw`env --split-string='rm\_-rf\_.'`,
+    "X=m env -S'r${X} -rf .'",
+    "env -S'${REMOVER} -rf .'",
+    `env -S'rm -rf scratch x#foo ${protectedPath}'`,
+  ]) {
+    assert.equal(commandTargetsManagedWorktree(command, protectedPath, protection),
+      MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL, command);
   }
 });
 
@@ -214,11 +253,11 @@ test("env does not swallow a destructive command from a split assignment expansi
 test("ambiguous env assignment readings have a shared work bound", () => {
   const command = `env ${Array(9).fill("$A").join(" ")}`;
   assert.equal(commandTargetsManagedWorktree(command, protectedPath, protection, { A: "X=1 Y=2" }),
-    MANAGED_WORKTREE_REFUSAL);
+    MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL);
   const args = Array(3).fill("$A").join(" ");
   const nested = `env ${args} sh -c 'env ${args} sh -c "env ${args} true"'`;
   assert.equal(commandTargetsManagedWorktree(nested, protectedPath, protection, { A: "X=1 Y=2" }),
-    MANAGED_WORKTREE_REFUSAL, "nested shell classification shares the same reading budget");
+    MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL, "nested shell classification shares the same reading budget");
 });
 
 test("ambiguous env readings share a total token-work bound", () => {
@@ -226,7 +265,7 @@ test("ambiguous env readings share a total token-work bound", () => {
   const command = `env $A $B $C rm ${operands}`;
   assert.ok(command.length < 32_768);
   assert.equal(commandTargetsManagedWorktree(command, "/tmp", protection,
-    { A: "X=1 Y=2", B: "X=1 Y=2", C: "X=1 Y=2" }), MANAGED_WORKTREE_REFUSAL,
+    { A: "X=1 Y=2", B: "X=1 Y=2", C: "X=1 Y=2" }), MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL,
   "a legal command below the byte cap cannot multiply thousands of operand checks across readings");
   assert.equal(commandTargetsManagedWorktree("env $A rm scratch", "/tmp", protection,
     { A: "X=1 Y=2" }), null, "small ambiguous commands remain available");
@@ -241,7 +280,7 @@ test("ambiguous env readings share a total token-work bound", () => {
   const array = Array(5_000).fill("x").join(",");
   assert.ok(array.length < 32_768);
   for (const command of [`Remove-Item -Path ${array}`, `Move-Item -Path ${array} -Destination /tmp/out`]) {
-    assert.equal(commandTargetsManagedWorktree(command, "/tmp", protection), MANAGED_WORKTREE_REFUSAL,
+    assert.equal(commandTargetsManagedWorktree(command, "/tmp", protection), MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL,
       "a single array token cannot multiply destructive path checks past the shared bound");
   }
 });
@@ -544,7 +583,7 @@ test("ambiguous directory-control syntax checks destructive tails without blocki
   const protectedFixture = [{ worktreePath: `${parent}/managed`, repoPath: "/projects/repo" }];
   for (const command of ["cd safe\npwd", "echo before\ncd safe\npwd"]) {
     assert.equal(commandTargetsManagedWorktree(command, parent, protectedFixture),
-      MANAGED_WORKTREE_REFUSAL, command);
+      MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL, command);
   }
   for (const command of ["cd safe | pwd", "(cd safe) && pwd", "true || cd safe | pwd",
     "cd safe && make > build.log", "cd safe && pnpm test 2>&1 | tail -5"]) {
@@ -616,12 +655,12 @@ test("directory-change alternatives are bounded before they can exhaust classifi
   const protectedFixture = [{ worktreePath: managed, repoPath: join(parent, "repo") }];
   const manyFailedChanges = Array.from({ length: 6 }, (_, index) => `cd missing-${index}`).join("; ");
   assert.equal(commandTargetsManagedWorktree(`${manyFailedChanges}; pwd`, parent, protectedFixture),
-    MANAGED_WORKTREE_REFUSAL, "the reading bound fails closed even without a destructive tail");
+    MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL, "the reading bound fails closed even without a destructive tail");
   assert.equal(commandTargetsManagedWorktree(`${manyFailedChanges}; rm -rf managed`, parent,
-    protectedFixture), MANAGED_WORKTREE_REFUSAL);
+    protectedFixture), MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL);
   const manyParkedChanges = Array.from({ length: 10 }, (_, index) => `cd missing-${index}`).join(" && ");
   assert.equal(commandTargetsManagedWorktree(`${manyParkedChanges} && pwd`, parent, protectedFixture),
-    MANAGED_WORKTREE_REFUSAL, "active and parked cwd readings share the same fail-closed bound");
+    MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL, "active and parked cwd readings share the same fail-closed bound");
 });
 
 test("env names outside shell syntax cannot shadow a nested shell expansion", () => {
@@ -648,7 +687,7 @@ test("ordinary expanded env arguments remain available", () => {
 
 test("unresolved non-identifier env assignments retain their fail-closed verdict", () => {
   assert.equal(commandTargetsManagedWorktree('env A-B="$(unknown)" make', protectedPath, protection),
-    MANAGED_WORKTREE_REFUSAL);
+    MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL);
 });
 
 test("env options with equals signs remain options, while shell assignments still require identifiers", () => {
@@ -784,13 +823,13 @@ test("env split-string expansion is bounded and fails closed past its bound", ()
   assert.equal(commandTargetsManagedWorktree(splitStringChain(8, "pnpm test"), protectedPath, protection), null,
     "a chain within the expansion bound is still classified on its merits");
   assert.equal(commandTargetsManagedWorktree(splitStringChain(9, "pnpm test"), protectedPath, protection),
-    MANAGED_WORKTREE_REFUSAL, "a chain past the expansion bound retains the worktree rather than parsing on");
+    MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL, "a chain past the expansion bound retains the worktree rather than parsing on");
 
   // Expansion stops after a fixed number of levels rather than after however many the 32 KiB
   // command budget affords, so chains of any length stop at the same point.
   for (const levels of [10, 100, 1_500]) {
     assert.equal(commandTargetsManagedWorktree(splitStringChain(levels, "pnpm test"), protectedPath, protection),
-      MANAGED_WORKTREE_REFUSAL, `a ${levels}-level chain expands no further than the bound`);
+      MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL, `a ${levels}-level chain expands no further than the bound`);
   }
 });
 
@@ -928,7 +967,7 @@ test("an operand too deep to walk is refused, never collapsed textually", (t) =>
   const deep = `${"d/../".repeat(127)}alias/../managed`;
   assert.equal(deep.split("/").length, 257);
   assert.equal(commandTargetsManagedWorktree(`rm -rf ${deep}`, join(base, "sibling"), protections),
-    MANAGED_WORKTREE_REFUSAL);
+    MANAGED_WORKTREE_UNINSPECTABLE_REFUSAL);
   // The same shape within the bound is walked, and still reaches the worktree.
   assert.equal(commandTargetsManagedWorktree(`rm -rf ${"d/../".repeat(20)}alias/../managed`, join(base, "sibling"), protections),
     MANAGED_WORKTREE_REFUSAL);

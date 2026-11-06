@@ -310,3 +310,114 @@ test("a duplicate reading joins the same occurrence, and an interrupted one is t
     assert.equal(restarted.policy().issueScopeSeed!.state, "owner");
   } finally { restarted.db.close(); }
 });
+
+/**
+ * A Custom campaign launched without a message whose first message was recorded before #4216 (#4258):
+ * the old build held it through the `initialCampaignEpic` regex on every check and stored nothing, so
+ * it carries no seed. `harness("")` is that empty launch, and the message is appended the way the old
+ * build recorded it, without the first-prompt seed.
+ */
+function preUpgradeCampaign(message: string, reading: Reading) {
+  const h = harness("", reading);
+  h.db.appendEvent(h.id, { kind: "user_message", text: message }, Date.now());
+  assert.equal(h.policy().issueScopeSeed, undefined, "the old build stored no seed");
+  assert.equal(h.policy().issueScopeProposalEpic, undefined, "nor an epic: it read the message on every check");
+  const owner = { kind: "human" as const, id: h.db.localIdentityContext().userId };
+  const principal = { ...h.db.localIdentityContext(), kind: "human" as const, actorId: owner.id };
+  /** The owner approves an issue scope of #40 from Campaign Status. */
+  const approveScope = async (requestId: string) => {
+    const proposed = await h.svc.proposeCampaignIssueScope(h.id, { requestId, expectedRevision: 0,
+      additions: [{ repository: "team/repo", number: 40 }], removals: [], explanation: "The epic" }, () => true, principal);
+    assert.ok(proposed.ok, proposed.error ?? requestId);
+    assert.ok(h.svc.resolveWorkflowDecision(h.id, h.id, proposed.data!.occurrenceId, { outcome: "approve" }, "human", owner, () => true).ok);
+  };
+  return { ...h, owner, approveScope };
+}
+
+test("a pre-upgrade campaign whose reading fails stays held until its owner continues without an epic (#4258)", async () => {
+  const h = preUpgradeCampaign("Orchestrate epic #40.", () => ({ errorClass: "authentication" }));
+  try {
+    const waiting = h.delegate();
+    assert.equal(waiting.ok, false, "the first delegation after the upgrade is held");
+    assert.match(waiting.error!, /still reading this campaign's first message/u);
+    assert.equal(h.policy().issueScopeSeed!.messageDigest, firstMessageDigest("Orchestrate epic #40."), "the recorded first message is read");
+    await h.settled();
+    assert.equal(h.fake.calls.length, 1, "the Decision Model reads it once");
+    const seed = h.policy().issueScopeSeed!;
+    assert.equal(seed.state, "owner");
+    assert.equal(h.policy().issueScopeProposalEpic, undefined, "nothing is parsed from the text instead");
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const held = h.delegate();
+      assert.equal(held.ok, false, "held on every later attempt");
+      assert.match(held.error!, /Confirm the epic's authorized issue scope/u);
+    }
+    assert.equal(h.fake.calls.length, 1, "a held campaign is never read again");
+    assert.equal(h.db.campaignDecisionSubject(seed.occurrenceId!)?.surface, "issue_scope_seed", "Campaign Status shows the Epic Seed row");
+    assert.equal(campaignSeedSubjectState(h.policy(), seed.occurrenceId!), "owner", "and offers Continue Without an Epic");
+    const released = h.svc.classifyCampaignDecision(h.id, seed.occurrenceId!, { classification: "orchestrator" }, h.owner);
+    assert.ok(released.ok, released.error ?? "released");
+    assert.equal(h.policy().issueScopeSeed!.state, "none");
+    assert.equal(h.policy().issueScope, undefined, "releasing scopes and grants nothing");
+    assert.equal(h.delegate().ok, true, "Continue Without an Epic releases the hold");
+    assert.equal(h.fake.calls.length, 1);
+  } finally { h.db.close(); }
+});
+
+test("a pre-upgrade campaign whose reading is uncertain stays held until its owner approves an issue scope (#4258)", async () => {
+  const h = preUpgradeCampaign("Orchestrate epic #40.", () => ({ verdict: "uncertain", reason: "It is unclear which issue is the epic.", fields: EMPTY_FIELDS }));
+  try {
+    assert.equal(h.delegate().ok, false);
+    await h.settled();
+    assert.equal(h.policy().issueScopeSeed!.state, "owner");
+    assert.equal(h.delegate().ok, false, "held until the owner acts");
+    await h.approveScope("approve-uncertain");
+    assert.deepEqual(h.policy().issueScope!.issueNumbers, [40]);
+    assert.equal(campaignSeedSubjectState(h.policy(), h.policy().issueScopeSeed!.occurrenceId!), "scoped");
+    assert.equal(h.delegate().ok, true, "the owner's scope approval releases the hold");
+  } finally { h.db.close(); }
+});
+
+test("a pre-upgrade campaign's epic is seeded by the reading, its scope starts from the epic's members, and only the owner's approval releases it (#4258)", async () => {
+  const h = preUpgradeCampaign("Orchestrate epic #40.", () => named(40));
+  try {
+    // Campaign Status reading the scope starts the seed too, before the Orchestrator tries to delegate.
+    assert.ok((await h.svc.campaignIssueScope(h.id)).ok);
+    assert.notEqual(h.policy().issueScopeSeed, undefined);
+    await h.settled();
+    assert.equal(h.policy().issueScopeSeed!.state, "seeded");
+    assert.equal(h.policy().issueScopeProposalEpic, 40);
+    const held = h.delegate();
+    assert.equal(held.ok, false);
+    assert.match(held.error!, /Confirm the epic's authorized issue scope/u);
+    const view = await h.svc.campaignIssueScope(h.id);
+    assert.ok(view.ok, view.error ?? "scope view");
+    assert.deepEqual(view.data!.candidates!.map((c) => c.issue.number), [40, 41, 42], "the scope inspection starts from the epic's members again");
+    assert.equal(h.svc.classifyCampaignDecision(h.id, h.policy().issueScopeSeed!.occurrenceId!, { classification: "orchestrator" }, h.owner).status, 409,
+      "a seeded epic waits for the scope approval itself");
+    await h.approveScope("approve-seeded");
+    assert.equal(h.delegate().ok, true);
+    assert.equal(h.fake.calls.length, 1);
+  } finally { h.db.close(); }
+});
+
+test("a pre-upgrade campaign is read once, a first message that needs no reading holds nothing, and later messages never count (#4258)", async () => {
+  const quiet = preUpgradeCampaign("Coordinate the release checklist.", () => named(40));
+  try {
+    assert.equal(quiet.delegate().ok, true, "a first message without an issue number never held delegation and still doesn't");
+    assert.equal(quiet.policy().issueScopeSeed!.state, "none");
+    assert.equal(quiet.fake.calls.length, 0, "no Decision call");
+    quiet.db.appendEvent(quiet.id, { kind: "user_message", text: "Now orchestrate epic #40." }, Date.now());
+    assert.equal(quiet.delegate().ok, true, "a later message is never read as the first");
+    assert.equal(quiet.fake.calls.length, 0);
+  } finally { quiet.db.close(); }
+  // Repeated checks while the reading runs start one reading and one audited occurrence.
+  const h = preUpgradeCampaign("Orchestrate epic #40.", () => named(40));
+  try {
+    assert.equal(h.delegate().ok, false);
+    assert.equal(h.delegate().ok, false);
+    await h.svc.campaignIssueScope(h.id);
+    await h.settled();
+    assert.equal(h.fake.calls.length, 1);
+    assert.equal(h.occurrences().length, 1);
+  } finally { h.db.close(); }
+});
