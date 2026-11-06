@@ -28,7 +28,9 @@ const boundary: CampaignRepositoryBoundaryView = {
       { locationId: "loc_setup", name: "Dev Box Setup", availability: "removed", isDefault: false },
     ] },
   ],
-  excludedLocations: [{ locationId: "loc_notes", name: "Notes Folder", failure: "not_repository", reason: PROJECT_LOCATION_INSPECTION_FAILURES.not_repository }],
+  excludedLocations: [{ locationId: "loc_notes", name: "Notes Folder", failure: "not_repository", reason: PROJECT_LOCATION_INSPECTION_FAILURES.not_repository },
+    { locationId: "loc_away", name: "Away Machine", failure: "runner_offline", reason: PROJECT_LOCATION_INSPECTION_FAILURES.runner_offline },
+    { locationId: "loc_old", name: "Old Machine", failure: "runner_too_old", reason: PROJECT_LOCATION_INSPECTION_FAILURES.runner_too_old }],
   pendingLocations: [{ locationId: "loc_shared", name: "Shared Docs", reason: "added_by_other" }],
   joins: [{ locationId: "loc_desk", name: "Wollipog on Desk", repository: "picoduck/wollipog", revision: 6, at: 1, source: "owner_added" }],
 };
@@ -58,7 +60,9 @@ test("Repositories lists each boundary repository's Locations, exclusions and Lo
     assert.match(second.textContent!, /Dev Box Setup Removed/);
     assert.match(container.textContent!, /No Location of this repository is available/);
     const excluded = container.querySelector('ul[aria-label="Excluded Locations"]')!;
-    assert.equal(excluded.textContent, `Notes Folder${PROJECT_LOCATION_INSPECTION_FAILURES.not_repository}`);
+    // Each one names its own specific reason, whichever way it failed.
+    assert.deepEqual([...excluded.querySelectorAll("li")].map((item) => item.textContent), [`Notes Folder${PROJECT_LOCATION_INSPECTION_FAILURES.not_repository}`,
+      `Away Machine${PROJECT_LOCATION_INSPECTION_FAILURES.runner_offline}`, `Old Machine${PROJECT_LOCATION_INSPECTION_FAILURES.runner_too_old}`]);
     const headings = [...container.querySelectorAll("h4")].map((node) => node.textContent);
     assert.deepEqual(headings, ["Excluded Locations", "Waiting to Be Included"]);
     const button = includeButton(container);

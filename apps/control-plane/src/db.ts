@@ -10056,13 +10056,17 @@ export class ControlPlaneDb {
           session.runnerId,
           { name: project.name, path },
           now,
+          undefined,
+          adoptingUserId,
         ).id;
       }
       this.stmt("UPDATE sessions SET workspace_id=?, updated_at=? WHERE id=?")
         .run(workspaceId, now, sessionId);
 
+      // The person moving the session is who adds this Location, which is what a campaign in the
+      // Project reads to decide whether it joins (#4117).
       const location = this.findProjectLocationForProject(projectId, session.runnerId, workspaceId)
-        ?? this.addProjectLocation(projectId, { runnerId: session.runnerId, workspaceId }, now);
+        ?? this.addProjectLocation(projectId, { runnerId: session.runnerId, workspaceId, ...(adoptingUserId ? { addedByUserId: adoptingUserId } : {}) }, now);
       return this.setSessionProject(sessionId, projectId, location.id, now, adoptingUserId);
     });
   }

@@ -501,6 +501,8 @@ const projectionFor = (rev: number) => campaignProjection(
           reason: "The Location's folder is not a git repository with a valid HEAD." },
         { locationId: "loc_old", name: "Wollipog on Old Mac", failure: "runner_too_old" as const,
           reason: "The Location's runner is too old to verify it; update the runner." },
+        { locationId: "loc_away", name: "Wollipog on Travel Laptop", failure: "runner_offline" as const,
+          reason: "The Location's machine is offline." },
       ],
       pendingLocations: included ? [] : [{ locationId: "loc_shared", name: "Shared Docs", reason: "added_by_other" as const }],
       joins: [

@@ -198,6 +198,10 @@ for (const theme of ["dark", "light"] as const) {
       await expect(section.getByRole("list", { name: "Locations of picoduck/notes-site" })).toContainText("Removed");
       await expect(section.getByRole("list", { name: "Excluded Locations" })).toContainText("Scratch Folder");
       await expect(section.getByRole("list", { name: "Excluded Locations" })).toContainText("not a git repository");
+      // Each failure names its own reason.
+      const excludedRows = section.getByRole("list", { name: "Excluded Locations" }).getByRole("listitem");
+      await expect(excludedRows.filter({ hasText: "Wollipog on Old Mac" })).toContainText("The Location's runner is too old to verify it; update the runner.");
+      await expect(excludedRows.filter({ hasText: "Wollipog on Travel Laptop" })).toContainText("The Location's machine is offline.");
       await expect(section).toContainText("Joined at boundary revision 6.");
       await section.scrollIntoViewIfNeeded();
       await assertNoHorizontalOverflow(page, ".campaign-status");
