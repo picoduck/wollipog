@@ -4303,6 +4303,67 @@ test("an Orchestrator asks to add a Project repository; only the owner's approva
   } finally { await c.server.close(); f.db.close(); }
 });
 
+test("a follow-up in a Project repository outside the boundary is a person's until the owner's addition, then the Orchestrator's, with its search in that repository (#4119)", async () => {
+  const f = fixture();
+  const c = await repositoryAdditionCampaign(f);
+  try {
+    f.db.updateSessionStatus(c.rootId, "running", Date.now());
+    // The second machine inspects publications, and answers for third/repo's Location.
+    f.db.registerRunner({ runnerId: "r2", hostname: "r2", os: "linux", version: "test", agents: [], runtime: { ...runtime, campaignLaunchInspection: { version: 4 } },
+      workspaces: [{ id: "a", name: "r2 a", path: "/fixture/two/other" }, { id: "b", name: "r2 b", path: "/fixture/two/repository" }, { id: "c", name: "r2 c", path: "/fixture/two/third" }] },
+    Date.now(), PROTOCOL_VERSION);
+    const searched: Array<string | undefined> = [];
+    const inspect = f.state.inspect;
+    f.state.inspect = (message) => {
+      const answer = inspect(message);
+      if (!message.publication || !answer) return answer;
+      searched.push(message.workspacePath);
+      return { ...answer, publicationDigest: "e".repeat(64), duplicateSearch: "subject" };
+    };
+    // Accepted follow-up work in third/repo, originating from the launch repository's issue #7.
+    const child = f.sessions.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude", title: "Child", prompt: "Deliver #7", useWorktree: false },
+      undefined, f.scope, false, false, false, { parentSessionId: c.rootId });
+    assert.equal(child.ok, true, child.error ?? "created");
+    f.db.updateSessionStatus(child.data!.id, "running", Date.now());
+    assert.equal(f.sessions.recordCampaignPlan(c.rootId, { items: [{ key: "issue:7", issue: { repository: "owner/repo", number: 7 } }], planComplete: true }).ok, true);
+    const page = f.db.campaignWorkLedger.page(c.rootId, { state: "all", limit: 100 }, Date.now());
+    assert.ok(page.ok);
+    const title = "Document the Third Repository's Upgrade";
+    const recorded = f.sessions.recordCampaignFollowUp(c.rootId, { originSessionId: child.data!.id, repository: "third/repo", title, originWorkItemIds: [page.data.items[0]!.id] });
+    assert.equal(recorded.ok, true, recorded.error ?? "recorded");
+    assert.equal(f.sessions.adjudicateCampaignRecommendation(c.rootId, { recommendationId: recorded.data!.id, disposition: "accepted",
+      reason: "Observed while delivering #7", publicationRequired: true }).ok, true);
+    const publish = (requestId: string) => f.sessions.createWorkflowDecisionWithVideo(child.data!.id, { requestId, resourceKey: requestId, resourceSnapshot: {
+      category: "follow_up_issue_publication", repository: "third/repo", sanitizedTitle: title, labels: [], recommendationId: recorded.data!.id,
+      sanitizedBody: "## Problem\nRelated failure\n## Proposed Behavior\nRepair it\n## Acceptance Criteria\n- Verified repair\n## Security and Compatibility\nNone" } });
+
+    // Outside the boundary it is a person's, with nothing inspected.
+    const before = await publish("publish-before");
+    assert.equal(before.ok, true, before.error ?? "requested");
+    assert.equal(before.data!.authority, "human");
+    assert.equal(before.data!.authorityEvaluation?.admissionFailure, "target_outside_boundary");
+    assert.deepEqual(searched, []);
+
+    // The Orchestrator asks the owner, naming the follow-up; agent text changes nothing, only approval does.
+    const asked = await c.request("add-for-follow-up", { work: { kind: "follow_up", id: recorded.data!.id } });
+    assert.equal(asked.status, 201, asked.error ?? "");
+    assert.equal(asked.data!.authority, "human");
+    const stillOutside = await publish("publish-while-pending");
+    assert.equal(stillOutside.data!.authority, "human", "an unapproved addition changes no owner");
+    assert.equal(c.resolve(asked.data!.occurrenceId, "approve", { kind: "human", id: f.human.userId }).ok, true);
+    const added = await c.additions.execute(c.rootId, asked.data!.occurrenceId, asked.data!.resourceDigest, c.orchestrator);
+    assert.equal(added.ok, true, added.error ?? "executed");
+
+    // Now the same follow-up is the Orchestrator's, and its duplicate search ran in third/repo.
+    const after = await publish("publish-after");
+    assert.equal(after.ok, true, after.error ?? "requested");
+    assert.equal(after.data!.authority, "orchestrator", JSON.stringify(after.data!.authorityEvaluation));
+    assert.deepEqual(searched, ["/fixture/two/third"]);
+    assert.deepEqual(publicationEvidence(f.db, f.db.getSession(c.rootId)!, after.data!.resourceSnapshot as Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>)?.lineage,
+      { target: "third/repo", origins: ["owner/repo#7"] });
+  } finally { await c.server.close(); f.db.close(); }
+});
+
 test("a declined addition changes nothing and is not asked again for the same work (#4117)", async () => {
   const f = fixture();
   const c = await repositoryAdditionCampaign(f);
