@@ -75,6 +75,12 @@ const VOCABULARY = {
     /** An at-rest Full Control root whose campaign continues automatically: informational, not
      * review work or a prompt the person owes (#2938). No pulse, so it never reads as Running. */
     campaign_active: info("Campaign Active"),
+    /** A finished campaign with housekeeping left, such as a merged branch still on the remote
+     * (#4146): it reads as complete, with an informational tone. Campaign Status lists each item. */
+    campaign_needs_cleanup: info("Complete, Needs Cleanup"),
+    /** An idle campaign with undelivered work and nothing scheduled to wake anyone (#4146). Derived
+     * from facts, unlike the time-based Stalled warning; it needs a person. */
+    campaign_stuck: warning("Campaign Stuck"),
     failed: danger("Failed"),
     completed: success("Completed"),
     stopped: neutral("Stopped"),

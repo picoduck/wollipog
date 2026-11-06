@@ -1,5 +1,6 @@
 import type { SessionReminderView, SessionView } from "@wollipog/protocol";
-import { activeFullControlCampaign, completedFullControlCampaign, sessionFollowUp, sessionWorking } from "./session-follow-up.js";
+import { activeFullControlCampaign, cleanupFullControlCampaign, completedFullControlCampaign, sessionFollowUp, sessionWorking,
+  stuckFullControlCampaign } from "./session-follow-up.js";
 import { reminderBadgeDescription, reminderBadgeLabel, snoozedSessionAttentionReason } from "./session-reminders.js";
 import {
   sessionStatusSummary,
@@ -86,11 +87,29 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
       secondary = null;
     }
   }
-  if ((!secondary || (secondary.kind === "lifecycle" && secondary.meta.tone !== "danger" && !session.stopOperation)) &&
+  // #4146: a stuck campaign needs a person whatever the root's last result says, so the warning wins
+  // over a result waiting for review, which stays among the other conditions and in the follow-up
+  // list. A request or recovery the person must handle still comes first.
+  const followUpsOnly = needs.length > 0 && needs.every((condition) => condition.kind === "follow_up");
+  let stuckOverFollowUp = false;
+  if ((needs.length === 0 ? !secondary || (secondary.kind === "lifecycle" && secondary.meta.tone !== "danger") : followUpsOnly) &&
+      !session.stopOperation && reminder?.state !== "fired" && !context.familyWorking &&
+      !sessionWorking(session as SessionView) && stuckFullControlCampaign(session)) {
+    stuckOverFollowUp = followUpsOnly;
+    secondary = { kind: "lifecycle", meta: statusMeta("session", "campaign_stuck"),
+      description: "This Full Control campaign has unfinished work and nothing is scheduled to move it. Campaign Status names what is stuck.",
+      needsYou: true };
+  } else if ((!secondary || (secondary.kind === "lifecycle" && secondary.meta.tone !== "danger" && !session.stopOperation)) &&
       needs.length === 0 && reminder?.state !== "fired" &&
       session.attention && sessionFollowUp(session as SessionView, { familyWorking: context.familyWorking }).group === "ready_for_review") {
     secondary = { kind: "lifecycle", meta: statusMeta("session", "ready_for_review"),
       description: "A new result is waiting for your assessment or next instructions.", needsYou: true };
+  } else if ((!secondary || (secondary.kind === "lifecycle" && secondary.meta.label === statusMeta("session", "completed").label)) &&
+      !session.stopOperation && needs.length === 0 && reminder?.state !== "fired" && !context.familyWorking &&
+      !sessionWorking(session as SessionView) && cleanupFullControlCampaign(session)) {
+    secondary = { kind: "lifecycle", meta: statusMeta("session", "campaign_needs_cleanup"),
+      description: "This Full Control campaign finished, and some cleanup is left. Campaign Status lists each item and how to settle it.",
+      needsYou: false };
   } else if ((!secondary || (secondary.kind === "lifecycle" && secondary.meta.label === statusMeta("session", "completed").label)) &&
       !session.stopOperation && needs.length === 0 && reminder?.state !== "fired" && !context.familyWorking &&
       !sessionWorking(session as SessionView) && completedFullControlCampaign(session)) {
@@ -102,7 +121,7 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
     secondary = { kind: "lifecycle", meta: statusMeta("session", "campaign_active"),
       description: "This Full Control campaign continues automatically. Its intermediate results are informational.", needsYou: false };
   }
-  const others = needs.slice(1).map(conditionName);
+  const others = (stuckOverFollowUp ? needs : needs.slice(1)).map(conditionName);
   const familyLabel = context.familyFollowUpLabel;
   if (familyLabel && secondary?.meta.label !== familyLabel && needs.every((condition) => condition.kind === "follow_up") &&
       (familyLabel === "Needs Your Input" || (!context.familyWorking && !sessionWorking(session as SessionView))) &&

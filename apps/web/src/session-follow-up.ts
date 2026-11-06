@@ -10,17 +10,31 @@ type CampaignFacts = Partial<Pick<SessionView, "parentSessionId" | "orchestrator
  * person's own follow-up, so a completed campaign never hides it. */
 export const FIRED_REMINDER_RESULT_REVISION = "reminder";
 
-/** A Full Control root whose campaign the server reports Verified Complete (#2940): its normal
- * completion is informational, never review work. Only the server decides this, through the root's
+/** A Full Control root whose campaign the server reports Campaign Complete (#2940), or Complete,
+ * Needs Cleanup (#4146): its normal completion is informational, never review work; any cleanup is
+ * listed in Campaign Status. Only the server decides this, through the root's
  * `fullControlCampaignStatus` (present on summary, detail and live rows) or, from an older control
  * plane, its campaign projection. Any other campaign state, a Custom campaign or a descendant keeps
  * its ordinary follow-up. */
 export function completedFullControlCampaign(session: CampaignFacts): boolean {
-  return fullControlRootStatus(session) === "verified_complete";
+  const status = fullControlRootStatus(session);
+  return status === "verified_complete" || status === "complete_needs_cleanup";
 }
 
-/** The server's campaign status for a Full Control root, or null for a Custom root or a descendant. */
-function fullControlRootStatus(session: CampaignFacts) {
+/** A Full Control root whose campaign is complete but owes cleanup (#4146). */
+export function cleanupFullControlCampaign(session: CampaignFacts): boolean {
+  return fullControlRootStatus(session) === "complete_needs_cleanup";
+}
+
+/** A Full Control root whose campaign the server reports Campaign Stuck (#4146): idle, unfinished,
+ * nothing scheduled. It keeps its ordinary follow-up, since it needs a person. */
+export function stuckFullControlCampaign(session: CampaignFacts): boolean {
+  return fullControlRootStatus(session) === "stuck";
+}
+
+/** The server's campaign status for a Full Control root, or null for a Custom root or a descendant.
+ * Exported so other surfaces (Board columns, the root's header) read one projection (#4146). */
+export function fullControlRootStatus(session: CampaignFacts) {
   if (session.parentSessionId) return null;
   // The row's own stored policy is authoritative for its control mode. A projection the store kept
   // from an earlier detail read may predate a revoke, so its control counts only on a row without one.

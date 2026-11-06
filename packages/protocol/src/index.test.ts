@@ -360,6 +360,9 @@ test("session restart capability overlays controls without freezing the agent ca
 
 test("PROTOCOL_VERSION is 298", () => {
   assert.equal(PROTOCOL_VERSION, 298);
+  // Campaign activity statuses reach dashboards from v297 (#4146).
+  assert.equal(runnerSupportsProtocol(296, "campaignActivityStatus"), false);
+  assert.equal(runnerSupportsProtocol(297, "campaignActivityStatus"), true);
   // An owner rule on a typed decision needs a v296 control plane (#4137).
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule, 296);
   // A v294 runner cannot report the closing references of a GitLab merge (#3762).
@@ -412,6 +415,11 @@ test("PROTOCOL_VERSION is 298", () => {
   assert.equal(campaignStatusTerminal("verified_complete"), true);
   assert.equal(campaignStatusTerminal("complete_with_handoffs"), true);
   for (const status of ["waiting_human", "active", "blocked", null, undefined] as const) assert.equal(campaignStatusTerminal(status), false);
+  // #4146: Complete, Needs Cleanup ends Campaign Elapsed and automatic turns; Campaign Stuck does not.
+  assert.equal(runnerSupportsProtocol(296, "campaignActivityStatus"), false);
+  assert.equal(runnerSupportsProtocol(297, "campaignActivityStatus"), true);
+  assert.equal(campaignStatusTerminal("complete_needs_cleanup"), true);
+  assert.equal(campaignStatusTerminal("stuck"), false);
   assert.equal(runnerSupportsProtocol(271, "pullRequestWatch"), false);
   assert.equal(runnerSupportsProtocol(272, "pullRequestWatch"), true);
   assert.equal(runnerSupportsProtocol(269, "runnerProcessingBarriers"), false);
