@@ -3,11 +3,15 @@ import { test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { CampaignDecisionsResponse } from "@wollipog/protocol";
+import type { CampaignDecisionsResponse, DecisionKind } from "@wollipog/protocol";
 import { api } from "../api.js";
+import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { CampaignDecisionModelChecks } from "./CampaignDecisionModelChecks.js";
+import { CampaignDecisions } from "./CampaignDecisions.js";
 
 const dom = new Window({ url: "http://localhost/" });
+// Campaign Status › Decision Model refreshes on a repeating timer.
+installDomTestCleanup(dom);
 for (const [name, value] of Object.entries({
   window: dom, document: dom.document, navigator: dom.navigator, localStorage: dom.localStorage,
   HTMLElement: dom.HTMLElement, HTMLButtonElement: dom.HTMLButtonElement, HTMLInputElement: dom.HTMLInputElement,
@@ -203,6 +207,50 @@ test("a Custom campaign's epic seed shows its reading beside the scope it affect
     assert.deepEqual(items.map((item) => [...item.querySelectorAll("button")].map((node) => node.textContent)), [
       ["Open Session"], ["Open Session"], ["Open Session"], ["Continue Without an Epic", "Open Session"], ["Open Session"], ["Open Session"],
     ], "only a seed still left to the owner offers to continue without an epic");
+  } finally {
+    view.unmount();
+    api.campaignDecisions = read;
+  }
+});
+
+test("Campaign Status lists each Decision Model call in exactly one section: checks beside their request, every other call in Decision Model (#4265)", async () => {
+  const read = api.campaignDecisions;
+  type Section = "Decision Model Checks" | "Decision Model";
+  // One decision of every kind, keyed by kind so a new kind fails to typecheck until its section is chosen here.
+  const byKind: Record<DecisionKind, [Section, CampaignDecisionsResponse["decisions"][number]]> = {
+    credential_screen: ["Decision Model Checks", decision("credential_screen", { verdict: "discusses", reason: "[credential_screen]" })],
+    follow_up_relatedness: ["Decision Model Checks", decision("follow_up_relatedness", { kind: "follow_up_relatedness", verdict: "related",
+      reason: "[follow_up_relatedness]", subject: { sessionId: "child-1", surface: "follow_up_publication", requestId: "rec_1" } })],
+    closure_reason: ["Decision Model Checks", decision("closure_reason", { kind: "closure_reason", verdict: "fits", reason: "[closure_reason]",
+      subject: { sessionId: "root-1", surface: "issue_closure", requestId: "team/repo#7" } })],
+    scope_review: ["Decision Model Checks", decision("scope_review", { kind: "scope_review", verdict: "admit", reason: "[scope_review]", subject: undefined })],
+    // Full Control's scope grant has no section of its own, so Decision Model lists it.
+    scope_grant: ["Decision Model", decision("scope_grant", { kind: "scope_grant", verdict: "grant", reason: "[scope_grant]", subject: undefined })],
+    probe: ["Decision Model", decision("probe", { kind: "probe", verdict: "confirm", reason: "[probe]", subject: undefined })],
+  };
+  const listed: Array<[Section, CampaignDecisionsResponse["decisions"][number]]> = [
+    ...Object.values(byKind),
+    // A Custom campaign's epic-seed reading is a scope grant too, but a check shown beside the scope it affects.
+    ["Decision Model Checks", decision("epic_seed", { kind: "scope_grant", verdict: "grant", reason: "[epic_seed]",
+      subject: { sessionId: "root-1", surface: "issue_scope_seed", requestId: "issue_scope_seed:abc", seed: "seeded" } })],
+  ];
+  const decisions = listed.map(([, item]) => item);
+  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions, usage: { ...usage, calls: decisions.length, unpricedCalls: 0 } });
+  const view = await render(<>
+    <CampaignDecisionModelChecks sessionId="root-1" canClassify refreshKey={1} onOpenSession={() => {}} />
+    <CampaignDecisions campaignId="root-1" />
+  </>);
+  try {
+    const sections = [...view.container.querySelectorAll("section")].map((node) => ({
+      title: node.querySelector("h3")?.textContent ?? "",
+      items: [...node.querySelectorAll("li")].map((item) => item.textContent ?? ""),
+    }));
+    assert.deepEqual(sections.map(({ title }) => title), ["Decision Model Checks", "Decision Model"]);
+    assert.equal(sections.reduce((total, { items }) => total + items.length, 0), decisions.length, "one list item per decision across both sections");
+    for (const [expected, item] of listed) {
+      const listedIn = sections.flatMap(({ title, items }) => items.filter((text) => text.includes(item.reason!)).map(() => title));
+      assert.deepEqual(listedIn, [expected], `${item.occurrenceId} is listed once, in ${expected}`);
+    }
   } finally {
     view.unmount();
     api.campaignDecisions = read;

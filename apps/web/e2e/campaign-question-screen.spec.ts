@@ -126,6 +126,16 @@ for (const [label, viewport] of [["1440", { width: 1440, height: 900 }], ["390",
   });
 }
 
+test("Campaign Status lists each check once: the Decision Model section keeps only calls without a section of their own (#4265)", async ({ page }) => {
+  await page.goto("/campaign-status-e2e.html?scenario=campaign&checks=1&seed=1&decisions=1");
+  await expect(page.getByRole("region", { name: "Decision Model Checks" }).locator("li")).toHaveCount(6);
+  const decisions = page.locator("section.campaign-status-handoffs").filter({ has: page.getByRole("heading", { name: "Decision Model", exact: true }) });
+  // Only the three calls the fixture adds for this section; no follow-up, closure or epic-seed check a second time.
+  await expect(decisions.locator(".campaign-decision-item")).toHaveCount(3);
+  await expect(decisions).not.toContainText("It removes a temp file the crash fix exposed.");
+  await expect(decisions).not.toContainText("The person names epic #123");
+});
+
 test("Campaign Status shows no Decision Model Checks before the Decision Model screens anything", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=campaign");
   await expect(page.locator(".campaign-status-summary")).toBeVisible();
