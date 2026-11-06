@@ -1490,6 +1490,7 @@ test("CLI typed-decision help is discoverable and malformed or cross-session com
     ["decision", "ask-owner", "--request-id", "r", "--resource-key", "k", "--question", "Q?", "--options", "not-json"],
     ["decision", "ask-owner", "--request-id", "r", "--resource-key", "k", "--question", "Q?", "--options", "{}"],
     ["decision", "ask-owner", "--request-id", "r", "--resource-key", "k", "--question", "Q?", "--options", "[]", "--session", "child"],
+    ["decision", "ask-owner", "--request-id", "r", "--resource-key", "k", "--question", "Q?", "--kind", "other"],
     ["decision", "hand-to-owner", "--reason", "Kept"],
     ["decision", "hand-to-owner", "workflow_1"],
     ["decision", "hand-to-owner", "workflow_1", "--reason", "Kept", "--session"],

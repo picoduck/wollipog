@@ -3,11 +3,16 @@ import { test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { CampaignDecisionsResponse } from "@wollipog/protocol";
+import type { CampaignDecisionsResponse, DecisionKind } from "@wollipog/protocol";
 import { api } from "../api.js";
+import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { CampaignDecisionModelChecks } from "./CampaignDecisionModelChecks.js";
+import { CampaignDecisions } from "./CampaignDecisions.js";
+import { TYPED_ADMITTED, TYPED_REFUSED, TYPED_UNCERTAIN } from "../e2e/decision-model-fixtures.js";
 
 const dom = new Window({ url: "http://localhost/" });
+// Campaign Status › Decision Model refreshes on a repeating timer.
+installDomTestCleanup(dom);
 for (const [name, value] of Object.entries({
   window: dom, document: dom.document, navigator: dom.navigator, localStorage: dom.localStorage,
   HTMLElement: dom.HTMLElement, HTMLButtonElement: dom.HTMLButtonElement, HTMLInputElement: dom.HTMLInputElement,
@@ -209,6 +214,52 @@ test("a Custom campaign's epic seed shows its reading beside the scope it affect
   }
 });
 
+test("Campaign Status lists each Decision Model call in exactly one section: checks beside their request, every other call in Decision Model (#4265)", async () => {
+  const read = api.campaignDecisions;
+  type Section = "Decision Model Checks" | "Decision Model";
+  // One decision of every kind, keyed by kind so a new kind fails to typecheck until its section is chosen here.
+  const byKind: Record<DecisionKind, [Section, CampaignDecisionsResponse["decisions"][number]]> = {
+    credential_screen: ["Decision Model Checks", decision("credential_screen", { verdict: "discusses", reason: "[credential_screen]" })],
+    follow_up_relatedness: ["Decision Model Checks", decision("follow_up_relatedness", { kind: "follow_up_relatedness", verdict: "related",
+      reason: "[follow_up_relatedness]", subject: { sessionId: "child-1", surface: "follow_up_publication", requestId: "rec_1" } })],
+    closure_reason: ["Decision Model Checks", decision("closure_reason", { kind: "closure_reason", verdict: "fits", reason: "[closure_reason]",
+      subject: { sessionId: "root-1", surface: "issue_closure", requestId: "team/repo#7" } })],
+    scope_review: ["Decision Model Checks", decision("scope_review", { kind: "scope_review", verdict: "admit", reason: "[scope_review]", subject: undefined })],
+    // An Orchestrator scope proposal's constraint check (#4282) is a check beside the proposal it affects.
+    scope_check: ["Decision Model Checks", decision("scope_check", { kind: "scope_check", verdict: "refuse", reason: "[scope_check]", subject: undefined })],
+    // Full Control's scope grant has no section of its own, so Decision Model lists it.
+    scope_grant: ["Decision Model", decision("scope_grant", { kind: "scope_grant", verdict: "grant", reason: "[scope_grant]", subject: undefined })],
+    probe: ["Decision Model", decision("probe", { kind: "probe", verdict: "confirm", reason: "[probe]", subject: undefined })],
+  };
+  const listed: Array<[Section, CampaignDecisionsResponse["decisions"][number]]> = [
+    ...Object.values(byKind),
+    // A Custom campaign's epic-seed reading is a scope grant too, but a check shown beside the scope it affects.
+    ["Decision Model Checks", decision("epic_seed", { kind: "scope_grant", verdict: "grant", reason: "[epic_seed]",
+      subject: { sessionId: "root-1", surface: "issue_scope_seed", requestId: "issue_scope_seed:abc", seed: "seeded" } })],
+  ];
+  const decisions = listed.map(([, item]) => item);
+  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions, usage: { ...usage, calls: decisions.length, unpricedCalls: 0 } });
+  const view = await render(<>
+    <CampaignDecisionModelChecks sessionId="root-1" canClassify refreshKey={1} onOpenSession={() => {}} />
+    <CampaignDecisions campaignId="root-1" />
+  </>);
+  try {
+    const sections = [...view.container.querySelectorAll("section")].map((node) => ({
+      title: node.querySelector("h3")?.textContent ?? "",
+      items: [...node.querySelectorAll("li")].map((item) => item.textContent ?? ""),
+    }));
+    assert.deepEqual(sections.map(({ title }) => title), ["Decision Model Checks", "Decision Model"]);
+    assert.equal(sections.reduce((total, { items }) => total + items.length, 0), decisions.length, "one list item per decision across both sections");
+    for (const [expected, item] of listed) {
+      const listedIn = sections.flatMap(({ title, items }) => items.filter((text) => text.includes(item.reason!)).map(() => title));
+      assert.deepEqual(listedIn, [expected], `${item.occurrenceId} is listed once, in ${expected}`);
+    }
+  } finally {
+    view.unmount();
+    api.campaignDecisions = read;
+  }
+});
+
 test("a member session sees the checks but never the classification buttons", async () => {
   const read = api.campaignDecisions;
   api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions: [decision("dec_failed", { state: "uncertain", verdict: "uncertain", reason: "Unclear." })],
@@ -218,6 +269,79 @@ test("a member session sees the checks but never the classification buttons", as
     const item = view.container.querySelector("li")!;
     assert.equal(facts(item).Verdict, "Uncertain");
     assert.deepEqual([...item.querySelectorAll("button")].map((node) => node.textContent), ["Open Session"]);
+  } finally {
+    view.unmount();
+    api.campaignDecisions = read;
+  }
+});
+
+test("a typed check shows its answers as a short checklist beside the server's verdict and reason (#4283)", async () => {
+  const read = api.campaignDecisions;
+  const decisions = [
+    decision("sel_refused", { kind: "scope_review", promptVersion: "scope_review.v2", verdict: "refuse", subject: undefined,
+      reason: "Issue 140 violates 'Skip Security'.", typedAnswers: TYPED_REFUSED,
+      selectionProposal: { outcome: "refused", explanation: "Next in the backlog.",
+        issues: [{ repository: "team/repo", number: 140, title: "Reword the Settings footer" }] } }),
+    decision("sel_uncertain", { kind: "scope_review", promptVersion: "scope_review.v2", state: "uncertain", verdict: "uncertain", subject: undefined,
+      reason: "Issue 141 on 'UI Only' is below the 80% confidence threshold.", typedAnswers: TYPED_UNCERTAIN }),
+    decision("dec_typed_call", { kind: "probe", verdict: "confirm", subject: undefined,
+      reason: "Every answer is satisfied with at least 80% confidence.", typedAnswers: TYPED_ADMITTED }),
+    decision("dec_legacy", { kind: "probe", verdict: "confirm", subject: undefined, reason: "Listed in the boundary." }),
+  ];
+  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions, usage: { ...usage, calls: decisions.length, unpricedCalls: 0 } });
+  const view = await render(<>
+    <CampaignDecisionModelChecks sessionId="root-1" canClassify refreshKey={1} onOpenSession={() => {}} />
+    <CampaignDecisions campaignId="root-1" />
+  </>);
+  try {
+    const lists = [...view.container.querySelectorAll("ul[aria-label='Answers']")];
+    assert.equal(lists.length, 3, "only typed decisions show answers; a single-verdict decision keeps its form");
+    const lines = (list: Element) => [...list.querySelectorAll("li")].map((item) => ({
+      standing: item.getAttribute("data-standing"),
+      claim: item.querySelector(".decision-answer-claim")?.textContent,
+      detail: item.querySelector(".campaign-status-meta")?.textContent,
+    }));
+    assert.deepEqual(lines(lists[0]!), [
+      { standing: "satisfies", claim: "Satisfies 'Count Matches'",
+        detail: "Yes (96% confidence). The owner asked for one more; one is proposed." },
+      { standing: "satisfies", claim: "Issue 140 Satisfies 'UI Only'", detail: "Satisfies (90% confidence). It rewords the Settings footer." },
+      { standing: "violates", claim: "Issue 140 Violates 'Skip Security'",
+        detail: "Violates (92% confidence); this answer decided the verdict. It is labeled security." },
+    ]);
+    // An answer below the threshold reads as unsure, whatever its value.
+    assert.deepEqual(lines(lists[1]!)[1], { standing: "unsure", claim: "Issue 141 Unsure About 'UI Only'",
+      detail: "Satisfies (55% confidence); this answer decided the verdict. A layout bug, but the label is area/sidebar, not area/ui." });
+    assert.ok(lines(lists[2]!).every((line) => line.standing === "satisfies"));
+    const refused = lists[0]!.closest("li.campaign-screen-item")!;
+    assert.equal(facts(refused).Verdict, "Doesn't Fit Your Selection");
+    assert.equal(facts(refused).Reason, "Issue 140 violates 'Skip Security'.");
+    assert.ok(facts(refused).Answers?.startsWith("Answers count at 80% confidence or more."));
+    // Every icon is decorative; the claim carries the standing in words.
+    assert.ok([...view.container.querySelectorAll(".decision-answer-icon")].every((icon) => icon.getAttribute("aria-hidden") === "true"));
+  } finally {
+    view.unmount();
+    api.campaignDecisions = read;
+  }
+});
+
+test("a typed check names a parameterized question by its complete parameter, never only its shortened label (#4283)", async () => {
+  const read = api.campaignDecisions;
+  const shared = "Only issues in the web dashboard that change no stored data and touch none of the session, runner or account paths, and ";
+  const parameter = `${shared}only if no reviewer has marked them security-sensitive.`;
+  const question = TYPED_REFUSED.questions.find((candidate) => candidate.items)!;
+  const typed = {
+    ...TYPED_REFUSED,
+    questions: TYPED_REFUSED.questions.map((candidate) => candidate === question
+      ? { ...candidate, label: `${shared.slice(0, 119)}…`, parameter } : candidate),
+  };
+  const decisions = [decision("dec_long", { kind: "probe", verdict: "confirm", subject: undefined, reason: "Checked.", typedAnswers: typed })];
+  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions, usage: { ...usage, calls: 1, unpricedCalls: 0 } });
+  const view = await render(<CampaignDecisions campaignId="root-1" />);
+  try {
+    const claims = [...view.container.querySelectorAll("ul[aria-label='Answers'] .decision-answer-claim")].map((claim) => claim.textContent);
+    const item = question.items![0]!.label;
+    assert.ok(claims.includes(`${item} Satisfies '${parameter}'`), `claims: ${JSON.stringify(claims)}`);
+    assert.ok(claims.every((claim) => !claim?.includes("…")), "no claim falls back to the shortened label");
   } finally {
     view.unmount();
     api.campaignDecisions = read;

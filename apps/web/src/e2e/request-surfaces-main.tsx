@@ -269,10 +269,19 @@ function evidenceSession(): SessionView {
 
 function issueScopeSession(): SessionView {
   const base=evidenceSession();
-  const snapshot={category:"campaign_issue_scope" as const,repository:"team/repo",expectedRevision:1,before:[123,124],additions:[125],removals:[124],
+  // `ownerReview=1` (#4267): the Orchestrator's proposal without lineage, with the Maximum Issues increase it needs.
+  const snapshot = query.get("ownerReview") === "1" ? { category: "campaign_issue_scope" as const, repository: "team/repo", expectedRevision: 3,
+    before: [130, 131, 132, 133, 134], additions: [141, 142], removals: [],
+    explanation: "You asked me to start #141 and #142 after launch. Neither is an epic member or a published follow-up.",
+    affectedAssignments: [], affectedDecisions: ["merge-4141"], activeChildren: [],
+    ownerReview: { cause: "lineage_missing" as const, maxIssuesIncrease: { from: 6, increase: 1 } } }
+    : {category:"campaign_issue_scope" as const,repository:"team/repo",expectedRevision:1,before:[123,124],additions:[125],removals:[124],
     explanation: tallBody ? Array.from({ length: 12 }, (_, index) =>
       `Review scope item ${index + 1}: confirm the requested work, dependencies, and affected assignments before approving this campaign change.`).join("\n\n")
-      : "Update the intended epic members.",affectedAssignments:[{sessionId:"child",issue:124}],affectedDecisions:["closure-member-124"],activeChildren:[{sessionId:"child",title:"Implement Member Work",assignmentDigest:"a".repeat(64)}]};
+      : "Update the intended epic members.",affectedAssignments:[{sessionId:"child",issue:124}],affectedDecisions:["closure-member-124"],activeChildren:[{sessionId:"child",title:"Implement Member Work",assignmentDigest:"a".repeat(64)}],
+    // `repositories=1`: the same change also adds and removes issues in a second campaign repository (#4118).
+    ...(query.get("repositories") === "1" ? { otherRepositories: [{ repository: "team/api", before: [5, 124], additions: [40], removals: [5] }],
+      affectedAssignments: [{ sessionId: "child", issue: 124 }, { sessionId: "api-child", issue: 5, repository: "team/api" }] } : {})};
   return {...base,title:"Campaign Issue Scope",pendingApproval:{...base.pendingApproval!,title:"Campaign Issue Scope Approval Required",context:{input:JSON.stringify(snapshot)},
     workflowDecision:{...base.pendingApproval!.workflowDecision!,category:"campaign_issue_scope",resourceSnapshot:snapshot,controllingSessionId:base.id,authority:"human"}}};
 }
@@ -296,15 +305,21 @@ function followUpAdmissionSession(rebinding = false): SessionView {
   } };
 }
 
-/** `refused`: the last approved closure was refused, so this request shows why (#4059). */
+/** `refused`: the last approved closure was refused, so this request shows why (#4059). The
+ * `excluded` query parameter picks the excluded children (#3237): one by default, `none` for an
+ * empty list, or `old` for a snapshot from a release that did not record them. */
 function issueClosureSession(refused = false): SessionView {
   const base = evidenceSession();
+  const excluded = query.get("excluded");
+  const excludedChildren = excluded === "old" ? {} : { excludedChildren: excluded === "none" ? [] : [{ sessionId: "other-child",
+    title: "Fix the <b>Settings</b> Sync Race", reason: { attemptedIssues: [{ repository: "team/repo", number: 131 }],
+      attemptedIssueCount: 1, attemptedWithoutIssue: 0, linkedWorkItems: 0 } }] };
   const snapshot = { category: "issue_closure" as const, repository: "team/repo", issue: 123,
     title: "Obsolete Task", url: "https://github.com/team/repo/issues/123", forgeDigest: "a".repeat(64),
     reason: "not_planned" as const, explanation: "The replacement design makes this task obsolete.",
     evidence: ["Replacement issue #124 covers the current design."], comment: "Retired in favor of #124.",
     openPullRequests: [{ number: 77, title: "Earlier Implementation", url: "https://github.com/team/repo/pull/77", headSha: "b".repeat(40) }],
-    activeChildren: [{ sessionId: "child", title: "Implement Issue 123", assignmentDigest: "c".repeat(64) }],
+    activeChildren: [{ sessionId: "child", title: "Implement Issue 123", assignmentDigest: "c".repeat(64) }], ...excludedChildren,
     ...(refused ? { previousRefusal: { occurrenceId: "wd_occ_closure_1", completedAt: Date.UTC(2026, 10, 1, 17, 32),
       refusal: githubIssueClosureRefusal("closing_reference_changed", { pullRequests: [77] }) } } : {}),
   };

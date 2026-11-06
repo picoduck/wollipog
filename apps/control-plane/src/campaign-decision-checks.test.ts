@@ -44,7 +44,7 @@ function harness(answer: Answer = (kind) => ({ verdict: HEALTHY_VERDICTS[kind]! 
         repository: "team/repo", duplicateSearch: "subject" as const,
         publicationDigest: issueEvidenceDigest({ sanitizedTitle: message.sanitizedTitle, sanitizedBody: message.sanitizedBody, labels: message.labels }) };
       return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: true, repository: "team/repo",
-        ...(message.operation === "synchronize" ? { revision: message.scope.revision } : { candidates: (message.issues ?? [100]).map((number) =>
+        ...(message.operation === "synchronize" ? { revision: message.scope.revision } : message.operation === "grant_issue_numbers" ? { issueNumbersGrant: "applied" as const } : { candidates: (message.issues ?? [100]).map((number) =>
           ({ issue: { repository: "team/repo", number }, title: `Issue ${number}`, source: "sub_issue" as const })) }) };
     }
     if (message.type === "github_issue_closure") {
@@ -115,7 +115,8 @@ test("follow-up relatedness: an unrelated follow-up is refused back to the Orche
   try {
     const refused = await publish(h, "unrelated", recommend(h, "Add a Dark-Mode Theme"));
     assert.deepEqual([refused.ok, refused.status, refused.errorDetails?.code], [false, 409, "unrelated_follow_up"]);
-    assert.match(refused.error!, /The Decision Model's reason: It starts a dark-mode theme the owner did not ask for\./u);
+    // The typed refusal (#4283) names the deciding question and carries that answer's evidence.
+    assert.match(refused.error!, /The Decision Model's reason: The answer violates 'Related to the Requested Work'\. The Decision Model's evidence: It starts a dark-mode theme the owner did not ask for\./u);
     assert.equal(h.db.workflowDecisionByRequestId("child", "unrelated"), null, "no decision for anyone");
   } finally { h.db.close(); }
 });

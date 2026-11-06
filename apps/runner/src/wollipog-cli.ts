@@ -490,12 +490,22 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
         if (!value || value.startsWith("--")) return { error: `decision ask-owner requires ${optionName}` };
         input[key] = value;
       }
+      // An Owner Question (#4270) may suggest no options; an Owner Approval always offers them.
+      if (optionPresent(args, "--kind")) {
+        const kind = option(args, "--kind");
+        if (kind !== "question" && kind !== "approval") return { error: "--kind requires question or approval" };
+        input.kind = kind;
+      }
       const raw = option(args, "--options");
-      if (!raw || raw.startsWith("--")) return { error: "decision ask-owner requires --options as a JSON array" };
-      try {
-        input.options = JSON.parse(raw) as unknown;
-      } catch {
-        return { error: "--options must be valid JSON" };
+      if (input.kind === "question" && !optionPresent(args, "--options")) {
+        input.options = [];
+      } else {
+        if (!raw || raw.startsWith("--")) return { error: "decision ask-owner requires --options as a JSON array" };
+        try {
+          input.options = JSON.parse(raw) as unknown;
+        } catch {
+          return { error: "--options must be valid JSON" };
+        }
       }
       if (!Array.isArray(input.options)) return { error: "--options requires a JSON array of {optionId, label, description?}" };
       for (const [optionName, key] of [["--recommended", "recommendedOptionId"], ["--material", "material"]] as const) {
@@ -1067,6 +1077,8 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionWithdrawal
     : parsed.tool === "execute_workflow_decision"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.forgeDecisionActions
+    : parsed.tool === "request_owner_decision" && parsed.input.kind === "question"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.ownerQuestions
     : parsed.tool === "request_owner_decision" || parsed.tool === "hand_workflow_decision_to_owner"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions
     : ["request_campaign_repository_addition", "get_campaign_repository_addition", "execute_campaign_repository_addition"].includes(parsed.tool)

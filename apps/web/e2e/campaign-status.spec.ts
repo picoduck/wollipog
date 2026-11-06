@@ -318,6 +318,45 @@ test("a campaign complete with handoffs lists the owner's items without a recove
   await assertNoHorizontalOverflow(page, ".campaign-status");
 });
 
+// UI evidence for #3361: set CAMPAIGN_RECOVERY_HOLD_EVIDENCE_DIR to capture each recovery hold. The
+// capture comes before the assertions, so the same run against the old panel records "before".
+const RECOVERY_HOLD_EVIDENCE_DIR = process.env.CAMPAIGN_RECOVERY_HOLD_EVIDENCE_DIR;
+const RECOVERY_HOLDS = [
+  { name: "complete", query: "activity=complete&automation=complete", label: "Campaign Complete", notice: null },
+  { name: "cleanup", query: "activity=cleanup&automation=complete", label: "Complete, Needs Cleanup", notice: null },
+  { name: "active", query: "activity=active&automation=complete", label: "Campaign Active", notice: "No Recovery Needed" },
+  { name: "stuck", query: "activity=stuck&automation=held", label: "Campaign Stuck", notice: "Authorized Recovery Unavailable" },
+] as const;
+for (const theme of ["dark", "light"] as const) {
+  for (const [device, viewport] of [["desktop", { width: 1440, height: 1000 }], ["phone", { width: 390, height: 844 }]] as const) {
+    for (const hold of RECOVERY_HOLDS) {
+      test(`${hold.label} shows ${hold.notice ?? "no recovery notice"} for its recovery hold on a ${device} ${theme} viewport (#3361)`, async ({ page }) => {
+        await page.setViewportSize(viewport);
+        await page.goto(`/campaign-status-e2e.html?scenario=campaign&${hold.query}&theme=${theme}`);
+        await expect(page.locator(".campaign-status-summary")).toContainText(hold.label);
+        const titled = (title: string) => page.locator(".notice", { has: page.locator(".notice-title", { hasText: title }) });
+        // Frame where the recovery notice is, or where it would be: just above Authorized Issue Scope.
+        const notice = page.locator(".notice", { has: page.locator(".notice-title", { hasText: /^(No Recovery Needed|Authorized Recovery Unavailable)$/u }) });
+        await (await notice.count() ? notice : page.getByRole("heading", { name: "Authorized Issue Scope" })).scrollIntoViewIfNeeded();
+        if (RECOVERY_HOLD_EVIDENCE_DIR) await page.screenshot({ path: `${RECOVERY_HOLD_EVIDENCE_DIR}/recovery-${hold.name}-${device}-${theme}.png` });
+        if (hold.notice === "No Recovery Needed") {
+          await expect(titled("No Recovery Needed")).toHaveClass(/\bt-neutral\b/u);
+          await expect(titled("No Recovery Needed")).toHaveAttribute("role", "status");
+          await expect(titled("No Recovery Needed")).toContainText("The campaign has no unfinished original scoped recovery obligation.");
+          await expect(titled("Authorized Recovery Unavailable")).toHaveCount(0);
+        } else if (hold.notice) {
+          await expect(titled("Authorized Recovery Unavailable")).toHaveClass(/\bt-warning\b/u);
+          await expect(titled("Authorized Recovery Unavailable")).toContainText("Reconcile its original obligation before continuing.");
+          await expect(titled("No Recovery Needed")).toHaveCount(0);
+        } else {
+          await expect(page.getByText(/Authorized Recovery Unavailable|No Recovery Needed/u)).toHaveCount(0);
+        }
+        await assertNoHorizontalOverflow(page, ".campaign-status");
+      });
+    }
+  }
+}
+
 test("a campaign without a recorded plan says so", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=planless");
   const notice = page.locator(".campaign-status-summary .notice");
@@ -374,6 +413,20 @@ test("decisions the owner kept wait for them in Campaign Status, and each opens 
 });
 
 for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "phone", width: 390, height: 844 }]) {
+  test(`an Orchestrator's scope proposal without lineage waits for the owner with its Maximum Issues increase, ${viewport.name} (#4267)`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&ownerScope=1");
+    const waiting = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Waiting for You" }) });
+    const summary = "Add team/repo#141, team/repo#142, raising Maximum Issues from 6 to 7";
+    await expect(waiting).toContainText("Scope Approval");
+    await expect(waiting).toContainText(summary);
+    await expect(waiting).toContainText("Proposed by the Orchestrator");
+    await expect(waiting).toContainText("Only you can make this decision.");
+    // The root's own request opens as its dock card above the composer, which this harness does not
+    // render; campaign-issue-scope.spec.ts reads that card.
+    await expect(waiting.getByRole("button", { name: `Open Request: ${summary}` })).toBeVisible();
+  });
+
   test(`a merge an installed rule keeps for the owner waits for them with the rule's source and quote, ${viewport.name} (#4137)`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.goto("/campaign-status-e2e.html?scenario=campaign&owners=rule");
@@ -391,5 +444,18 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
     await expect(detail).toContainText("~/.codex/skills/issue-workflow/SKILL.md");
     await expect(detail.getByRole("button", { name: "Approve" })).toBeVisible();
     await assertNoHorizontalOverflow(page, ".request-panel-detail");
+  });
+
+  test(`a request to add a repository waits for the owner in Waiting for You, ${viewport.name} (#4117)`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&ownerAddition=1");
+    const waiting = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Waiting for You" }) });
+    await expect(waiting).toContainText("Only you can make this decision.");
+    await expect(waiting.locator("dt")).toHaveText(["Add Repository"]);
+    await expect(waiting).toContainText("Add picoduck/notes-site to the campaign");
+    await expect(waiting).toContainText("Asked by the Orchestrator");
+    await waiting.scrollIntoViewIfNeeded();
+    await assertNoHorizontalOverflow(page, ".campaign-status");
+    if (REPOSITORIES_EVIDENCE_DIR) await page.screenshot({ path: `${REPOSITORIES_EVIDENCE_DIR}/waiting-add-repository-${viewport.name}.png` });
   });
 }

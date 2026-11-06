@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { CampaignIssueScopeMessage, ExecutionTargetRef, HostExecutionTargetRefusalReason, GithubIssueClosureSnapshot } from "@wollipog/protocol";
+import { classifyRoutineClaudeOrchestratorPermission } from "./orchestrator-provider-permissions.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 
@@ -480,4 +481,284 @@ test("same-revision synchronization with a changed origin withdraws live issue p
     assert.equal((await f.scope({operation:"synchronize",scope})).ok,true);
     assert.deepEqual(policy.issueNumbers,[issue]);
   } finally {active.delete(sessionId);}
+});
+
+test("a participant in another boundary repository stores its own repository's part of the scope (#4118)", async (t) => {
+  const f = fixture(t);
+  // This runner's origin is example/project; the campaign launched in owner/app.
+  const boundary = (repositories: Array<{ repository: string; locationIds: string[] }>): import("@wollipog/protocol").CampaignControl => ({ mode: "full_control", boundary: {
+    version: 1, revision: 2, issueScopeRevision: 1, repository: "owner/app", objective: "Deliver across repositories",
+    authorizedByUserId: "owner", authorizedAt: 2000, operations: ["campaign_issue_scope"], delegatablePolicyIds: [], repositories } });
+  const scope = { repository: "example/project", issueNumbers: [5], revision: 1, authorizedByUserId: "owner", authorizedAt: 1000 };
+  const outside = await f.scope({ operation: "synchronize", scope, control: boundary([{ repository: "owner/app", locationIds: ["loc_app"] }]) });
+  assert.equal(outside.ok, false, "a boundary without this runner's repository is refused");
+  assert.match(outside.error ?? "", /another repository/u);
+  const synchronized = await f.scope({ operation: "synchronize", scope, control: boundary([
+    { repository: "owner/app", locationIds: ["loc_app"] }, { repository: "Example/Project", locationIds: ["loc_project"] }]) });
+  assert.equal(synchronized.ok, true, synchronized.error ?? "");
+  const stored = f.diskMeta().orchestrator!;
+  assert.deepEqual([stored.issueScope?.repository, stored.issueNumbers], ["example/project", [5]]);
+});
+
+/** #3363: control metadata has its own order, alongside issue-scope ordering. */
+const orderedControl = (revision: number): import("@wollipog/protocol").CampaignControl => ({ mode: "full_control", boundary: {
+  version: 1, revision, issueScopeRevision: 1, repository: "example/project", objective: "Retire scoped work",
+  authorizedByUserId: "owner", authorizedAt: 2000, operations: ["issue_closure"], delegatablePolicyIds: [],
+  issueAuthority: { epics: [], relatedFollowUps: false, maxIssues: 1, closureReasons: ["not_planned"] } } });
+
+test("a delayed synchronization cannot roll back control within one scope revision, before or after recreation (#3363)", async (t) => {
+  const f = fixture(t);
+  const original = await f.snapshot();
+  const scope = { repository: "example/project", issueNumbers: [issue], revision: 1, authorizedByUserId: "owner", authorizedAt: 1000 };
+  assert.equal((await f.scope({ operation: "synchronize", scope, control: orderedControl(2), controlRevision: 2 })).ok, true);
+  // A same-scope control change (a reauthorization) applies without any scope edit.
+  assert.equal((await f.scope({ operation: "synchronize", scope, control: orderedControl(3), controlRevision: 3 })).ok, true);
+  assert.deepEqual(f.diskMeta().orchestrator!.control, orderedControl(3));
+  assert.equal(f.diskMeta().orchestrator!.controlRevision, 3);
+  const policy: { issueNumbers?: number[]; issueScope?: typeof scope; control?: import("@wollipog/protocol").CampaignControl; controlRevision?: number } =
+    { issueNumbers: [issue], issueScope: scope, control: orderedControl(3), controlRevision: 3 };
+  const active = (f.manager() as unknown as { active: Map<string, { orchestratorLaunchPolicy: typeof policy }> }).active;
+  active.set(sessionId, { orchestratorLaunchPolicy: policy });
+  try {
+    const delayed = await f.scope({ operation: "synchronize", scope, control: orderedControl(2), controlRevision: 2 });
+    assert.equal(delayed.ok, true, "the scope itself is current");
+    assert.deepEqual(f.diskMeta().orchestrator!.control, orderedControl(3), "the delayed control is ignored on disk");
+    assert.deepEqual(policy.control, orderedControl(3), "and in the live launch policy");
+    assert.deepEqual(policy.issueNumbers, [issue]);
+    assert.ok(f.logs.some((line) => line.includes("campaign_control_update_ignored")));
+  } finally { active.delete(sessionId); }
+
+  // The order persists: a runner restart (reconnect) does not reopen the window.
+  f.restart();
+  assert.equal((await f.scope({ operation: "synchronize", scope, control: orderedControl(2), controlRevision: 2 })).ok, true);
+  assert.deepEqual(f.store().readMeta(sessionId)!.orchestrator!.control, orderedControl(3));
+
+  // A revoke at the next revision narrows it; nothing older revives the boundary.
+  assert.equal((await f.scope({ operation: "synchronize", scope, control: { mode: "custom" }, controlRevision: 4 })).ok, true);
+  assert.equal((await f.scope({ operation: "synchronize", scope, control: orderedControl(3), controlRevision: 3 })).ok, true);
+  assert.equal((await f.scope({ operation: "synchronize", scope, control: orderedControl(3) })).ok, true, "an unordered peer");
+  assert.deepEqual(f.diskMeta().orchestrator!.control, { mode: "custom" });
+  assert.equal(f.diskMeta().orchestrator!.controlRevision, 4);
+  const refused = await f.execute({ ...original, scopeRevision: 1, issueAdmission: { boundaryRevision: 3, evidenceDigest: "a".repeat(64) } });
+  assert.equal(refused.ok, false, "a stale diagnostic never becomes a grant");
+  assert.equal(refused.failure, "campaign_authority_changed");
+  assert.equal(f.mutations().length, 0);
+});
+
+test("a control revision must be valid and accompany control (#3363)", async (t) => {
+  const f = fixture(t);
+  const scope = { repository: "example/project", issueNumbers: [issue], revision: 1, authorizedByUserId: "owner", authorizedAt: 1000 };
+  assert.equal((await f.scope({ operation: "synchronize", scope, control: orderedControl(2), controlRevision: -1 })).ok, false);
+  assert.equal((await f.scope({ operation: "synchronize", scope, control: orderedControl(2), controlRevision: 1.5 })).ok, false);
+  assert.equal((await f.scope({ operation: "synchronize", scope, controlRevision: 2 })).ok, false);
+  assert.equal(f.diskMeta().orchestrator!.issueScope, undefined, "a refused synchronization persists nothing");
+  // An older control plane sends no revision: control replaces as before.
+  assert.equal((await f.scope({ operation: "synchronize", scope, control: orderedControl(2) })).ok, true);
+  assert.equal((await f.scope({ operation: "synchronize", scope, control: orderedControl(3) })).ok, true);
+  assert.deepEqual(f.diskMeta().orchestrator!.control, orderedControl(3));
+  assert.equal(f.diskMeta().orchestrator!.controlRevision, undefined);
+});
+
+// #4269: a Custom campaign's Orchestrator launches before the Decision Model's first-message reading
+// settles, so it holds no issue numbers; the control plane then delivers the granted ones.
+type GrantPolicy = NonNullable<SessionMeta["orchestrator"]>;
+type ActiveSessions = Map<string, { orchestratorLaunchPolicy: GrantPolicy }>;
+
+/** The fixture's Orchestrator as such a campaign: no issue numbers and no scope yet. */
+function ungranted(f: ReturnType<typeof fixture>) {
+  f.store().patchMeta(sessionId, { orchestrator: { strictProjectIsolation: true } });
+  const active = (f.manager() as unknown as { active: ActiveSessions }).active;
+  // The driver's launch policy: the exact object the Claude routine-write classifier reads on each ask.
+  const policy: GrantPolicy = { strictProjectIsolation: true };
+  return { policy, active, live: () => { active.set(sessionId, { orchestratorLaunchPolicy: policy }); } };
+}
+const grantIssues = (f: ReturnType<typeof fixture>, issueNumbers: number[] = [issue, 124], campaignSessionId = sessionId) =>
+  f.scope({ operation: "grant_issue_numbers", campaignSessionId, issueNumbers });
+const claim = (n: number) => ({ command: `gh issue edit ${n} --add-assignee @me` });
+
+test("a granted issue reaches a live Orchestrator's routine-write classifier and closure checks without a relaunch (#4269)", async (t) => {
+  const f = fixture(t);
+  const g = ungranted(f);
+  g.live();
+  try {
+    assert.notEqual(classifyRoutineClaudeOrchestratorPermission("Bash", claim(issue), g.policy.issueNumbers ?? [], f.root), "allow",
+      "before the grant, a write on the issue takes the person's approval path");
+    const refused = await f.inspect();
+    assert.equal(refused.ok, false);
+    assert.equal(refused.failure, "campaign_authority_changed", "before the grant, the closure check refuses the issue");
+    const applied = await grantIssues(f, [124, issue]);
+    assert.equal(applied.ok, true, applied.error ?? "applied");
+    assert.equal(applied.issueNumbersGrant, "applied");
+    assert.deepEqual(g.policy.issueNumbers, [issue, 124], "the live launch policy is updated in place");
+    assert.equal(classifyRoutineClaudeOrchestratorPermission("Bash", claim(issue), g.policy.issueNumbers ?? [], f.root), "allow",
+      "the running provider now treats the granted issue as a routine write");
+    assert.notEqual(classifyRoutineClaudeOrchestratorPermission("Bash", claim(999), g.policy.issueNumbers ?? [], f.root), "allow",
+      "an issue the grant does not name stays the person's");
+    assert.deepEqual(f.diskMeta().orchestrator, { strictProjectIsolation: true, issueNumbers: [issue, 124] },
+      "the stored launch metadata gains exactly the numbers: no scope, revision or control");
+    const inspected = await f.inspect();
+    assert.equal(inspected.ok, true, inspected.error ?? "the closure check now recognizes the granted issue");
+    assert.equal(f.mutations().length, 0);
+  } finally { g.active.delete(sessionId); }
+  // The next launch carries the same numbers.
+  f.restart();
+  let launched: import("./drivers/driver.js").DriverOptions["orchestrator"];
+  const manager = f.manager() as unknown as {
+    createDriver: (kind: string, options: import("./drivers/driver.js").DriverOptions) => never;
+    beginLaunchGeneration(id: string): number;
+    launch(meta: SessionMeta, resume: undefined, generation: number): Promise<boolean>;
+  };
+  manager.createDriver = (_kind, options) => { launched = options.orchestrator; throw new Error("capture-only driver"); };
+  await manager.launch(f.store().readMeta(sessionId)!, undefined, manager.beginLaunchGeneration(sessionId));
+  assert.deepEqual(launched?.issueNumbers, [issue, 124]);
+});
+
+test("a duplicate grant delivery is a no-op (#4269)", async (t) => {
+  const f = fixture(t);
+  const g = ungranted(f);
+  g.live();
+  try {
+    assert.equal((await grantIssues(f)).issueNumbersGrant, "applied");
+    const stored = JSON.stringify(f.diskMeta());
+    const writes = f.logs.length;
+    for (const numbers of [[issue, 124], [124, issue]]) {
+      const replay = await grantIssues(f, numbers);
+      assert.equal(replay.ok, true, replay.error ?? "replayed");
+      assert.equal(replay.issueNumbersGrant, "unchanged");
+    }
+    assert.equal(JSON.stringify(f.diskMeta()), stored, "nothing is written again");
+    assert.deepEqual(g.policy.issueNumbers, [issue, 124]);
+    assert.equal(f.logs.slice(writes).filter((line) => line.includes("campaign_issue_numbers_granted")).length, 0);
+  } finally { g.active.delete(sessionId); }
+});
+
+test("a grant is refused for a session holding issue numbers or a scope, a stopped session, another campaign, and malformed numbers (#4269)", async (t) => {
+  const f = fixture(t);
+  const g = ungranted(f);
+  const unchanged = async (name: string, refusal: import("@wollipog/protocol").CampaignIssueNumberGrantRefusal,
+    send: () => ReturnType<typeof grantIssues>) => {
+    const before = JSON.stringify(f.diskMeta().orchestrator);
+    const livePolicy = JSON.stringify(g.policy);
+    const result = await send();
+    assert.equal(result.ok, false, name);
+    assert.equal(result.grantRefusal, refusal, name);
+    assert.equal(result.issueNumbersGrant, undefined, name);
+    assert.equal(JSON.stringify(f.diskMeta().orchestrator), before, `${name}: stored launch metadata unchanged`);
+    assert.equal(JSON.stringify(g.policy), livePolicy, `${name}: live launch policy unchanged`);
+  };
+  // No live or launching provider: a stopped session gets the numbers at its next launch instead.
+  await unchanged("no live provider", "not_live", () => grantIssues(f));
+  g.live();
+  try {
+    for (const status of ["stopped", "failed", "completed"] as const) {
+      f.store().patchMeta(sessionId, { status });
+      await unchanged(`a ${status} session`, "not_live", () => grantIssues(f));
+    }
+    f.store().patchMeta(sessionId, { status: "idle" });
+    await unchanged("another campaign's grant", "other_campaign", () => grantIssues(f, [issue], "s_other_campaign"));
+    await unchanged("no numbers", "invalid", () => grantIssues(f, []));
+    await unchanged("a non-issue number", "invalid", () => grantIssues(f, [0]));
+    await unchanged("a repeated number", "invalid", () => grantIssues(f, [issue, issue]));
+    await unchanged("more than the bound", "invalid", () => grantIssues(f, Array.from({ length: 101 }, (_, i) => i + 1)));
+    // A session already holding other numbers is never widened or changed.
+    f.store().patchMeta(sessionId, { orchestrator: { strictProjectIsolation: true, issueNumbers: [issue] } });
+    await unchanged("other numbers held", "issue_numbers_held", () => grantIssues(f, [issue, 124]));
+    await unchanged("different numbers held", "issue_numbers_held", () => grantIssues(f, [124]));
+    // Live authority the stored metadata lacks is never overwritten either.
+    f.store().patchMeta(sessionId, { orchestrator: { strictProjectIsolation: true } });
+    g.policy.issueNumbers = [issue];
+    await unchanged("numbers held by the live session", "issue_numbers_held", () => grantIssues(f, [issue, 124]));
+    delete g.policy.issueNumbers;
+    // A session holding an authorized issue scope keeps the synchronize path, even an empty one.
+    const scope = { repository: "example/project", issueNumbers: [], revision: 1, authorizedByUserId: "owner", authorizedAt: 1000 };
+    assert.equal((await f.scope({ operation: "synchronize", scope })).ok, true);
+    await unchanged("an authorized issue scope", "issue_scope_held", () => grantIssues(f, [issue]));
+  } finally { g.active.delete(sessionId); }
+  // A session that is not an Orchestrator holds no campaign authority at all.
+  f.store().patchMeta(sessionId, { orchestrator: undefined });
+  const plain = await grantIssues(f);
+  assert.equal(plain.grantRefusal, "not_orchestrator");
+  assert.equal(f.diskMeta().orchestrator, undefined);
+});
+
+test("a grant that arrives while the provider is still launching reaches the driver's launch policy (#4269)", async (t) => {
+  const f = fixture(t);
+  ungranted(f);
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let launched: import("./drivers/driver.js").DriverOptions["orchestrator"];
+  const manager = f.manager() as unknown as {
+    providerHomeLeases: { acquireReference(): Promise<null>; stopAcquisitions(): void };
+    createDriver: (kind: string, options: import("./drivers/driver.js").DriverOptions) => never;
+    beginLaunchGeneration(id: string): number;
+    launch(meta: SessionMeta, resume: undefined, generation: number): Promise<boolean>;
+  };
+  manager.providerHomeLeases = { acquireReference: async () => { enter(); await gate; return null; }, stopAcquisitions() {} };
+  manager.createDriver = (_kind, options) => { launched = options.orchestrator; throw new Error("capture-only driver"); };
+  const launching = manager.launch(f.store().readMeta(sessionId)!, undefined, manager.beginLaunchGeneration(sessionId));
+  try {
+    await entered;
+    const applied = await grantIssues(f);
+    assert.equal(applied.issueNumbersGrant, "applied", applied.error ?? "applied");
+  } finally { release(); }
+  await launching;
+  assert.deepEqual(launched?.issueNumbers, [issue, 124], "the launching provider starts with the granted numbers");
+  assert.equal(launched?.issueScope, undefined);
+});
+
+test("a grant applied while a restart prepares survives the restart's metadata rebuild from its older spec (#4269, review round 1)", async (t) => {
+  const f = fixture(t);
+  ungranted(f);
+  f.store().patchMeta(sessionId, { status: "stopped" });
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let launched: import("./drivers/driver.js").DriverOptions["orchestrator"];
+  const manager = f.manager() as unknown as {
+    runWorktreeOperation<T>(id: string, operation: () => Promise<T>): Promise<T>;
+    createDriver: (kind: string, options: import("./drivers/driver.js").DriverOptions) => never;
+    start(spec: import("@wollipog/protocol").SessionLaunchSpec): Promise<boolean>;
+  };
+  const runWorktreeOperation = manager.runWorktreeOperation.bind(manager);
+  let held = false;
+  manager.runWorktreeOperation = async (id, operation) => {
+    // Hold the restart inside startGeneration, after its launch generation began and before it
+    // rebuilds the session row from its spec.
+    if (!held) { held = true; enter(); await gate; }
+    return runWorktreeOperation(id, operation);
+  };
+  manager.createDriver = (_kind, options) => { launched = options.orchestrator; throw new Error("capture-only driver"); };
+  // The restart's spec was built before the reading settled: no issue numbers.
+  const starting = manager.start({ sessionId, agentId: "claude", workspaceId: "repo", workspacePath: f.root, driver: "claude-code",
+    command: "claude", args: [], env: {}, context: { kind: "native" }, useWorktree: false, orchestrator: { strictProjectIsolation: true, integrationIsolation: false } });
+  try {
+    await entered;
+    const applied = await grantIssues(f);
+    assert.equal(applied.issueNumbersGrant, "applied", applied.error ?? "applied during the restart");
+  } finally { release(); }
+  await starting;
+  assert.deepEqual(launched?.issueNumbers, [issue, 124], "the replacement provider starts with the applied grant");
+  assert.deepEqual(f.diskMeta().orchestrator?.issueNumbers, [issue, 124], "the rebuilt row keeps the applied grant");
+});
+
+test("an applied grant never fills a later launch that holds issue numbers or a scope (#4269, review round 1)", async (t) => {
+  const f = fixture(t);
+  const g = ungranted(f);
+  g.live();
+  try { assert.equal((await grantIssues(f)).issueNumbersGrant, "applied"); } finally { g.active.delete(sessionId); }
+  const internals = f.manager() as unknown as {
+    withAppliedIssueGrant(id: string, orchestrator: SessionMeta["orchestrator"]): SessionMeta["orchestrator"];
+  };
+  const scope = { repository: "example/project", issueNumbers: [124], revision: 1, authorizedByUserId: "owner", authorizedAt: 1000 };
+  assert.deepEqual(internals.withAppliedIssueGrant(sessionId, { strictProjectIsolation: true, issueScope: scope, issueNumbers: [] }),
+    { strictProjectIsolation: true, issueScope: scope, issueNumbers: [] }, "a scope, even one that removed every issue, is never refilled");
+  assert.deepEqual(internals.withAppliedIssueGrant(sessionId, { strictProjectIsolation: true, issueNumbers: [124] }),
+    { strictProjectIsolation: true, issueNumbers: [124] }, "held numbers are never replaced or merged");
+  assert.equal(internals.withAppliedIssueGrant(sessionId, undefined), undefined, "a non-Orchestrator launch gains nothing");
+  assert.deepEqual(internals.withAppliedIssueGrant("s_other_session", { strictProjectIsolation: true }), { strictProjectIsolation: true },
+    "another session's launch gains nothing");
+  const empty = { strictProjectIsolation: true };
+  assert.deepEqual(internals.withAppliedIssueGrant(sessionId, empty), { strictProjectIsolation: true, issueNumbers: [issue, 124] });
+  assert.deepEqual(empty, { strictProjectIsolation: true }, "the spec is never mutated");
 });

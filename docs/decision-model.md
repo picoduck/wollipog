@@ -58,6 +58,12 @@ const outcome = await decisionRuntime.decide({
 
 ### Scope Grant
 
+Since #4282 a Full Control first message gets no call of this kind: the Orchestrator reads the
+owner's first message and proposes the scope, and the server's deterministic floors bind that
+proposal to the message (`docs/full-control-launch-preparation.md`). Full Control grants stored
+before then still read as below. A Custom campaign's epic seed still uses this reading until #4282's
+second slice moves it onto the Orchestrator's proposal.
+
 `scope_grant` (#4102) reads a Full Control owner's exact first message and nothing else: no data
 fields, no tools, no repository or issue content. Its fields are `explicit`, `ranges` and `context`
 (each repository-qualified, with an empty repository meaning the campaign's own), the selection
@@ -98,14 +104,77 @@ ceiling, change a repository or grant an operation; callers enforce that before 
 with `narrowToProposal`. Write a repository floor as "a repository in the campaign's boundary" so it
 holds for single- and multi-repository boundaries.
 
+## Typed Questions (#4283)
+
+A kind may set `typed` instead of returning a verdict. It then lists fixed questions
+(`apps/control-plane/src/decision-questions.ts`), each with:
+
+- a stable `questionId`, a short Title Case `label` and fixed text, which never contains caller data;
+- an answer type: `boolean`, `choice` with allowed values, or an integer `score` with a range;
+- a rule saying which values satisfy the question, which violate it, and which (such as
+  `cannot_tell`) settle nothing;
+- optionally a per-item `subject` ("for each proposed issue") and `parameterized`, which asks the
+  question once per caller parameter (such as each constraint the owner stated, quoted as data).
+
+The caller passes `inputs.questions`: each subject's items (a schema-safe `id` and a display `label`)
+and each parameterized question's parameters. Malformed, missing, unused or oversized question inputs
+throw `DecisionInputError`; a typed decision never asks a partial set. Zero parameters simply ask
+nothing for that question, so a caller with nothing checkable should not call at all.
+
+All of a decision's questions go in one call with one output schema (`typedOutputSchema`): exactly
+one property per question, each answer exactly `value`, `confidence` (0 to 1) and `evidence` (at
+most 160 characters), and a per-item question exactly one entry per listed item. There is no verdict
+property. The same schema goes to Claude Code's `--json-schema` and Codex's `outputSchema`. Output
+with an added or missing question, an extra field, a verdict, a value outside the allowed answers,
+or a missing or repeated item is `invalid_output`, retried like any other, and never read leniently.
+
+The server derives the verdict (`deriveTypedVerdict`) with the kind's fixed `confidenceThreshold`:
+
+- **refuse** when any answer is a violation at or above the threshold, naming the first such
+  question and item, for example "Issue 4120 violates 'Skip Security'.";
+- **admit** when every answer is satisfied at or above the threshold;
+- otherwise **uncertain**, naming the first answer that could not admit, which takes the failure
+  rule's one person-owned request.
+
+The reason is the server's sentence, never the model's prose. The occurrence's `typed_answers`
+column records the threshold, each question as asked (with its items, and a parameterized question's
+complete parameter, since its display label may be shortened), each answer with its
+confidence, evidence and assessment, and the deciding answer; `DecisionOccurrenceView.typedAnswers`
+projects it, and Campaign Status shows it as a checklist. Records from before typed questions keep
+their single-verdict form. Item labels and parameters are stored there for display, like
+`campaign_selection_proposals`; the other inputs are still kept only as digests.
+
+A typed call goes only to a v307 runner (`typedDecisionQuestions`), which accepts its larger schema
+(`DECISION_SCHEMA_MAX_CHARS`) and output (`DECISION_OUTPUT_MAX_BYTES`). With an older runner the
+occurrence records one non-transient `runner_incapable` attempt and takes the person route.
+
+The credential screen, follow-up relatedness and closure-reason kinds are typed (prompt version
+`v2`, each with a fixed confidence threshold of 0.8; see their sections below). The scope constraint
+check (#4282) comes next. Their verdict names are unchanged, so every caller, and every record from
+before typed questions, keeps its meaning: a replay of a `v1` occurrence joins its recorded
+single-verdict outcome and is never asked again. The optional dedicated decisions provider is
+deferred, and #4283 closes without it.
+
 ## The Question and Credential Screen (`credential_screen`, #4104)
 
 `apps/control-plane/src/credential-screen.ts` screens Full Control question and tool text that the
 deterministic floor in `@wollipog/protocol` (`campaign-authority.ts`) left open. The `request`
 data field is one JSON document: the `surface` (`implementation_question`, `provider_question`,
-`tool_request` or `owner_decision`) and the request's own text, quoted. Verdicts are `ask`,
-`discusses` and `uncertain`. The occurrence key names the session, the request occurrence and a
-digest of that text, so a replay joins the recorded outcome.
+`tool_request` or `owner_decision`) and the request's own text, quoted. The occurrence key names the
+session, the request occurrence and a digest of that text, so a replay joins the recorded outcome.
+
+It asks three typed yes-or-no questions about what answering or approving the request would do. Each
+one excludes a request that only names its subject as part of a design or the code:
+**No Credential Handed Over** (`hands_over_credential`), **No Sign-In Performed**
+(`performs_sign_in`) and **No Access Granted** (`grants_access`). The server derives:
+
+- `ask` from a confident yes to any of them, which declines the request;
+- `discusses` from a confident no to all three, which leaves it to the Orchestrator;
+- `uncertain` from anything else, including a yes below the threshold, which holds the request for
+  the owner to classify.
+
+The screen's authority is unchanged. A low-confidence yes holds the request rather than declining it,
+and nobody may answer a held request.
 
 - The typed route screens an implementation question before it is admitted and passes the fact to
   the evaluation. A re-evaluation of a stored occurrence never re-screens it.
@@ -126,8 +195,18 @@ digest of that text, so a replay joins the recorded outcome.
 - inputs too large for one call, or a runtime that cannot finish, recorded as a failed occurrence
   rather than judged in part.
 
+Both are typed:
+
+- Follow-up relatedness asks one choice, **Related to the Requested Work** (`relation`).
+  `completes_requested_work` or `gap_found_in_requested_work` satisfy it, `separate_work` violates it,
+  and `cannot_tell` settles nothing.
+- Closure-reason choice asks **Evidence Supports the Reason** (`supports`, `does_not_support`,
+  `cannot_tell`) and **Explanation Matches the Evidence** (`consistent`, `contradicts_evidence`,
+  `cannot_tell`).
+
 The confirming verdict (`related`, `fits`) leaves the request as its floor admitted it. The refusing
-one (`unrelated`, `does_not_fit`) returns it to the Orchestrator with the model's reason. An uncertain
+one (`unrelated`, `does_not_fit`) returns it to the Orchestrator with the server's sentence naming the
+deciding question, followed by that answer's evidence. An uncertain
 or failed check makes the affected publication or closure the person's: that request is the one
 typed, person-owned request, so no second one is created. `follow_up_relatedness` is the only kind
 besides `scope_grant` that reads the owner's message (the boundary objective). See
@@ -147,13 +226,25 @@ A Custom campaign's epic seed uses the same `scope_grant` reading in place of th
 `initialCampaignEpic` regular expression. The reading starts once the session is created, or once the
 person's first prompt is admitted when the campaign was launched without one, so neither adds a wait.
 A campaign whose first message was recorded before the seed existed gets the same reading of that
-message the first time it tries to delegate or its issue scope is read (#4258).
+message the first time it tries to delegate, its issue scope is read (#4258), or it is restarted
+(#4259).
 
 Its outcome:
 
 - Only a reading that names exactly one issue can seed it.
 - The same floors apply (`scopeGrantCandidates`, against the repository the runner reports).
 - The runner must read members for that issue: sub-issues or checklist members.
+
+The same reading also grants the issues the first message names (#4259), in place of the
+`orchestratorIssueNumbersFromInitialPrompt` grammar, which is removed. When the reading names issues
+or ranges and no epic is seeded, every one must survive the floors and the runner must read each as an
+issue of the campaign repository; they then become the campaign's `issueNumbers`. A drop of any of
+them, or a runner older than the issue scope protocol, grants none and leaves the reading with the
+owner. So does a message the server can't show the campaign's owner wrote: only the owner's create
+request or first prompt grants issues. Nothing is granted at creation: the reading settles after
+`createSession` returns, and the campaign holds no issue numbers until then. A v302 runner then
+receives the granted numbers for the live Orchestrator without a relaunch (#4269, see
+`docs/campaign-issue-scope.md`); the delivery carries only what the reading granted.
 
 A failed or uncertain reading, or one the floors or the runner cannot confirm, falls back to today's
 Custom human scope approval with no seed. It never falls back to parsing the text. That is the
@@ -188,7 +279,37 @@ the runtime; `apps/control-plane/src/scope-selection.ts` builds the inputs and t
   the occurrence's `humanRequestId` names it.
 
 `campaign_selection_proposals` keeps each reviewed proposal's issues and rationale, and the scope
-change an admit created, for Campaign Status. The audit still keeps only input digests.
+change an admit created, for Campaign Status. The audit still keeps only input digests. Since #4282
+this review serves only campaigns whose stored grant predates the propose-then-check flow.
+
+## Scope Check (`scope_check`, #4282)
+
+Under the propose-then-check flow the Orchestrator reads the owner's first message and proposes the
+scope; the server reads nothing from the text. After the deterministic floors, a proposal that states
+anything checkable is asked the `scope_check` kind's typed questions (#4283) in one call.
+`proposeOrchestratorScope` and `scopeProposalCheck` in `apps/control-plane/src/sessions.ts` run it;
+`apps/control-plane/src/scope-check.ts` builds the inputs, the key and the Campaign Status view.
+
+- **Inputs.** The owner's exact message is the owner's words. The data fields are quoted and
+  untrusted: `proposal` (each issue's origin and rationale, the count, constraints, withheld
+  operations and the overall rationale), `issues` (each issue's number, title, state, labels and a
+  body excerpt that shrinks to fit) and `campaign` (repository, operations, issues in scope and any
+  admitted count, constraints and withheld operations).
+- **Questions** (`SCOPE_CHECK_TYPED`, threshold 0.8): `count_consistent`; `named_asked_for`, one per
+  owner-named issue; `constraint_met`, one per chosen issue and stated constraint, so a refusal names
+  both; `constraints_complete`; `nothing_omitted`; `operations_respected`. Each is a choice with a
+  `cannot_tell` answer that never admits or refuses. None asks about priority, importance, impact or
+  effort. Too many questions for one call is never checked in part: the proposal is the owner's.
+- **Verdicts.** The server derives `admit`, `refuse` (naming the deciding question and item) or
+  `uncertain`. Admit records `constraintCheck` on an Orchestrator-owned change; refuse returns
+  `constraint_check_refused`; uncertain, a failure after the runtime's retries, or inputs that can't
+  fit, make the proposal the owner's one approval, presented as an Owner Question. The runtime's own
+  person route creates nothing: the caller does.
+- **Occurrence key.** The campaign, boundary revision, scope revision, the sorted additions (a shared
+  prefix) and the structured proposal: origins, count, normalized and sorted constraints, withheld
+  operations. The rationale is left out, so a repeat reads the recorded outcome. One set of additions
+  gets at most three distinct checks per scope revision; past that it is the owner's. A check still
+  pending with other inputs is waited for within the runtime's bound, then settled as timed out.
 
 ## Audit and Usage
 

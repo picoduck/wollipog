@@ -1,18 +1,13 @@
 import { useEffect, useId, useState } from "react";
-import type { CampaignDecisionsResponse, DecisionErrorClass, DecisionKind } from "@wollipog/protocol";
+import type { CampaignDecisionsResponse, DecisionErrorClass } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
+import { DecisionAnswerChecklist } from "./DecisionAnswerChecklist.js";
+import { isDecisionModelCheck } from "./decision-model.js";
 import type { CampaignRequestTarget } from "./CampaignStatusPanel.js";
 
 type CampaignDecision = CampaignDecisionsResponse["decisions"][number];
-
-/** The checks shown here (#4104): the question screen, follow-up relatedness, closure-reason choice,
- * a Custom campaign's epic seed, and the review of each selection proposal (#4103). Other kinds, such
- * as Full Control's scope grant, have their own place in Campaign Status. */
-const SHOWN_KINDS: ReadonlySet<DecisionKind> = new Set<DecisionKind>(["credential_screen", "follow_up_relatedness", "closure_reason", "scope_review"]);
-const shown = (decision: CampaignDecision) => SHOWN_KINDS.has(decision.kind) ||
-  decision.kind === "scope_grant" && decision.subject?.surface === "issue_scope_seed";
 
 const SURFACE_LABELS: Record<NonNullable<CampaignDecision["subject"]>["surface"], string> = {
   implementation_question: "Implementation Question",
@@ -36,6 +31,22 @@ const VERDICT_LABELS: Record<string, string> = {
   refuse: "Doesn't Fit Your Selection",
   uncertain: "Uncertain",
 };
+
+/** A scope proposal's constraint check (#4282): whether the proposal stays within the owner's words. */
+const SCOPE_CHECK_VERDICT_LABELS: Record<string, string> = {
+  admit: "Within Your Message",
+  refuse: "Outside Your Message",
+  uncertain: "Uncertain",
+};
+
+/** What a scope proposal's constraint check did to the proposal (#4282). */
+function scopeCheckOutcomeText(decision: CampaignDecision): string {
+  if (decision.state === "pending") return "The proposal waits until the check finishes.";
+  if (decision.state === "decided") {
+    return decision.verdict === "refuse" ? "Refused back to the Orchestrator, which revises it." : "Admitted; the Orchestrator adds it to the scope.";
+  }
+  return "It came to you as one approval of the proposal.";
+}
 
 /** What a selection proposal's review led to (#4103). */
 const SELECTION_OUTCOMES: Record<NonNullable<CampaignDecision["selectionProposal"]>["outcome"], string> = {
@@ -95,6 +106,7 @@ function outcomeText(decision: CampaignDecision): string {
     return decision.selectionProposal ? SELECTION_OUTCOMES[decision.selectionProposal.outcome] : SELECTION_OUTCOMES.reviewing;
   }
   if (decision.kind === "scope_grant") return seedOutcomeText(decision);
+  if (decision.kind === "scope_check") return scopeCheckOutcomeText(decision);
   if (decision.kind !== "credential_screen") return checkOutcomeText(decision);
   const classification = decision.subject?.classification;
   const ownerDecision = decision.subject?.surface === "owner_decision";
@@ -138,7 +150,7 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
   useEffect(() => {
     const controller = new AbortController();
     api.campaignDecisions(sessionId, controller.signal).then((response) => {
-      setDecisions(response.decisions.filter(shown));
+      setDecisions(response.decisions.filter(isDecisionModelCheck));
       setCampaignSessionId(response.campaignSessionId);
       setLoadError(null);
     }).catch((cause: unknown) => {
@@ -190,7 +202,9 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
           // only that exact request, never another one pending on the session.
           const requestKey = proposal?.outcome === "waiting_for_owner" && proposal.requestOccurrenceId && findRequest
             ? findRequest({ occurrenceId: proposal.requestOccurrenceId, sessionId: null }) : null;
-          const label = decision.kind === "scope_review" ? "Selection Proposal" : subject ? SURFACE_LABELS[subject.surface] : "Request";
+          const label = decision.kind === "scope_review" ? "Selection Proposal" : decision.kind === "scope_check" ? "Scope Proposal"
+            : subject ? SURFACE_LABELS[subject.surface] : "Request";
+          const verdictLabels = decision.kind === "scope_check" ? SCOPE_CHECK_VERDICT_LABELS : VERDICT_LABELS;
           return (
             <li key={decision.occurrenceId} className="campaign-screen-item">
               <dl className="facts">
@@ -212,12 +226,18 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
                 )}
                 <div>
                   <dt>Verdict</dt>
-                  <dd>{decision.verdict ? VERDICT_LABELS[decision.verdict] ?? decision.verdict : decision.state === "pending" ? "Checking" : "None"}</dd>
+                  <dd>{decision.verdict ? verdictLabels[decision.verdict] ?? decision.verdict : decision.state === "pending" ? "Checking" : "None"}</dd>
                 </div>
                 {decision.reason && (
                   <div>
                     <dt>Reason</dt>
                     <dd>{decision.reason}</dd>
+                  </div>
+                )}
+                {decision.typedAnswers && (
+                  <div>
+                    <dt>Answers</dt>
+                    <dd><DecisionAnswerChecklist typed={decision.typedAnswers} /></dd>
                   </div>
                 )}
                 {decision.failureClass && (

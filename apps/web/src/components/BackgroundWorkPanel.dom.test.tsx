@@ -75,13 +75,15 @@ test("a job's current state keeps its lifecycle separate from where its result i
   assert.equal(statusMeta("job", "unverified").label, "Unverified");
   assert.equal(backgroundJobCurrentState(baseJob, undefined, true, true), "unverified",
     "a source-present row cannot claim Running without a current aggregate lifecycle");
-  // A listed job past the stall bound is reported as stalled, from the control plane's mark or
-  // from the clock, and never declared ended (#1651).
-  assert.equal(backgroundJobCurrentState({ ...baseJob, stalledSince: 3_601_000 }, "running", true, true), "stalled");
-  assert.equal(backgroundJobCurrentState(baseJob, "running", true, true, 1_000 + 3_600_000), "stalled");
-  assert.equal(backgroundJobCurrentState(baseJob, "running", true, true, 1_000 + 3_599_000), "running");
+  // A job its connected runner still lists keeps its liveness contract however long it has run: the
+  // control plane's one-hour mark is not a Stalled label (#4249), and it is never declared ended.
+  assert.equal(backgroundJobCurrentState({ ...baseJob, stalledSince: 3_601_000 }, "running", true, true), "running");
+  assert.equal(backgroundJobCurrentState({ ...baseJob, registeredAt: 1_000 - 7_200_000 }, "running", true, true), "running");
+  // A broken contract reads as its concrete state.
   assert.equal(backgroundJobCurrentState({ ...baseJob, stalledSince: 3_601_000 }, "running", false, true), "unverified",
-    "an offline runner cannot confirm a stalled job any more than a running one");
+    "an offline runner cannot confirm a long job any more than a short one");
+  assert.equal(backgroundJobCurrentState({ ...baseJob, stalledSince: 3_601_000, sourcePresent: false }, "running", true, true),
+    "unverified", "a job the runner stopped listing is Unverified, not Running");
 });
 
 test("every watchdog is one notice in the panel's notice slot, titled with its turn, and its details wait for Show Details (#2859, #2871)", async () => {

@@ -34,8 +34,12 @@ export interface CampaignLaunchProposal {
 /** Optional Human overrides. Each replaces only the derived value it names; none can add an
  * authority field, provenance, readiness claim or evidence envelope. */
 export interface FullControlLaunchOverrides {
-  /** Root Orchestrator selection. Omitted fields use the account's saved defaults. */
-  session?: Partial<Pick<CreateSessionRequest, "agentId" | "providerAccountId" | "title" | "useWorktree" | "config" | "orchestrator">>;
+  /** Root Orchestrator selection. Omitted fields use the account's saved defaults. New Session's
+   * Run On (`executionTargetId`) and Harness (`launchSurface`) are forwarded so the ordinary
+   * creation validator honors or refuses them; neither is ever replaced by a default. ACP session
+   * context is excluded: it applies only to ACP agents, which cannot hold Full Control (#2940). */
+  session?: Partial<Pick<CreateSessionRequest, "agentId" | "providerAccountId" | "title" | "useWorktree" | "executionTargetId" |
+    "launchSurface" | "config" | "orchestrator">>;
   objective?: string;
   /** May only narrow the default operation set. */
   operations?: CampaignAuthorityOperation[];
@@ -179,6 +183,78 @@ export interface CampaignLaunchSummary {
   /** What happens to the requests the campaign can never supply, instead of asking the Human. */
   declinedNote?: string;
   blockers: Array<{ capability: string; reason: string }>;
+}
+
+/** What a Full Control launch or enable told its Human about capabilities and evidence (#2940),
+ * kept on the campaign so Campaign Status can show it after launch: Full Control launches with no
+ * preflight panel, so this is where those facts are disclosed. Server-owned and informational: it
+ * grants nothing, and it is a snapshot of that moment, not a live capability check. It holds no
+ * account, organization or destination identifier. */
+export interface CampaignLaunchDisclosure {
+  version: 1;
+  /** The authorization that recorded it. */
+  source: "launch" | "enable";
+  recordedAt: number;
+  capabilities: Array<Pick<CampaignLaunchCapability, "id" | "capability" | "state" | "reason" | "mandatory">>;
+  evidence: {
+    statement: string;
+    destination: "private_session_artifacts";
+    /** The provider that receives screenshot bytes, with its verbatim retention disclosure; null
+     * when the Orchestrator reviews no images. */
+    provider: { providerId: string; disclosureRevision: number; retentionDisclosure: string;
+      reviewer: { driver: string; model: string | null } } | null;
+  };
+}
+
+const LAUNCH_DISCLOSURE_TEXT_MAX = 4_000;
+const LAUNCH_CAPABILITY_IDS: ReadonlySet<string> = new Set<CampaignLaunchCapabilityId>([
+  "repository_scope", "authority_contract", "accounting_budget", "native_review",
+  "execution_isolation", "image_evidence", "video_evidence", "external_evidence",
+]);
+const LAUNCH_CAPABILITY_STATES: ReadonlySet<string> = new Set<CampaignLaunchCapability["state"]>([
+  "verified", "unsupported", "human_required", "informational", "orchestrator_decides",
+]);
+
+/** The disclosure an admitted launch or enable records, derived only from its reviewed preflight. */
+export function campaignLaunchDisclosure(preflight: Pick<CampaignLaunchPreflight, "capabilities" | "summary">,
+  source: CampaignLaunchDisclosure["source"], recordedAt: number): CampaignLaunchDisclosure {
+  const { evidence } = preflight.summary;
+  return {
+    version: 1, source, recordedAt,
+    capabilities: preflight.capabilities.map(({ id, capability, state, reason, mandatory }) => ({ id, capability, state, reason, mandatory })),
+    evidence: {
+      statement: evidence.statement,
+      destination: evidence.destination.kind,
+      provider: evidence.provider ? { providerId: evidence.provider.providerId, disclosureRevision: evidence.provider.disclosureRevision,
+        retentionDisclosure: evidence.provider.retentionDisclosure,
+        reviewer: { driver: evidence.provider.reviewer.driver, model: evidence.provider.reviewer.model } } : null,
+    },
+  };
+}
+
+/** Whether a stored disclosure has exactly the recorded shape. Callers drop one that doesn't, since
+ * it is informational: Campaign Status then reads it as not recorded. */
+export function validCampaignLaunchDisclosure(value: unknown): value is CampaignLaunchDisclosure {
+  const text = (v: unknown) => typeof v === "string" && v.length > 0 && v.length <= LAUNCH_DISCLOSURE_TEXT_MAX;
+  const exact = (v: unknown, keys: string[]): v is Record<string, unknown> => Boolean(v && typeof v === "object" && !Array.isArray(v)) &&
+    Object.keys(v as object).length === keys.length && keys.every((key) => Object.hasOwn(v as object, key));
+  if (!exact(value, ["version", "source", "recordedAt", "capabilities", "evidence"]) || value.version !== 1 ||
+      (value.source !== "launch" && value.source !== "enable") || !Number.isSafeInteger(value.recordedAt) || (value.recordedAt as number) < 1) return false;
+  const capabilities = value.capabilities;
+  if (!Array.isArray(capabilities) || capabilities.length > LAUNCH_CAPABILITY_IDS.size ||
+      new Set(capabilities.map((item) => (item as { id?: unknown })?.id)).size !== capabilities.length ||
+      !capabilities.every((item) => exact(item, ["id", "capability", "state", "reason", "mandatory"]) &&
+        LAUNCH_CAPABILITY_IDS.has(item.id as string) && LAUNCH_CAPABILITY_STATES.has(item.state as string) &&
+        text(item.capability) && text(item.reason) && typeof item.mandatory === "boolean")) return false;
+  const evidence = value.evidence;
+  if (!exact(evidence, ["statement", "destination", "provider"]) || !text(evidence.statement) ||
+      evidence.destination !== "private_session_artifacts") return false;
+  const provider = evidence.provider;
+  if (provider === null) return true;
+  return exact(provider, ["providerId", "disclosureRevision", "retentionDisclosure", "reviewer"]) && text(provider.providerId) &&
+    Number.isSafeInteger(provider.disclosureRevision) && (provider.disclosureRevision as number) >= 1 && text(provider.retentionDisclosure) &&
+    exact(provider.reviewer, ["driver", "model"]) && text(provider.reviewer.driver) &&
+    (provider.reviewer.model === null || text(provider.reviewer.model));
 }
 
 export interface CampaignLaunchPreflight {

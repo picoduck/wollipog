@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { campaignIssueForgeUrl, epicChecklistMembers, normalizeCampaignIssueScopeSnapshot } from "./campaign-issue-scope.js";
+import {
+  campaignIssueForgeUrl, campaignScopeChangeBefore, campaignScopeChangeGroups, campaignScopeChangeResult, campaignScopeForRepository, campaignScopeHolds,
+  campaignScopeIssues, campaignScopeNumbers, campaignScopeWithIssues, canonicalCampaignIssues, epicChecklistMembers, normalizeCampaignIssueScopeSnapshot,
+} from "./campaign-issue-scope.js";
+import type { CampaignIssueScope } from "./index.js";
 
 test("GitLab epic checklists accept #N and same-project issue URLs only (#3539)", () => {
   assert.deepEqual(epicChecklistMembers(`Goal: #99.
@@ -81,6 +85,60 @@ test("scope normalization refuses ambiguous and oversized authority, and canonic
   }
 });
 
+const legacy: CampaignIssueScope = { repository: "owner/app", issueNumbers: [12, 5], revision: 3, authorizedByUserId: "usr_owner", authorizedAt: 10 };
+
+test("a scope stored before #4118 reads as its numbers in its repository, at the same revision (#4118)", () => {
+  assert.deepEqual(campaignScopeIssues(legacy), [{ repository: "owner/app", number: 5 }, { repository: "owner/app", number: 12 }]);
+  assert.deepEqual(campaignScopeNumbers(legacy, "Owner/App"), [5, 12]);
+  assert.deepEqual(campaignScopeNumbers(legacy, "owner/api"), []);
+  // The launch repository's runner part of a one-repository scope is the stored scope, field for field.
+  assert.equal(JSON.stringify(campaignScopeForRepository(legacy, "owner/app")),
+    JSON.stringify({ ...legacy, issueNumbers: [5, 12] }));
+});
+
+test("repository-qualified scope keeps same-numbered issues apart and gives each runner only its repository (#4118)", () => {
+  const scope = campaignScopeWithIssues(legacy, [{ repository: "Owner/Api", number: 5 }, { repository: "owner/app", number: 5 }, { repository: "owner/api", number: 40 }]);
+  assert.deepEqual(scope.issues, [{ repository: "owner/api", number: 5 }, { repository: "owner/api", number: 40 }, { repository: "owner/app", number: 5 }]);
+  assert.deepEqual([scope.repository, scope.issueNumbers, scope.revision], ["owner/app", [5], 3]);
+  assert.ok(campaignScopeHolds(scope, { repository: "OWNER/API", number: 5 }));
+  assert.ok(!campaignScopeHolds(scope, { repository: "owner/app", number: 40 }), "a number belongs to its own repository only");
+  const api = campaignScopeForRepository(scope, "owner/api");
+  assert.deepEqual(api, { repository: "owner/api", issueNumbers: [5, 40], revision: 3, authorizedByUserId: "usr_owner", authorizedAt: 10 });
+  assert.equal("issues" in api, false, "runners get the earlier shape");
+  // Malformed, duplicated or oversized lists are refused.
+  for (const bad of [[{ repository: "owner/app", number: 5 }, { repository: "Owner/App", number: 5 }], [{ repository: "nope", number: 1 }],
+    [{ repository: "owner/app", number: 0 }], [{ repository: "owner/app", number: 1, extra: true }],
+    Array.from({ length: 101 }, (_, i) => ({ repository: "owner/app", number: i + 1 }))]) {
+    assert.equal(canonicalCampaignIssues(bad), null, JSON.stringify(bad).slice(0, 80));
+  }
+});
+
+test("a scope change snapshot groups every other repository's part and bounds the whole scope (#4118)", () => {
+  const base = { category: "campaign_issue_scope", repository: "Owner/App", expectedRevision: 2, before: [5], additions: [], removals: [],
+    otherRepositories: [{ repository: "Owner/Api", before: [5], additions: [40], removals: [5] }],
+    explanation: "Move work to the api", affectedAssignments: [{ sessionId: "s_child", issue: 5, repository: "Owner/Api" }], affectedDecisions: [] };
+  const snapshot = normalizeCampaignIssueScopeSnapshot(base)!;
+  assert.deepEqual(snapshot.otherRepositories, [{ repository: "owner/api", before: [5], additions: [40], removals: [5] }]);
+  assert.deepEqual(snapshot.affectedAssignments, [{ sessionId: "s_child", issue: 5, repository: "owner/api" }]);
+  assert.deepEqual(campaignScopeChangeGroups(snapshot).map((group) => group.repository), ["owner/app", "owner/api"]);
+  assert.deepEqual(campaignScopeChangeBefore(snapshot), [{ repository: "owner/api", number: 5 }, { repository: "owner/app", number: 5 }]);
+  assert.deepEqual(campaignScopeChangeResult(snapshot), [{ repository: "owner/api", number: 40 }, { repository: "owner/app", number: 5 }]);
+  // A snapshot without other repositories normalizes exactly as before.
+  assert.equal("otherRepositories" in normalizeCampaignIssueScopeSnapshot({ ...base, additions: [6], otherRepositories: undefined, affectedAssignments: [] })!, false);
+  for (const patch of [
+    { otherRepositories: [{ repository: "owner/app", before: [], additions: [1], removals: [] }] },
+    { otherRepositories: [{ repository: "owner/api", before: [], additions: [1], removals: [] }, { repository: "OWNER/API", before: [], additions: [2], removals: [] }] },
+    { otherRepositories: [{ repository: "owner/api", before: [], additions: [], removals: [3] }] },
+    { otherRepositories: [{ repository: "owner/api", before: [], additions: [1], removals: [], extra: 1 }] },
+    { otherRepositories: [] },
+    { otherRepositories: [{ repository: "owner/api", before: Array.from({ length: 100 }, (_, i) => i + 1), additions: [], removals: [] }] },
+    { affectedAssignments: [{ sessionId: "s_child", issue: 5, repository: "third/repo" }] },
+    { otherRepositories: [{ repository: "owner/api", before: [5], additions: [], removals: [] }] },
+  ]) {
+    assert.equal(normalizeCampaignIssueScopeSnapshot({ ...base, ...patch }), null, JSON.stringify(patch).slice(0, 120));
+  }
+});
+
 test("selection lineage, its review evidence and its owner causes keep their exact shapes (#4103)", () => {
   const base = { category: "campaign_issue_scope", repository: "team/repo", expectedRevision: 1, before: [], additions: [3],
     removals: [], explanation: "Highest priority", affectedAssignments: [], affectedDecisions: [], lineage: { kind: "selection" } };
@@ -96,4 +154,23 @@ test("selection lineage, its review evidence and its owner causes keep their exa
     assert.ok(normalizeCampaignIssueScopeSnapshot({ ...base, grantReview: { ...grantReview, cause } }), cause);
   }
   assert.equal(normalizeCampaignIssueScopeSnapshot({ ...base, grantReview: { ...grantReview, cause: "selection_admitted" } }), null);
+});
+
+test("an owner review keeps its exact shape and never rides with an admission, a grant review or lineage (#4267)", () => {
+  const base = { category: "campaign_issue_scope", repository: "team/repo", expectedRevision: 1, before: [1], additions: [3, 4],
+    removals: [], explanation: "The owner asked for these", affectedAssignments: [], affectedDecisions: [] };
+  const plain = { cause: "lineage_missing" };
+  const raised = { cause: "lineage_missing", maxIssuesIncrease: { from: 2, increase: 1 } };
+  assert.deepEqual(normalizeCampaignIssueScopeSnapshot({ ...base, ownerReview: plain })?.ownerReview, plain);
+  assert.deepEqual(normalizeCampaignIssueScopeSnapshot({ ...base, ownerReview: raised })?.ownerReview, raised);
+  for (const bad of [{ cause: "selection" }, { ...plain, extra: 1 }, { ...plain, maxIssuesIncrease: { from: 2, increase: 0 } },
+    { ...plain, maxIssuesIncrease: { from: 0, increase: 1 } }, { ...plain, maxIssuesIncrease: { from: 99, increase: 2 } },
+    { ...plain, maxIssuesIncrease: { from: 2, increase: 1, to: 3 } }, { ...plain, maxIssuesIncrease: { from: 2.5, increase: 1 } }, [], "lineage_missing"]) {
+    assert.equal(normalizeCampaignIssueScopeSnapshot({ ...base, ownerReview: bad }), null, JSON.stringify(bad));
+  }
+  for (const companion of [{ issueAdmission: { boundaryRevision: 1, evidenceDigest: "a".repeat(64) } }, { lineage: { kind: "epic", epic: 1 } },
+    { grantReview: { cause: "grant_failed", ownerMessage: "Fix it", messageDigest: "b".repeat(64) } },
+    { selectionReview: { occurrenceId: "dec_1", grantDigest: "a".repeat(64), verdict: "admit", reason: "Fits." } }]) {
+    assert.equal(normalizeCampaignIssueScopeSnapshot({ ...base, ownerReview: plain, ...companion }), null, JSON.stringify(companion));
+  }
 });

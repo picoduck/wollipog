@@ -59,7 +59,10 @@ export async function inspectProjectLocation(
   locationId: string,
   options: { projectId?: string; signal?: AbortSignal; timeoutMs?: number; now?: () => number;
     /** A runner below this protocol capability is too old for what the caller will use it for. */
-    requireProtocol?: RunnerProtocolCapability } = {},
+    requireProtocol?: RunnerProtocolCapability;
+    /** Issues the runner must also read in the Location's repository (#4118); any it cannot read
+     * as an issue there fails the inspection. */
+    issueNumbers?: readonly number[] } = {},
 ): Promise<ProjectLocationInspection> {
   const { db, hub } = dependencies;
   const fail = (failure: ProjectLocationInspectionFailure): ProjectLocationInspection =>
@@ -78,10 +81,12 @@ export async function inspectProjectLocation(
       (options.requireProtocol && !runnerSupportsProtocol(runner.protocolVersion, options.requireProtocol))) return fail("runner_too_old");
   const workspacePath = db.getWorkspacePath(location.runnerId, location.workspaceId);
   if (!workspacePath) return fail("path_missing");
-  const result = await inspectCampaignWorkspace(hub, runner, location.workspaceId, [],
+  const issueNumbers = [...options.issueNumbers ?? []].sort((a, b) => a - b);
+  const result = await inspectCampaignWorkspace(hub, runner, location.workspaceId, issueNumbers,
     options.signal ?? new AbortController().signal, options.timeoutMs, workspacePath);
   // Runner frames are not validated on the wire: only an exact success for this workspace verifies.
   if (result?.ok !== true || result.cancelled !== undefined || result.workspaceId !== location.workspaceId ||
+      JSON.stringify(result.issueNumbers ?? []) !== JSON.stringify(issueNumbers) ||
       campaignRepositoryLocation(result.repository) === null || typeof result.digest !== "string" || !/^[a-f0-9]{64}$/.test(result.digest)) {
     const failure = result?.ok === false && typeof result.failure === "string" && Object.hasOwn(RUNNER_FAILURES, result.failure)
       ? RUNNER_FAILURES[result.failure] : undefined;

@@ -12,6 +12,7 @@ test("scope removal impact distinguishes equal issue numbers across repositories
       { issue: { repository: "other/repo", number: 124 }, currentAttempt: { sessionId: "foreign-member" } },
     ], nextCursor: null } }), sessionsUnrelatedToIssues: () => new Set<string>() },
     unconsumedWorkflowDecisionsForController: () => [],
+    authorityBoundWorkflowDecisionsForController: () => [],
     campaignDescendantIds: () => [],
   } as unknown as ControlPlaneDb;
   const snapshot = scopeSnapshot(db, root, "team/repo", { requestId: "remove", expectedRevision: 1,

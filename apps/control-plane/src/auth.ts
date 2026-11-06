@@ -172,6 +172,8 @@ const AGENT_CONTROL_API_ROUTES = new Set([
   "POST /api/sessions/:id/review-sessions/:reviewSessionId/cancel",
   // A session parking on its own enqueued pull request (#4071); the route refuses other sessions.
   "POST /api/sessions/:id/pull-request-watch",
+  // A session's own wait_session and wait_pull_request progress (#1280); the route refuses other sessions.
+  "POST /api/sessions/:id/waits",
 ]);
 
 const ORCHESTRATOR_API_ROUTES = new Set([

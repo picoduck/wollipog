@@ -1,7 +1,8 @@
 import { normalizeDeliveryVerificationFailure } from "@wollipog/protocol";
 import { createHash } from "node:crypto";
-import type { GithubIssueClosureRefusal, GithubIssueClosureSnapshot, SessionView } from "@wollipog/protocol";
+import type { GithubIssueClosureRefusal, GithubIssueClosureSnapshot, IssueClosureExcludedChild, SessionView } from "@wollipog/protocol";
 import {
+  normalizeIssueClosureExcludedChildren,
   campaignIssueForgeUrl, campaignRepositoryLocation, GITHUB_ISSUE_CLOSURE_FAILURE_REASONS, GITHUB_ISSUE_CLOSURE_RESULT_REFUSAL_REASONS,
   GITHUB_ISSUE_CLOSURE_RUNNER_ERROR_MAX, githubIssueClosureRefusal, isGithubIssueClosureRefusalReason, isTerminal,
   normalizeGithubIssueClosureRefusal, normalizeIssueClosureDeliveryGaps, normalizeIssueClosureEpicMembers, validIssueAdmission,
@@ -101,13 +102,15 @@ export function normalizeIssueClosureSnapshot(value: Record<string, unknown>): G
     if (!record(child) || !bounded(child.sessionId, 256) || !bounded(child.title, 1024) || !sha(child.assignmentDigest)) return null;
     activeChildren.push({ sessionId: child.sessionId, title: child.title, assignmentDigest: child.assignmentDigest });
   }
+  const excludedChildren = value.excludedChildren === undefined ? undefined : normalizeIssueClosureExcludedChildren(value.excludedChildren);
+  if (excludedChildren === null || excludedChildren?.some((child) => activeChildren.some((bound) => bound.sessionId === child.sessionId))) return null;
   if (value.scopeRevision !== undefined && (!Number.isSafeInteger(value.scopeRevision) || (value.scopeRevision as number) < 1)) return null;
   return { ...(value.scopeRevision === undefined ? {} : { scopeRevision: value.scopeRevision as number }), category: "issue_closure", repository: value.repository, issue: value.issue as number,
     ...(verificationFailure ? { deliveryVerificationFailure: verificationFailure } : {}),
     title: value.title, url: value.url as string, forgeDigest: value.forgeDigest,
     reason: value.reason as GithubIssueClosureSnapshot["reason"], explanation: value.explanation,
     evidence: [...value.evidence] as string[], ...(value.comment === undefined ? {} : { comment: value.comment as string }),
-    openPullRequests, activeChildren,
+    openPullRequests, activeChildren, ...(excludedChildren === undefined ? {} : { excludedChildren }),
     ...(value.deliveryFailure === undefined ? {} : { deliveryFailure: value.deliveryFailure as string }),
     ...(deliveryGaps === undefined ? {} : { deliveryGaps }),
     ...(value.delivery === undefined ? {} : { delivery: structuredClone(value.delivery) as GithubIssueClosureSnapshot["delivery"] }),
@@ -146,20 +149,46 @@ function issueClosurePrompts(child: Pick<SessionView, "queued" | "pendingPrompts
  * included. */
 export function issueClosureActiveChildren(db: ControlPlaneDb, sessionId: string,
   issue?: { repository: string; number: number } | { repository: string; numbers: readonly number[] }) {
+  return issueClosureChildren(db, sessionId, issue).active;
+}
+
+/** Both sides of the closure binding in one pass (#3237): the children `issueClosureActiveChildren`
+ * binds, and every live child it leaves out, with the ledger facts that left it out. The excluded
+ * list is read-only information for whoever approves; nothing compares it later, so only a child
+ * crossing between the two sets, which changes `active`, revokes an approval. */
+export function issueClosureChildren(db: ControlPlaneDb, sessionId: string,
+  issue?: { repository: string; number: number } | { repository: string; numbers: readonly number[] }) {
   const numbers = !issue ? [] : "numbers" in issue ? issue.numbers : [issue.number];
   const excludable = issue && numbers.length ? db.campaignWorkLedger.sessionsUnrelatedToIssues(sessionId, issue.repository, numbers) : null;
-  return db.campaignDescendantIds(sessionId).flatMap((id) => {
+  const active: GithubIssueClosureSnapshot["activeChildren"] = [];
+  const excluded: IssueClosureExcludedChild[] = [];
+  for (const id of db.campaignDescendantIds(sessionId)) {
     const child = db.getSession(id);
-    if (!child || isTerminal(child.status) || child.archived) return [];
+    if (!child || isTerminal(child.status) || child.archived) continue;
     const assignment = db.initialUserMessageText(id);
-    if (excludable?.has(id) && assignment !== null) return [];
-    const state = db.issueClosureAssignmentState(id);
-    return [{ sessionId: id, title: child.title,
-      assignmentDigest: createHash("sha256").update(JSON.stringify({
-        assignment, state, prompts: issueClosurePrompts(child), parentSessionId: child.parentSessionId, worktreePath: child.worktreePath,
-        pending: db.unconsumedWorkflowDecisionsForSession(id).map((decision) => ({
-          occurrenceId: decision.occurrenceId, digest: decision.resourceDigest, status: decision.status,
-        })),
-      })).digest("hex") }];
-  });
+    if (excludable?.has(id) && assignment !== null) {
+      excluded.push({ sessionId: id, title: child.title, reason: db.campaignWorkLedger.issueClosureExclusionReason(id) });
+      continue;
+    }
+    active.push(issueClosureBoundChild(db, id, child, assignment));
+  }
+  return { active, excluded };
+}
+
+function issueClosureBoundChild(db: ControlPlaneDb, id: string, child: SessionView, assignment: string | null) {
+  const state = db.issueClosureAssignmentState(id);
+  return { sessionId: id, title: child.title,
+    assignmentDigest: createHash("sha256").update(JSON.stringify({
+      assignment, state, prompts: issueClosurePrompts(child), parentSessionId: child.parentSessionId, worktreePath: child.worktreePath,
+      pending: db.unconsumedWorkflowDecisionsForSession(id).map((decision) => ({
+        occurrenceId: decision.occurrenceId, digest: decision.resourceDigest, status: decision.status,
+      })),
+    })).digest("hex") };
+}
+
+/** The snapshot a closure's resource digest covers (#3237): all of it but the excluded children,
+ * which are read-only information. A snapshot without them, from an earlier release, is unchanged. */
+export function issueClosureBindingSnapshot(snapshot: GithubIssueClosureSnapshot): GithubIssueClosureSnapshot {
+  const { excludedChildren: _excluded, ...binding } = snapshot;
+  return binding;
 }

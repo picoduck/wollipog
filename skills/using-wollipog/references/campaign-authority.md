@@ -32,6 +32,38 @@ through its normal review and merge gates. A committed policy change does not ch
 session's higher-priority instructions or installed skills. Continue independent work while a
 required decision is pending.
 
+Full Control launches with zero overhead: no form, budget, preflight panel or question comes before
+the first message. The root Orchestrator (no parent session) therefore makes this preflight visible
+after launch, in one user-visible first report posted after `get_campaign` and before its first
+`create_session`. The report names:
+
+- the objective and the authorized issue scope;
+- the follow-up behavior and the operations the boundary permits;
+- campaign limits (`limits` and `budget`);
+- the evidence upload destination and reviewer provider disclosure;
+- the Human Required exceptions (`fullControlHumanRequired`, or none);
+- every unsupported or degraded capability: `uiEvidenceReview` and `videoEvidenceReview` status
+  with their reasons, whether mandatory review runs through controlled review sessions or a native
+  reviewer outside them (`budget.requiredNativeReview`), and execution isolation where a runner
+  reports it (otherwise unknown);
+- every unresolved mandatory human rule from installed skills or user-authored instructions, with
+  its exact source file and quoted requirement, and that each such gate will reach the owner typed
+  as described below, never only in prose.
+
+The report is not a question: it asks nothing, waits for nobody, and the root continues in the same
+turn. A nested Orchestrator does not repeat it. The always-injected Orchestrator preset carries the
+same requirement.
+
+When the owner's first message started the campaign, the server reads no scope from it: the root's
+first campaign action, right after the report, is proposing the initial scope with
+`request_campaign_issue_scope_change` and `proposal` (each issue's origin and rationale, the count,
+the constraints read and the operations withheld). `create_session` refuses campaign work until that
+proposal is admitted. Deterministic checks refuse a proposal naming its issue and condition; one of
+only owner-named issues the message writes as issue references, with nothing else to check, is
+admitted with no model call; anything else goes to the Decision Model's constraint check, which
+admits, refuses naming the question and issue, or, when uncertain or failed, makes it the owner's one
+approval, asked as an Owner Question. Ranking criteria are the root's own call and are never checked.
+
 When such a rule keeps a gate for a person, the gate reaches the owner as a typed request, never
 only as prose:
 
@@ -44,7 +76,10 @@ only as prose:
 - A Full Control root hands an occurrence already filed without the rule to the owner with
   `hand_workflow_decision_to_owner`.
 - For a gate with no typed category, a Full Control root asks the owner with
-  `request_owner_decision`.
+  `request_owner_decision` and `kind: "approval"`.
+- For a design choice, clarification or preference, a Full Control root asks an Owner Question:
+  `request_owner_decision` with `kind: "question"` (protocol v303). The owner answers in their own
+  words, the answer grants nothing, and no scope, boundary or policy change revokes the question.
 - Nobody, child or root, ends a turn with such a gate only in prose.
 
 No campaign grants authentication/sign-in, secret disclosure, persistent grants or provider access

@@ -142,6 +142,8 @@ needed. If the result is uncertain, inspect GitHub and never replay the action o
 a shell command.
 
 Issue scope: issue-scope get [--epic <number>]; issue-scope request --proposal <json>.
+The scope is grouped by repository; a proposal may name issues in any of the campaign's
+repositories, and one outside them is refused with repository_outside_boundary.
 Tools: get_campaign_issue_scope, request_campaign_issue_scope_change, request_github_issue_closure, close_github_issue; recover with decision get.
 `;
 }
@@ -164,7 +166,7 @@ Commands:
              [--sort queue|activity|elapsed|cost] [--limit <n>] [--cursor <cursor>]
              [--recommendations]                 Read the summary and one page or one item
   repository-addition request --input '<json>'  Ask the owner to add a Project Location's repository
-                                                 (protocol v300+): {requestId, locationId, reason,
+                                                 (protocol v314+): {requestId, locationId, reason,
                                                  work: {kind: follow_up|work_item, id}}
   repository-addition get <occurrence-id>        Read the request and the owner's answer
   repository-addition execute <occurrence-id> --digest <resource-digest>
@@ -194,7 +196,7 @@ export function decisionHelp(): string {
     "  decision reconcile <occurrence-id> --snapshot <json> [--json]",
     "  decision execute <occurrence-id> --resource-digest <sha256> [--json]",
     "  decision withdraw <occurrence-id> --reason <text> [--session <id>] [--json]",
-    "  decision ask-owner --request-id <id> --resource-key <key> --question <text> --options <json-array> [--recommended <option-id>] [--material <text>] [--json]",
+    "  decision ask-owner --request-id <id> --resource-key <key> --question <text> [--kind question|approval] --options <json-array> [--recommended <option-id>] [--material <text>] [--json]",
     "  decision hand-to-owner <occurrence-id> --reason <text> [--session <id>] [--json]",
     "Options: --url <control-plane-origin>, --token-file <credential-file>.",
     "Reads may target an accessible descendant with --session for an Orchestrator, and so may a withdrawal of a decision that Orchestrator owns; request, consume, execute, and reconcile remain self-scoped and refuse --session. Tools: request_workflow_decision, get_workflow_decision, list_workflow_decisions, consume_workflow_decision, execute_workflow_decision, reconcile_workflow_decision, withdraw_workflow_decision.",
@@ -204,7 +206,7 @@ export function decisionHelp(): string {
     "Reconcile only an already-successful, exactly armed pr_merge action after the approved head has merged. Use its original snapshot; reconciliation never runs the merge command and requires control plane protocol v153.",
     "Withdraw a pending or approved decision that was never consumed or armed when it is no longer needed. It approves and consumes nothing, records you and the reason, and the decision then reads revoked with withdrawal provenance. Withdrawal requires control plane protocol v269.",
     "When an installed skill or user-authored instruction keeps the gate for a person (a per-PR merge approval, say), request the exact typed decision anyway and name the rule with --owner-rule-source (the file) and --owner-rule-quote (the requirement, on one line). The decision is then the owner's under any mode or grant, and so is every later request for the same resource; it reaches their Inbox and Campaign Status. It can never give the Orchestrator a decision. Requires control plane protocol v296. Never end a turn with such a gate only in prose.",
-    "ask-owner and hand-to-owner are for a Full Control campaign's root Orchestrator (tools request_owner_decision and hand_workflow_decision_to_owner; control plane protocol v281). ask-owner gives the campaign's owner a decision the owner kept, with the options as a JSON array of {optionId, label, description?}; it waits in the owner's Inbox without stopping your turn, only the owner can answer it, and their choice comes back to you. hand-to-owner gives the owner one of your pending Orchestrator-owned decisions (pass --session for a child's); that is one way, and you can never resolve it afterwards.",
+    "ask-owner and hand-to-owner are for a Full Control campaign's root Orchestrator (tools request_owner_decision and hand_workflow_decision_to_owner; control plane protocol v281). ask-owner gives the campaign's owner a decision the owner kept, with the options as a JSON array of {optionId, label, description?}; it waits in the owner's Inbox without stopping your turn, only the owner can answer it, and their answer comes back to you. Use --kind question (an Owner Question, protocol v303) for a design choice, clarification or preference: --options becomes optional suggestions, the owner may answer in their own words, and no scope or policy change revokes it. The default --kind approval is for an exact action with no typed category, with 2 to 12 options. hand-to-owner gives the owner one of your pending Orchestrator-owned decisions (pass --session for a child's); that is one way, and you can never resolve it afterwards.",
     "The control plane remains authoritative: it validates the category, policy owner, current resource snapshot, and one-shot consumption. This command cannot resolve its own decision.",
   ].join("\n");
 }

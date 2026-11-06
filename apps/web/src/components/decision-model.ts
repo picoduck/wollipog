@@ -1,5 +1,7 @@
 import type {
+  CampaignDecisionSubject,
   DecisionErrorClass,
+  DecisionKind,
   DecisionModelResolvedTarget,
   DecisionModelSettingsView,
   DecisionModelTestResult,
@@ -107,6 +109,24 @@ export function decisionTestSummary(result: DecisionModelTestResult): string {
     return `Verdict: ${verdictLabel(occurrence.verdict ?? "")}. ${facts}`;
   }
   return `No verdict: ${decisionFailureText(occurrence.failureClass)}. A campaign would ask its owner instead. ${facts}`;
+}
+
+/** Kinds Campaign Status lists in Decision Model Checks, beside the request each one affected: the
+ * question screen, follow-up relatedness and closure-reason choice (#4104), and the review of each
+ * selection proposal (#4103), and the constraint check of each Orchestrator scope proposal (#4282). */
+const DECISION_MODEL_CHECK_KINDS: ReadonlySet<DecisionKind> = new Set<DecisionKind>([
+  "credential_screen", "follow_up_relatedness", "closure_reason", "scope_review", "scope_check",
+]);
+
+/**
+ * Whether Campaign Status lists a decision in Decision Model Checks: one of the kinds above, or a
+ * Custom campaign's epic-seed reading, which is a scope grant on the `issue_scope_seed` surface. The
+ * Decision Model section lists every other decision, such as Full Control's scope grant, so each
+ * decision appears in exactly one list (#4265).
+ */
+export function isDecisionModelCheck(decision: { kind: DecisionKind; subject?: Pick<CampaignDecisionSubject, "surface"> }): boolean {
+  return DECISION_MODEL_CHECK_KINDS.has(decision.kind) ||
+    (decision.kind === "scope_grant" && decision.subject?.surface === "issue_scope_seed");
 }
 
 /** Campaign Status: one decision's outcome in plain words. */

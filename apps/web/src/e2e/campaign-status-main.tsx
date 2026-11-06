@@ -22,10 +22,16 @@
  * `owners=after` gives the owner a decision they kept and a merge the Orchestrator handed to them
  * (#4064); `owners=before` is the same campaign as a server without owner decisions reports it, the
  * merge still the Orchestrator's and the owner's decision nowhere in Wollipog.
+ * `activity=active|cleanup|complete|stuck` shows each activity state (#4146), and `automation=` holds
+ * its recovery automation (#3361).
+ * `fullControl=rules|ready|old|degraded` makes it a Full Control campaign and shows its Full Control
+ * section (#2940); see `fullControlProjection`.
  */
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  CAMPAIGN_AUTOMATION_HOLD_REASONS,
+  CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE,
   campaignIssueLimitsRequirement,
   campaignIssueScopeChangesRequirement,
   PROTOCOL_VERSION,
@@ -48,7 +54,19 @@ import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-t
 import { MINUTE, campaignProjection, forgeObservation, itemDetail, itemSummary, knownCost, workSummary } from "./campaign-status-fixtures.js";
 import "../styles.css";
 import { campaignRecoveryFixture } from "./campaign-recovery-fixtures.js";
-import { campaignDecisionsFixture } from "./decision-model-fixtures.js";
+import {
+  campaignDecisionsFixture,
+  TYPED_ADMITTED,
+  TYPED_CLOSURE_MISFIT,
+  TYPED_REFUSED,
+  TYPED_RELATED,
+  TYPED_SCREEN_ASK,
+  TYPED_SCREEN_DISCUSSES,
+  TYPED_SCREEN_UNCERTAIN,
+  TYPED_UNCERTAIN,
+  TYPED_UNRELATED,
+} from "./decision-model-fixtures.js";
+import type { DecisionTypedAnswersView } from "@wollipog/protocol";
 
 declare global {
   interface Window {
@@ -302,6 +320,143 @@ function handoffProjection(state: "before" | "after"): Partial<import("@wollipog
   };
 }
 
+/** `fullControl=rules|ready|old|degraded` (#2940): a Full Control campaign's boundary and what its launch
+ * disclosed, as Campaign Status shows it after launch. `rules`: a person-marked Human Required rule and
+ * a long objective; `ready`: nothing comes to the person; `old`: authorized before the launch record
+ * existed; `degraded`: an Orchestrator that can't view images. Static rendering data only. */
+const fullControlScenario = ["rules", "ready", "old", "degraded"].includes(params.get("fullControl") ?? "")
+  ? params.get("fullControl") as "rules" | "ready" | "old" | "degraded" : null;
+const FULL_CONTROL_OPERATIONS = ["implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication",
+  "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"] as const;
+function fullControlProjection(kind: "rules" | "ready" | "old" | "degraded"): Partial<import("@wollipog/protocol").OrchestratorCampaignProjection> {
+  const objective = kind === "rules"
+    ? "Fix Full Control authority, gate routing and admission in picoduck/wollipog: #4137, #3676, #3685, #3618, #3382 and #3237. " +
+      "Each issue specifies its behavior and acceptance criteria; follow them and say so in each pull request. Close an issue only after " +
+      "verifying every criterion against merged main, and deliver an issue in slices when one pull request can't meet all of its criteria."
+    : "Deliver picoduck/wollipog #4137 and #3676.";
+  const images = kind === "degraded" ? "orchestrator_decides" as const : "verified" as const;
+  return {
+    control: { mode: "full_control", boundary: { version: 1, revision: 4, issueScopeRevision: 3, repository: "picoduck/wollipog", objective,
+      authorizedByUserId: "fixture-human", authorizedAt: NOW - 3 * 60 * MINUTE, operations: [...FULL_CONTROL_OPERATIONS], delegatablePolicyIds: [],
+      issueAuthority: { epics: [2940], relatedFollowUps: true, maxIssues: 21, closureReasons: ["completed"] },
+      budgetAuthority: { version: 1, concurrency: 3, acceptedFollowUps: 20, accounting: "managed_workers_only", unpriced: "stop" } } },
+    decisionOwners: { implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "orchestrator",
+      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "orchestrator", review_round_extension: "orchestrator" },
+    fullControlHumanRequired: kind === "rules" ? ["human_required_rules"] : [],
+    // Nothing waits in recovery unless `recovery=` adds a record (its own fixture wins below).
+    ...(recoveryRecord ? {} : { recovery: { unattendedReady: true, automation: { state: "available" as const }, automatic: 0,
+      waitingHuman: 0, blocked: 0, records: [], truncated: false } }),
+    uiEvidenceReview: kind === "degraded"
+      ? { status: "unavailable", effectiveOwner: "orchestrator", reasonCode: "model_unsupported",
+        reason: "The Orchestrator model \"text-only\" does not accept image input. It asks for inspectable evidence or denies the claim as unproven." }
+      : { status: "available", effectiveOwner: "orchestrator" },
+    videoEvidenceReview: { status: "unavailable",
+      reason: "The Orchestrator can't watch video because no current live proof certifies the media-only reviewer on the Orchestrator's machine. It asks for screenshots or denies the claim as unproven." },
+    ...(params.get("scope") === "grant" ? { maxIssuesSource: "derived" as const } : {}),
+    ...(kind === "old" ? {} : { launchDisclosure: {
+      version: 1, source: kind === "degraded" ? "enable" : "launch", recordedAt: NOW - 3 * 60 * MINUTE,
+      capabilities: [
+        { id: "repository_scope", capability: "Repository and Issue Scope", state: "verified",
+          reason: "The registered workspace's origin is picoduck/wollipog and issues #4137, #3676 were read from it.", mandatory: true },
+        { id: "authority_contract", capability: "Full Control Authority", state: "verified", reason: "The claude-code root's runner enforces the Full Control authority contract.", mandatory: true },
+        { id: "accounting_budget", capability: "Campaign Accounting and Budget", state: "verified",
+          reason: "No limit. Managed workers are metered and priced, and Campaign Status shows the campaign's usage.", mandatory: false },
+        { id: "native_review", capability: "Controlled Cross-Model Review", state: "informational",
+          reason: "This runner does not offer the controlled reviewer, which needs provider isolation (current: unreported), Claude Code CLI 2.1.296 and python3 on Linux; the campaign uses the regular cross-model review workflow.", mandatory: false },
+        { id: "execution_isolation", capability: "Execution Isolation", state: "informational", reason: "The runner does not report the execution isolation it enforces.", mandatory: false },
+        { id: "image_evidence", capability: "Screenshot Evidence Review", state: images, reason: images === "verified"
+          ? "Screenshots attached as private Session artifacts are reviewed by the Orchestrator."
+          : "The Orchestrator can't view screenshots: its model doesn't accept image input. It asks for inspectable evidence or denies the claim as unproven.", mandatory: false },
+        { id: "video_evidence", capability: "Video Evidence Review", state: "orchestrator_decides",
+          reason: "The Orchestrator can't watch video, so it asks for screenshots or denies the claim as unproven.", mandatory: false },
+        { id: "external_evidence", capability: "Externally Stored Evidence", state: "orchestrator_decides",
+          reason: "The Orchestrator can't inspect externally stored evidence, so it asks for Session artifacts or denies the claim as unproven.", mandatory: false },
+      ],
+      evidence: {
+        statement: images === "verified"
+          ? "The Orchestrator reviews screenshots. For video and external evidence it asks for screenshots or denies the claim as unproven."
+          : "The Orchestrator decides UI evidence but can't view images, so it asks for inspectable evidence or denies the claim as unproven.",
+        destination: "private_session_artifacts",
+        provider: images === "verified" ? { providerId: "claude-code", disclosureRevision: 1, retentionDisclosure: CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE,
+          reviewer: { driver: "claude-code", model: "claude-opus-5-5" } } : null,
+      },
+    } }),
+  };
+}
+
+/** `activity=active|cleanup|complete|stuck` (#4146): the same delivered-or-idle campaign in each
+ * activity state, as a v297 control plane reports it; `legacy=1` is what an older one reported for
+ * the same facts (Active for owed cleanup, Blocked for stuck work, and no lists). */
+const activityScenario = (["active", "cleanup", "complete", "stuck"] as const).find((value) => params.get("activity") === value) ?? null;
+const activityLegacy = params.get("legacy") === "1";
+/** `automation=complete|held|unsupported` (#3361) holds the recovery automation with the server's
+ * reason for a campaign with nothing left to recover (as servers before #4070 sent it on a finished
+ * campaign too), for original work no recovery can continue, or for an unsupported provider. */
+const automationHold = params.get("automation") === "complete"
+  ? { state: "lifecycle_held" as const, reason: CAMPAIGN_AUTOMATION_HOLD_REASONS.complete }
+  : params.get("automation") === "held" ? { state: "lifecycle_held" as const, reason: CAMPAIGN_AUTOMATION_HOLD_REASONS.recoveryHeld }
+  : params.get("automation") === "unsupported"
+    ? { state: "unsupported_capability" as const, reason: "The current provider cannot enforce authorized recovery." } : null;
+// Each state's work matches its facts: delivered states have every committed item delivered; Active
+// keeps the Campaign Status Panel item running in its child, its PR waiting in the merge queue.
+if (activityScenario === "active" || activityScenario === "cleanup" || activityScenario === "complete") {
+  for (const [index, item] of items.entries()) {
+    if (item.commitment !== "committed") continue;
+    const live = activityScenario === "active" && item.id === "cwi_2";
+    items[index] = live ? { ...item, primaryState: "running", stateCauses: [], blocker: null }
+      : { ...item, primaryState: "delivered", stateCauses: [], currentAttempt: null, blocker: null,
+        elapsed: { startedAt: item.elapsed.startedAt ?? NOW - 2 * HOUR, endedAt: item.elapsed.endedAt ?? NOW - 20 * MINUTE } };
+    details[item.id] = itemDetail(items[index]!);
+  }
+}
+const activityWork = (rev: number) => {
+  const committed = items.filter((item) => item.commitment === "committed");
+  const delivered = committed.filter((item) => item.primaryState === "delivered").length;
+  const running = committed.filter((item) => item.primaryState === "running").length;
+  return { ...recordedWork(rev),
+    counts: { committed: committed.length, delivered, original: committed.filter((item) => item.origin === "original").length,
+      followUp: committed.filter((item) => item.origin !== "original").length, cancelled: 0,
+      removed: items.filter((item) => item.commitment !== "committed").length,
+      byState: { planned: 0, queued: 0, running, waiting: 0, blocked: 0, delivered, cancelled: 0,
+        removed: items.filter((item) => item.commitment !== "committed").length } },
+    recommendations: { awaiting_adjudication: 0, accepted: 2, rejected: 1, deferred: 1, duplicate: 3 },
+    obligations: { verification: 0, adjudication: 0, publication: 0, cleanup: 0 },
+    elapsed: { startedAt: NOW - 3 * HOUR - 12 * MINUTE, endedAt: activityScenario === "active" ? null : NOW - 8 * MINUTE },
+  };
+};
+function activityProjection(state: "active" | "cleanup" | "complete" | "stuck"): Partial<import("@wollipog/protocol").OrchestratorCampaignProjection> {
+  const status = state === "active" ? "active" : state === "cleanup" ? (activityLegacy ? "active" : "complete_needs_cleanup")
+    : state === "complete" ? "verified_complete" : activityLegacy ? "blocked" : "stuck";
+  const repair = { state: "attempted" as const, startedAt: NOW - 9 * MINUTE, finishedAt: NOW - 8 * MINUTE, continuation: true };
+  return {
+    status: status as import("@wollipog/protocol").OrchestratorCampaignStatus,
+    children: state === "stuck"
+      ? { total: 3, active: 0, waitingHuman: 0, blocked: 0, verified: 2, cleanupPending: 0 }
+      : state === "active" ? { total: 3, active: 1, waitingHuman: 0, blocked: 0, verified: 2, cleanupPending: 0 }
+      : { total: 3, active: 0, waitingHuman: 0, blocked: 0, verified: 3, cleanupPending: 0 },
+    limits: { maximumConcurrentChildren: 4, occupied: state === "active" ? 1 : 0, remaining: state === "active" ? 3 : 4, costBudgetUsd: 40, maxToolCalls: null },
+    heldChildren: [],
+    ...(activityLegacy ? {} : { activity: state === "active" ? { live: ["child_turn" as const, "merge_queue_wait" as const] } : { live: [], ...(state === "complete" ? {} : { repair }) } }),
+    ...(state === "cleanup" && !activityLegacy ? { cleanup: { total: 3, items: [
+      { kind: "merged_branch" as const, sessionId: "s_child", repository: "picoduck/wollipog", pullRequest: 4217, branch: "agent/s_9d2f41c07a11",
+        state: "pending" as const, reason: "The merged branch is still on the remote.",
+        action: { kind: "command" as const, command: "gh api -X DELETE 'repos/picoduck/wollipog/git/refs/heads/agent/s_9d2f41c07a11'" } },
+      { kind: "merged_branch" as const, sessionId: "s_child", repository: "picoduck/wollipog", pullRequest: 4223, branch: "agent/s_b845cb95d6be",
+        state: "pending" as const, reason: "The last deletion was refused: The forge could not be reached.",
+        action: { kind: "delete_merged_branches" as const, occurrenceId: "workflow_delete_4223" } },
+      { kind: "worktree" as const, sessionId: "s_child", path: "/home/dev/worktrees/wollipog/s_079714ea231c", status: "refused" as const,
+        reason: "The worktree has uncommitted changes.",
+        action: { kind: "command" as const, command: "git -C '/home/dev/worktrees/wollipog/s_079714ea231c' status",
+          then: "Commit and push the changes you want to keep, or discard them yourself. Then ask the Orchestrator to retire the worktree through Wollipog." } },
+    ] } } : {}),
+    ...(state === "stuck" && !activityLegacy ? { stuck: { total: 2, items: [
+      { kind: "unverified_child" as const, sessionId: "s_child", status: "idle", reason: "The child's latest report has not been verified." },
+      { kind: "orchestrator_request" as const, sessionId: "s_child", occurrenceId: "workflow_merge_4234",
+        reason: "An Orchestrator-owned decision is waiting for the Orchestrator." },
+    ] } } : {}),
+  };
+}
+
 let revision = 1;
 /** Whether the owner included the waiting Location (`repositories=1`). */
 let included = false;
@@ -319,7 +474,8 @@ const projectionFor = (rev: number) => campaignProjection(
       obligations: { verification: 0, adjudication: 0, publication: 0, cleanup: 0 },
       cost: undefined,
     })
-      : handoffScenario ? handoffWork(rev) : recordedWork(rev),
+      : activityScenario && activityScenario !== "stuck" ? activityWork(rev)
+      : handoffScenario || activityScenario ? handoffWork(rev) : recordedWork(rev),
   {
     limits: { maximumConcurrentChildren: 4, occupied: 3, remaining: 1, costBudgetUsd: 40, maxToolCalls: null },
     // `repositories=1`: a multi-repository boundary with an exclusion, a removed Location and a
@@ -398,7 +554,17 @@ const projectionFor = (rev: number) => campaignProjection(
       }],
     }],
     ...(handoffScenario ? handoffProjection(handoffScenario) : {}),
+    ...(activityScenario ? activityProjection(activityScenario) : {}),
+    ...(automationHold ? { recovery: { unattendedReady: false, automation: automationHold, automatic: 0, waitingHuman: 0, blocked: 0,
+      records: [], truncated: false } } : {}),
     ...ownerProjection,
+    ...ownerScopeProjection,
+    // `ownerAddition=1` (#4117): the Orchestrator's request to add a repository waits for the owner.
+    ...(params.get("ownerAddition") === "1" ? { status: "waiting_human" as const, ownerDecisions: { total: 1, items: [
+      { occurrenceId: "wd_addition_1", sessionId: "s_root", category: "campaign_repository_addition" as const,
+        summary: "Add picoduck/notes-site to the campaign", handedOff: false, createdAt: NOW - 2 * 60_000 },
+    ] } } : {}),
+    ...(fullControlScenario ? fullControlProjection(fullControlScenario) : {}),
   },
 );
 
@@ -429,6 +595,25 @@ const ownerProjection = ownerScenario === "after" ? { status: "waiting_human" as
 ] } } : ownerScenario === "rule" ? { status: "waiting_human" as const, ownerDecisions: { total: 1, items: [
   { occurrenceId: "occ_1", sessionId: "s_child_3", category: "pr_merge" as const, summary: "Merge picoduck/wollipog#4141", handedOff: false,
     ownerRule, createdAt: NOW - 8 * MINUTE },
+] } } : {};
+
+/** `ownerScope=1` (#4267): the Orchestrator's proposal without lineage, waiting for the owner with
+ * the Maximum Issues increase its additions need. */
+const ownerScopeSnapshot = { category: "campaign_issue_scope" as const, repository: "team/repo", expectedRevision: 3,
+  before: [130, 131, 132, 133, 134], additions: [141, 142], removals: [],
+  explanation: "You asked me to start #141 and #142 after launch. Neither is an epic member or a published follow-up.",
+  affectedAssignments: [], affectedDecisions: ["occ_1"], activeChildren: [],
+  ownerReview: { cause: "lineage_missing" as const, maxIssuesIncrease: { from: 6, increase: 1 } } };
+const ownerScopeCard: import("@wollipog/protocol").PendingApproval | null = params.get("ownerScope") === "1" ? {
+  requestId: "wd_scope_141", occurrenceId: "wd_scope_141", kind: "workflow_decision", title: "Campaign Issue Scope Approval Required",
+  options: [{ optionId: "approve", name: "Approve", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }],
+  workflowDecision: { requestId: "scope-141", occurrenceId: "wd_scope_141", sessionId: "s_root", controllingSessionId: "s_root",
+    category: "campaign_issue_scope", resourceKey: "campaign_issue_scope:s_root", resourceSnapshot: ownerScopeSnapshot,
+    resourceDigest: "d".repeat(64), policyRevision: 1, authority: "human", status: "pending", createdAt: NOW - 2 * MINUTE },
+} : null;
+const ownerScopeProjection = ownerScopeCard ? { status: "waiting_human" as const, ownerDecisions: { total: 1, items: [
+  { occurrenceId: "wd_scope_141", sessionId: "s_root", category: "campaign_issue_scope" as const,
+    summary: "Add team/repo#141, team/repo#142, raising Maximum Issues from 6 to 7", handedOff: false, createdAt: NOW - 2 * MINUTE },
 ] } } : {};
 
 /** The root's own Pending Decision cards for the follow-ups past the limit (`followUps=pending`). */
@@ -463,7 +648,8 @@ function sessionsFor(rev: number): SessionView[] {
   const root = baseSession({ orchestratorCampaign: projectionFor(rev),
     ...(followUpCards.length ? { pendingApproval: { ...followUpCards[0]!, additionalRequests: followUpCards.slice(1) } } : {}),
     ...(ownerCard ? { pendingApproval: ownerCard } : {}),
-    ...(selectionCard ? { pendingApproval: selectionCard } : {}) });
+    ...(selectionCard ? { pendingApproval: selectionCard } : {}),
+    ...(ownerScopeCard ? { pendingApproval: ownerScopeCard } : {}) });
   const child = baseSession({
     id: "s_child", title: "#2417 Slice 7: Campaign Status Panel", parentSessionId: "s_root",
     ...(scenario === "legacy" ? {} : { campaignMembership: { campaignSessionId: "s_root", currentWorkItemId: "cwi_2", currentAttemptId: "catt_2" } }),
@@ -500,7 +686,10 @@ const ownerRequests = (owners: "before" | "after" | "rule"): DescendantRequestVi
 };
 
 /** The request the blocked item's recorded blocker names, pending on its child. */
-const descendantRequests: DescendantRequestView[] = ownerScenario ? ownerRequests(ownerScenario) : scenario === "campaign" ? [{
+const ownerScopeRequests: DescendantRequestView[] = ownerScopeCard ? [{ sessionId: "s_root", sessionTitle: "Full Control Campaign",
+  runnerId: "runner-1", runnerOnline: true, eventEpoch: 1, createdAt: NOW - 2 * MINUTE, responseOwner: "human",
+  occurrenceId: "wd_scope_141", request: ownerScopeCard }] : [];
+const descendantRequests: DescendantRequestView[] = ownerScopeCard ? ownerScopeRequests : ownerScenario ? ownerRequests(ownerScenario) : scenario === "campaign" ? [{
   sessionId: "s_child_3",
   sessionTitle: "#2417 Slice 5: Read API",
   runnerId: "runner-1",
@@ -556,10 +745,73 @@ let scopeGrantFixture: import("@wollipog/protocol").FullControlScopeGrant | null
 } : params.get("scope") === "grant-failed" ? {
   version: 1, status: "failed", occurrenceId: "dec_fixture", target: SCOPE_GRANT_TARGET, failureClass: "provider_overloaded", namedIssues: [],
   ceilings: launchCeilings(1),
+} : params.get("scope") === "proposal" || params.get("scope") === "proposal-waiting" ? {
+  // The Orchestrator proposes the scope (#4282): the server read nothing from the message.
+  version: 1, status: "proposal", namedIssues: [], ceilings: launchCeilings(9),
 } : params.get("scope") === "grant-uncertain" ? {
   version: 1, status: "uncertain", occurrenceId: "dec_fixture", target: SCOPE_GRANT_TARGET, namedIssues: [],
   reason: "The message doesn't say whether #12 is a request or background.", ceilings: launchCeilings(1),
 } : null;
+
+/** The constraint check's typed answers for the waiting proposal (#4282): every question satisfied
+ * except #152 against "UI only", which the model couldn't settle, so the proposal came to the owner. */
+const SCOPE_CHECK_ANSWERS: import("@wollipog/protocol").DecisionTypedAnswersView = (() => {
+  const choice = (values: string[]) => ({ type: "choice" as const, values });
+  const pairs = [131, 140, 152].flatMap((number) => ["open", "UI only"].map((constraint) => ({ number, constraint })));
+  const titles: Record<number, string> = { 123: "Composer Epic", 124: "Member Work", 131: "Sidebar Collapses on Resize", 140: "Badge Contrast in Light Theme",
+    152: "Composer Hint Overlaps Send" };
+  const questions = [
+    { questionId: "count_consistent", label: "Count Matches Your Message", text: "Does the proposal's count agree with the owner's message?",
+      answer: choice(["consistent", "inconsistent", "cannot_tell"]) },
+    ...[123, 124].map((number, index) => ({ questionId: `named_asked_for__${index + 1}`, label: `team/repo#${number} ${titles[number]}`,
+      parameter: `team/repo#${number} ${titles[number]}`, text: "Does the owner's message ask the campaign to work on the issue quoted below?",
+      answer: choice(["asked_for", "only_mentioned", "cannot_tell"]) })),
+    ...pairs.map(({ number, constraint }, index) => ({ questionId: `constraint_met__${index + 1}`, label: `team/repo#${number} ${titles[number]} — ${constraint}`,
+      parameter: `team/repo#${number} ${titles[number]} — ${constraint}`, text: "Does the issue satisfy that constraint?",
+      answer: choice(["satisfies", "violates", "cannot_tell"]) })),
+    { questionId: "constraints_complete", label: "Every Stated Constraint Listed", text: "Does the proposal list every stated constraint?",
+      answer: choice(["complete", "missing_constraint", "cannot_tell"]) },
+    { questionId: "nothing_omitted", label: "No Requested Issue Left Out", text: "Does the proposal add every issue the owner asked for?",
+      answer: choice(["complete", "omits_requested", "cannot_tell"]) },
+    { questionId: "operations_respected", label: "Withheld Operations Respected", text: "Does the proposal withhold every operation the message rules out?",
+      answer: choice(["respected", "not_respected", "cannot_tell"]) },
+  ];
+  const satisfied: Record<string, [string, string]> = { count_consistent: ["consistent", "The owner asks for the 3 highest-priority open UI issues."],
+    named_asked_for: ["asked_for", "The owner writes \"Fix #123 and #124\"."], constraint_met: ["satisfies", "It is open and labeled ui."],
+    constraints_complete: ["complete", "Open and UI only are the only filters stated."], nothing_omitted: ["complete", "Both named issues are proposed."],
+    operations_respected: ["respected", "\"Don't merge anything yet\" withholds PR Merge, which the proposal withholds."] };
+  const answers = questions.map((question) => {
+    const unsure = question.questionId === "constraint_met__6";
+    const [value, evidence] = unsure ? ["cannot_tell", "Its labels don't say whether it is UI work."] : satisfied[question.questionId.split("__")[0]!]!;
+    return { questionId: question.questionId, value, confidence: unsure ? 0.55 : 0.93, evidence, assessment: unsure ? "unknown" as const : "satisfied" as const };
+  });
+  return { confidenceThreshold: 0.8, questions, answers, decisive: { questionId: "constraint_met__6" } };
+})();
+
+const SCOPE_PROPOSALS: import("@wollipog/protocol").CampaignScopeProposalView[] = [{
+  occurrenceId: "wd_scope_2", createdAt: NOW - 60_000, outcome: "waiting_for_owner",
+  explanation: "You named #123 and #124. For the rest I ranked open UI issues by priority label, then by age.",
+  check: { occurrenceId: "dec_scope_check", state: "uncertain", verdict: "uncertain", typedAnswers: SCOPE_CHECK_ANSWERS,
+    reason: "The answer can't be settled for 'team/repo#152 Composer Hint Overlaps Send — UI only'." },
+  proposal: { initial: true, messageDigest: "a".repeat(64), requestedCount: 3, constraints: ["open", "UI only"], withheldOperations: ["pr_merge"],
+    checks: ["chosen_issues", "requested_count", "constraints", "withheld_operations"], route: "owner", ownerCause: "constraint_check_uncertain",
+    constraintCheck: { occurrenceId: "dec_scope_check", verdict: "uncertain",
+      reason: "The answer can't be settled for 'team/repo#152 Composer Hint Overlaps Send — UI only'." },
+    ownerMessage: "Fix #123 and #124, then the 3 highest-priority open UI issues. Don't merge anything yet.",
+    issues: [
+      { number: 123, origin: "owner_named", rationale: "You named it first.", title: "Composer Epic" },
+      { number: 124, origin: "owner_named", rationale: "You named it second.", title: "Member Work" },
+      { number: 131, origin: "orchestrator_chosen", rationale: "Open, UI, priority:high, oldest.", title: "Sidebar Collapses on Resize" },
+      { number: 140, origin: "orchestrator_chosen", rationale: "Open, UI, priority:high.", title: "Badge Contrast in Light Theme" },
+      { number: 152, origin: "orchestrator_chosen", rationale: "Open, UI, priority:medium, most reactions.", title: "Composer Hint Overlaps Send" },
+    ] },
+}, {
+  occurrenceId: "wd_scope_1", createdAt: NOW - 120_000, outcome: "replaced",
+  explanation: "You named #123 and #124.",
+  proposal: { initial: true, messageDigest: "a".repeat(64), requestedCount: null, constraints: [], withheldOperations: [], checks: [], route: "admitted",
+    issues: [{ number: 123, origin: "owner_named", rationale: "You named it.", title: "Composer Epic" },
+      { number: 124, origin: "owner_named", rationale: "You named it.", title: "Member Work" }] },
+}];
 
 const scopeRequirement = params.get("scope") === "outdated-runner" ? campaignIssueScopeChangesRequirement(207)
   : params.get("scope") === "issue-limits" ? campaignIssueLimitsRequirement(216) : null;
@@ -627,6 +879,27 @@ let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["dec
         { repository: "team/repo", number: 141, title: "Sidebar badges overlap on narrow screens" }] } },
 ] : [];
 
+// `typed=1` (#4283): the same checks as typed questions, each with its answers and the reason the
+// server derived from them: the selection reviews with `selection=1`, and the migrated credential
+// screen, follow-up relatedness and closure-reason kinds with `screen=1` or `checks=1`. A failed
+// check has no answers, so it reads as before.
+if (params.get("typed") === "1") {
+  const admitted = "Every answer is satisfied with at least 80% confidence.";
+  const typed: Record<string, { typedAnswers: DecisionTypedAnswersView; reason: string }> = {
+    sel_admitted: { typedAnswers: TYPED_ADMITTED, reason: admitted },
+    sel_refused: { typedAnswers: TYPED_REFUSED, reason: "Issue 140 violates 'Skip Security'." },
+    sel_uncertain: { typedAnswers: TYPED_UNCERTAIN, reason: "Issue 141 on 'UI Only' is below the 80% confidence threshold." },
+    dec_keys: { typedAnswers: TYPED_SCREEN_DISCUSSES, reason: admitted },
+    dec_token: { typedAnswers: TYPED_SCREEN_ASK, reason: "The answer violates 'No Credential Handed Over'." },
+    dec_owner: { typedAnswers: TYPED_SCREEN_UNCERTAIN, reason: "The answer on 'No Sign-In Performed' is below the 80% confidence threshold." },
+    rel_related: { typedAnswers: TYPED_RELATED, reason: admitted },
+    rel_unrelated: { typedAnswers: TYPED_UNRELATED, reason: "The answer violates 'Related to the Requested Work'." },
+    why_misfit: { typedAnswers: TYPED_CLOSURE_MISFIT, reason: "The answer violates 'Evidence Supports the Reason'." },
+  };
+  screenDecisions = screenDecisions.map((decision) => typed[decision.occurrenceId]
+    ? { ...decision, promptVersion: `${decision.kind}.v2`, ...typed[decision.occurrenceId] } : decision);
+}
+
 const client = {
   ...api,
   // `decisions=1` adds three Decision Model calls for the Decision Model section (#4101); the
@@ -658,6 +931,12 @@ const client = {
     // count, and the failure route.
     ...(scopeGrantFixture ? { issueNumbers: scopeGrantFixture.namedIssues, revision: 2, outsideScope: [], candidates: [],
       ...(params.get("scope") === "grant" ? { contextIssueNumbers: [126] } : {}), scopeGrant: scopeGrantFixture, policyRevision: revision } : {}),
+    // The Orchestrator's proposals (#4282): one waiting for the owner, after an earlier one it replaced.
+    ...(params.get("scope") === "proposal" ? { issueNumbers: [], scopeProposals: SCOPE_PROPOSALS } : {}),
+    ...(params.get("scope") === "proposal-waiting" ? { issueNumbers: [], scopeProposals: [] } : {}),
+    // `activity=…` (#4146): the authorized scope covers every work item, so nothing reads as outside it.
+    ...(activityScenario ? { repository: "picoduck/wollipog", revision: 1, canPropose: false, outsideScope: [], candidates: [],
+      issueNumbers: [...new Set(items.flatMap((item) => item.issue ? [item.issue.number] : []))] } : {}),
     ...(params.get("completedChildren") === "1" && recoveryRecord?.reason === "failed_checks" ? {
       // Disclosed static scope data, not a live mint/approval or supported-profile assertion.
       issueNumbers: [123], revision: 1, canPropose: false, outsideScope: [], candidates: [],
@@ -680,6 +959,10 @@ const client = {
   setCampaignFollowUpLimit: async (_id: string, limit: number | null, expectedRevision: number) => {
     (window as unknown as { __FOLLOW_UP_LIMIT__: unknown }).__FOLLOW_UP_LIMIT__ = { limit, expectedRevision };
     return sessionsFor(revision)[0]!;
+  },
+  deleteCampaignMergedBranches: async (id: string) => {
+    (window as unknown as { __DELETE_MERGED_BRANCHES__: unknown }).__DELETE_MERGED_BRANCHES__ = id;
+    return { performed: 1, refused: 0 };
   },
   proposeCampaignIssueScope: async (_id: string, proposal: import("@wollipog/protocol").CampaignIssueScopeRequest) => {
     (window as unknown as { __SCOPE_PROPOSAL__: unknown }).__SCOPE_PROPOSAL__ = proposal;

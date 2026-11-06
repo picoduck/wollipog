@@ -1,876 +1,3417 @@
 {
-  "schemaVersion": 1,
-  "sourceWindow": {
-    "since": "2026-10-22T22:40:00Z",
-    "until": "2026-10-22T22:41:00Z"
-  },
-  "sourceHead": "9a57f6a4efcf5418f4eeb66731ab96a45d9322cf",
-  "testedSha": "8183eb56c4beb1ebfa4bfcc2693591e8d8a8cfbb",
-  "inventoryFiles": 280,
-  "fallbackDurationMs": 12943,
-  "productionDurationMs": 99000,
+  "schemaVersion": 2,
+  "aggregation": "ceil-mean-per-observed-file",
+  "sourceRuns": [
+    {
+      "runId": 42054331358,
+      "attempt": 1,
+      "sourceHead": "69a3ccc4a3d9bc535f29551edb522cba77146928",
+      "testedSha": "4a65869bbd681ce445e79e9046e343a374be5525",
+      "sourceWindow": {
+        "since": "2026-11-05T15:22:33Z",
+        "until": "2026-11-05T16:04:38.000Z"
+      },
+      "shardCount": 10
+    },
+    {
+      "runId": 42063471740,
+      "attempt": 1,
+      "sourceHead": "09accc26210f98eb975774e971ee721b6b3d457a",
+      "testedSha": "8979d3695f440a3dd5854e687a4de50e55b28722",
+      "sourceWindow": {
+        "since": "2026-11-05T16:20:52Z",
+        "until": "2026-11-05T16:44:55.000Z"
+      },
+      "shardCount": 10
+    }
+  ],
+  "inventoryFiles": 311,
+  "fallbackDurationMs": 9347,
+  "productionDurationMs": 95000,
   "files": {
-    "access-scope-change.spec.ts": 27930,
-    "account-email-privacy.spec.ts": 70494,
-    "agent-questions-live.spec.ts": 228338,
-    "agent-questions.spec.ts": 150039,
-    "agents-roster.spec.ts": 40645,
-    "agents.spec.ts": 46450,
-    "app-container.spec.ts": 54447,
-    "attention-shell.spec.ts": 65575,
-    "authentication-recovery.spec.ts": 63728,
-    "automation-page.spec.ts": 104685,
-    "automation-run-history.spec.ts": 35849,
-    "automation-schedule.spec.ts": 35277,
-    "automation-triggers.spec.ts": 45719,
-    "automations-list.spec.ts": 48590,
-    "background-work-visibility.spec.ts": 70161,
-    "behavior-settings.spec.ts": 36164,
-    "browser-panel.spec.ts": 53811,
-    "campaign-status-walkthrough.spec.ts": 24016,
-    "campaign-status.spec.ts": 28529,
-    "checkpoint-rewind.spec.ts": 62793,
-    "colour-schemes.spec.ts": 61239,
-    "command-inbox-projects.spec.ts": 297859,
-    "commit-bar.spec.ts": 28436,
-    "compact-tier.spec.ts": 103033,
-    "composer-bar-first-tap.spec.ts": 43250,
-    "composer-bar-layout.spec.ts": 67106,
-    "composer-idle-capsule.spec.ts": 30446,
-    "composer-image-picker.spec.ts": 86685,
-    "composer-remove-keyboard-focus.spec.ts": 31025,
-    "conversation-handoff.spec.ts": 68200,
-    "conversation-steering.spec.ts": 175227,
-    "copy-button.spec.ts": 32383,
-    "desktop-rail.spec.ts": 30414,
-    "desktop-updates.spec.ts": 51250,
-    "dialog-anatomy.spec.ts": 29046,
-    "diff-sections.spec.ts": 33366,
-    "earlier-activity-desktop.spec.ts": 30418,
-    "evidence-artifacts.spec.ts": 60797,
-    "field-label-outside-field.spec.ts": 31185,
-    "focus-zones.spec.ts": 52574,
-    "full-control-preparation.spec.ts": 72120,
-    "git-visibility.spec.ts": 33749,
-    "inbox-row-layout.spec.ts": 44350,
-    "machine-management.spec.ts": 132704,
-    "mobile-viewport.spec.ts": 79604,
-    "new-session-choices.spec.ts": 51483,
-    "offline-banner.spec.ts": 39008,
-    "orchestrator-controls.spec.ts": 68653,
-    "orchestrator-preset.spec.ts": 125337,
-    "orchestrator-settings.spec.ts": 28931,
-    "outbound-events.spec.ts": 31131,
-    "page-anatomy.spec.ts": 62270,
-    "panel-pages.spec.ts": 31334,
-    "paused-history-gap.spec.ts": 117253,
-    "pinned-summary-dock.spec.ts": 33188,
-    "pinned-summary-rows.spec.ts": 38124,
-    "pods-list.spec.ts": 37639,
-    "project-child-defaults.spec.ts": 55692,
-    "project-memory-sharing.spec.ts": 28571,
-    "projects-master-detail.spec.ts": 44497,
-    "projects-overview.spec.ts": 46691,
-    "provider-home-refusal.spec.ts": 63646,
-    "question-draft-reload.spec.ts": 70990,
-    "question-policies.spec.ts": 29259,
-    "recovery-notice.spec.ts": 35725,
-    "request-surfaces.spec.ts": 122010,
-    "right-panel-overlay.spec.ts": 55062,
-    "session-bar.spec.ts": 109584,
-    "session-detail-retention-live.spec.ts": 41329,
-    "session-follow-up.spec.ts": 38668,
-    "session-header.spec.ts": 102659,
-    "session-notices.spec.ts": 36829,
-    "session-placeholders.spec.ts": 35104,
-    "session-usage.spec.ts": 77715,
-    "sessions-board.spec.ts": 51158,
-    "sessions-list-notices.spec.ts": 58797,
-    "sessions-preview-bar.spec.ts": 34902,
-    "sessions-preview-right.spec.ts": 37602,
-    "sessions-search.spec.ts": 46041,
-    "sessions-split.spec.ts": 46376,
-    "settings-rows.spec.ts": 132746,
-    "settings-sections.spec.ts": 65326,
-    "shell-dock-phone.spec.ts": 28283,
-    "side-chat.spec.ts": 27468,
-    "side-panel-expand.spec.ts": 54328,
-    "skill-groups.spec.ts": 43807,
-    "skill-machine-import.spec.ts": 26918,
-    "skill-notice-slot.spec.ts": 26726,
-    "skill-orphans.spec.ts": 26893,
-    "skill-review-conflict.spec.ts": 38963,
-    "slash-commands.spec.ts": 89750,
-    "stop-turn.spec.ts": 36739,
-    "terminal-panel.spec.ts": 50899,
-    "timeline-reflow.spec.ts": 84513,
-    "transcript-entry.spec.ts": 62599,
-    "transcript-states.spec.ts": 25015,
-    "worker-page.spec.ts": 27528,
-    "workspace-references.spec.ts": 28983,
-    "worktree-recovery.spec.ts": 32069,
-    "xterm-smoke.spec.ts": 33874
+    "access-scope-change.spec.ts": 24019,
+    "account-email-privacy.spec.ts": 69462,
+    "agent-questions-live.spec.ts": 299882,
+    "agent-questions.spec.ts": 124632,
+    "agent-tui-provider-home-refusal.spec.ts": 22629,
+    "agents-roster.spec.ts": 36626,
+    "agents.spec.ts": 60453,
+    "app-container.spec.ts": 44299,
+    "archive-stop-toast.spec.ts": 16565,
+    "archived-session-rows.spec.ts": 16567,
+    "archived-toolbar.spec.ts": 26792,
+    "artifact-gallery.spec.ts": 22274,
+    "artifact-panel-back.spec.ts": 22759,
+    "attention-shell.spec.ts": 75654,
+    "authentication-recovery.spec.ts": 78541,
+    "automation-page.spec.ts": 119383,
+    "automation-run-history.spec.ts": 40812,
+    "automation-schedule.spec.ts": 37520,
+    "automation-triggers.spec.ts": 47296,
+    "automations-list.spec.ts": 57113,
+    "background-follow-up-status.spec.ts": 13472,
+    "background-unlisted-hold.spec.ts": 20799,
+    "background-work-history.spec.ts": 24472,
+    "background-work-visibility.spec.ts": 57472,
+    "behavior-settings.spec.ts": 27908,
+    "blocked-result-acknowledgement.spec.ts": 11620,
+    "browser-panel.spec.ts": 48541,
+    "busy-button.spec.ts": 17955,
+    "campaign-issue-scope.spec.ts": 36089,
+    "campaign-recovery.spec.ts": 21516,
+    "campaign-status-live.spec.ts": 20573,
+    "campaign-status-walkthrough.spec.ts": 27086,
+    "campaign-status.spec.ts": 45260,
+    "checkpoint-rewind.spec.ts": 56477,
+    "claude-init-slash-catalog.spec.ts": 20453,
+    "colour-schemes.spec.ts": 52367,
+    "command-inbox-projects.spec.ts": 244549,
+    "commit-bar.spec.ts": 28070,
+    "compact-notice-icon-alignment.spec.ts": 25277,
+    "compact-tier.spec.ts": 134585,
+    "composer-bar-first-tap.spec.ts": 42718,
+    "composer-bar-layout.spec.ts": 72235,
+    "composer-dictation.spec.ts": 23931,
+    "composer-idle-capsule.spec.ts": 33358,
+    "composer-image-picker.spec.ts": 100983,
+    "composer-modes-initial-focus.spec.ts": 23243,
+    "composer-question-scroll.spec.ts": 13232,
+    "composer-remove-keyboard-focus.spec.ts": 36256,
+    "conversation-handoff.spec.ts": 77651,
+    "conversation-steering.spec.ts": 165465,
+    "copy-button.spec.ts": 33096,
+    "decision-history.spec.ts": 26365,
+    "decision-model.spec.ts": 11612,
+    "delegated-ui-evidence-live.spec.ts": 11717,
+    "delegated-video-evidence-live.spec.ts": 14177,
+    "desktop-rail.spec.ts": 29743,
+    "desktop-title-bar.spec.ts": 15029,
+    "desktop-updates.spec.ts": 59225,
+    "dialog-anatomy.spec.ts": 31127,
+    "diff-finding-card.spec.ts": 31838,
+    "diff-line-selectors.spec.ts": 13868,
+    "diff-sections.spec.ts": 31099,
+    "earlier-activity-desktop.spec.ts": 34811,
+    "earlier-activity-mobile.spec.ts": 20168,
+    "empty-opening-race.spec.ts": 17367,
+    "evidence-artifacts.spec.ts": 56102,
+    "field-label-outside-field.spec.ts": 34267,
+    "field-read-only.spec.ts": 20407,
+    "files-panel.spec.ts": 19582,
+    "files-viewer.spec.ts": 24844,
+    "focus-zones.spec.ts": 55893,
+    "foundation-primitives.spec.ts": 26020,
+    "full-control-preparation.spec.ts": 89600,
+    "git-status-failure.spec.ts": 18920,
+    "git-visibility.spec.ts": 35061,
+    "history-quarantine.spec.ts": 22659,
+    "inbox-layout-shift.spec.ts": 21973,
+    "inbox-row-layout.spec.ts": 42804,
+    "inbox-threads.spec.ts": 24053,
+    "inbox-triage-detail.spec.ts": 24064,
+    "keycap.spec.ts": 17767,
+    "location-switch.spec.ts": 16174,
+    "long-turn-opening-live.spec.ts": 15266,
+    "machine-management.spec.ts": 130748,
+    "machine-skills.spec.ts": 12114,
+    "mark-reviewed-shortcut.spec.ts": 24172,
+    "mobile-question-states.spec.ts": 18428,
+    "mobile-viewport.spec.ts": 71594,
+    "new-run.spec.ts": 11642,
+    "new-session-choices.spec.ts": 51363,
+    "offline-banner.spec.ts": 36931,
+    "open-destination.spec.ts": 13028,
+    "orchestrator-controls.spec.ts": 72673,
+    "orchestrator-policy.spec.ts": 13230,
+    "orchestrator-preset.spec.ts": 154868,
+    "orchestrator-review-policy.spec.ts": 21028,
+    "orchestrator-settings.spec.ts": 26230,
+    "outbound-events.spec.ts": 33582,
+    "page-anatomy.spec.ts": 110099,
+    "pairing-banner.spec.ts": 16759,
+    "panel-pages.spec.ts": 24641,
+    "paused-history-gap.spec.ts": 108047,
+    "people-devices-masking.spec.ts": 20797,
+    "permission-mode-layout.spec.ts": 20700,
+    "picker-footer.spec.ts": 13517,
+    "pinned-summary-dock.spec.ts": 26781,
+    "pinned-summary-rows.spec.ts": 36679,
+    "pods-list.spec.ts": 27078,
+    "project-child-defaults.spec.ts": 65527,
+    "project-locations.spec.ts": 35851,
+    "project-memory-sharing.spec.ts": 23262,
+    "projects-master-detail.spec.ts": 30881,
+    "projects-overview.spec.ts": 36136,
+    "provider-home-refusal.spec.ts": 52019,
+    "provider-home-wait.spec.ts": 18761,
+    "question-draft-reload.spec.ts": 68396,
+    "question-more-requests.spec.ts": 21179,
+    "question-policies.spec.ts": 25634,
+    "recovery-notice.spec.ts": 36849,
+    "remote-instances.spec.ts": 45013,
+    "request-disclosure-virtualization.spec.ts": 17255,
+    "request-surfaces.spec.ts": 149398,
+    "review-status-colors.spec.ts": 26648,
+    "right-panel-overlay.spec.ts": 65034,
+    "select-trigger-type.spec.ts": 33161,
+    "session-bar.spec.ts": 111592,
+    "session-detail-retention-live.spec.ts": 42779,
+    "session-dialogs.spec.ts": 22311,
+    "session-follow-up.spec.ts": 45904,
+    "session-header.spec.ts": 105048,
+    "session-notices.spec.ts": 46446,
+    "session-placeholders.spec.ts": 37072,
+    "session-role.spec.ts": 26327,
+    "session-tools.spec.ts": 17716,
+    "session-usage.spec.ts": 77286,
+    "sessions-board.spec.ts": 65507,
+    "sessions-group-tabs.spec.ts": 17598,
+    "sessions-list-notices.spec.ts": 65456,
+    "sessions-notice-focus.spec.ts": 23059,
+    "sessions-page-header.spec.ts": 11450,
+    "sessions-phone-app-bar.spec.ts": 14405,
+    "sessions-preview-bar.spec.ts": 41005,
+    "sessions-preview-right.spec.ts": 42239,
+    "sessions-project-retention.spec.ts": 36069,
+    "sessions-row-columns.spec.ts": 18709,
+    "sessions-search.spec.ts": 48367,
+    "sessions-split.spec.ts": 48980,
+    "sessions-states.spec.ts": 14655,
+    "settings-rows.spec.ts": 145403,
+    "settings-sections.spec.ts": 83173,
+    "shell-dock-body.spec.ts": 16636,
+    "shell-dock-head.spec.ts": 20358,
+    "shell-dock-phone.spec.ts": 34274,
+    "shell-hidden-content-scroll.spec.ts": 12251,
+    "shortcut-reference.spec.ts": 20190,
+    "side-chat.spec.ts": 29998,
+    "side-panel-expand.spec.ts": 61649,
+    "side-panel-frame.spec.ts": 29187,
+    "side-panel-hidden-conditions.spec.ts": 20917,
+    "skill-create-assign-dialogs.spec.ts": 13612,
+    "skill-deployment.spec.ts": 11146,
+    "skill-detail-header.spec.ts": 27030,
+    "skill-drift.spec.ts": 18616,
+    "skill-file-diff.spec.ts": 13892,
+    "skill-git-auto-update.spec.ts": 24888,
+    "skill-git-import.spec.ts": 18403,
+    "skill-groups.spec.ts": 46631,
+    "skill-machine-import.spec.ts": 30704,
+    "skill-machine-versions.spec.ts": 18236,
+    "skill-matrix.spec.ts": 21233,
+    "skill-notice-slot.spec.ts": 34393,
+    "skill-orphans.spec.ts": 33682,
+    "skill-review-conflict.spec.ts": 49478,
+    "skill-version-history.spec.ts": 15171,
+    "skills-list.spec.ts": 22190,
+    "skills-master-detail.spec.ts": 34992,
+    "skills-overview.spec.ts": 17735,
+    "slash-commands.spec.ts": 116850,
+    "snooze-dialog.spec.ts": 31694,
+    "snooze-typeahead.spec.ts": 24836,
+    "status-badge-parity.spec.ts": 29134,
+    "status-popover-escape.spec.ts": 12635,
+    "stop-turn.spec.ts": 48387,
+    "switch-account.spec.ts": 30404,
+    "terminal-panel.spec.ts": 66179,
+    "thread-family-glance.spec.ts": 24136,
+    "timeline-reflow.spec.ts": 108312,
+    "toast-placement.spec.ts": 19733,
+    "tone-icons-forced-colors.spec.ts": 17540,
+    "transcript-entry.spec.ts": 80488,
+    "transcript-share.spec.ts": 14360,
+    "transcript-states.spec.ts": 35219,
+    "transcript-underfilled.spec.ts": 22577,
+    "unavailable-message-action-styling.spec.ts": 12759,
+    "usage-chart.spec.ts": 16834,
+    "usage-view.spec.ts": 58213,
+    "worker-page.spec.ts": 32622,
+    "workflow-decision-reading.spec.ts": 22106,
+    "workspace-references.spec.ts": 37929,
+    "worktree-identity.spec.ts": 19293,
+    "worktree-recovery.spec.ts": 39813,
+    "xterm-smoke.spec.ts": 44816
   },
   "sources": [
     {
-      "runId": 39866598899,
+      "runId": 42054331358,
       "attempt": 1,
-      "jobId": 120130235547,
-      "jobName": "Browser End-to-End Tests (4)",
-      "suiteSeconds": 1643,
-      "slowestTests": [
-        {
-          "fileId": "4f016a6bd340d8d85877311e1fcda3b53b63d581bd2fa3314e0fbbd16a8b3bee",
-          "testId": "7810847e5f6dc21bb2d8da2b53c531441d07f4b554f7113091393cfd984bcf03",
-          "durationMs": 10427,
-          "state": "passing",
-          "retry": 0
-        },
-        {
-          "fileId": "eb9bb6a814f99fd051d13cb756fd42b5d0fa8f3eff2c82f95241b704492f64b2",
-          "testId": "c7c571b0c4a5dd0bf5d1ebbe2a22858e7af6666a59287eadddebd7326f614de9",
-          "durationMs": 9648,
-          "state": "passing",
-          "retry": 0
-        },
-        {
-          "fileId": "ed8a77f43ef6978b877c0c68a7fee7449b8db4dcac640365aa03c098c3bc55d5",
-          "testId": "d7bb52faf16283e062467b4d7ba0fa85dd8c58ffb4a7a160d1ee35ecc1d60f84",
-          "durationMs": 8254,
-          "state": "passing",
-          "retry": 0
-        }
-      ],
+      "jobId": 127342213224,
+      "shard": 5,
+      "version": 1,
+      "suite": "browser",
+      "count": 444,
+      "failed": 0,
+      "skipped": 8,
+      "cancelled": 0,
+      "unmeasured": 0,
+      "retryOnly": 0,
+      "truncated": false,
+      "context": {
+        "runId": "42054331358",
+        "attempt": 1,
+        "testedSha": "4a65869bbd681ce445e79e9046e343a374be5525",
+        "workflowSha": "4a65869bbd681ce445e79e9046e343a374be5525"
+      },
       "slowestFiles": [
         {
           "fileId": "4f016a6bd340d8d85877311e1fcda3b53b63d581bd2fa3314e0fbbd16a8b3bee",
-          "durationMs": 132746,
-          "count": 83
-        },
-        {
-          "fileId": "8df93f9a1aee7eae1568ae36669c9ea3cc3b8bd4036c1765c103c4ca207b888f",
-          "durationMs": 122010,
-          "count": 66
+          "durationMs": 136741,
+          "count": 87
         },
         {
           "fileId": "fc463d9f51257db5dce535b9508843f4d507cc2485844d130a6bb9f258d44dc5",
-          "durationMs": 109584,
+          "durationMs": 104011,
           "count": 29
         },
         {
-          "fileId": "eb9bb6a814f99fd051d13cb756fd42b5d0fa8f3eff2c82f95241b704492f64b2",
-          "durationMs": 102659,
-          "count": 27
-        },
-        {
-          "fileId": "60cfc7260eba1c082748cc0810f677f002ecd28a2ac2dae113209ed6a596fc23",
-          "durationMs": 77715,
-          "count": 50
-        },
-        {
-          "fileId": "ed8a77f43ef6978b877c0c68a7fee7449b8db4dcac640365aa03c098c3bc55d5",
-          "durationMs": 65326,
-          "count": 19
-        },
-        {
-          "fileId": "1eef63a072686a0912c71e3af33117842dae50c98f5ca4aac7475417499b997d",
-          "durationMs": 58797,
-          "count": 14
-        },
-        {
-          "fileId": "2748236e5a31cf808ff5b10c1fde10878558f2836826b92e9be5d2f843933d64",
-          "durationMs": 55062,
-          "count": 10
-        },
-        {
-          "fileId": "fb4d39ed5641cd128bb87dd86d182e75da63ff3b0dbb2269d1e4260955186de3",
-          "durationMs": 54328,
-          "count": 14
-        },
-        {
-          "fileId": "a4eeee5c05662e4228152a5d3146108c0fe0259221c6a603b37b8a86d7084920",
-          "durationMs": 51158,
-          "count": 25
-        },
-        {
-          "fileId": "4dcd680ae2de8924e9e7631f762e10c413deda1b38970b9fd565a146e3426650",
-          "durationMs": 46376,
-          "count": 12
-        },
-        {
-          "fileId": "cc2478179fcca7363ffe16a650dec32161b794fc0d1a20de7b45490d8f6b2ce7",
-          "durationMs": 46041,
-          "count": 20
-        },
-        {
-          "fileId": "a595e9c28da0b81b3f640c6591aa4d8a7a6c337801cbb00065ced459aa0e137a",
-          "durationMs": 38668,
-          "count": 15
-        },
-        {
-          "fileId": "9b2d0183e2b4bd03ef13516f82cdccb600c54db5e4f824bf3c144878352bb237",
-          "durationMs": 37602,
-          "count": 9
-        },
-        {
-          "fileId": "6af1bfdfe830a70644d0fde74b20f7b7f54a6a677d025b9561718bb85f89b9e3",
-          "durationMs": 36829,
-          "count": 11
-        },
-        {
-          "fileId": "e4b373f88d0a6799c664289b1b66cdd1f520865e622e939c8ad1a2775a181132",
-          "durationMs": 35725,
-          "count": 13
-        },
-        {
-          "fileId": "dac70d000e385310ff863d160cb2a74af99a38d034ddcb8e7dccb319d4a20aea",
-          "durationMs": 35104,
-          "count": 10
-        },
-        {
-          "fileId": "eea95825e886b13618c14dae7a4519fee66015bc7b95d356c9bf05389c5f7e94",
-          "durationMs": 34902,
-          "count": 10
-        },
-        {
-          "fileId": "c489ef7a00321155c80c2ee2cb4ae91d0c90e5ba557a56ca190e63a7769342d6",
-          "durationMs": 28283,
-          "count": 10
-        },
-        {
-          "fileId": "934c3ae880986e1467d6ea5b93deb604d1e9c10403ef38804676aead9b018ec1",
-          "durationMs": 27468,
-          "count": 6
-        }
-      ],
-      "count": 725,
-      "failed": 0,
-      "retryOnly": 0,
-      "context": {
-        "runId": "39866598899",
-        "attempt": 1,
-        "testedSha": "8183eb56c4beb1ebfa4bfcc2693591e8d8a8cfbb",
-        "workflowSha": "8183eb56c4beb1ebfa4bfcc2693591e8d8a8cfbb"
-      },
-      "phases": {
-        "activeSeconds": 1686,
-        "installSeconds": 17,
-        "otherSetupSeconds": 22,
-        "suiteSeconds": 1643,
-        "productionSeconds": 0,
-        "cleanupSeconds": 4
-      },
-      "skipped": 4,
-      "cancelled": 0,
-      "unmeasured": 0
-    },
-    {
-      "runId": 39866598899,
-      "attempt": 1,
-      "jobId": 120130235621,
-      "jobName": "Browser End-to-End Tests (2)",
-      "suiteSeconds": 1531,
-      "slowestTests": [
-        {
-          "fileId": "f32cd278669edcf5067b88382aee81ac5132e1e7012d0bb30c37dc7f6df563df",
-          "testId": "58c43a06b30a90675d25f600cb880a4b906a324e448508ad580c6ddafc690919",
-          "durationMs": 13609,
-          "state": "passing",
-          "retry": 0
-        },
-        {
-          "fileId": "d2d900d95627194db12ab91f9d233662c56332a7ba65370c0b345645d7bdb6a4",
-          "testId": "fc7ed2bc00e2a50cac5be0dbcd27b10d2ac673e67fe972215b3cbf0b5f36c9eb",
-          "durationMs": 13604,
-          "state": "passing",
-          "retry": 0
-        },
-        {
-          "fileId": "d2d900d95627194db12ab91f9d233662c56332a7ba65370c0b345645d7bdb6a4",
-          "testId": "0a638086d81c81cd9ee3c13cd657929670813662f9fdfa6dd85f7f8e25ed1674",
-          "durationMs": 13601,
-          "state": "passing",
-          "retry": 0
-        }
-      ],
-      "slowestFiles": [
-        {
-          "fileId": "ee173d8788ad0a15b615e6c6fe07fe036d5012f751a345acc31eae01d56969d3",
-          "durationMs": 175227,
-          "count": 45
-        },
-        {
-          "fileId": "d2d900d95627194db12ab91f9d233662c56332a7ba65370c0b345645d7bdb6a4",
-          "durationMs": 103033,
-          "count": 24
-        },
-        {
-          "fileId": "d63e0f5293c44824494e8221898d505337296bf1663bae6edd51330e32017181",
-          "durationMs": 86685,
-          "count": 23
-        },
-        {
-          "fileId": "c8d030972bdc6f6c2ecd31b10d2ca17d69a1d36ba86851334f33d4ad8c1b683e",
-          "durationMs": 72120,
-          "count": 33
-        },
-        {
-          "fileId": "4fe46a32c81057f85c4a433301ac6eac1e94d44e1951dc1f4cae4c1000c5ca01",
-          "durationMs": 68200,
-          "count": 18
-        },
-        {
-          "fileId": "2f9840f44fede593a70b37b9a25c2be73428d689442d0282b2d13f5c732694ec",
-          "durationMs": 67106,
-          "count": 43
-        },
-        {
-          "fileId": "6ac4bc03a1bd4dca9a3f033cd7ed11b96b021dd8258bda760e17e23308391d3a",
-          "durationMs": 60797,
-          "count": 30
-        },
-        {
-          "fileId": "480954301fad999c30acbdf073230e2295586a2ed7b574668e537631c6db8513",
-          "durationMs": 52574,
-          "count": 23
-        },
-        {
-          "fileId": "aa7c02c233a195c4ec43632895b7038554976f920f729d8fe26e7f4909e0d43b",
-          "durationMs": 51250,
-          "count": 55
-        },
-        {
-          "fileId": "3939cfdce4da2439e0b491eccb7ca7c367e127b88a178e0216841f28c2ff0d37",
-          "durationMs": 43250,
-          "count": 11
-        },
-        {
-          "fileId": "cdeb6c5615f43cc69e2a6cb78c2ff6936a037c37cd60be749c9415d1b5ba9da1",
-          "durationMs": 33749,
-          "count": 9
-        },
-        {
-          "fileId": "4a3e7b2e81825f163d8b89c93343d58f79f932ed7a7257bc9292c375ee5164d1",
-          "durationMs": 33366,
-          "count": 13
-        },
-        {
-          "fileId": "64e881559e110a1b8dedb836d302c2df887f929fca7615dd6a2e4d5efaf41102",
-          "durationMs": 32383,
-          "count": 6
-        },
-        {
-          "fileId": "023e55b9ae2266b8f131c62413480b188f4b0c620e0731d91c79b68b914a2ae7",
-          "durationMs": 31185,
-          "count": 20
-        },
-        {
-          "fileId": "142930b81d5392eef26ca59adb304b148ce96d274aaf555053258d8cb724555f",
-          "durationMs": 31025,
-          "count": 9
-        },
-        {
-          "fileId": "eccc27b48fc71cb8448ee9372449f32c5cb76e3fc5a230ca1f6aa4ddb7371efc",
-          "durationMs": 30446,
-          "count": 19
-        },
-        {
-          "fileId": "ed26eb5ae7b2584588bbe6eee19d242f7d433e690c9481ce2083aafffca3648e",
-          "durationMs": 30418,
-          "count": 12
-        },
-        {
-          "fileId": "a97db08be7189fa14de27e602abe4002a90ee98ddbdf52bbacf8a02453a6ed7f",
-          "durationMs": 30414,
-          "count": 13
-        },
-        {
-          "fileId": "8d41ee8750dc84de4c84f4f7ed5b3254652f974c173a3055efb9677866d114f5",
-          "durationMs": 29046,
-          "count": 9
-        },
-        {
-          "fileId": "3b3c11617dffa3ba7a463e7d4978f70fcf23a0a1ff68fd556c8f61853f40184c",
-          "durationMs": 28436,
-          "count": 21
-        }
-      ],
-      "count": 705,
-      "failed": 0,
-      "retryOnly": 0,
-      "context": {
-        "runId": "39866598899",
-        "attempt": 1,
-        "testedSha": "8183eb56c4beb1ebfa4bfcc2693591e8d8a8cfbb",
-        "workflowSha": "8183eb56c4beb1ebfa4bfcc2693591e8d8a8cfbb"
-      },
-      "phases": {
-        "activeSeconds": 2203,
-        "installSeconds": 637,
-        "otherSetupSeconds": 31,
-        "suiteSeconds": 1531,
-        "productionSeconds": 0,
-        "cleanupSeconds": 4
-      },
-      "skipped": 4,
-      "cancelled": 0,
-      "unmeasured": 0
-    },
-    {
-      "runId": 39866598899,
-      "attempt": 1,
-      "jobId": 120130235646,
-      "jobName": "Browser End-to-End Tests (5)",
-      "suiteSeconds": 1600,
-      "slowestTests": [
-        {
-          "fileId": "3452527edbc0aba39fe739c52eff1c718c1ac3670d9e32ccac960c157b098d0d",
-          "testId": "32da7c88c8a1d079f54188ca15170644491cbf8a0d2d2169a39ca96b41472822",
-          "durationMs": 41329,
-          "state": "passing",
-          "retry": 0
-        },
-        {
-          "fileId": "2f18265ce0b63584131626925e3fa6a6ceb8d6c245910f878a43f5569afd58b5",
-          "testId": "959b6a32f54a09b8557f65e46dd84fcdcdf2b6ec585f4341461531a082db8ce9",
-          "durationMs": 10923,
-          "state": "passing",
-          "retry": 0
-        },
-        {
-          "fileId": "9579a51cc63675cfaa417f56027bd4108702fa78ed5d4f44c76a818d4b628d98",
-          "testId": "9e8105eee26d1ae1884cd535e4997a5a76399f3f871d447b35ff04fb9172af77",
-          "durationMs": 8237,
-          "state": "passing",
-          "retry": 0
-        }
-      ],
-      "slowestFiles": [
-        {
-          "fileId": "b86b74e0f3f571141378811c716303cfeee8ba38b3991bcec54ba5ec8e42713b",
-          "durationMs": 125337,
-          "count": 26
-        },
-        {
-          "fileId": "3ba7a7068ec541351b83f60a7a78ae091a50b4d04e832b5503549cab5f37b9b9",
-          "durationMs": 89750,
-          "count": 30
-        },
-        {
-          "fileId": "9c3c6aa65ecfe5660548aeba957d579f048f93f302eb01bd5b8b1a2f93c8a51f",
-          "durationMs": 84513,
-          "count": 44
-        },
-        {
-          "fileId": "3648faed38fa2903652de31bb4136a956672dacdf75a9e08f14e3af2e2e35496",
-          "durationMs": 65575,
-          "count": 25
-        },
-        {
-          "fileId": "29c5d43190a38be29b1e554a5c6b7f3066b7c0e9eba841efdcbe18ca7e7b0412",
-          "durationMs": 62599,
-          "count": 30
-        },
-        {
-          "fileId": "c48d3cb886b313c57f5e7295f20d2120a258301e7fd356df8df55e09d817ddcb",
-          "durationMs": 55692,
-          "count": 15
-        },
-        {
-          "fileId": "96585da966a8c8fd29ea771e3b5fe60cf7d77ae3aa6e6e839197c562f7c1fc0d",
-          "durationMs": 50899,
-          "count": 16
-        },
-        {
-          "fileId": "55c8829024b6b23b58b8be149bf83ebb7dd5855275d56ebdfe2da6179a9ee8d8",
-          "durationMs": 46450,
-          "count": 24
-        },
-        {
-          "fileId": "6b29b7f218aa563725fc8f397a31ddc4f13208c35fc8cd11ab2ad9aa5f3ee002",
-          "durationMs": 43807,
-          "count": 17
-        },
-        {
-          "fileId": "3452527edbc0aba39fe739c52eff1c718c1ac3670d9e32ccac960c157b098d0d",
-          "durationMs": 41329,
-          "count": 1
-        },
-        {
-          "fileId": "3a22280c1e8063383a6e2348651b75e8182b13b3de5671b31a685613814a0fa6",
-          "durationMs": 38963,
-          "count": 24
-        },
-        {
-          "fileId": "2f18265ce0b63584131626925e3fa6a6ceb8d6c245910f878a43f5569afd58b5",
-          "durationMs": 36739,
-          "count": 10
-        },
-        {
-          "fileId": "80285b4cfccee0b1309691d95b0eb5d87cb89eeb51efd203c5b7eb696b866b9e",
-          "durationMs": 33874,
-          "count": 19
-        },
-        {
-          "fileId": "9579a51cc63675cfaa417f56027bd4108702fa78ed5d4f44c76a818d4b628d98",
-          "durationMs": 32069,
-          "count": 11
-        },
-        {
-          "fileId": "4111bde35cb7fa2f076027f02190f461853a447900607f02b53d27bec792b829",
-          "durationMs": 28983,
-          "count": 10
-        },
-        {
-          "fileId": "644fe0aec277f7f94abf7fb11fa60d52c83d784e0e7897b8e164b4bb11753f42",
-          "durationMs": 27528,
-          "count": 9
-        },
-        {
-          "fileId": "39e11c00ecc9db04bb70e4a675e02ba49f15497c0890455a2e5b88a980a9bb33",
-          "durationMs": 26918,
-          "count": 17
-        },
-        {
-          "fileId": "cb650a0a25087fb29395d3ae98a1f009ae2b691c6f41122f76d6fe245979f9f2",
-          "durationMs": 26893,
-          "count": 18
-        },
-        {
-          "fileId": "d6a8f3c0541edd683089dc7333240576e74855dabdae64d809be8f3c790b6b4b",
-          "durationMs": 26726,
-          "count": 12
-        },
-        {
-          "fileId": "2bfd440a6ae78c6f1c1b879eeabd971c40aa9b9a41fffa606958dbe473658dda",
-          "durationMs": 25015,
-          "count": 17
-        }
-      ],
-      "count": 731,
-      "failed": 0,
-      "retryOnly": 0,
-      "context": {
-        "runId": "39866598899",
-        "attempt": 1,
-        "testedSha": "8183eb56c4beb1ebfa4bfcc2693591e8d8a8cfbb",
-        "workflowSha": "8183eb56c4beb1ebfa4bfcc2693591e8d8a8cfbb"
-      },
-      "phases": {
-        "activeSeconds": 1637,
-        "installSeconds": 14,
-        "otherSetupSeconds": 19,
-        "suiteSeconds": 1600,
-        "productionSeconds": 0,
-        "cleanupSeconds": 4
-      },
-      "skipped": 0,
-      "cancelled": 0,
-      "unmeasured": 0
-    },
-    {
-      "runId": 39866598899,
-      "attempt": 1,
-      "jobId": 120130235688,
-      "jobName": "Browser End-to-End Tests (3)",
-      "suiteSeconds": 1615,
-      "slowestTests": [
-        {
-          "fileId": "705aeb874404404ac17a44b51f9164ba2706db10bb15fded3684e0c8504a8264",
-          "testId": "b3cbcb5a6b4de37fb3d39810d0dbf36fac3472d4e6f2cab3759fcc12255a0d22",
-          "durationMs": 23898,
-          "state": "passing",
-          "retry": 0
-        },
-        {
-          "fileId": "705aeb874404404ac17a44b51f9164ba2706db10bb15fded3684e0c8504a8264",
-          "testId": "a91e6bc0ae0146d2930c6bd2f14834c58494afd140cdbec4cfb7b7e89983ad10",
-          "durationMs": 23083,
-          "state": "passing",
-          "retry": 0
-        },
-        {
-          "fileId": "8569d3ded262b2a29398385dc716a95493fa69973527cfdb54d3083524a0c76b",
-          "testId": "c01af1ab7baa42b25a1ecf26433b12ed42800f333d069504006a2f7e5809b1f2",
-          "durationMs": 16321,
-          "state": "passing",
-          "retry": 0
-        }
-      ],
-      "slowestFiles": [
-        {
-          "fileId": "f0e0441575a53d32e94e528691fb97540ccbb74a11eec99c5e21e1babfe12513",
-          "durationMs": 132704,
-          "count": 70
-        },
-        {
-          "fileId": "705aeb874404404ac17a44b51f9164ba2706db10bb15fded3684e0c8504a8264",
-          "durationMs": 117253,
-          "count": 13
-        },
-        {
           "fileId": "42a9c4e8adad65160872d843b956ae6a03a616b7d11b3b3fe306011a7f1dbc40",
-          "durationMs": 79604,
+          "durationMs": 67140,
           "count": 41
         },
         {
-          "fileId": "6377d239dc170dabd88f1c2adca6827790ca723e14f0eb0b0b06bbb4d34a38a0",
-          "durationMs": 70990,
-          "count": 18
+          "fileId": "55c8829024b6b23b58b8be149bf83ebb7dd5855275d56ebdfe2da6179a9ee8d8",
+          "durationMs": 59999,
+          "count": 24
         },
         {
-          "fileId": "b1b134901fe272e867d7bbf95db9dbb69c25feb2fe898c088cf4d4b2088a4696",
-          "durationMs": 68653,
-          "count": 22
-        },
-        {
-          "fileId": "8569d3ded262b2a29398385dc716a95493fa69973527cfdb54d3083524a0c76b",
-          "durationMs": 63646,
-          "count": 4
-        },
-        {
-          "fileId": "1898d1e03fbcc10b927d4a2cb345b9b509d7639b74c1352eea18c49cdcfc1827",
-          "durationMs": 62270,
+          "fileId": "cc2478179fcca7363ffe16a650dec32161b794fc0d1a20de7b45490d8f6b2ce7",
+          "durationMs": 45329,
           "count": 20
         },
         {
-          "fileId": "20747b983374467898371c2e4d48e3cf6cb93ba440ad59f68e86ddf8c4a7a796",
-          "durationMs": 51483,
-          "count": 39
+          "fileId": "3939cfdce4da2439e0b491eccb7ca7c367e127b88a178e0216841f28c2ff0d37",
+          "durationMs": 39760,
+          "count": 11
         },
         {
           "fileId": "5c2157999b207812522e4d848a33d2f5d699ea4b33b1284d963d5614fc0cbca9",
-          "durationMs": 46691,
+          "durationMs": 33864,
+          "count": 10
+        },
+        {
+          "fileId": "023e55b9ae2266b8f131c62413480b188f4b0c620e0731d91c79b68b914a2ae7",
+          "durationMs": 32196,
+          "count": 20
+        },
+        {
+          "fileId": "39e11c00ecc9db04bb70e4a675e02ba49f15497c0890455a2e5b88a980a9bb33",
+          "durationMs": 29644,
+          "count": 17
+        },
+        {
+          "fileId": "3b3c11617dffa3ba7a463e7d4978f70fcf23a0a1ff68fd556c8f61853f40184c",
+          "durationMs": 25918,
+          "count": 21
+        },
+        {
+          "fileId": "7edfa92c437fb3f30c72aece4a91ba1fb36a0c20ccb4b0e338cfb05e792901c7",
+          "durationMs": 24228,
+          "count": 9
+        },
+        {
+          "fileId": "a345a269e7cf8d810277dc6e294571065c00c067a1a374fcd9c01c7989b772f8",
+          "durationMs": 22169,
+          "count": 17
+        },
+        {
+          "fileId": "2a7f89b81ce3a05e7b809c29ef2fae0c43260fc51d033f40cfe47891289b6232",
+          "durationMs": 21647,
+          "count": 4
+        },
+        {
+          "fileId": "2ce487f4d8a965a593ac557d8bdb15aa2e7ddc06ea119d5e157a26ab4df23807",
+          "durationMs": 20891,
+          "count": 12
+        },
+        {
+          "fileId": "6c5f09ad4895104f994ed48f16823db6b5caca0d5c7f5b5c862bebd1d31d7a90",
+          "durationMs": 20573,
+          "count": 8
+        },
+        {
+          "fileId": "76463518ee708308a52a7be04f3f3a8342652aa903dcfba82665e10b6f565756",
+          "durationMs": 19556,
+          "count": 8
+        },
+        {
+          "fileId": "decf8b7cafac04806c48fd07b5ee5c5470357ccee330e36db8847b5d2e6aacd0",
+          "durationMs": 19340,
+          "count": 5
+        },
+        {
+          "fileId": "ec8b12a5dec2976e8170b5056c21a5c3610cb08ccdbd7cc7bcd28cab9237afb4",
+          "durationMs": 16057,
+          "count": 9
+        },
+        {
+          "fileId": "de92af45cf207dbd4328298980cc22e729e904637ac3be65b4c1e50e1a1c812c",
+          "durationMs": 15806,
+          "count": 8
+        },
+        {
+          "fileId": "f46539cb4634a262b3b3017ed576540947b4a616bb8ceb521ea591c30576dfe0",
+          "durationMs": 15529,
+          "count": 8
+        }
+      ],
+      "slowestTests": [
+        {
+          "fileId": "6c5f09ad4895104f994ed48f16823db6b5caca0d5c7f5b5c862bebd1d31d7a90",
+          "testId": "292aa48a08923f6b53b3d0966741ec8740dde7205597f37c1b6780b198b9862a",
+          "durationMs": 12271,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "4f016a6bd340d8d85877311e1fcda3b53b63d581bd2fa3314e0fbbd16a8b3bee",
+          "testId": "1f07f426ffc10d44323397cce41bd2e3cfcb190068d39742f8a5ea79279919db",
+          "durationMs": 10469,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "4f016a6bd340d8d85877311e1fcda3b53b63d581bd2fa3314e0fbbd16a8b3bee",
+          "testId": "b777c2dcaa9129c0e3a345a6c461f63ba241d2dd82a3a1731eb54aa4e7761741",
+          "durationMs": 5951,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "reliability": {
+        "tests": [],
+        "truncated": false
+      },
+      "suiteSeconds": 887,
+      "phases": {
+        "activeSeconds": 926,
+        "installSeconds": 6,
+        "otherSetupSeconds": 30,
+        "suiteSeconds": 887,
+        "productionSeconds": 0,
+        "cleanupSeconds": 3
+      }
+    },
+    {
+      "runId": 42054331358,
+      "attempt": 1,
+      "jobId": 127342213238,
+      "shard": 3,
+      "version": 1,
+      "suite": "browser",
+      "count": 389,
+      "failed": 0,
+      "skipped": 3,
+      "cancelled": 0,
+      "unmeasured": 0,
+      "retryOnly": 0,
+      "truncated": false,
+      "context": {
+        "runId": "42054331358",
+        "attempt": 1,
+        "testedSha": "4a65869bbd681ce445e79e9046e343a374be5525",
+        "workflowSha": "4a65869bbd681ce445e79e9046e343a374be5525"
+      },
+      "slowestFiles": [
+        {
+          "fileId": "10697a9df047387b834c1cf389cb2bbdf2536b1a2485147b650190ccefa2da09",
+          "durationMs": 297091,
+          "count": 30
+        },
+        {
+          "fileId": "88376137501f250687e602a30b42a427fb8e2e2fb73c73044068f450eb3085d7",
+          "durationMs": 78270,
+          "count": 31
+        },
+        {
+          "fileId": "6377d239dc170dabd88f1c2adca6827790ca723e14f0eb0b0b06bbb4d34a38a0",
+          "durationMs": 66776,
+          "count": 18
+        },
+        {
+          "fileId": "a4eeee5c05662e4228152a5d3146108c0fe0259221c6a603b37b8a86d7084920",
+          "durationMs": 63666,
+          "count": 26
+        },
+        {
+          "fileId": "62db2f099c421a712cbf957d14b112ce7256d4ed3db94ea52b71419c10c84006",
+          "durationMs": 56727,
+          "count": 45
+        },
+        {
+          "fileId": "a0be1640251948b6dab4f83ab868dd2aa64f34005ca3171bb1bb66c84d562640",
+          "durationMs": 44397,
+          "count": 26
+        },
+        {
+          "fileId": "77c0b320f6b47b8cf37a2e5d1107322c09d46283ac8d2bee7383134e9a058bd4",
+          "durationMs": 40550,
+          "count": 18
+        },
+        {
+          "fileId": "9579a51cc63675cfaa417f56027bd4108702fa78ed5d4f44c76a818d4b628d98",
+          "durationMs": 39388,
+          "count": 11
+        },
+        {
+          "fileId": "c766fa11a7e93bb1b61598a48c2f7f70b4849a7d7d3b42de8c2a784e3bc05057",
+          "durationMs": 36082,
+          "count": 11
+        },
+        {
+          "fileId": "3f6bee7da291c3253a89cd82bfb09502bf3368ee38498fa83a36e1cab1ed7e52",
+          "durationMs": 35623,
+          "count": 8
+        },
+        {
+          "fileId": "c489ef7a00321155c80c2ee2cb4ae91d0c90e5ba557a56ca190e63a7769342d6",
+          "durationMs": 33766,
+          "count": 10
+        },
+        {
+          "fileId": "1c55e93e2fded3d2db4d578e87361c9b90dccfde8f8d5fb12e11a724e4c59a07",
+          "durationMs": 32600,
+          "count": 16
+        },
+        {
+          "fileId": "61822b1cbabb386855f2497160b1cc1f36e233ff042c43dadfc06c2011c2490e",
+          "durationMs": 22536,
+          "count": 11
+        },
+        {
+          "fileId": "5ce8f47d5948e02211d0ec514a3d1f92ef0a83a56228ce5dc94f2fc50d1ad3c5",
+          "durationMs": 20754,
+          "count": 12
+        },
+        {
+          "fileId": "9f3b47723e848ce59c1eabbbd1449de4751b309b6af498a41cdd2ffa50bd365c",
+          "durationMs": 20348,
+          "count": 18
+        },
+        {
+          "fileId": "6bfb7bcf3862db9741e738c11167ebadb4f89d34a1c2314bb7d672d416a30b84",
+          "durationMs": 20083,
+          "count": 14
+        },
+        {
+          "fileId": "b1bf4ada7a8fb97eb937d76edb8d5d20d24ffdb3dbd6064f8552cca50c5f6174",
+          "durationMs": 19363,
+          "count": 8
+        },
+        {
+          "fileId": "17a9034519e31bcd204500e4bb183c4dc6cba4cf527661ead27628633c3e7bfa",
+          "durationMs": 18687,
+          "count": 12
+        },
+        {
+          "fileId": "cd44808ed458a4764420076a05be489de1762ebdd08d47883bcb734ba4602f66",
+          "durationMs": 18603,
+          "count": 10
+        },
+        {
+          "fileId": "9fb104d09dea08c9baf0d052ce1617181dc9313095d4d45213f203f045cf794a",
+          "durationMs": 14820,
+          "count": 10
+        }
+      ],
+      "slowestTests": [
+        {
+          "fileId": "10697a9df047387b834c1cf389cb2bbdf2536b1a2485147b650190ccefa2da09",
+          "testId": "85545be5373ba2f26ebfb1d4db187de576239af8f88dc231f7ed676c1035b481",
+          "durationMs": 20745,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "10697a9df047387b834c1cf389cb2bbdf2536b1a2485147b650190ccefa2da09",
+          "testId": "0fff8971f1b31025057691e561f4e56347a47837a8bf7491355ebd0dd51b51a7",
+          "durationMs": 18412,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "10697a9df047387b834c1cf389cb2bbdf2536b1a2485147b650190ccefa2da09",
+          "testId": "8217d2b6c6030223ec1583489f2dde60428e6732cca699a71a3e51ea6fe6b92b",
+          "durationMs": 13011,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "reliability": {
+        "tests": [],
+        "truncated": false
+      },
+      "suiteSeconds": 1076,
+      "phases": {
+        "activeSeconds": 1117,
+        "installSeconds": 5,
+        "otherSetupSeconds": 33,
+        "suiteSeconds": 1076,
+        "productionSeconds": 0,
+        "cleanupSeconds": 3
+      }
+    },
+    {
+      "runId": 42054331358,
+      "attempt": 1,
+      "jobId": 127342213289,
+      "shard": 9,
+      "version": 1,
+      "suite": "browser",
+      "count": 436,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0,
+      "unmeasured": 0,
+      "retryOnly": 0,
+      "truncated": false,
+      "context": {
+        "runId": "42054331358",
+        "attempt": 1,
+        "testedSha": "4a65869bbd681ce445e79e9046e343a374be5525",
+        "workflowSha": "4a65869bbd681ce445e79e9046e343a374be5525"
+      },
+      "slowestFiles": [
+        {
+          "fileId": "3ba7a7068ec541351b83f60a7a78ae091a50b4d04e832b5503549cab5f37b9b9",
+          "durationMs": 129277,
+          "count": 30
+        },
+        {
+          "fileId": "705aeb874404404ac17a44b51f9164ba2706db10bb15fded3684e0c8504a8264",
+          "durationMs": 113130,
+          "count": 13
+        },
+        {
+          "fileId": "29c5d43190a38be29b1e554a5c6b7f3066b7c0e9eba841efdcbe18ca7e7b0412",
+          "durationMs": 88254,
+          "count": 30
+        },
+        {
+          "fileId": "2f9840f44fede593a70b37b9a25c2be73428d689442d0282b2d13f5c732694ec",
+          "durationMs": 79954,
+          "count": 43
+        },
+        {
+          "fileId": "67ef8a70b6eb25a5f9189ba7ab43ddb5b23eeace1e710d07eca93b8d7c7870c1",
+          "durationMs": 62124,
+          "count": 29
+        },
+        {
+          "fileId": "4a79b4baef33ff7a4cd61c91d157b6cad3830bc3dbf6f324a337623b77db91c1",
+          "durationMs": 58875,
+          "count": 62
+        },
+        {
+          "fileId": "9d224f6b1943b638599f0adc0ab7a80bed26776ec7c5b6abdb6ab8bd63a4bd94",
+          "durationMs": 48375,
+          "count": 18
+        },
+        {
+          "fileId": "e4b373f88d0a6799c664289b1b66cdd1f520865e622e939c8ad1a2775a181132",
+          "durationMs": 39987,
+          "count": 13
+        },
+        {
+          "fileId": "fe26d50774f8f0efa0ca7147ff9123dc65f49c8626d1864ceb0e96c3711696ed",
+          "durationMs": 39954,
+          "count": 10
+        },
+        {
+          "fileId": "467f5b568300c6669bae0d01f3877dfe6c2a797c913763baa30f9ea1fdfceb32",
+          "durationMs": 33361,
+          "count": 8
+        },
+        {
+          "fileId": "0d716b7d79736fdf86d32d80f2f4d44438b915dbf7b84924cfcda14ffb3873cb",
+          "durationMs": 32346,
+          "count": 15
+        },
+        {
+          "fileId": "be07f0ce1b0229e735214f56c74da74a3959337822f30f15b47380cc7505f246",
+          "durationMs": 32135,
+          "count": 8
+        },
+        {
+          "fileId": "2202e3e5f9e13564085f1ee87c7eec2e67094c7b89ee2b956b6090134982c858",
+          "durationMs": 28097,
+          "count": 25
+        },
+        {
+          "fileId": "eee78b9fe0afbcc2004889163a57583c22fa4076fb348813b1909743ab4d8990",
+          "durationMs": 26496,
+          "count": 12
+        },
+        {
+          "fileId": "3d64dede0e1e1c30b8cc77547134afde3c7ca63f092f6e2c303c933d00104184",
+          "durationMs": 24975,
+          "count": 12
+        },
+        {
+          "fileId": "03c721a900192ce689cd907515432d8c513cd68b0f9f5db1f4d77c3f15256032",
+          "durationMs": 24250,
+          "count": 16
+        },
+        {
+          "fileId": "c855806839de21d2e9c57b296bffbef729a219cec7b8eb0df30d0d9045a187b5",
+          "durationMs": 20186,
+          "count": 11
+        },
+        {
+          "fileId": "42497246c07da3bb38430e1a2f838b685a24c902a4993d4c97d54b3c78ff3500",
+          "durationMs": 16205,
+          "count": 9
+        },
+        {
+          "fileId": "7b4d66cd106435f507cd44f119f6886c758622ae01939c46c0b82080d0a1758c",
+          "durationMs": 15024,
+          "count": 4
+        },
+        {
+          "fileId": "9c19159169be7aca707aef4bc69fbdd8c0978aa09f001e70e269498e83f0c50e",
+          "durationMs": 14831,
+          "count": 20
+        }
+      ],
+      "slowestTests": [
+        {
+          "fileId": "705aeb874404404ac17a44b51f9164ba2706db10bb15fded3684e0c8504a8264",
+          "testId": "54f07ee2b0b75c3a5e33fbbd552ee70df8073143d723972bdb506940f4142efd",
+          "durationMs": 23266,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "705aeb874404404ac17a44b51f9164ba2706db10bb15fded3684e0c8504a8264",
+          "testId": "822017abb47550106adef715136c8a007d7fc6e89382dff32b814b2924cb3ead",
+          "durationMs": 22724,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "1423e878d57d6ba206c740dc29029ce2db27b37d9b64d9b03aaedb7802d6957f",
+          "testId": "564cfa50d73f7cc0ea4d9a93d0d786f932e3231a8e0ce9b581263e2025f637e1",
+          "durationMs": 8208,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "reliability": {
+        "tests": [],
+        "truncated": false
+      },
+      "suiteSeconds": 1039,
+      "phases": {
+        "activeSeconds": 1092,
+        "installSeconds": 9,
+        "otherSetupSeconds": 41,
+        "suiteSeconds": 1039,
+        "productionSeconds": 0,
+        "cleanupSeconds": 3
+      }
+    },
+    {
+      "runId": 42054331358,
+      "attempt": 1,
+      "jobId": 127342213427,
+      "shard": 7,
+      "version": 1,
+      "suite": "browser",
+      "count": 361,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0,
+      "unmeasured": 0,
+      "retryOnly": 0,
+      "truncated": false,
+      "context": {
+        "runId": "42054331358",
+        "attempt": 1,
+        "testedSha": "4a65869bbd681ce445e79e9046e343a374be5525",
+        "workflowSha": "4a65869bbd681ce445e79e9046e343a374be5525"
+      },
+      "slowestFiles": [
+        {
+          "fileId": "8df93f9a1aee7eae1568ae36669c9ea3cc3b8bd4036c1765c103c4ca207b888f",
+          "durationMs": 149549,
+          "count": 70
+        },
+        {
+          "fileId": "9c3c6aa65ecfe5660548aeba957d579f048f93f302eb01bd5b8b1a2f93c8a51f",
+          "durationMs": 107920,
+          "count": 44
+        },
+        {
+          "fileId": "d63e0f5293c44824494e8221898d505337296bf1663bae6edd51330e32017181",
+          "durationMs": 100623,
+          "count": 23
+        },
+        {
+          "fileId": "96585da966a8c8fd29ea771e3b5fe60cf7d77ae3aa6e6e839197c562f7c1fc0d",
+          "durationMs": 65973,
+          "count": 16
+        },
+        {
+          "fileId": "2748236e5a31cf808ff5b10c1fde10878558f2836826b92e9be5d2f843933d64",
+          "durationMs": 65409,
+          "count": 10
+        },
+        {
+          "fileId": "3a22280c1e8063383a6e2348651b75e8182b13b3de5671b31a685613814a0fa6",
+          "durationMs": 50026,
+          "count": 24
+        },
+        {
+          "fileId": "a595e9c28da0b81b3f640c6591aa4d8a7a6c337801cbb00065ced459aa0e137a",
+          "durationMs": 45792,
+          "count": 15
+        },
+        {
+          "fileId": "142930b81d5392eef26ca59adb304b148ce96d274aaf555053258d8cb724555f",
+          "durationMs": 35881,
+          "count": 9
+        },
+        {
+          "fileId": "48be406cb622f5b2f5487ff1d1159c74d3d879b6a0affeb49dabb8db96a88b37",
+          "durationMs": 35078,
+          "count": 13
+        },
+        {
+          "fileId": "16a67f8450135bd0838332d08c0df2062c00f2832418f1d0e8b84ead20f7b203",
+          "durationMs": 31948,
+          "count": 12
+        },
+        {
+          "fileId": "25fdafb142d68577f334a25368712a552210c27ade82c8b2699371cf22ac9b98",
+          "durationMs": 25222,
+          "count": 15
+        },
+        {
+          "fileId": "14f94279e095149e2db6865a46a0cbb95c2528128b8d774d2ecf61bc95d56171",
+          "durationMs": 24281,
+          "count": 9
+        },
+        {
+          "fileId": "969cacb78c598f952a622788f17de0edfef99befa7d282a5317c61b10083f6d2",
+          "durationMs": 22702,
+          "count": 5
+        },
+        {
+          "fileId": "a8725ca8aec15bcdf0f0acb442fa4d469e3d75479addf551fafb0a5731405a1b",
+          "durationMs": 22355,
+          "count": 7
+        },
+        {
+          "fileId": "8dd3cf9e25792a0a71de86565198c4cb1256d573c5bd50ee162da8e68aedcb12",
+          "durationMs": 22282,
+          "count": 12
+        },
+        {
+          "fileId": "0bb3f282cce773b83c4698fc8456c47cede6f4f22464f3d6a36b9030f19c2dd9",
+          "durationMs": 20378,
+          "count": 5
+        },
+        {
+          "fileId": "3a90b902f6f1110220d0ee31f68b21277585ba8f6ef6a7dd36519a544fc933ef",
+          "durationMs": 16886,
+          "count": 4
+        },
+        {
+          "fileId": "3549b8b9ba0d2bf6b444219ffa2ee59af5e609a56004083658ce1fdcd8d10293",
+          "durationMs": 14427,
+          "count": 7
+        },
+        {
+          "fileId": "341dcbd597a09ba39d645781e8c9e85588a162a332e21fa2e52d2fac243001b6",
+          "durationMs": 13160,
+          "count": 7
+        },
+        {
+          "fileId": "4d4dfcdc31764a64186c91325e821e636cfcca58c571307c49e91cad17805c7c",
+          "durationMs": 12323,
+          "count": 6
+        }
+      ],
+      "slowestTests": [
+        {
+          "fileId": "d63e0f5293c44824494e8221898d505337296bf1663bae6edd51330e32017181",
+          "testId": "2a50ad2a4d8ccc8af9c81103cc74226662e03eac00c992998c0b0e49472c8c8d",
+          "durationMs": 7932,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "2748236e5a31cf808ff5b10c1fde10878558f2836826b92e9be5d2f843933d64",
+          "testId": "023fa22fa26db8be0c36582228131418cbd3945376ecda5815472dae2660bf10",
+          "durationMs": 7733,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "2748236e5a31cf808ff5b10c1fde10878558f2836826b92e9be5d2f843933d64",
+          "testId": "0e6803e3b972139bc304b117407e0a08bfea6b69fabc309f6fef2a83b7626d21",
+          "durationMs": 7667,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "reliability": {
+        "tests": [],
+        "truncated": false
+      },
+      "suiteSeconds": 998,
+      "phases": {
+        "activeSeconds": 1114,
+        "installSeconds": 6,
+        "otherSetupSeconds": 106,
+        "suiteSeconds": 998,
+        "productionSeconds": 0,
+        "cleanupSeconds": 4
+      }
+    },
+    {
+      "runId": 42054331358,
+      "attempt": 1,
+      "jobId": 127342213499,
+      "shard": 4,
+      "version": 1,
+      "suite": "browser",
+      "count": 465,
+      "failed": 0,
+      "skipped": 64,
+      "cancelled": 0,
+      "unmeasured": 0,
+      "retryOnly": 0,
+      "truncated": false,
+      "context": {
+        "runId": "42054331358",
+        "attempt": 1,
+        "testedSha": "4a65869bbd681ce445e79e9046e343a374be5525",
+        "workflowSha": "4a65869bbd681ce445e79e9046e343a374be5525"
+      },
+      "slowestFiles": [
+        {
+          "fileId": "ee173d8788ad0a15b615e6c6fe07fe036d5012f751a345acc31eae01d56969d3",
+          "durationMs": 136726,
+          "count": 47
+        },
+        {
+          "fileId": "60cfc7260eba1c082748cc0810f677f002ecd28a2ac2dae113209ed6a596fc23",
+          "durationMs": 66414,
+          "count": 53
+        },
+        {
+          "fileId": "6ac4bc03a1bd4dca9a3f033cd7ed11b96b021dd8258bda760e17e23308391d3a",
+          "durationMs": 49636,
+          "count": 30
+        },
+        {
+          "fileId": "3452527edbc0aba39fe739c52eff1c718c1ac3670d9e32ccac960c157b098d0d",
+          "durationMs": 42608,
+          "count": 1
+        },
+        {
+          "fileId": "6af1bfdfe830a70644d0fde74b20f7b7f54a6a677d025b9561718bb85f89b9e3",
+          "durationMs": 39273,
+          "count": 16
+        },
+        {
+          "fileId": "97220f376d72dd789f185e72a1270dbb43671a18444afc57c21ec7cc3268ec0f",
+          "durationMs": 39068,
+          "count": 19
+        },
+        {
+          "fileId": "4a3e7b2e81825f163d8b89c93343d58f79f932ed7a7257bc9292c375ee5164d1",
+          "durationMs": 27704,
+          "count": 13
+        },
+        {
+          "fileId": "67dc83db1a4a78fdd53152ba7f05ab5fd7105a39b096a07352b922afac524a20",
+          "durationMs": 27607,
           "count": 10
         },
         {
           "fileId": "7566717d883b1598c0e8bb439fcac72996d4348d7ee4532a91c97862861f9480",
-          "durationMs": 44497,
+          "durationMs": 26796,
           "count": 11
-        },
-        {
-          "fileId": "8624950d9795be97e917861a5b5c4ef9418ada9c2491c6c4137faa94dd62dda2",
-          "durationMs": 44350,
-          "count": 23
-        },
-        {
-          "fileId": "a56acf6b823b467eb5aebe7d676f0d39fa781145386a8da12a6e4c91fbfd2fd2",
-          "durationMs": 39008,
-          "count": 8
-        },
-        {
-          "fileId": "c766fa11a7e93bb1b61598a48c2f7f70b4849a7d7d3b42de8c2a784e3bc05057",
-          "durationMs": 38124,
-          "count": 11
-        },
-        {
-          "fileId": "dd4d76728db89459762f6829cbbde03913e013ad5bab3f1124571486dff2ced5",
-          "durationMs": 37639,
-          "count": 32
-        },
-        {
-          "fileId": "7edfa92c437fb3f30c72aece4a91ba1fb36a0c20ccb4b0e338cfb05e792901c7",
-          "durationMs": 33188,
-          "count": 9
-        },
-        {
-          "fileId": "61996624d526dd15d510669b5bd5c976019856cf368a29c77f27c2f7aa9cf199",
-          "durationMs": 31334,
-          "count": 15
-        },
-        {
-          "fileId": "03ce846071f12ce7499334ce45a17b9e865816cd26aa94308ec865319ed2dcef",
-          "durationMs": 31131,
-          "count": 25
-        },
-        {
-          "fileId": "1870a9c11b9e91284f36b67ec98a359084037ce6bc4c24eb08230ca6730e25fc",
-          "durationMs": 29259,
-          "count": 23
-        },
-        {
-          "fileId": "987b6c446fb37bb0d2ae140ffa7c19faffa08eb6932436be8b01258ebc21c68d",
-          "durationMs": 28931,
-          "count": 20
-        },
-        {
-          "fileId": "a6493a160f0c9435b88c30f7620282051aea617f908e631d998573214368ca0e",
-          "durationMs": 28571,
-          "count": 4
-        }
-      ],
-      "count": 743,
-      "failed": 0,
-      "retryOnly": 0,
-      "context": {
-        "runId": "39866598899",
-        "attempt": 1,
-        "testedSha": "8183eb56c4beb1ebfa4bfcc2693591e8d8a8cfbb",
-        "workflowSha": "8183eb56c4beb1ebfa4bfcc2693591e8d8a8cfbb"
-      },
-      "phases": {
-        "activeSeconds": 1650,
-        "installSeconds": 12,
-        "otherSetupSeconds": 20,
-        "suiteSeconds": 1615,
-        "productionSeconds": 0,
-        "cleanupSeconds": 3
-      },
-      "skipped": 69,
-      "cancelled": 0,
-      "unmeasured": 0
-    },
-    {
-      "runId": 39866598899,
-      "attempt": 3,
-      "jobId": 120202516638,
-      "jobName": "Browser End-to-End Tests (1)",
-      "suiteSeconds": 1817,
-      "slowestTests": [
-        {
-          "fileId": "10697a9df047387b834c1cf389cb2bbdf2536b1a2485147b650190ccefa2da09",
-          "testId": "5c924f767d0fecca9db7192dfa81952cb6e741ac68a0fe7a58dd808b574e59e0",
-          "durationMs": 13722,
-          "state": "passing",
-          "retry": 0
-        },
-        {
-          "fileId": "10697a9df047387b834c1cf389cb2bbdf2536b1a2485147b650190ccefa2da09",
-          "testId": "6c7caf5b8d7fad52e386b29b8d021637204205b9db7bfa76b4ac1d7b770e7504",
-          "durationMs": 13647,
-          "state": "passing",
-          "retry": 0
-        },
-        {
-          "fileId": "a744385c6a66aef4a5573ac71e0091aa057fd9ca6caab813d270d80b71182d48",
-          "testId": "9f45e3f00e6b183e94b5438e7e9ee85605bc3e9149915416659041df68cf5a4e",
-          "durationMs": 11901,
-          "state": "passing",
-          "retry": 0
-        }
-      ],
-      "slowestFiles": [
-        {
-          "fileId": "a744385c6a66aef4a5573ac71e0091aa057fd9ca6caab813d270d80b71182d48",
-          "durationMs": 297859,
-          "count": 52
-        },
-        {
-          "fileId": "10697a9df047387b834c1cf389cb2bbdf2536b1a2485147b650190ccefa2da09",
-          "durationMs": 228338,
-          "count": 28
-        },
-        {
-          "fileId": "0870d9217fe84838fcda1eccccc4b24796dfe149d78ce09b5ff785f982b4db75",
-          "durationMs": 150039,
-          "count": 91
-        },
-        {
-          "fileId": "0901d1d7e1c81efd103c88d777c73ce9cfc829892a4ae416865666fa3bcc5d9f",
-          "durationMs": 104685,
-          "count": 65
-        },
-        {
-          "fileId": "5c89475eae168bac13869ef018048d2a08fb712f80ee048721f9fdb438c330de",
-          "durationMs": 70494,
-          "count": 14
-        },
-        {
-          "fileId": "57dbb9c8af8fd67b40be299e1fc53fd446533afe0ae21d689ada386d49dda101",
-          "durationMs": 70161,
-          "count": 15
-        },
-        {
-          "fileId": "88376137501f250687e602a30b42a427fb8e2e2fb73c73044068f450eb3085d7",
-          "durationMs": 63728,
-          "count": 24
-        },
-        {
-          "fileId": "67ef8a70b6eb25a5f9189ba7ab43ddb5b23eeace1e710d07eca93b8d7c7870c1",
-          "durationMs": 62793,
-          "count": 28
-        },
-        {
-          "fileId": "4a79b4baef33ff7a4cd61c91d157b6cad3830bc3dbf6f324a337623b77db91c1",
-          "durationMs": 61239,
-          "count": 62
-        },
-        {
-          "fileId": "97220f376d72dd789f185e72a1270dbb43671a18444afc57c21ec7cc3268ec0f",
-          "durationMs": 54447,
-          "count": 19
-        },
-        {
-          "fileId": "500c9c6425dc6b5154bb26fae93d922b4a68e71a18d2722848c301f565954d99",
-          "durationMs": 53811,
-          "count": 18
-        },
-        {
-          "fileId": "62db2f099c421a712cbf957d14b112ce7256d4ed3db94ea52b71419c10c84006",
-          "durationMs": 48590,
-          "count": 45
-        },
-        {
-          "fileId": "fcfcc149c48ce98550cd689d9f6fd9b29bd7bc1aa86b6b36c9e7de2edca43e1d",
-          "durationMs": 45719,
-          "count": 27
-        },
-        {
-          "fileId": "736584b1b05354cee821e6aa714e0af2e7e290d8329e8a0656a00e8355e72b4f",
-          "durationMs": 40645,
-          "count": 14
-        },
-        {
-          "fileId": "ec1e87178a5492a53beb3954d2cffb30d5d266f9d08e2589a70986cf8eaef0e6",
-          "durationMs": 36164,
-          "count": 17
-        },
-        {
-          "fileId": "77c0b320f6b47b8cf37a2e5d1107322c09d46283ac8d2bee7383134e9a058bd4",
-          "durationMs": 35849,
-          "count": 18
-        },
-        {
-          "fileId": "b2314e03376af35a7e2acfee720d35013680f656bcafa33302da8c554bd35e40",
-          "durationMs": 35277,
-          "count": 24
-        },
-        {
-          "fileId": "a0be1640251948b6dab4f83ab868dd2aa64f34005ca3171bb1bb66c84d562640",
-          "durationMs": 28529,
-          "count": 16
-        },
-        {
-          "fileId": "0afe5bd1759ac20909ffd8b4895334c23eb1278eda466a89fc9cf20baa6325de",
-          "durationMs": 27930,
-          "count": 6
         },
         {
           "fileId": "ba172d137900021c232d6f2081bf172a4391f1bd6cd5817a2d23d8cfece46c99",
-          "durationMs": 24016,
+          "durationMs": 24894,
+          "count": 5
+        },
+        {
+          "fileId": "dd4d76728db89459762f6829cbbde03913e013ad5bab3f1124571486dff2ced5",
+          "durationMs": 23401,
+          "count": 32
+        },
+        {
+          "fileId": "61996624d526dd15d510669b5bd5c976019856cf368a29c77f27c2f7aa9cf199",
+          "durationMs": 22118,
+          "count": 15
+        },
+        {
+          "fileId": "ba7efa7489cfc54e4d5b2f3ac1d9911ddee847ba7ac2f97d33cb2a1237f4eb8d",
+          "durationMs": 21537,
+          "count": 8
+        },
+        {
+          "fileId": "b55606a7fd7eb481cb3ca6cca78fddfe2e477ec609aa4f62610d71b972688b48",
+          "durationMs": 20699,
+          "count": 27
+        },
+        {
+          "fileId": "c3b707c404070850ba3112087d8462dfdac87f22b749e274372224a972b19cf1",
+          "durationMs": 15173,
+          "count": 5
+        },
+        {
+          "fileId": "8e09630c8332ab3031cdc4b45d0696f9831a45823ac6eecae9ddc7a339148dc8",
+          "durationMs": 14830,
+          "count": 12
+        },
+        {
+          "fileId": "2028fdc5536080112fa360054dd93db9b27560f9a44d3cfe442af91166ffd23a",
+          "durationMs": 13852,
+          "count": 9
+        },
+        {
+          "fileId": "59cd95159f145dcf663c4818cd0e5738e9e51cccd79ea03f4e3a58103a77d3ba",
+          "durationMs": 12152,
+          "count": 11
+        },
+        {
+          "fileId": "087841f4a67089836c16cf369ab5edf8845b515735ea18acb0ced12ebb781b8c",
+          "durationMs": 10825,
+          "count": 4
+        },
+        {
+          "fileId": "edf609eb15dadf60d77d1b4b32cb648d47ad5db413573c1e4a7007bdc005e4fa",
+          "durationMs": 10075,
+          "count": 12
+        }
+      ],
+      "slowestTests": [
+        {
+          "fileId": "3452527edbc0aba39fe739c52eff1c718c1ac3670d9e32ccac960c157b098d0d",
+          "testId": "6bae81b0e18b97adc3de5aef301425b08e723f622489749f9d4082589ea288c2",
+          "durationMs": 42608,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "ba172d137900021c232d6f2081bf172a4391f1bd6cd5817a2d23d8cfece46c99",
+          "testId": "1ff24f9113118e2bab6d370ced75bcaf6f3ee19b46485dcf7cc69dd7c70dd7f4",
+          "durationMs": 13993,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "67dc83db1a4a78fdd53152ba7f05ab5fd7105a39b096a07352b922afac524a20",
+          "testId": "cf70a76a4b2409954b9b33ee13401a1a705f8f9693fac6d862c920535849f83f",
+          "durationMs": 7393,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "reliability": {
+        "tests": [],
+        "truncated": false
+      },
+      "suiteSeconds": 717,
+      "phases": {
+        "activeSeconds": 753,
+        "installSeconds": 5,
+        "otherSetupSeconds": 27,
+        "suiteSeconds": 717,
+        "productionSeconds": 0,
+        "cleanupSeconds": 4
+      }
+    },
+    {
+      "runId": 42054331358,
+      "attempt": 1,
+      "jobId": 127342213547,
+      "shard": 10,
+      "version": 1,
+      "suite": "browser",
+      "count": 386,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0,
+      "unmeasured": 0,
+      "retryOnly": 0,
+      "truncated": false,
+      "context": {
+        "runId": "42054331358",
+        "attempt": 1,
+        "testedSha": "4a65869bbd681ce445e79e9046e343a374be5525",
+        "workflowSha": "4a65869bbd681ce445e79e9046e343a374be5525"
+      },
+      "slowestFiles": [
+        {
+          "fileId": "0870d9217fe84838fcda1eccccc4b24796dfe149d78ce09b5ff785f982b4db75",
+          "durationMs": 97813,
+          "count": 91
+        },
+        {
+          "fileId": "eb9bb6a814f99fd051d13cb756fd42b5d0fa8f3eff2c82f95241b704492f64b2",
+          "durationMs": 88007,
+          "count": 27
+        },
+        {
+          "fileId": "3648faed38fa2903652de31bb4136a956672dacdf75a9e08f14e3af2e2e35496",
+          "durationMs": 60070,
+          "count": 25
+        },
+        {
+          "fileId": "57dbb9c8af8fd67b40be299e1fc53fd446533afe0ae21d689ada386d49dda101",
+          "durationMs": 46843,
+          "count": 15
+        },
+        {
+          "fileId": "6b29b7f218aa563725fc8f397a31ddc4f13208c35fc8cd11ab2ad9aa5f3ee002",
+          "durationMs": 41954,
+          "count": 17
+        },
+        {
+          "fileId": "500c9c6425dc6b5154bb26fae93d922b4a68e71a18d2722848c301f565954d99",
+          "durationMs": 38204,
+          "count": 22
+        },
+        {
+          "fileId": "dac70d000e385310ff863d160cb2a74af99a38d034ddcb8e7dccb319d4a20aea",
+          "durationMs": 29310,
+          "count": 11
+        },
+        {
+          "fileId": "644fe0aec277f7f94abf7fb11fa60d52c83d784e0e7897b8e164b4bb11753f42",
+          "durationMs": 26220,
+          "count": 9
+        },
+        {
+          "fileId": "a97db08be7189fa14de27e602abe4002a90ee98ddbdf52bbacf8a02453a6ed7f",
+          "durationMs": 24295,
+          "count": 13
+        },
+        {
+          "fileId": "ec1e87178a5492a53beb3954d2cffb30d5d266f9d08e2589a70986cf8eaef0e6",
+          "durationMs": 22246,
+          "count": 17
+        },
+        {
+          "fileId": "ff0c7b2a0d351947fb5bf7ab54ae684283847a90a06d0c917a1b8d2782cfd8db",
+          "durationMs": 21824,
+          "count": 13
+        },
+        {
+          "fileId": "2d2ebf09ebe141581f6ee17d0c96c94d887214a65f52011a063d4d88e31b85c6",
+          "durationMs": 20787,
+          "count": 19
+        },
+        {
+          "fileId": "168b8c03c153039aeea90fcb2d0ccdbb011c2f05366568e7ceb2fce193167827",
+          "durationMs": 19177,
+          "count": 7
+        },
+        {
+          "fileId": "b3d409d67e31353ca96e4b0b74ee561b3ea91db998d80e0d9bd0f4c4b462c164",
+          "durationMs": 18770,
+          "count": 11
+        },
+        {
+          "fileId": "e6cc410da49a50008f21caddc10b945678584e540e3b10c71c10e53a5e25c189",
+          "durationMs": 18421,
+          "count": 7
+        },
+        {
+          "fileId": "4922db8249622720bedb908ff0cd7a835fc1f9682d45ee344a444d4832f679e9",
+          "durationMs": 14075,
+          "count": 10
+        },
+        {
+          "fileId": "198723faf2f3e59cf184248b5c299fea5cc33080903eb98ecf9c2582cc0cb6aa",
+          "durationMs": 9969,
+          "count": 10
+        },
+        {
+          "fileId": "e64b3562d9b47279a138e4ece697d0089f0054c7d97135fb9c82bd929814fd8c",
+          "durationMs": 9827,
+          "count": 1
+        },
+        {
+          "fileId": "538ec57e3e4e5e31db9c17fc03f557f02c66d468cca375daab4758da5a6821ec",
+          "durationMs": 9280,
+          "count": 4
+        },
+        {
+          "fileId": "2b3130936d3931a2d6fa74a75ccaa344d40c6f890010d71ac4c44e06c19ce910",
+          "durationMs": 9216,
+          "count": 6
+        }
+      ],
+      "slowestTests": [
+        {
+          "fileId": "e64b3562d9b47279a138e4ece697d0089f0054c7d97135fb9c82bd929814fd8c",
+          "testId": "11e421723145b4eb8ef168e26b16461cbc8969e9f7b72e6482c54e7fe8fcd46f",
+          "durationMs": 9827,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "eb9bb6a814f99fd051d13cb756fd42b5d0fa8f3eff2c82f95241b704492f64b2",
+          "testId": "7eb9dec7b78a2b4968eddab0c9aba04621ca2fea120b48acbce0239bfac39d11",
+          "durationMs": 9367,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "6b29b7f218aa563725fc8f397a31ddc4f13208c35fc8cd11ab2ad9aa5f3ee002",
+          "testId": "4df8785824f72ea15e9c6462e85620dc741d5ef39446303d6fe00ea5ba05fa1f",
+          "durationMs": 5533,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "reliability": {
+        "tests": [],
+        "truncated": false
+      },
+      "suiteSeconds": 689,
+      "phases": {
+        "activeSeconds": 725,
+        "installSeconds": 5,
+        "otherSetupSeconds": 28,
+        "suiteSeconds": 689,
+        "productionSeconds": 0,
+        "cleanupSeconds": 3
+      }
+    },
+    {
+      "runId": 42054331358,
+      "attempt": 1,
+      "jobId": 127342213564,
+      "shard": 6,
+      "version": 1,
+      "suite": "browser",
+      "count": 376,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0,
+      "unmeasured": 0,
+      "retryOnly": 0,
+      "truncated": false,
+      "context": {
+        "runId": "42054331358",
+        "attempt": 1,
+        "testedSha": "4a65869bbd681ce445e79e9046e343a374be5525",
+        "workflowSha": "4a65869bbd681ce445e79e9046e343a374be5525"
+      },
+      "slowestFiles": [
+        {
+          "fileId": "b86b74e0f3f571141378811c716303cfeee8ba38b3991bcec54ba5ec8e42713b",
+          "durationMs": 153319,
+          "count": 26
+        },
+        {
+          "fileId": "0901d1d7e1c81efd103c88d777c73ce9cfc829892a4ae416865666fa3bcc5d9f",
+          "durationMs": 117281,
+          "count": 65
+        },
+        {
+          "fileId": "4fe46a32c81057f85c4a433301ac6eac1e94d44e1951dc1f4cae4c1000c5ca01",
+          "durationMs": 76876,
+          "count": 18
+        },
+        {
+          "fileId": "1eef63a072686a0912c71e3af33117842dae50c98f5ca4aac7475417499b997d",
+          "durationMs": 64063,
+          "count": 14
+        },
+        {
+          "fileId": "fb4d39ed5641cd128bb87dd86d182e75da63ff3b0dbb2269d1e4260955186de3",
+          "durationMs": 61325,
+          "count": 14
+        },
+        {
+          "fileId": "2f18265ce0b63584131626925e3fa6a6ceb8d6c245910f878a43f5569afd58b5",
+          "durationMs": 47837,
+          "count": 10
+        },
+        {
+          "fileId": "9b2d0183e2b4bd03ef13516f82cdccb600c54db5e4f824bf3c144878352bb237",
+          "durationMs": 41813,
+          "count": 9
+        },
+        {
+          "fileId": "b2314e03376af35a7e2acfee720d35013680f656bcafa33302da8c554bd35e40",
+          "durationMs": 36974,
+          "count": 24
+        },
+        {
+          "fileId": "2bfd440a6ae78c6f1c1b879eeabd971c40aa9b9a41fffa606958dbe473658dda",
+          "durationMs": 34742,
+          "count": 17
+        },
+        {
+          "fileId": "03ce846071f12ce7499334ce45a17b9e865816cd26aa94308ec865319ed2dcef",
+          "durationMs": 33266,
+          "count": 25
+        },
+        {
+          "fileId": "8d41ee8750dc84de4c84f4f7ed5b3254652f974c173a3055efb9677866d114f5",
+          "durationMs": 30853,
+          "count": 9
+        },
+        {
+          "fileId": "934c3ae880986e1467d6ea5b93deb604d1e9c10403ef38804676aead9b018ec1",
+          "durationMs": 29576,
+          "count": 6
+        },
+        {
+          "fileId": "127d9346ffee82503ae40b31a692f417799e7f2af735f29f1aff29870fc57ac6",
+          "durationMs": 26029,
+          "count": 14
+        },
+        {
+          "fileId": "79ffed997b5e8ef83eb5348c0462a6b706b0adffadcccd8f47703be9be358798",
+          "durationMs": 24744,
+          "count": 8
+        },
+        {
+          "fileId": "b11675bde4196d5da1c3f1a3ecbc21f1111714b7bf8e75b4f072cdd922fda630",
+          "durationMs": 24242,
+          "count": 14
+        },
+        {
+          "fileId": "7aec999072774db5db1839b29efb60dc5262c371ff2ce286a5e2a507cd6b3496",
+          "durationMs": 23784,
+          "count": 9
+        },
+        {
+          "fileId": "f6aa199787c68c3290df4ed3d2d8cb51bd37a30accd272b5d2ddb845c03fd4f5",
+          "durationMs": 19890,
+          "count": 7
+        },
+        {
+          "fileId": "e3db74c9a9e528de2eca3c37d6aa55e87269a88dd1b74a3e4533ea623d05e358",
+          "durationMs": 19131,
+          "count": 9
+        },
+        {
+          "fileId": "95a63f2c1b4c2b5492d2c9fb39767f9b22a30f85d4e8fd13f3c0d68a9a2d2124",
+          "durationMs": 18573,
+          "count": 4
+        },
+        {
+          "fileId": "b598a17b6b67c2ba2f7d5e8920cf252dde73420c2eecc93926579a9f12ac0e44",
+          "durationMs": 18236,
+          "count": 8
+        }
+      ],
+      "slowestTests": [
+        {
+          "fileId": "2f18265ce0b63584131626925e3fa6a6ceb8d6c245910f878a43f5569afd58b5",
+          "testId": "a0df953511560730d66d6055522cb854cd0c8c03f4bfe073721acbd8e2477d61",
+          "durationMs": 12034,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "934c3ae880986e1467d6ea5b93deb604d1e9c10403ef38804676aead9b018ec1",
+          "testId": "9de080569f27892847cf16972530f95dce7958b0489b06de56811ef0ab051e0d",
+          "durationMs": 7534,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "9b2d0183e2b4bd03ef13516f82cdccb600c54db5e4f824bf3c144878352bb237",
+          "testId": "0d662ea4381da47b71cab83333389078b05821335d47a8a4c0d0e25b9b38a129",
+          "durationMs": 7055,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "reliability": {
+        "tests": [],
+        "truncated": false
+      },
+      "suiteSeconds": 1033,
+      "phases": {
+        "activeSeconds": 1073,
+        "installSeconds": 5,
+        "otherSetupSeconds": 32,
+        "suiteSeconds": 1033,
+        "productionSeconds": 0,
+        "cleanupSeconds": 3
+      }
+    },
+    {
+      "runId": 42054331358,
+      "attempt": 1,
+      "jobId": 127342213582,
+      "shard": 8,
+      "version": 1,
+      "suite": "browser",
+      "count": 431,
+      "failed": 0,
+      "skipped": 4,
+      "cancelled": 0,
+      "unmeasured": 0,
+      "retryOnly": 0,
+      "truncated": false,
+      "context": {
+        "runId": "42054331358",
+        "attempt": 1,
+        "testedSha": "4a65869bbd681ce445e79e9046e343a374be5525",
+        "workflowSha": "4a65869bbd681ce445e79e9046e343a374be5525"
+      },
+      "slowestFiles": [
+        {
+          "fileId": "d2d900d95627194db12ab91f9d233662c56332a7ba65370c0b345645d7bdb6a4",
+          "durationMs": 132245,
+          "count": 33
+        },
+        {
+          "fileId": "1898d1e03fbcc10b927d4a2cb345b9b509d7639b74c1352eea18c49cdcfc1827",
+          "durationMs": 107920,
+          "count": 35
+        },
+        {
+          "fileId": "ed8a77f43ef6978b877c0c68a7fee7449b8db4dcac640365aa03c098c3bc55d5",
+          "durationMs": 80562,
+          "count": 19
+        },
+        {
+          "fileId": "5c89475eae168bac13869ef018048d2a08fb712f80ee048721f9fdb438c330de",
+          "durationMs": 67490,
+          "count": 14
+        },
+        {
+          "fileId": "aa7c02c233a195c4ec43632895b7038554976f920f729d8fe26e7f4909e0d43b",
+          "durationMs": 57498,
+          "count": 55
+        },
+        {
+          "fileId": "20747b983374467898371c2e4d48e3cf6cb93ba440ad59f68e86ddf8c4a7a796",
+          "durationMs": 49387,
+          "count": 40
+        },
+        {
+          "fileId": "80285b4cfccee0b1309691d95b0eb5d87cb89eeb51efd203c5b7eb696b866b9e",
+          "durationMs": 44286,
+          "count": 19
+        },
+        {
+          "fileId": "eea95825e886b13618c14dae7a4519fee66015bc7b95d356c9bf05389c5f7e94",
+          "durationMs": 39875,
+          "count": 10
+        },
+        {
+          "fileId": "a56acf6b823b467eb5aebe7d676f0d39fa781145386a8da12a6e4c91fbfd2fd2",
+          "durationMs": 36199,
+          "count": 8
+        },
+        {
+          "fileId": "74ece85ac2af23390b1761108258a59b1865378202c7bd2c4f002fdddbc880fb",
+          "durationMs": 34968,
+          "count": 23
+        },
+        {
+          "fileId": "ed26eb5ae7b2584588bbe6eee19d242f7d433e690c9481ce2083aafffca3648e",
+          "durationMs": 33811,
+          "count": 12
+        },
+        {
+          "fileId": "6f31bd6722d927ccf0ee3843eb60dc1fea976b8ea1f34fe7c8608ddec9ea1b7e",
+          "durationMs": 31222,
+          "count": 11
+        },
+        {
+          "fileId": "d1f09ba6d18322454e8284d828b6f4e3a1a3adea39ea55c932046d8b829e23a6",
+          "durationMs": 25656,
+          "count": 16
+        },
+        {
+          "fileId": "1f1f2f82394c5160005b5a6e48090d7ee15f44dd8cd76dcc9049a81bf3eb3fc1",
+          "durationMs": 21105,
+          "count": 13
+        },
+        {
+          "fileId": "50f4cd94df5e926ab7d1ae0b37c5e5c537982de271ea1ba2cd7c8f08f53b77ed",
+          "durationMs": 20299,
+          "count": 6
+        },
+        {
+          "fileId": "c8975dc8d682d9a31f449687557750058edb818d8d0d94fc3e57bd8f5cb9e4fa",
+          "durationMs": 19653,
+          "count": 7
+        },
+        {
+          "fileId": "34bac6bc65150fb9acbc46c60efe92f883bb8f99cc1890443551554b359188c0",
+          "durationMs": 19222,
+          "count": 11
+        },
+        {
+          "fileId": "27c35aff027d1729e5f0e41ed91d141ee78c7c79607aa293f0b9c9d25fef8002",
+          "durationMs": 18034,
+          "count": 8
+        },
+        {
+          "fileId": "c0843d85f05af4c8220b9db216231419123bd7f7a5db76ccb8bf0a248e141d3b",
+          "durationMs": 14182,
+          "count": 10
+        },
+        {
+          "fileId": "233c64b3c3d28bf092538e12166b0514edd3f99684adb48f72e3cce0c96441c2",
+          "durationMs": 13254,
+          "count": 9
+        }
+      ],
+      "slowestTests": [
+        {
+          "fileId": "d2d900d95627194db12ab91f9d233662c56332a7ba65370c0b345645d7bdb6a4",
+          "testId": "1ff7f5ac0aa83cb215b6fe98815e3accf20a2370d7343ac3034f8fc41ba9b348",
+          "durationMs": 15275,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "d2d900d95627194db12ab91f9d233662c56332a7ba65370c0b345645d7bdb6a4",
+          "testId": "66a1f27c2f6f18bf4240ba54bd9739e4de0a54f53698cae1ae6845431b2c8c96",
+          "durationMs": 15088,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "d2d900d95627194db12ab91f9d233662c56332a7ba65370c0b345645d7bdb6a4",
+          "testId": "6032eab0261ebe8cec4707b9a38785659b4998df1bc69dfb00306934f8f08ece",
+          "durationMs": 15067,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "reliability": {
+        "tests": [],
+        "truncated": false
+      },
+      "suiteSeconds": 1040,
+      "phases": {
+        "activeSeconds": 1082,
+        "installSeconds": 6,
+        "otherSetupSeconds": 34,
+        "suiteSeconds": 1040,
+        "productionSeconds": 0,
+        "cleanupSeconds": 2
+      }
+    },
+    {
+      "runId": 42054331358,
+      "attempt": 1,
+      "jobId": 127342213609,
+      "shard": 1,
+      "version": 1,
+      "suite": "browser",
+      "count": 390,
+      "failed": 0,
+      "skipped": 12,
+      "cancelled": 0,
+      "unmeasured": 0,
+      "retryOnly": 0,
+      "truncated": false,
+      "context": {
+        "runId": "42054331358",
+        "attempt": 1,
+        "testedSha": "4a65869bbd681ce445e79e9046e343a374be5525",
+        "workflowSha": "4a65869bbd681ce445e79e9046e343a374be5525"
+      },
+      "slowestFiles": [
+        {
+          "fileId": "f0e0441575a53d32e94e528691fb97540ccbb74a11eec99c5e21e1babfe12513",
+          "durationMs": 145325,
+          "count": 76
+        },
+        {
+          "fileId": "c8d030972bdc6f6c2ecd31b10d2ca17d69a1d36ba86851334f33d4ad8c1b683e",
+          "durationMs": 97151,
+          "count": 39
+        },
+        {
+          "fileId": "c48d3cb886b313c57f5e7295f20d2120a258301e7fd356df8df55e09d817ddcb",
+          "durationMs": 72126,
+          "count": 15
+        },
+        {
+          "fileId": "480954301fad999c30acbdf073230e2295586a2ed7b574668e537631c6db8513",
+          "durationMs": 61124,
+          "count": 23
+        },
+        {
+          "fileId": "8569d3ded262b2a29398385dc716a95493fa69973527cfdb54d3083524a0c76b",
+          "durationMs": 58735,
+          "count": 4
+        },
+        {
+          "fileId": "8624950d9795be97e917861a5b5c4ef9418ada9c2491c6c4137faa94dd62dda2",
+          "durationMs": 47435,
+          "count": 25
+        },
+        {
+          "fileId": "736584b1b05354cee821e6aa714e0af2e7e290d8329e8a0656a00e8355e72b4f",
+          "durationMs": 41221,
+          "count": 14
+        },
+        {
+          "fileId": "cdeb6c5615f43cc69e2a6cb78c2ff6936a037c37cd60be749c9415d1b5ba9da1",
+          "durationMs": 39555,
+          "count": 9
+        },
+        {
+          "fileId": "cb650a0a25087fb29395d3ae98a1f009ae2b691c6f41122f76d6fe245979f9f2",
+          "durationMs": 36509,
+          "count": 18
+        },
+        {
+          "fileId": "46b10f670a6e54b7192d3bbdf207d21ae612949d99f124491363141ceca8b6a4",
+          "durationMs": 29374,
+          "count": 10
+        },
+        {
+          "fileId": "987b6c446fb37bb0d2ae140ffa7c19faffa08eb6932436be8b01258ebc21c68d",
+          "durationMs": 29247,
+          "count": 20
+        },
+        {
+          "fileId": "bb94b7d6af27dcb6dc5a9650d09be6df33d543eaca1cb2d70a3eb511cb4b785d",
+          "durationMs": 25928,
+          "count": 7
+        },
+        {
+          "fileId": "f01a0280fc888b1126a063425dc243de7763bb6072c7a2264193ff88aa41ef76",
+          "durationMs": 24814,
+          "count": 8
+        },
+        {
+          "fileId": "876eefdd1edf13440740528321642589293daf4a85612356c50ce621b38138ac",
+          "durationMs": 19903,
+          "count": 10
+        },
+        {
+          "fileId": "fc72cb8019cca75638e277ee0ba07863b63031335a3fd53074e044fc613493da",
+          "durationMs": 19899,
+          "count": 8
+        },
+        {
+          "fileId": "d1ff21b96c5652885f8d6055839aef348eb248f8d07b7c9b0fd86c44c361ed00",
+          "durationMs": 19494,
+          "count": 8
+        },
+        {
+          "fileId": "37bbd059a4070e4c165578eecd11aa30acef6e32a84a5fb9cbcd22d5803cf488",
+          "durationMs": 18688,
+          "count": 11
+        },
+        {
+          "fileId": "17e9f7b2105de249a36d2ebdb35148b18b7565d11e63a84af26152a1f31df582",
+          "durationMs": 18482,
+          "count": 11
+        },
+        {
+          "fileId": "3c8c9a2bc9a7fc3ce2138e88becef83b0d3dca41957d250639fedca40a6b3f86",
+          "durationMs": 18257,
+          "count": 8
+        },
+        {
+          "fileId": "f32cd278669edcf5067b88382aee81ac5132e1e7012d0bb30c37dc7f6df563df",
+          "durationMs": 15742,
+          "count": 1
+        }
+      ],
+      "slowestTests": [
+        {
+          "fileId": "f32cd278669edcf5067b88382aee81ac5132e1e7012d0bb30c37dc7f6df563df",
+          "testId": "f6f8a37889d5403d2fd434f0673fc42ab7cb573ae204b6c0354698fdbde7fe85",
+          "durationMs": 15742,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "8569d3ded262b2a29398385dc716a95493fa69973527cfdb54d3083524a0c76b",
+          "testId": "5e923a680823de32b833c5b219a14986f66c9fd32c321ee1c625943acb9d6474",
+          "durationMs": 14838,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "8569d3ded262b2a29398385dc716a95493fa69973527cfdb54d3083524a0c76b",
+          "testId": "3322efeec17047ee50a1e1ca5ba936626c4c29be35ccd8790a561573335b8e63",
+          "durationMs": 14776,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "reliability": {
+        "tests": [],
+        "truncated": false
+      },
+      "suiteSeconds": 929,
+      "phases": {
+        "activeSeconds": 1072,
+        "installSeconds": 6,
+        "otherSetupSeconds": 30,
+        "suiteSeconds": 929,
+        "productionSeconds": 105,
+        "cleanupSeconds": 2
+      }
+    },
+    {
+      "runId": 42054331358,
+      "attempt": 1,
+      "jobId": 127342213669,
+      "shard": 2,
+      "version": 1,
+      "suite": "browser",
+      "count": 389,
+      "failed": 0,
+      "skipped": 60,
+      "cancelled": 0,
+      "unmeasured": 0,
+      "retryOnly": 0,
+      "truncated": false,
+      "context": {
+        "runId": "42054331358",
+        "attempt": 1,
+        "testedSha": "4a65869bbd681ce445e79e9046e343a374be5525",
+        "workflowSha": "4a65869bbd681ce445e79e9046e343a374be5525"
+      },
+      "slowestFiles": [
+        {
+          "fileId": "a744385c6a66aef4a5573ac71e0091aa057fd9ca6caab813d270d80b71182d48",
+          "durationMs": 215511,
+          "count": 52
+        },
+        {
+          "fileId": "b1b134901fe272e867d7bbf95db9dbb69c25feb2fe898c088cf4d4b2088a4696",
+          "durationMs": 66003,
+          "count": 26
+        },
+        {
+          "fileId": "cde3e518de9704bf9b9c2b40e2061a5842ed0e65926af43d72a156709301ee79",
+          "durationMs": 51154,
+          "count": 34
+        },
+        {
+          "fileId": "4dcd680ae2de8924e9e7631f762e10c413deda1b38970b9fd565a146e3426650",
+          "durationMs": 42680,
+          "count": 12
+        },
+        {
+          "fileId": "fcfcc149c48ce98550cd689d9f6fd9b29bd7bc1aa86b6b36c9e7de2edca43e1d",
+          "durationMs": 42483,
+          "count": 28
+        },
+        {
+          "fileId": "4111bde35cb7fa2f076027f02190f461853a447900607f02b53d27bec792b829",
+          "durationMs": 32708,
+          "count": 10
+        },
+        {
+          "fileId": "64e881559e110a1b8dedb836d302c2df887f929fca7615dd6a2e4d5efaf41102",
+          "durationMs": 32306,
+          "count": 6
+        },
+        {
+          "fileId": "d6a8f3c0541edd683089dc7333240576e74855dabdae64d809be8f3c790b6b4b",
+          "durationMs": 30422,
+          "count": 12
+        },
+        {
+          "fileId": "eccc27b48fc71cb8448ee9372449f32c5cb76e3fc5a230ca1f6aa4ddb7371efc",
+          "durationMs": 28955,
+          "count": 19
+        },
+        {
+          "fileId": "1870a9c11b9e91284f36b67ec98a359084037ce6bc4c24eb08230ca6730e25fc",
+          "durationMs": 22205,
+          "count": 23
+        },
+        {
+          "fileId": "0afe5bd1759ac20909ffd8b4895334c23eb1278eda466a89fc9cf20baa6325de",
+          "durationMs": 21724,
+          "count": 6
+        },
+        {
+          "fileId": "a6493a160f0c9435b88c30f7620282051aea617f908e631d998573214368ca0e",
+          "durationMs": 20803,
+          "count": 4
+        },
+        {
+          "fileId": "e578222e403e3fd0ad7ff884923d1698b17ae9fb0c8f16990fa69af05dc4be61",
+          "durationMs": 18116,
+          "count": 5
+        },
+        {
+          "fileId": "a944e20f645d8eacde29f7f711b19a40ce20df58962564b1eb8bbfce97b4ecba",
+          "durationMs": 15104,
+          "count": 10
+        },
+        {
+          "fileId": "716ab696c8c8b9b756189c13fc48cff62aa3a4e369e7b2b64aff1babb0bfe894",
+          "durationMs": 13110,
+          "count": 8
+        },
+        {
+          "fileId": "5c995caa9c4b6ce95d388e20848617e86bfdb9597733f40c6bb004538aca03e5",
+          "durationMs": 12431,
+          "count": 9
+        },
+        {
+          "fileId": "f37178b9e27c008f04e8856838e749fa146f27990cc969ecfe8d7b427e347ac4",
+          "durationMs": 12198,
+          "count": 5
+        },
+        {
+          "fileId": "fa0b9a897486539a9fcc7a13508dee0667ed3e9880575f7fd4c8167aef747337",
+          "durationMs": 11273,
+          "count": 12
+        },
+        {
+          "fileId": "9641cfcfebe41bfb8ab993ba6584bca43c2da0635b204a650a32ab290415e79d",
+          "durationMs": 10817,
+          "count": 9
+        },
+        {
+          "fileId": "be70ad15bcb25876cdb0cd2dc545543f69ca85a1a53232dbdb8b29c797325818",
+          "durationMs": 9995,
           "count": 5
         }
       ],
-      "count": 771,
-      "failed": 0,
-      "retryOnly": 0,
-      "context": {
-        "runId": "39866598899",
-        "attempt": 3,
-        "testedSha": "8183eb56c4beb1ebfa4bfcc2693591e8d8a8cfbb",
-        "workflowSha": "8183eb56c4beb1ebfa4bfcc2693591e8d8a8cfbb"
+      "slowestTests": [
+        {
+          "fileId": "a744385c6a66aef4a5573ac71e0091aa057fd9ca6caab813d270d80b71182d48",
+          "testId": "06924215228f2d2e07aa130029f129017eb4d6c75c77e2cdb5899bb897369846",
+          "durationMs": 8770,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "64e881559e110a1b8dedb836d302c2df887f929fca7615dd6a2e4d5efaf41102",
+          "testId": "1fa9147350893fdcc028af661519cd47378126153494ec0473d9fab9f1a21c77",
+          "durationMs": 7780,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "64e881559e110a1b8dedb836d302c2df887f929fca7615dd6a2e4d5efaf41102",
+          "testId": "d48509a19f1066199fca3c5a4bc76ce9ebcdc7fd0a8214b622c1d679a86c6d22",
+          "durationMs": 7761,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "reliability": {
+        "tests": [],
+        "truncated": false
       },
+      "suiteSeconds": 763,
       "phases": {
-        "activeSeconds": 1956,
-        "installSeconds": 11,
-        "otherSetupSeconds": 26,
-        "suiteSeconds": 1817,
-        "productionSeconds": 99,
-        "cleanupSeconds": 3
-      },
-      "skipped": 52,
+        "activeSeconds": 811,
+        "installSeconds": 6,
+        "otherSetupSeconds": 37,
+        "suiteSeconds": 763,
+        "productionSeconds": 0,
+        "cleanupSeconds": 5
+      }
+    },
+    {
+      "runId": 42063471740,
+      "attempt": 1,
+      "jobId": 127371354153,
+      "shard": 6,
+      "version": 1,
+      "suite": "browser",
+      "count": 376,
+      "failed": 0,
+      "skipped": 0,
       "cancelled": 0,
-      "unmeasured": 0
+      "unmeasured": 0,
+      "retryOnly": 0,
+      "truncated": false,
+      "context": {
+        "runId": "42063471740",
+        "attempt": 1,
+        "testedSha": "8979d3695f440a3dd5854e687a4de50e55b28722",
+        "workflowSha": "8979d3695f440a3dd5854e687a4de50e55b28722"
+      },
+      "slowestFiles": [
+        {
+          "fileId": "b86b74e0f3f571141378811c716303cfeee8ba38b3991bcec54ba5ec8e42713b",
+          "durationMs": 156417,
+          "count": 26
+        },
+        {
+          "fileId": "0901d1d7e1c81efd103c88d777c73ce9cfc829892a4ae416865666fa3bcc5d9f",
+          "durationMs": 121485,
+          "count": 65
+        },
+        {
+          "fileId": "4fe46a32c81057f85c4a433301ac6eac1e94d44e1951dc1f4cae4c1000c5ca01",
+          "durationMs": 78425,
+          "count": 18
+        },
+        {
+          "fileId": "1eef63a072686a0912c71e3af33117842dae50c98f5ca4aac7475417499b997d",
+          "durationMs": 66848,
+          "count": 14
+        },
+        {
+          "fileId": "fb4d39ed5641cd128bb87dd86d182e75da63ff3b0dbb2269d1e4260955186de3",
+          "durationMs": 61973,
+          "count": 14
+        },
+        {
+          "fileId": "2f18265ce0b63584131626925e3fa6a6ceb8d6c245910f878a43f5569afd58b5",
+          "durationMs": 48937,
+          "count": 10
+        },
+        {
+          "fileId": "9b2d0183e2b4bd03ef13516f82cdccb600c54db5e4f824bf3c144878352bb237",
+          "durationMs": 42664,
+          "count": 9
+        },
+        {
+          "fileId": "b2314e03376af35a7e2acfee720d35013680f656bcafa33302da8c554bd35e40",
+          "durationMs": 38066,
+          "count": 24
+        },
+        {
+          "fileId": "2bfd440a6ae78c6f1c1b879eeabd971c40aa9b9a41fffa606958dbe473658dda",
+          "durationMs": 35695,
+          "count": 17
+        },
+        {
+          "fileId": "03ce846071f12ce7499334ce45a17b9e865816cd26aa94308ec865319ed2dcef",
+          "durationMs": 33898,
+          "count": 25
+        },
+        {
+          "fileId": "8d41ee8750dc84de4c84f4f7ed5b3254652f974c173a3055efb9677866d114f5",
+          "durationMs": 31400,
+          "count": 9
+        },
+        {
+          "fileId": "934c3ae880986e1467d6ea5b93deb604d1e9c10403ef38804676aead9b018ec1",
+          "durationMs": 30419,
+          "count": 6
+        },
+        {
+          "fileId": "127d9346ffee82503ae40b31a692f417799e7f2af735f29f1aff29870fc57ac6",
+          "durationMs": 26624,
+          "count": 14
+        },
+        {
+          "fileId": "b11675bde4196d5da1c3f1a3ecbc21f1111714b7bf8e75b4f072cdd922fda630",
+          "durationMs": 25446,
+          "count": 14
+        },
+        {
+          "fileId": "79ffed997b5e8ef83eb5348c0462a6b706b0adffadcccd8f47703be9be358798",
+          "durationMs": 24927,
+          "count": 8
+        },
+        {
+          "fileId": "7aec999072774db5db1839b29efb60dc5262c371ff2ce286a5e2a507cd6b3496",
+          "durationMs": 24322,
+          "count": 9
+        },
+        {
+          "fileId": "f6aa199787c68c3290df4ed3d2d8cb51bd37a30accd272b5d2ddb845c03fd4f5",
+          "durationMs": 20445,
+          "count": 7
+        },
+        {
+          "fileId": "e3db74c9a9e528de2eca3c37d6aa55e87269a88dd1b74a3e4533ea623d05e358",
+          "durationMs": 19455,
+          "count": 9
+        },
+        {
+          "fileId": "95a63f2c1b4c2b5492d2c9fb39767f9b22a30f85d4e8fd13f3c0d68a9a2d2124",
+          "durationMs": 18948,
+          "count": 4
+        },
+        {
+          "fileId": "d52ae90263fec00b77c7b0f2ff54438ea579e4fd9fa7df706c7ee0fa1472d517",
+          "durationMs": 18709,
+          "count": 8
+        }
+      ],
+      "slowestTests": [
+        {
+          "fileId": "2f18265ce0b63584131626925e3fa6a6ceb8d6c245910f878a43f5569afd58b5",
+          "testId": "a0df953511560730d66d6055522cb854cd0c8c03f4bfe073721acbd8e2477d61",
+          "durationMs": 12053,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "934c3ae880986e1467d6ea5b93deb604d1e9c10403ef38804676aead9b018ec1",
+          "testId": "9de080569f27892847cf16972530f95dce7958b0489b06de56811ef0ab051e0d",
+          "durationMs": 7743,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "9b2d0183e2b4bd03ef13516f82cdccb600c54db5e4f824bf3c144878352bb237",
+          "testId": "0d662ea4381da47b71cab83333389078b05821335d47a8a4c0d0e25b9b38a129",
+          "durationMs": 7319,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "reliability": {
+        "tests": [],
+        "truncated": false
+      },
+      "suiteSeconds": 1058,
+      "phases": {
+        "activeSeconds": 1110,
+        "installSeconds": 5,
+        "otherSetupSeconds": 43,
+        "suiteSeconds": 1058,
+        "productionSeconds": 0,
+        "cleanupSeconds": 4
+      }
+    },
+    {
+      "runId": 42063471740,
+      "attempt": 1,
+      "jobId": 127371354169,
+      "shard": 10,
+      "version": 1,
+      "suite": "browser",
+      "count": 386,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0,
+      "unmeasured": 0,
+      "retryOnly": 0,
+      "truncated": false,
+      "context": {
+        "runId": "42063471740",
+        "attempt": 1,
+        "testedSha": "8979d3695f440a3dd5854e687a4de50e55b28722",
+        "workflowSha": "8979d3695f440a3dd5854e687a4de50e55b28722"
+      },
+      "slowestFiles": [
+        {
+          "fileId": "0870d9217fe84838fcda1eccccc4b24796dfe149d78ce09b5ff785f982b4db75",
+          "durationMs": 151451,
+          "count": 91
+        },
+        {
+          "fileId": "eb9bb6a814f99fd051d13cb756fd42b5d0fa8f3eff2c82f95241b704492f64b2",
+          "durationMs": 122089,
+          "count": 27
+        },
+        {
+          "fileId": "3648faed38fa2903652de31bb4136a956672dacdf75a9e08f14e3af2e2e35496",
+          "durationMs": 91238,
+          "count": 25
+        },
+        {
+          "fileId": "57dbb9c8af8fd67b40be299e1fc53fd446533afe0ae21d689ada386d49dda101",
+          "durationMs": 68101,
+          "count": 15
+        },
+        {
+          "fileId": "500c9c6425dc6b5154bb26fae93d922b4a68e71a18d2722848c301f565954d99",
+          "durationMs": 58877,
+          "count": 22
+        },
+        {
+          "fileId": "6b29b7f218aa563725fc8f397a31ddc4f13208c35fc8cd11ab2ad9aa5f3ee002",
+          "durationMs": 51307,
+          "count": 17
+        },
+        {
+          "fileId": "dac70d000e385310ff863d160cb2a74af99a38d034ddcb8e7dccb319d4a20aea",
+          "durationMs": 44834,
+          "count": 11
+        },
+        {
+          "fileId": "644fe0aec277f7f94abf7fb11fa60d52c83d784e0e7897b8e164b4bb11753f42",
+          "durationMs": 39023,
+          "count": 9
+        },
+        {
+          "fileId": "a97db08be7189fa14de27e602abe4002a90ee98ddbdf52bbacf8a02453a6ed7f",
+          "durationMs": 35191,
+          "count": 13
+        },
+        {
+          "fileId": "ec1e87178a5492a53beb3954d2cffb30d5d266f9d08e2589a70986cf8eaef0e6",
+          "durationMs": 33569,
+          "count": 17
+        },
+        {
+          "fileId": "2d2ebf09ebe141581f6ee17d0c96c94d887214a65f52011a063d4d88e31b85c6",
+          "durationMs": 31252,
+          "count": 19
+        },
+        {
+          "fileId": "ff0c7b2a0d351947fb5bf7ab54ae684283847a90a06d0c917a1b8d2782cfd8db",
+          "durationMs": 30906,
+          "count": 13
+        },
+        {
+          "fileId": "b3d409d67e31353ca96e4b0b74ee561b3ea91db998d80e0d9bd0f4c4b462c164",
+          "durationMs": 25609,
+          "count": 11
+        },
+        {
+          "fileId": "168b8c03c153039aeea90fcb2d0ccdbb011c2f05366568e7ceb2fce193167827",
+          "durationMs": 25371,
+          "count": 7
+        },
+        {
+          "fileId": "e6cc410da49a50008f21caddc10b945678584e540e3b10c71c10e53a5e25c189",
+          "durationMs": 23173,
+          "count": 7
+        },
+        {
+          "fileId": "4922db8249622720bedb908ff0cd7a835fc1f9682d45ee344a444d4832f679e9",
+          "durationMs": 21458,
+          "count": 10
+        },
+        {
+          "fileId": "538ec57e3e4e5e31db9c17fc03f557f02c66d468cca375daab4758da5a6821ec",
+          "durationMs": 13960,
+          "count": 4
+        },
+        {
+          "fileId": "e64b3562d9b47279a138e4ece697d0089f0054c7d97135fb9c82bd929814fd8c",
+          "durationMs": 13607,
+          "count": 1
+        },
+        {
+          "fileId": "198723faf2f3e59cf184248b5c299fea5cc33080903eb98ecf9c2582cc0cb6aa",
+          "durationMs": 13314,
+          "count": 10
+        },
+        {
+          "fileId": "2b3130936d3931a2d6fa74a75ccaa344d40c6f890010d71ac4c44e06c19ce910",
+          "durationMs": 13075,
+          "count": 6
+        }
+      ],
+      "slowestTests": [
+        {
+          "fileId": "e64b3562d9b47279a138e4ece697d0089f0054c7d97135fb9c82bd929814fd8c",
+          "testId": "11e421723145b4eb8ef168e26b16461cbc8969e9f7b72e6482c54e7fe8fcd46f",
+          "durationMs": 13607,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "eb9bb6a814f99fd051d13cb756fd42b5d0fa8f3eff2c82f95241b704492f64b2",
+          "testId": "7eb9dec7b78a2b4968eddab0c9aba04621ca2fea120b48acbce0239bfac39d11",
+          "durationMs": 10780,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "3648faed38fa2903652de31bb4136a956672dacdf75a9e08f14e3af2e2e35496",
+          "testId": "3717be6f076ce7c3ba225b3351af9d42d1201460053b2689d5c54e5eedec5063",
+          "durationMs": 7438,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "reliability": {
+        "tests": [],
+        "truncated": false
+      },
+      "suiteSeconds": 1002,
+      "phases": {
+        "activeSeconds": 1045,
+        "installSeconds": 6,
+        "otherSetupSeconds": 34,
+        "suiteSeconds": 1002,
+        "productionSeconds": 0,
+        "cleanupSeconds": 3
+      }
+    },
+    {
+      "runId": 42063471740,
+      "attempt": 1,
+      "jobId": 127371354276,
+      "shard": 9,
+      "version": 1,
+      "suite": "browser",
+      "count": 436,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0,
+      "unmeasured": 0,
+      "retryOnly": 0,
+      "truncated": false,
+      "context": {
+        "runId": "42063471740",
+        "attempt": 1,
+        "testedSha": "8979d3695f440a3dd5854e687a4de50e55b28722",
+        "workflowSha": "8979d3695f440a3dd5854e687a4de50e55b28722"
+      },
+      "slowestFiles": [
+        {
+          "fileId": "3ba7a7068ec541351b83f60a7a78ae091a50b4d04e832b5503549cab5f37b9b9",
+          "durationMs": 104422,
+          "count": 30
+        },
+        {
+          "fileId": "705aeb874404404ac17a44b51f9164ba2706db10bb15fded3684e0c8504a8264",
+          "durationMs": 102964,
+          "count": 13
+        },
+        {
+          "fileId": "29c5d43190a38be29b1e554a5c6b7f3066b7c0e9eba841efdcbe18ca7e7b0412",
+          "durationMs": 72722,
+          "count": 30
+        },
+        {
+          "fileId": "2f9840f44fede593a70b37b9a25c2be73428d689442d0282b2d13f5c732694ec",
+          "durationMs": 64515,
+          "count": 43
+        },
+        {
+          "fileId": "67ef8a70b6eb25a5f9189ba7ab43ddb5b23eeace1e710d07eca93b8d7c7870c1",
+          "durationMs": 50829,
+          "count": 29
+        },
+        {
+          "fileId": "4a79b4baef33ff7a4cd61c91d157b6cad3830bc3dbf6f324a337623b77db91c1",
+          "durationMs": 45858,
+          "count": 62
+        },
+        {
+          "fileId": "9d224f6b1943b638599f0adc0ab7a80bed26776ec7c5b6abdb6ab8bd63a4bd94",
+          "durationMs": 41650,
+          "count": 18
+        },
+        {
+          "fileId": "e4b373f88d0a6799c664289b1b66cdd1f520865e622e939c8ad1a2775a181132",
+          "durationMs": 33711,
+          "count": 13
+        },
+        {
+          "fileId": "fe26d50774f8f0efa0ca7147ff9123dc65f49c8626d1864ceb0e96c3711696ed",
+          "durationMs": 32184,
+          "count": 10
+        },
+        {
+          "fileId": "467f5b568300c6669bae0d01f3877dfe6c2a797c913763baa30f9ea1fdfceb32",
+          "durationMs": 27446,
+          "count": 8
+        },
+        {
+          "fileId": "be07f0ce1b0229e735214f56c74da74a3959337822f30f15b47380cc7505f246",
+          "durationMs": 26239,
+          "count": 8
+        },
+        {
+          "fileId": "0d716b7d79736fdf86d32d80f2f4d44438b915dbf7b84924cfcda14ffb3873cb",
+          "durationMs": 25922,
+          "count": 15
+        },
+        {
+          "fileId": "2202e3e5f9e13564085f1ee87c7eec2e67094c7b89ee2b956b6090134982c858",
+          "durationMs": 22457,
+          "count": 25
+        },
+        {
+          "fileId": "eee78b9fe0afbcc2004889163a57583c22fa4076fb348813b1909743ab4d8990",
+          "durationMs": 21632,
+          "count": 12
+        },
+        {
+          "fileId": "3d64dede0e1e1c30b8cc77547134afde3c7ca63f092f6e2c303c933d00104184",
+          "durationMs": 20178,
+          "count": 12
+        },
+        {
+          "fileId": "03c721a900192ce689cd907515432d8c513cd68b0f9f5db1f4d77c3f15256032",
+          "durationMs": 18782,
+          "count": 16
+        },
+        {
+          "fileId": "c855806839de21d2e9c57b296bffbef729a219cec7b8eb0df30d0d9045a187b5",
+          "durationMs": 16670,
+          "count": 11
+        },
+        {
+          "fileId": "42497246c07da3bb38430e1a2f838b685a24c902a4993d4c97d54b3c78ff3500",
+          "durationMs": 13104,
+          "count": 9
+        },
+        {
+          "fileId": "9c19159169be7aca707aef4bc69fbdd8c0978aa09f001e70e269498e83f0c50e",
+          "durationMs": 12202,
+          "count": 20
+        },
+        {
+          "fileId": "7b4d66cd106435f507cd44f119f6886c758622ae01939c46c0b82080d0a1758c",
+          "durationMs": 11919,
+          "count": 4
+        }
+      ],
+      "slowestTests": [
+        {
+          "fileId": "705aeb874404404ac17a44b51f9164ba2706db10bb15fded3684e0c8504a8264",
+          "testId": "54f07ee2b0b75c3a5e33fbbd552ee70df8073143d723972bdb506940f4142efd",
+          "durationMs": 22663,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "705aeb874404404ac17a44b51f9164ba2706db10bb15fded3684e0c8504a8264",
+          "testId": "822017abb47550106adef715136c8a007d7fc6e89382dff32b814b2924cb3ead",
+          "durationMs": 22136,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "1423e878d57d6ba206c740dc29029ce2db27b37d9b64d9b03aaedb7802d6957f",
+          "testId": "564cfa50d73f7cc0ea4d9a93d0d786f932e3231a8e0ce9b581263e2025f637e1",
+          "durationMs": 7779,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "reliability": {
+        "tests": [],
+        "truncated": false
+      },
+      "suiteSeconds": 858,
+      "phases": {
+        "activeSeconds": 975,
+        "installSeconds": 20,
+        "otherSetupSeconds": 94,
+        "suiteSeconds": 858,
+        "productionSeconds": 0,
+        "cleanupSeconds": 3
+      }
+    },
+    {
+      "runId": 42063471740,
+      "attempt": 1,
+      "jobId": 127371354283,
+      "shard": 7,
+      "version": 1,
+      "suite": "browser",
+      "count": 361,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0,
+      "unmeasured": 0,
+      "retryOnly": 0,
+      "truncated": false,
+      "context": {
+        "runId": "42063471740",
+        "attempt": 1,
+        "testedSha": "8979d3695f440a3dd5854e687a4de50e55b28722",
+        "workflowSha": "8979d3695f440a3dd5854e687a4de50e55b28722"
+      },
+      "slowestFiles": [
+        {
+          "fileId": "8df93f9a1aee7eae1568ae36669c9ea3cc3b8bd4036c1765c103c4ca207b888f",
+          "durationMs": 149246,
+          "count": 70
+        },
+        {
+          "fileId": "9c3c6aa65ecfe5660548aeba957d579f048f93f302eb01bd5b8b1a2f93c8a51f",
+          "durationMs": 108704,
+          "count": 44
+        },
+        {
+          "fileId": "d63e0f5293c44824494e8221898d505337296bf1663bae6edd51330e32017181",
+          "durationMs": 101343,
+          "count": 23
+        },
+        {
+          "fileId": "96585da966a8c8fd29ea771e3b5fe60cf7d77ae3aa6e6e839197c562f7c1fc0d",
+          "durationMs": 66384,
+          "count": 16
+        },
+        {
+          "fileId": "2748236e5a31cf808ff5b10c1fde10878558f2836826b92e9be5d2f843933d64",
+          "durationMs": 64659,
+          "count": 10
+        },
+        {
+          "fileId": "3a22280c1e8063383a6e2348651b75e8182b13b3de5671b31a685613814a0fa6",
+          "durationMs": 48929,
+          "count": 24
+        },
+        {
+          "fileId": "a595e9c28da0b81b3f640c6591aa4d8a7a6c337801cbb00065ced459aa0e137a",
+          "durationMs": 46016,
+          "count": 15
+        },
+        {
+          "fileId": "142930b81d5392eef26ca59adb304b148ce96d274aaf555053258d8cb724555f",
+          "durationMs": 36630,
+          "count": 9
+        },
+        {
+          "fileId": "48be406cb622f5b2f5487ff1d1159c74d3d879b6a0affeb49dabb8db96a88b37",
+          "durationMs": 34906,
+          "count": 13
+        },
+        {
+          "fileId": "16a67f8450135bd0838332d08c0df2062c00f2832418f1d0e8b84ead20f7b203",
+          "durationMs": 31728,
+          "count": 12
+        },
+        {
+          "fileId": "25fdafb142d68577f334a25368712a552210c27ade82c8b2699371cf22ac9b98",
+          "durationMs": 24554,
+          "count": 15
+        },
+        {
+          "fileId": "14f94279e095149e2db6865a46a0cbb95c2528128b8d774d2ecf61bc95d56171",
+          "durationMs": 24063,
+          "count": 9
+        },
+        {
+          "fileId": "969cacb78c598f952a622788f17de0edfef99befa7d282a5317c61b10083f6d2",
+          "durationMs": 22616,
+          "count": 5
+        },
+        {
+          "fileId": "a8725ca8aec15bcdf0f0acb442fa4d469e3d75479addf551fafb0a5731405a1b",
+          "durationMs": 22267,
+          "count": 7
+        },
+        {
+          "fileId": "8dd3cf9e25792a0a71de86565198c4cb1256d573c5bd50ee162da8e68aedcb12",
+          "durationMs": 21929,
+          "count": 12
+        },
+        {
+          "fileId": "0bb3f282cce773b83c4698fc8456c47cede6f4f22464f3d6a36b9030f19c2dd9",
+          "durationMs": 20527,
+          "count": 5
+        },
+        {
+          "fileId": "3a90b902f6f1110220d0ee31f68b21277585ba8f6ef6a7dd36519a544fc933ef",
+          "durationMs": 16243,
+          "count": 4
+        },
+        {
+          "fileId": "3549b8b9ba0d2bf6b444219ffa2ee59af5e609a56004083658ce1fdcd8d10293",
+          "durationMs": 14383,
+          "count": 7
+        },
+        {
+          "fileId": "341dcbd597a09ba39d645781e8c9e85588a162a332e21fa2e52d2fac243001b6",
+          "durationMs": 13299,
+          "count": 7
+        },
+        {
+          "fileId": "4d4dfcdc31764a64186c91325e821e636cfcca58c571307c49e91cad17805c7c",
+          "durationMs": 12179,
+          "count": 6
+        }
+      ],
+      "slowestTests": [
+        {
+          "fileId": "d63e0f5293c44824494e8221898d505337296bf1663bae6edd51330e32017181",
+          "testId": "2a50ad2a4d8ccc8af9c81103cc74226662e03eac00c992998c0b0e49472c8c8d",
+          "durationMs": 7737,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "2748236e5a31cf808ff5b10c1fde10878558f2836826b92e9be5d2f843933d64",
+          "testId": "f5cc85e28424ba9c18fef12436ee8b7eaa6ecddb7833a60f7960e94d71a6b5a9",
+          "durationMs": 7640,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "2748236e5a31cf808ff5b10c1fde10878558f2836826b92e9be5d2f843933d64",
+          "testId": "0e6803e3b972139bc304b117407e0a08bfea6b69fabc309f6fef2a83b7626d21",
+          "durationMs": 7604,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "reliability": {
+        "tests": [],
+        "truncated": false
+      },
+      "suiteSeconds": 995,
+      "phases": {
+        "activeSeconds": 1034,
+        "installSeconds": 5,
+        "otherSetupSeconds": 32,
+        "suiteSeconds": 995,
+        "productionSeconds": 0,
+        "cleanupSeconds": 2
+      }
+    },
+    {
+      "runId": 42063471740,
+      "attempt": 1,
+      "jobId": 127371354308,
+      "shard": 5,
+      "version": 1,
+      "suite": "browser",
+      "count": 444,
+      "failed": 0,
+      "skipped": 8,
+      "cancelled": 0,
+      "unmeasured": 0,
+      "retryOnly": 0,
+      "truncated": false,
+      "context": {
+        "runId": "42063471740",
+        "attempt": 1,
+        "testedSha": "8979d3695f440a3dd5854e687a4de50e55b28722",
+        "workflowSha": "8979d3695f440a3dd5854e687a4de50e55b28722"
+      },
+      "slowestFiles": [
+        {
+          "fileId": "4f016a6bd340d8d85877311e1fcda3b53b63d581bd2fa3314e0fbbd16a8b3bee",
+          "durationMs": 154064,
+          "count": 87
+        },
+        {
+          "fileId": "fc463d9f51257db5dce535b9508843f4d507cc2485844d130a6bb9f258d44dc5",
+          "durationMs": 119173,
+          "count": 29
+        },
+        {
+          "fileId": "42a9c4e8adad65160872d843b956ae6a03a616b7d11b3b3fe306011a7f1dbc40",
+          "durationMs": 76048,
+          "count": 41
+        },
+        {
+          "fileId": "55c8829024b6b23b58b8be149bf83ebb7dd5855275d56ebdfe2da6179a9ee8d8",
+          "durationMs": 60906,
+          "count": 24
+        },
+        {
+          "fileId": "cc2478179fcca7363ffe16a650dec32161b794fc0d1a20de7b45490d8f6b2ce7",
+          "durationMs": 51405,
+          "count": 20
+        },
+        {
+          "fileId": "3939cfdce4da2439e0b491eccb7ca7c367e127b88a178e0216841f28c2ff0d37",
+          "durationMs": 45676,
+          "count": 11
+        },
+        {
+          "fileId": "5c2157999b207812522e4d848a33d2f5d699ea4b33b1284d963d5614fc0cbca9",
+          "durationMs": 38407,
+          "count": 10
+        },
+        {
+          "fileId": "023e55b9ae2266b8f131c62413480b188f4b0c620e0731d91c79b68b914a2ae7",
+          "durationMs": 36337,
+          "count": 20
+        },
+        {
+          "fileId": "39e11c00ecc9db04bb70e4a675e02ba49f15497c0890455a2e5b88a980a9bb33",
+          "durationMs": 31764,
+          "count": 17
+        },
+        {
+          "fileId": "3b3c11617dffa3ba7a463e7d4978f70fcf23a0a1ff68fd556c8f61853f40184c",
+          "durationMs": 30221,
+          "count": 21
+        },
+        {
+          "fileId": "7edfa92c437fb3f30c72aece4a91ba1fb36a0c20ccb4b0e338cfb05e792901c7",
+          "durationMs": 29333,
+          "count": 9
+        },
+        {
+          "fileId": "a345a269e7cf8d810277dc6e294571065c00c067a1a374fcd9c01c7989b772f8",
+          "durationMs": 25692,
+          "count": 17
+        },
+        {
+          "fileId": "2a7f89b81ce3a05e7b809c29ef2fae0c43260fc51d033f40cfe47891289b6232",
+          "durationMs": 23611,
+          "count": 4
+        },
+        {
+          "fileId": "decf8b7cafac04806c48fd07b5ee5c5470357ccee330e36db8847b5d2e6aacd0",
+          "durationMs": 22494,
+          "count": 5
+        },
+        {
+          "fileId": "76463518ee708308a52a7be04f3f3a8342652aa903dcfba82665e10b6f565756",
+          "durationMs": 22041,
+          "count": 8
+        },
+        {
+          "fileId": "2ce487f4d8a965a593ac557d8bdb15aa2e7ddc06ea119d5e157a26ab4df23807",
+          "durationMs": 21575,
+          "count": 12
+        },
+        {
+          "fileId": "ec8b12a5dec2976e8170b5056c21a5c3610cb08ccdbd7cc7bcd28cab9237afb4",
+          "durationMs": 18453,
+          "count": 9
+        },
+        {
+          "fileId": "f46539cb4634a262b3b3017ed576540947b4a616bb8ceb521ea591c30576dfe0",
+          "durationMs": 17989,
+          "count": 8
+        },
+        {
+          "fileId": "de92af45cf207dbd4328298980cc22e729e904637ac3be65b4c1e50e1a1c812c",
+          "durationMs": 17327,
+          "count": 8
+        },
+        {
+          "fileId": "3e0ebc1d7734bf712a0f9aa37491bf266b53abda697f5b1e3828606b3ead9a52",
+          "durationMs": 12635,
+          "count": 5
+        }
+      ],
+      "slowestTests": [
+        {
+          "fileId": "4f016a6bd340d8d85877311e1fcda3b53b63d581bd2fa3314e0fbbd16a8b3bee",
+          "testId": "1f07f426ffc10d44323397cce41bd2e3cfcb190068d39742f8a5ea79279919db",
+          "durationMs": 11902,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "4f016a6bd340d8d85877311e1fcda3b53b63d581bd2fa3314e0fbbd16a8b3bee",
+          "testId": "b777c2dcaa9129c0e3a345a6c461f63ba241d2dd82a3a1731eb54aa4e7761741",
+          "durationMs": 7076,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "fc463d9f51257db5dce535b9508843f4d507cc2485844d130a6bb9f258d44dc5",
+          "testId": "de5a7d6d618a08f026adda8b600664f34bef42c6fb2f6607c3a3c99189531238",
+          "durationMs": 6598,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "reliability": {
+        "tests": [],
+        "truncated": false
+      },
+      "suiteSeconds": 988,
+      "phases": {
+        "activeSeconds": 1031,
+        "installSeconds": 6,
+        "otherSetupSeconds": 34,
+        "suiteSeconds": 988,
+        "productionSeconds": 0,
+        "cleanupSeconds": 3
+      }
+    },
+    {
+      "runId": 42063471740,
+      "attempt": 1,
+      "jobId": 127371354345,
+      "shard": 8,
+      "version": 1,
+      "suite": "browser",
+      "count": 431,
+      "failed": 0,
+      "skipped": 4,
+      "cancelled": 0,
+      "unmeasured": 0,
+      "retryOnly": 0,
+      "truncated": false,
+      "context": {
+        "runId": "42063471740",
+        "attempt": 1,
+        "testedSha": "8979d3695f440a3dd5854e687a4de50e55b28722",
+        "workflowSha": "8979d3695f440a3dd5854e687a4de50e55b28722"
+      },
+      "slowestFiles": [
+        {
+          "fileId": "d2d900d95627194db12ab91f9d233662c56332a7ba65370c0b345645d7bdb6a4",
+          "durationMs": 136924,
+          "count": 33
+        },
+        {
+          "fileId": "1898d1e03fbcc10b927d4a2cb345b9b509d7639b74c1352eea18c49cdcfc1827",
+          "durationMs": 112277,
+          "count": 35
+        },
+        {
+          "fileId": "ed8a77f43ef6978b877c0c68a7fee7449b8db4dcac640365aa03c098c3bc55d5",
+          "durationMs": 85784,
+          "count": 19
+        },
+        {
+          "fileId": "5c89475eae168bac13869ef018048d2a08fb712f80ee048721f9fdb438c330de",
+          "durationMs": 71433,
+          "count": 14
+        },
+        {
+          "fileId": "aa7c02c233a195c4ec43632895b7038554976f920f729d8fe26e7f4909e0d43b",
+          "durationMs": 60952,
+          "count": 55
+        },
+        {
+          "fileId": "20747b983374467898371c2e4d48e3cf6cb93ba440ad59f68e86ddf8c4a7a796",
+          "durationMs": 53339,
+          "count": 40
+        },
+        {
+          "fileId": "80285b4cfccee0b1309691d95b0eb5d87cb89eeb51efd203c5b7eb696b866b9e",
+          "durationMs": 45346,
+          "count": 19
+        },
+        {
+          "fileId": "eea95825e886b13618c14dae7a4519fee66015bc7b95d356c9bf05389c5f7e94",
+          "durationMs": 42134,
+          "count": 10
+        },
+        {
+          "fileId": "a56acf6b823b467eb5aebe7d676f0d39fa781145386a8da12a6e4c91fbfd2fd2",
+          "durationMs": 37663,
+          "count": 8
+        },
+        {
+          "fileId": "74ece85ac2af23390b1761108258a59b1865378202c7bd2c4f002fdddbc880fb",
+          "durationMs": 37210,
+          "count": 23
+        },
+        {
+          "fileId": "ed26eb5ae7b2584588bbe6eee19d242f7d433e690c9481ce2083aafffca3648e",
+          "durationMs": 35810,
+          "count": 12
+        },
+        {
+          "fileId": "6f31bd6722d927ccf0ee3843eb60dc1fea976b8ea1f34fe7c8608ddec9ea1b7e",
+          "durationMs": 32165,
+          "count": 11
+        },
+        {
+          "fileId": "d1f09ba6d18322454e8284d828b6f4e3a1a3adea39ea55c932046d8b829e23a6",
+          "durationMs": 27640,
+          "count": 16
+        },
+        {
+          "fileId": "1f1f2f82394c5160005b5a6e48090d7ee15f44dd8cd76dcc9049a81bf3eb3fc1",
+          "durationMs": 22841,
+          "count": 13
+        },
+        {
+          "fileId": "50f4cd94df5e926ab7d1ae0b37c5e5c537982de271ea1ba2cd7c8f08f53b77ed",
+          "durationMs": 21757,
+          "count": 6
+        },
+        {
+          "fileId": "c8975dc8d682d9a31f449687557750058edb818d8d0d94fc3e57bd8f5cb9e4fa",
+          "durationMs": 20726,
+          "count": 7
+        },
+        {
+          "fileId": "34bac6bc65150fb9acbc46c60efe92f883bb8f99cc1890443551554b359188c0",
+          "durationMs": 19941,
+          "count": 11
+        },
+        {
+          "fileId": "27c35aff027d1729e5f0e41ed91d141ee78c7c79607aa293f0b9c9d25fef8002",
+          "durationMs": 18771,
+          "count": 8
+        },
+        {
+          "fileId": "c0843d85f05af4c8220b9db216231419123bd7f7a5db76ccb8bf0a248e141d3b",
+          "durationMs": 14538,
+          "count": 10
+        },
+        {
+          "fileId": "233c64b3c3d28bf092538e12166b0514edd3f99684adb48f72e3cce0c96441c2",
+          "durationMs": 14482,
+          "count": 9
+        }
+      ],
+      "slowestTests": [
+        {
+          "fileId": "d2d900d95627194db12ab91f9d233662c56332a7ba65370c0b345645d7bdb6a4",
+          "testId": "6032eab0261ebe8cec4707b9a38785659b4998df1bc69dfb00306934f8f08ece",
+          "durationMs": 15646,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "d2d900d95627194db12ab91f9d233662c56332a7ba65370c0b345645d7bdb6a4",
+          "testId": "e4c82a47513af986817e2644e4ab66c6d25ca648b214db0f4e0dda1a1294f7b7",
+          "durationMs": 15613,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "d2d900d95627194db12ab91f9d233662c56332a7ba65370c0b345645d7bdb6a4",
+          "testId": "1ff7f5ac0aa83cb215b6fe98815e3accf20a2370d7343ac3034f8fc41ba9b348",
+          "durationMs": 15024,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "reliability": {
+        "tests": [],
+        "truncated": false
+      },
+      "suiteSeconds": 1094,
+      "phases": {
+        "activeSeconds": 1142,
+        "installSeconds": 6,
+        "otherSetupSeconds": 38,
+        "suiteSeconds": 1094,
+        "productionSeconds": 0,
+        "cleanupSeconds": 4
+      }
+    },
+    {
+      "runId": 42063471740,
+      "attempt": 1,
+      "jobId": 127371354382,
+      "shard": 3,
+      "version": 1,
+      "suite": "browser",
+      "count": 389,
+      "failed": 0,
+      "skipped": 3,
+      "cancelled": 0,
+      "unmeasured": 0,
+      "retryOnly": 0,
+      "truncated": false,
+      "context": {
+        "runId": "42063471740",
+        "attempt": 1,
+        "testedSha": "8979d3695f440a3dd5854e687a4de50e55b28722",
+        "workflowSha": "8979d3695f440a3dd5854e687a4de50e55b28722"
+      },
+      "slowestFiles": [
+        {
+          "fileId": "10697a9df047387b834c1cf389cb2bbdf2536b1a2485147b650190ccefa2da09",
+          "durationMs": 302673,
+          "count": 30
+        },
+        {
+          "fileId": "88376137501f250687e602a30b42a427fb8e2e2fb73c73044068f450eb3085d7",
+          "durationMs": 78812,
+          "count": 31
+        },
+        {
+          "fileId": "6377d239dc170dabd88f1c2adca6827790ca723e14f0eb0b0b06bbb4d34a38a0",
+          "durationMs": 70016,
+          "count": 18
+        },
+        {
+          "fileId": "a4eeee5c05662e4228152a5d3146108c0fe0259221c6a603b37b8a86d7084920",
+          "durationMs": 67347,
+          "count": 26
+        },
+        {
+          "fileId": "62db2f099c421a712cbf957d14b112ce7256d4ed3db94ea52b71419c10c84006",
+          "durationMs": 57498,
+          "count": 45
+        },
+        {
+          "fileId": "a0be1640251948b6dab4f83ab868dd2aa64f34005ca3171bb1bb66c84d562640",
+          "durationMs": 46123,
+          "count": 26
+        },
+        {
+          "fileId": "77c0b320f6b47b8cf37a2e5d1107322c09d46283ac8d2bee7383134e9a058bd4",
+          "durationMs": 41073,
+          "count": 18
+        },
+        {
+          "fileId": "9579a51cc63675cfaa417f56027bd4108702fa78ed5d4f44c76a818d4b628d98",
+          "durationMs": 40237,
+          "count": 11
+        },
+        {
+          "fileId": "c766fa11a7e93bb1b61598a48c2f7f70b4849a7d7d3b42de8c2a784e3bc05057",
+          "durationMs": 37275,
+          "count": 11
+        },
+        {
+          "fileId": "3f6bee7da291c3253a89cd82bfb09502bf3368ee38498fa83a36e1cab1ed7e52",
+          "durationMs": 36079,
+          "count": 8
+        },
+        {
+          "fileId": "c489ef7a00321155c80c2ee2cb4ae91d0c90e5ba557a56ca190e63a7769342d6",
+          "durationMs": 34782,
+          "count": 10
+        },
+        {
+          "fileId": "1c55e93e2fded3d2db4d578e87361c9b90dccfde8f8d5fb12e11a724e4c59a07",
+          "durationMs": 33721,
+          "count": 16
+        },
+        {
+          "fileId": "61822b1cbabb386855f2497160b1cc1f36e233ff042c43dadfc06c2011c2490e",
+          "durationMs": 23581,
+          "count": 11
+        },
+        {
+          "fileId": "5ce8f47d5948e02211d0ec514a3d1f92ef0a83a56228ce5dc94f2fc50d1ad3c5",
+          "durationMs": 21603,
+          "count": 12
+        },
+        {
+          "fileId": "6bfb7bcf3862db9741e738c11167ebadb4f89d34a1c2314bb7d672d416a30b84",
+          "durationMs": 20632,
+          "count": 14
+        },
+        {
+          "fileId": "9f3b47723e848ce59c1eabbbd1449de4751b309b6af498a41cdd2ffa50bd365c",
+          "durationMs": 20465,
+          "count": 18
+        },
+        {
+          "fileId": "b1bf4ada7a8fb97eb937d76edb8d5d20d24ffdb3dbd6064f8552cca50c5f6174",
+          "durationMs": 20102,
+          "count": 8
+        },
+        {
+          "fileId": "17a9034519e31bcd204500e4bb183c4dc6cba4cf527661ead27628633c3e7bfa",
+          "durationMs": 19152,
+          "count": 12
+        },
+        {
+          "fileId": "cd44808ed458a4764420076a05be489de1762ebdd08d47883bcb734ba4602f66",
+          "durationMs": 18629,
+          "count": 10
+        },
+        {
+          "fileId": "9fb104d09dea08c9baf0d052ce1617181dc9313095d4d45213f203f045cf794a",
+          "durationMs": 15712,
+          "count": 10
+        }
+      ],
+      "slowestTests": [
+        {
+          "fileId": "10697a9df047387b834c1cf389cb2bbdf2536b1a2485147b650190ccefa2da09",
+          "testId": "85545be5373ba2f26ebfb1d4db187de576239af8f88dc231f7ed676c1035b481",
+          "durationMs": 20271,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "10697a9df047387b834c1cf389cb2bbdf2536b1a2485147b650190ccefa2da09",
+          "testId": "0fff8971f1b31025057691e561f4e56347a47837a8bf7491355ebd0dd51b51a7",
+          "durationMs": 18209,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "10697a9df047387b834c1cf389cb2bbdf2536b1a2485147b650190ccefa2da09",
+          "testId": "8217d2b6c6030223ec1583489f2dde60428e6732cca699a71a3e51ea6fe6b92b",
+          "durationMs": 18038,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "reliability": {
+        "tests": [],
+        "truncated": false
+      },
+      "suiteSeconds": 1104,
+      "phases": {
+        "activeSeconds": 1153,
+        "installSeconds": 6,
+        "otherSetupSeconds": 39,
+        "suiteSeconds": 1104,
+        "productionSeconds": 0,
+        "cleanupSeconds": 4
+      }
+    },
+    {
+      "runId": 42063471740,
+      "attempt": 1,
+      "jobId": 127371354386,
+      "shard": 4,
+      "version": 1,
+      "suite": "browser",
+      "count": 465,
+      "failed": 0,
+      "skipped": 64,
+      "cancelled": 0,
+      "unmeasured": 0,
+      "retryOnly": 0,
+      "truncated": false,
+      "context": {
+        "runId": "42063471740",
+        "attempt": 1,
+        "testedSha": "8979d3695f440a3dd5854e687a4de50e55b28722",
+        "workflowSha": "8979d3695f440a3dd5854e687a4de50e55b28722"
+      },
+      "slowestFiles": [
+        {
+          "fileId": "ee173d8788ad0a15b615e6c6fe07fe036d5012f751a345acc31eae01d56969d3",
+          "durationMs": 194203,
+          "count": 47
+        },
+        {
+          "fileId": "60cfc7260eba1c082748cc0810f677f002ecd28a2ac2dae113209ed6a596fc23",
+          "durationMs": 88158,
+          "count": 53
+        },
+        {
+          "fileId": "6ac4bc03a1bd4dca9a3f033cd7ed11b96b021dd8258bda760e17e23308391d3a",
+          "durationMs": 62568,
+          "count": 30
+        },
+        {
+          "fileId": "6af1bfdfe830a70644d0fde74b20f7b7f54a6a677d025b9561718bb85f89b9e3",
+          "durationMs": 53619,
+          "count": 16
+        },
+        {
+          "fileId": "97220f376d72dd789f185e72a1270dbb43671a18444afc57c21ec7cc3268ec0f",
+          "durationMs": 49530,
+          "count": 19
+        },
+        {
+          "fileId": "3452527edbc0aba39fe739c52eff1c718c1ac3670d9e32ccac960c157b098d0d",
+          "durationMs": 42950,
+          "count": 1
+        },
+        {
+          "fileId": "7566717d883b1598c0e8bb439fcac72996d4348d7ee4532a91c97862861f9480",
+          "durationMs": 34966,
+          "count": 11
+        },
+        {
+          "fileId": "4a3e7b2e81825f163d8b89c93343d58f79f932ed7a7257bc9292c375ee5164d1",
+          "durationMs": 34494,
+          "count": 13
+        },
+        {
+          "fileId": "dd4d76728db89459762f6829cbbde03913e013ad5bab3f1124571486dff2ced5",
+          "durationMs": 30755,
+          "count": 32
+        },
+        {
+          "fileId": "ba172d137900021c232d6f2081bf172a4391f1bd6cd5817a2d23d8cfece46c99",
+          "durationMs": 29278,
+          "count": 5
+        },
+        {
+          "fileId": "b55606a7fd7eb481cb3ca6cca78fddfe2e477ec609aa4f62610d71b972688b48",
+          "durationMs": 27572,
+          "count": 27
+        },
+        {
+          "fileId": "ba7efa7489cfc54e4d5b2f3ac1d9911ddee847ba7ac2f97d33cb2a1237f4eb8d",
+          "durationMs": 27407,
+          "count": 8
+        },
+        {
+          "fileId": "61996624d526dd15d510669b5bd5c976019856cf368a29c77f27c2f7aa9cf199",
+          "durationMs": 27164,
+          "count": 15
+        },
+        {
+          "fileId": "67dc83db1a4a78fdd53152ba7f05ab5fd7105a39b096a07352b922afac524a20",
+          "durationMs": 25977,
+          "count": 10
+        },
+        {
+          "fileId": "c3b707c404070850ba3112087d8462dfdac87f22b749e274372224a972b19cf1",
+          "durationMs": 20259,
+          "count": 5
+        },
+        {
+          "fileId": "8e09630c8332ab3031cdc4b45d0696f9831a45823ac6eecae9ddc7a339148dc8",
+          "durationMs": 19903,
+          "count": 12
+        },
+        {
+          "fileId": "2028fdc5536080112fa360054dd93db9b27560f9a44d3cfe442af91166ffd23a",
+          "durationMs": 16490,
+          "count": 9
+        },
+        {
+          "fileId": "59cd95159f145dcf663c4818cd0e5738e9e51cccd79ea03f4e3a58103a77d3ba",
+          "durationMs": 15072,
+          "count": 11
+        },
+        {
+          "fileId": "087841f4a67089836c16cf369ab5edf8845b515735ea18acb0ced12ebb781b8c",
+          "durationMs": 14692,
+          "count": 4
+        },
+        {
+          "fileId": "edf609eb15dadf60d77d1b4b32cb648d47ad5db413573c1e4a7007bdc005e4fa",
+          "durationMs": 13148,
+          "count": 12
+        }
+      ],
+      "slowestTests": [
+        {
+          "fileId": "3452527edbc0aba39fe739c52eff1c718c1ac3670d9e32ccac960c157b098d0d",
+          "testId": "6bae81b0e18b97adc3de5aef301425b08e723f622489749f9d4082589ea288c2",
+          "durationMs": 42950,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "ba172d137900021c232d6f2081bf172a4391f1bd6cd5817a2d23d8cfece46c99",
+          "testId": "1ff24f9113118e2bab6d370ced75bcaf6f3ee19b46485dcf7cc69dd7c70dd7f4",
+          "durationMs": 15357,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "ba172d137900021c232d6f2081bf172a4391f1bd6cd5817a2d23d8cfece46c99",
+          "testId": "fb5f38667c27421a4c0333c257caf62d457dd6cfec1bc7d5b4bc1773375c9a09",
+          "durationMs": 5341,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "reliability": {
+        "tests": [],
+        "truncated": false
+      },
+      "suiteSeconds": 927,
+      "phases": {
+        "activeSeconds": 979,
+        "installSeconds": 8,
+        "otherSetupSeconds": 41,
+        "suiteSeconds": 927,
+        "productionSeconds": 0,
+        "cleanupSeconds": 3
+      }
+    },
+    {
+      "runId": 42063471740,
+      "attempt": 1,
+      "jobId": 127371354431,
+      "shard": 1,
+      "version": 1,
+      "suite": "browser",
+      "count": 390,
+      "failed": 0,
+      "skipped": 12,
+      "cancelled": 0,
+      "unmeasured": 0,
+      "retryOnly": 0,
+      "truncated": false,
+      "context": {
+        "runId": "42063471740",
+        "attempt": 1,
+        "testedSha": "8979d3695f440a3dd5854e687a4de50e55b28722",
+        "workflowSha": "8979d3695f440a3dd5854e687a4de50e55b28722"
+      },
+      "slowestFiles": [
+        {
+          "fileId": "f0e0441575a53d32e94e528691fb97540ccbb74a11eec99c5e21e1babfe12513",
+          "durationMs": 116171,
+          "count": 76
+        },
+        {
+          "fileId": "c8d030972bdc6f6c2ecd31b10d2ca17d69a1d36ba86851334f33d4ad8c1b683e",
+          "durationMs": 82048,
+          "count": 39
+        },
+        {
+          "fileId": "c48d3cb886b313c57f5e7295f20d2120a258301e7fd356df8df55e09d817ddcb",
+          "durationMs": 58927,
+          "count": 15
+        },
+        {
+          "fileId": "480954301fad999c30acbdf073230e2295586a2ed7b574668e537631c6db8513",
+          "durationMs": 50661,
+          "count": 23
+        },
+        {
+          "fileId": "8569d3ded262b2a29398385dc716a95493fa69973527cfdb54d3083524a0c76b",
+          "durationMs": 45303,
+          "count": 4
+        },
+        {
+          "fileId": "8624950d9795be97e917861a5b5c4ef9418ada9c2491c6c4137faa94dd62dda2",
+          "durationMs": 38173,
+          "count": 25
+        },
+        {
+          "fileId": "736584b1b05354cee821e6aa714e0af2e7e290d8329e8a0656a00e8355e72b4f",
+          "durationMs": 32030,
+          "count": 14
+        },
+        {
+          "fileId": "cb650a0a25087fb29395d3ae98a1f009ae2b691c6f41122f76d6fe245979f9f2",
+          "durationMs": 30854,
+          "count": 18
+        },
+        {
+          "fileId": "cdeb6c5615f43cc69e2a6cb78c2ff6936a037c37cd60be749c9415d1b5ba9da1",
+          "durationMs": 30567,
+          "count": 9
+        },
+        {
+          "fileId": "46b10f670a6e54b7192d3bbdf207d21ae612949d99f124491363141ceca8b6a4",
+          "durationMs": 24686,
+          "count": 10
+        },
+        {
+          "fileId": "987b6c446fb37bb0d2ae140ffa7c19faffa08eb6932436be8b01258ebc21c68d",
+          "durationMs": 23212,
+          "count": 20
+        },
+        {
+          "fileId": "f01a0280fc888b1126a063425dc243de7763bb6072c7a2264193ff88aa41ef76",
+          "durationMs": 20703,
+          "count": 8
+        },
+        {
+          "fileId": "bb94b7d6af27dcb6dc5a9650d09be6df33d543eaca1cb2d70a3eb511cb4b785d",
+          "durationMs": 20558,
+          "count": 7
+        },
+        {
+          "fileId": "876eefdd1edf13440740528321642589293daf4a85612356c50ce621b38138ac",
+          "durationMs": 16007,
+          "count": 10
+        },
+        {
+          "fileId": "d1ff21b96c5652885f8d6055839aef348eb248f8d07b7c9b0fd86c44c361ed00",
+          "durationMs": 15975,
+          "count": 8
+        },
+        {
+          "fileId": "fc72cb8019cca75638e277ee0ba07863b63031335a3fd53074e044fc613493da",
+          "durationMs": 15297,
+          "count": 8
+        },
+        {
+          "fileId": "37bbd059a4070e4c165578eecd11aa30acef6e32a84a5fb9cbcd22d5803cf488",
+          "durationMs": 14980,
+          "count": 11
+        },
+        {
+          "fileId": "17e9f7b2105de249a36d2ebdb35148b18b7565d11e63a84af26152a1f31df582",
+          "durationMs": 14789,
+          "count": 11
+        },
+        {
+          "fileId": "3c8c9a2bc9a7fc3ce2138e88becef83b0d3dca41957d250639fedca40a6b3f86",
+          "durationMs": 14090,
+          "count": 8
+        },
+        {
+          "fileId": "f32cd278669edcf5067b88382aee81ac5132e1e7012d0bb30c37dc7f6df563df",
+          "durationMs": 12612,
+          "count": 1
+        }
+      ],
+      "slowestTests": [
+        {
+          "fileId": "f32cd278669edcf5067b88382aee81ac5132e1e7012d0bb30c37dc7f6df563df",
+          "testId": "f6f8a37889d5403d2fd434f0673fc42ab7cb573ae204b6c0354698fdbde7fe85",
+          "durationMs": 12612,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "8569d3ded262b2a29398385dc716a95493fa69973527cfdb54d3083524a0c76b",
+          "testId": "5e923a680823de32b833c5b219a14986f66c9fd32c321ee1c625943acb9d6474",
+          "durationMs": 11434,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "8569d3ded262b2a29398385dc716a95493fa69973527cfdb54d3083524a0c76b",
+          "testId": "3322efeec17047ee50a1e1ca5ba936626c4c29be35ccd8790a561573335b8e63",
+          "durationMs": 11403,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "reliability": {
+        "tests": [],
+        "truncated": false
+      },
+      "suiteSeconds": 749,
+      "phases": {
+        "activeSeconds": 881,
+        "installSeconds": 6,
+        "otherSetupSeconds": 37,
+        "suiteSeconds": 749,
+        "productionSeconds": 85,
+        "cleanupSeconds": 4
+      }
+    },
+    {
+      "runId": 42063471740,
+      "attempt": 1,
+      "jobId": 127371354565,
+      "shard": 2,
+      "version": 1,
+      "suite": "browser",
+      "count": 389,
+      "failed": 0,
+      "skipped": 60,
+      "cancelled": 0,
+      "unmeasured": 0,
+      "retryOnly": 0,
+      "truncated": false,
+      "context": {
+        "runId": "42063471740",
+        "attempt": 1,
+        "testedSha": "8979d3695f440a3dd5854e687a4de50e55b28722",
+        "workflowSha": "8979d3695f440a3dd5854e687a4de50e55b28722"
+      },
+      "slowestFiles": [
+        {
+          "fileId": "a744385c6a66aef4a5573ac71e0091aa057fd9ca6caab813d270d80b71182d48",
+          "durationMs": 273587,
+          "count": 52
+        },
+        {
+          "fileId": "b1b134901fe272e867d7bbf95db9dbb69c25feb2fe898c088cf4d4b2088a4696",
+          "durationMs": 79342,
+          "count": 26
+        },
+        {
+          "fileId": "cde3e518de9704bf9b9c2b40e2061a5842ed0e65926af43d72a156709301ee79",
+          "durationMs": 65271,
+          "count": 34
+        },
+        {
+          "fileId": "4dcd680ae2de8924e9e7631f762e10c413deda1b38970b9fd565a146e3426650",
+          "durationMs": 55279,
+          "count": 12
+        },
+        {
+          "fileId": "fcfcc149c48ce98550cd689d9f6fd9b29bd7bc1aa86b6b36c9e7de2edca43e1d",
+          "durationMs": 52108,
+          "count": 28
+        },
+        {
+          "fileId": "4111bde35cb7fa2f076027f02190f461853a447900607f02b53d27bec792b829",
+          "durationMs": 43150,
+          "count": 10
+        },
+        {
+          "fileId": "d6a8f3c0541edd683089dc7333240576e74855dabdae64d809be8f3c790b6b4b",
+          "durationMs": 38364,
+          "count": 12
+        },
+        {
+          "fileId": "eccc27b48fc71cb8448ee9372449f32c5cb76e3fc5a230ca1f6aa4ddb7371efc",
+          "durationMs": 37760,
+          "count": 19
+        },
+        {
+          "fileId": "64e881559e110a1b8dedb836d302c2df887f929fca7615dd6a2e4d5efaf41102",
+          "durationMs": 33885,
+          "count": 6
+        },
+        {
+          "fileId": "1870a9c11b9e91284f36b67ec98a359084037ce6bc4c24eb08230ca6730e25fc",
+          "durationMs": 29062,
+          "count": 23
+        },
+        {
+          "fileId": "0afe5bd1759ac20909ffd8b4895334c23eb1278eda466a89fc9cf20baa6325de",
+          "durationMs": 26314,
+          "count": 6
+        },
+        {
+          "fileId": "a6493a160f0c9435b88c30f7620282051aea617f908e631d998573214368ca0e",
+          "durationMs": 25720,
+          "count": 4
+        },
+        {
+          "fileId": "e578222e403e3fd0ad7ff884923d1698b17ae9fb0c8f16990fa69af05dc4be61",
+          "durationMs": 23283,
+          "count": 5
+        },
+        {
+          "fileId": "a944e20f645d8eacde29f7f711b19a40ce20df58962564b1eb8bbfce97b4ecba",
+          "durationMs": 19976,
+          "count": 10
+        },
+        {
+          "fileId": "716ab696c8c8b9b756189c13fc48cff62aa3a4e369e7b2b64aff1babb0bfe894",
+          "durationMs": 16948,
+          "count": 8
+        },
+        {
+          "fileId": "5c995caa9c4b6ce95d388e20848617e86bfdb9597733f40c6bb004538aca03e5",
+          "durationMs": 15353,
+          "count": 9
+        },
+        {
+          "fileId": "fa0b9a897486539a9fcc7a13508dee0667ed3e9880575f7fd4c8167aef747337",
+          "durationMs": 14783,
+          "count": 12
+        },
+        {
+          "fileId": "f37178b9e27c008f04e8856838e749fa146f27990cc969ecfe8d7b427e347ac4",
+          "durationMs": 14266,
+          "count": 5
+        },
+        {
+          "fileId": "9641cfcfebe41bfb8ab993ba6584bca43c2da0635b204a650a32ab290415e79d",
+          "durationMs": 13411,
+          "count": 9
+        },
+        {
+          "fileId": "be70ad15bcb25876cdb0cd2dc545543f69ca85a1a53232dbdb8b29c797325818",
+          "durationMs": 12904,
+          "count": 5
+        }
+      ],
+      "slowestTests": [
+        {
+          "fileId": "a744385c6a66aef4a5573ac71e0091aa057fd9ca6caab813d270d80b71182d48",
+          "testId": "06924215228f2d2e07aa130029f129017eb4d6c75c77e2cdb5899bb897369846",
+          "durationMs": 11256,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "a744385c6a66aef4a5573ac71e0091aa057fd9ca6caab813d270d80b71182d48",
+          "testId": "06b53798011a94583fd8db13f5a0734e1f7862368adc54ba0aec376ce6d54f5b",
+          "durationMs": 9250,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "d6a8f3c0541edd683089dc7333240576e74855dabdae64d809be8f3c790b6b4b",
+          "testId": "62a1c9cff157022d14da967a51c971447437ca73179e9aa204cd89a94d2c22f0",
+          "durationMs": 8800,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "reliability": {
+        "tests": [],
+        "truncated": false
+      },
+      "suiteSeconds": 960,
+      "phases": {
+        "activeSeconds": 1003,
+        "installSeconds": 6,
+        "otherSetupSeconds": 35,
+        "suiteSeconds": 960,
+        "productionSeconds": 0,
+        "cleanupSeconds": 2
+      }
     }
   ]
 }
