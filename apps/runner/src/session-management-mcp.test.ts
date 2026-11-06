@@ -3729,18 +3729,28 @@ test("request_campaign_issue_scope_change sends a structured proposal only to a 
   const { proposal: _omitted, ...withoutProposal } = args;
   assert.deepEqual(calls.at(-1)!.body, withoutProposal);
   // A repository name is never dropped: leaving it out would widen what the owner limited (#4118).
-  const named = { ...args, proposal: { ...proposal, repositoryName: "the api repo" } };
+  const named = { ...args, proposal: { ...proposal, repositoryNames: ["the api repo"] } };
   const before = calls.length;
   for (const version of [RUNNER_CAPABILITY_MIN_PROTOCOL.campaignScopeProposals - 1, RUNNER_CAPABILITY_MIN_PROTOCOL.repositoryQualifiedProposals - 1]) {
     deps.controlPlaneProtocolVersion = version;
     const refused = await callTool(deps, "request_campaign_issue_scope_change", named);
     assert.equal(refused.isError, true);
-    assert.match(JSON.stringify(refused), /repositoryName/u);
+    assert.match(JSON.stringify(refused), /repositoryNames/u);
   }
   assert.equal(calls.filter((call) => call.url.endsWith("/campaign/issue-scope/proposals")).length, calls.slice(0, before).filter((call) => call.url.endsWith("/campaign/issue-scope/proposals")).length);
+  // A v318 control plane reads one name, in the field it knows, and several can't be sent (#4117).
   deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.repositoryQualifiedProposals;
   assert.equal((await callTool(deps, "request_campaign_issue_scope_change", named)).isError, undefined);
-  assert.deepEqual(calls.at(-1)!.body, named);
+  assert.deepEqual(calls.at(-1)!.body, { ...args, proposal: { ...proposal, repositoryName: "the api repo" } });
+  const several = { ...args, proposal: { ...proposal, repositoryNames: ["the api repo", "web"] } };
+  const sent = calls.length;
+  const refused = await callTool(deps, "request_campaign_issue_scope_change", several);
+  assert.equal(refused.isError, true);
+  assert.match(JSON.stringify(refused), /repositoryNames/u);
+  assert.equal(calls.filter((call, index) => index >= sent && call.url.endsWith("/campaign/issue-scope/proposals")).length, 0, "no part of a limit is sent");
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryLimits;
+  assert.equal((await callTool(deps, "request_campaign_issue_scope_change", several)).isError, undefined);
+  assert.deepEqual(calls.at(-1)!.body, several);
   // Nor is an epic's repository: left out, the same number would be read in the launch repository.
   const lineage = { ...args, lineage: { kind: "epic", epic: 40, repository: "owner/api" } };
   const issueScope = `${CP_URL}/api/sessions/${SELF_ID}/campaign/issue-scope`;

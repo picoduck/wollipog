@@ -1001,6 +1001,12 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      check judges. A v318 runner sends it only to a v318 control plane; older dashboards show the
 //      launch repository for an issue that names another. (This change first claimed 316, which no
 //      released version uses.)
+// 320: an Orchestrator's scope proposal names every repository the owner's first message limits the
+//      work to (#4117). `proposal.repositoryNames` replaces `repositoryName`, which a v318 or v319
+//      runner still sends and reads as a one-entry list; a record with one name reads the same way.
+//      Admitting the initial scope re-mints the boundary without the other repositories, and their
+//      Locations show as available in Campaign Status. A v320 runner sends one name to a v318 or v319
+//      control plane, and refuses several. Older dashboards don't show available Locations.
 // 322: a campaign's epics are repository-qualified (#4118). `issueAuthority.otherEpics` holds the
 //      boundary's other repositories' epics and is stripped for an older runner, which keeps reading
 //      `epics` as the launch repository's. `lineage.epic` and `get_campaign_issue_scope` take an optional
@@ -1008,7 +1014,7 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      v322 runner; an older one is refused by name and nothing changes. A v322 runner sends a
 //      repository only to a v322 control plane. A Full Control launch's `otherIssues` are read through a
 //      Location of each repository with today's plain issue read. (This change first claimed 317 and
-//      319, which no released version uses for it; 320 and 321 are claimed by open pull requests.)
+//      319, which no released version uses for it; 321 is claimed by an open pull request.)
 export const PROTOCOL_VERSION = 322;
 
 export * from "./campaign-authority.js";
@@ -1613,6 +1619,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   campaignRepositoryAddition: 317,
   /** v318 reads a Location's issue facts for a repository-qualified scope proposal (#4118). */
   repositoryQualifiedProposals: 318,
+  /** v320 reads `proposal.repositoryNames` and narrows a campaign's boundary to them (#4117). */
+  campaignRepositoryLimits: 320,
   /** v322 reads `issueAuthority.otherEpics` and resolves an epic's members through a Location (#4118). */
   repositoryQualifiedEpics: 322,
 } as const;
@@ -3194,6 +3202,8 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   launchDisclosure?: import("./campaign-control-launch.js").CampaignLaunchDisclosure;
   /** Locations other people added mid-campaign, waiting for the owner's Include in Campaign (#4117). */
   pendingLocations?: import("./project-location-inspection.js").CampaignPendingLocation[];
+  /** Locations of repositories the owner's first message left out (#4117): they don't join. */
+  availableLocations?: import("./project-location-inspection.js").CampaignAvailableLocation[];
   /** The Locations that joined the boundary after launch, newest last, bounded (#4117). */
   locationJoins?: import("./project-location-inspection.js").CampaignLocationJoin[];
   /** A Custom campaign's repositories (#4117): its own Location's repository first, then those its

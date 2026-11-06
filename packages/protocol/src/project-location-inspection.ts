@@ -41,6 +41,15 @@ export interface CampaignPendingLocation {
   reason: "added_by_other";
 }
 
+/** A Project Location of a repository the owner's first message left out of the campaign (#4117).
+ * It is available but doesn't join: only an approved `campaign_repository_addition` brings its
+ * repository in. `repository` is what the Location verified as. */
+export interface CampaignAvailableLocation {
+  locationId: string;
+  name: string;
+  repository: string;
+}
+
 /** One Location that joined a campaign's boundary after launch, and the boundary revision it
  * joined at. */
 export interface CampaignLocationJoin {
@@ -55,14 +64,19 @@ export interface CampaignLocationJoin {
 export const CAMPAIGN_LOCATION_JOINS_MAX = 50;
 
 /** Campaign Status's view of the repository boundary (#4117): each boundary repository with its
- * Locations, the Locations left out with their reasons, those waiting for the owner, and the
- * Locations that joined after launch. Names only; no path or origin. */
+ * Locations, the Locations left out with their reasons, those waiting for the owner, those the
+ * owner's first message left out, and the Locations that joined after launch. Names only; no path
+ * or origin. */
 export interface CampaignRepositoryBoundaryView {
   revision: number;
   repositories: Array<{ repository: string; locations: Array<{ locationId: string; name: string;
     availability: import("./index.js").ProjectLocationAvailability | "removed"; isDefault: boolean }> }>;
   excludedLocations: CampaignExcludedLocation[];
   pendingLocations: CampaignPendingLocation[];
+  /** Absent from a control plane before v320. */
+  availableLocations?: CampaignAvailableLocation[];
+  /** The repositories the owner's first message limits the campaign to; absent with no limit. */
+  repositoryLimits?: string[];
   joins: CampaignLocationJoin[];
 }
 

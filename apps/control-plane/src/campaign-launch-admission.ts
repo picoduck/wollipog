@@ -276,7 +276,9 @@ export interface CampaignLaunchFacts {
   projectLocations?: { launchLocationId: string | null; locations: CampaignProjectLocation[];
     inspections: ReadonlyMap<string, ProjectLocationInspection>;
     /** Enabling on an existing campaign: the repositories it already holds, which it keeps. */
-    carried?: CampaignBoundaryRepository[] | undefined } | null;
+    carried?: CampaignBoundaryRepository[] | undefined;
+    /** Enabling on an existing campaign: what the owner's first message limited it to. */
+    limits?: string[] | undefined } | null;
 }
 
 function canonical(value: unknown): string {
@@ -495,6 +497,7 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
         // A carried Location the person can no longer see in the Project is never named by a live read.
         locations: entry.locationIds.map((locationId) => ({ locationId, name: locationName.get(locationId) ?? "Removed Location" })) })),
       excludedLocations: boundary.excluded,
+      ...(boundary.available.length ? { availableLocations: boundary.available } : {}),
     } : {}),
     issueNumbers, ...(otherIssues.length ? { otherIssues } : {}), objective,
     root: { agentId: plan.agentId, driver: plan.driver, model: plan.config.model ?? null, effort: plan.config.effort ?? null,

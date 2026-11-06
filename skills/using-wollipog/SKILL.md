@@ -883,12 +883,14 @@ and a one-line `rationale`; `requestedCount`, the number the owner asked for or 
 and `withheldOperations`, operations the message rules out ("fix but don't merge" withholds
 `pr_merge`). A proposal may add issues in any of the campaign's repositories. A bare `#12` means the
 launch repository, so an issue in another repository counts as `owner_named` only when the message
-writes `owner/repo#12` or its URL. When the message limits the work to one repository, send its own
-words as `repositoryName` ("the api repo"): the server resolves it by full name, name without the
-owner, or Location name, and refuses an issue outside that repository, now or in a later addition.
-The constraint check judges whether the message really limits the work to it, so never send a
-repository the message only mentions or excludes. A name that matches none or several decides
-nothing, so the proposal becomes the owner's one approval. Ranking criteria such as "highest priority" are your call: explain them in each
+writes `owner/repo#12` or its URL. When the message limits the work to some of the campaign's
+repositories, send its own words for each as `repositoryNames` (["the api repo", "web"]): the server
+resolves each by full name, name without the owner, or Location name, and refuses an issue outside
+them, now or in a later addition. Admission removes every other repository from the campaign; one comes
+back only through `request_campaign_repository_addition`, which its owner decides. The constraint check
+judges whether the message really limits the work to them, so never send a repository the message only
+mentions or excludes, and never leave out one it limits the work to. Any name that matches none or
+several decides nothing for the whole list, so the proposal becomes the owner's one approval. Ranking criteria such as "highest priority" are your call: explain them in each
 rationale and in `explanation`, never as constraints. A task that needs no issues proposes no
 additions. Deterministic checks run first and refuse, naming the issue and condition: an owner-named
 number the message doesn't write, an issue outside the campaign's repositories, a pull request, a

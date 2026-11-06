@@ -179,6 +179,9 @@ export interface CampaignLaunchSummary {
   repositories?: Array<{ repository: string; locations: Array<{ locationId: string; name: string }> }>;
   /** Project Locations left out of the boundary, each with its fixed reason. They never block launch. */
   excludedLocations?: import("./project-location-inspection.js").CampaignExcludedLocation[];
+  /** Enabling on a campaign whose first message limited it: Project Locations of other repositories,
+   * which stay available and don't join (#4117). */
+  availableLocations?: import("./project-location-inspection.js").CampaignAvailableLocation[];
   issueNumbers: number[];
   otherIssues?: CampaignIssueRef[];
   objective: string;

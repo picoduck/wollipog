@@ -163,18 +163,35 @@ approval is invalidated. A legacy campaign with no saved repository stays unveri
   Human Required label. An owner-named issue must be written for its own repository: a bare `#12` means
   the launch repository only, so another repository's needs `owner/repo#12` or its URL. The same number
   in two repositories is two issues everywhere, including the constraint check's questions.
-- **A repository the owner names.** `proposal.repositoryName` carries the message's own words for a
-  repository the Orchestrator says the work is limited to. The words must appear in the owner's message
-  as whole words (`repository_name_not_in_message`): "api" is not written in "rapidly". The server, not a
-  model, resolves them against the boundary: the full name, the name without the owner, or a Location's
-  name, ignoring case, a leading "the" and a trailing "repo" or "repository". One match binds every issue
-  to that repository (`repository_constraint_mismatch`). That proves what the name is, not what the owner
-  meant by it, so it is still the Orchestrator's claim: the `repository_limit` question asks the Decision
-  Model whether the message limits the work to it, rather than excluding or only mentioning it, and a
-  named repository never takes the no-model path. The admitted initial scope records the limit as
-  `repositoryLimit`, and a later addition outside it is refused, whether it names a repository or not. No
-  match or several grants nothing: the proposal becomes the owner's one approval
-  (`repository_name_unresolved`) with no model call.
+- **The repositories the owner names (#4117).** `proposal.repositoryNames` carries the message's own
+  words for each repository the Orchestrator says the work is limited to. The words must appear in the
+  owner's message as whole words (`repository_name_not_in_message`): "api" is not written in "rapidly".
+  The server, not a model, resolves each against the boundary: the full name, the name without the owner,
+  or a Location's name, ignoring case, a leading "the" and a trailing "repo" or "repository". When every
+  name matches one repository, every issue must be in one of them (`repository_constraint_mismatch`). That
+  proves what the names are, not what the owner meant by them, so they are still the Orchestrator's claim:
+  a `repository_limit` question for each name asks the Decision Model whether the message limits the work
+  to it, rather than excluding or only mentioning it, and named repositories never take the no-model path.
+  Any name that matches none or several grants nothing, for the whole list: the proposal becomes the
+  owner's one approval (`repository_name_unresolved`) with no model call, and approving it applies no part
+  of the limit. A name only ever resolves against the boundary, so a limit can't add a repository.
+- **A limit left out.** The `repository_limits_complete` question asks whether the message limits the work
+  to a repository the proposal doesn't name. `omits_limit` is neither a refusal nor an admission: the
+  proposal goes to the owner's one approval. A message that writes a campaign repository's name beside an
+  initial proposal with no limit (`repository_mentioned`) always reaches this check; `owner/repo#12` and an
+  issue's URL point at an issue and don't count.
+- **Narrowing the boundary (#4117).** Admitting a limited initial scope, by the check or by the owner,
+  re-mints the boundary without the other repositories at a new revision, and revokes what was bound to
+  the old one. It happens before anything is dispatched. The admitted scope records `repositoryLimits`, and
+  a later addition outside them is refused, whether it names a repository or not. The launch entry always
+  stays first, because the root runs there and the boundary requires it, so a limit to other repositories
+  keeps that entry beside them while its issues stay refused.
+- **Repositories the limit left out.** Their Locations show in Campaign Status as Available but Not in
+  This Campaign. A Location of a repository with no entry never joins while a limit stands, whether the
+  owner added it, its runner reconnected, the owner used Include in Campaign, or a reviewed enable found it.
+  A re-authorization and an enable keep the limit. Only `campaign_repository_addition`, which the owner
+  approves, gives that repository an entry, and its issues then pass the limit. Its other available
+  Locations then wait for Include in Campaign, because the approval named one Location.
 - **Admission.** Maximum Issues counts issues across all repositories. Follow-up lineage admits only a
   publication in the launch repository until cross-repository follow-ups (#4119) land.
 - **Epics.** `issueAuthority.epics` are the launch repository's, and `issueAuthority.otherEpics` holds
@@ -187,7 +204,8 @@ approval is invalidated. A legacy campaign with no saved repository stays unveri
   of its repository, and a member anywhere but that repository fails the read, so members count only in a
   boundary repository. One epic's lineage admits only that repository's members
   (`epic_members_unverified`). A scope change that drops an epic drops its authority, in that repository
-  only. A pre-v322 runner receives `epics` alone, and can't be asked to read another repository's epic.
+  only, and so does narrowing the boundary, since its issues leave with it. A pre-v322 runner receives
+  `epics` alone, and can't be asked to read another repository's epic.
 - **Participants.** The root holds the whole scope. Every other Orchestrator participant, and its runner,
   holds only its own Location repository's numbers in the earlier one-repository shape, so a number is
   never read in the wrong repository. A retired participant in no campaign repository records the

@@ -363,6 +363,8 @@ test("PROTOCOL_VERSION is 322", () => {
   // An epic in another repository is resolved through a v322 Location's runner (#4118).
   assert.equal(runnerSupportsProtocol(321, "repositoryQualifiedEpics"), false);
   assert.equal(runnerSupportsProtocol(322, "repositoryQualifiedEpics"), true);
+  // A control plane reads a proposal's repository list from v320 (#4117).
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryLimits, 320);
   // Another repository's proposed issues are read through a v318 Location's runner (#4118).
   assert.equal(runnerSupportsProtocol(317, "repositoryQualifiedProposals"), false);
   assert.equal(runnerSupportsProtocol(318, "repositoryQualifiedProposals"), true);

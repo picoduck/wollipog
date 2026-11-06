@@ -12,7 +12,7 @@ import type { SessionsService } from "./sessions.js";
 import type { OrchestratorSettings } from "./orchestrator-settings.js";
 import type { EvidenceAuthorityDisclosures } from "./evidence-authority.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
-import { authorizeFullControl, carriedCampaignRepositories } from "./campaign-authority.js";
+import { authorizeFullControl, campaignRepositoryLimits, carriedCampaignRepositories } from "./campaign-authority.js";
 import type { CampaignProjectLocation } from "./campaign-repository-boundary.js";
 import { evaluateUiEvidenceReviewClient } from "./ui-evidence-review.js";
 import { campaignLaunchDigest, campaignLaunchPreflight, derivedLaunchLimits, firstMessageLaunch, fullControlRootPlacementRefusal, launchSessionRequest,
@@ -342,7 +342,8 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
       campaignScope: issueScope ? { repository: issueScope.repository, issueNumbers: issueScope.issueNumbers,
         authorizedByCaller: issueScope.authorizedByUserId === principal.userId }
         : { repository: derived?.repository ?? "", issueNumbers: derived?.issueNumbers ?? [], authorizedByCaller: true },
-      projectLocations: surveyed && { ...surveyed, carried: carriedCampaignRepositories(settled!, issueScope?.repository ?? derived?.repository ?? "") },
+      projectLocations: surveyed && { ...surveyed, carried: carriedCampaignRepositories(settled!, issueScope?.repository ?? derived?.repository ?? ""),
+        limits: campaignRepositoryLimits(settled!.orchestratorPolicy) },
       participantCeiling: db.campaignDescendantIds(id).some((childId) => {
         const child = db.getSession(childId);
         return Boolean(child && !["completed", "failed", "stopped"].includes(child.status) && ceiling(limits(childId)));
@@ -384,7 +385,8 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
           reviewers: [{ driver: evidence.provider.reviewer.driver as "claude-code" | "codex-app-server", modelId: evidence.provider.reviewer.model }] }],
       } } : {}) }, revision, principal, derived ?? undefined, derivedLaunchLimits(body.overrides),
       campaignLaunchDisclosure(preflight, "enable", Date.now()),
-      proposal.repositories ? { repositories: proposal.repositories, excludedLocations: preflight.summary.excludedLocations ?? [] } : undefined);
+      proposal.repositories ? { repositories: proposal.repositories, excludedLocations: preflight.summary.excludedLocations ?? [],
+        availableLocations: preflight.summary.availableLocations ?? [] } : undefined);
     if (!result.ok || !result.data) return reply.code(result.status).send({ error: result.error ?? "Full Control was not enabled" });
     return result.data;
   });
