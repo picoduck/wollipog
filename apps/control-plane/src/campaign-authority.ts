@@ -39,7 +39,7 @@ export function carriedCampaignRepositories(session: SessionView, scopeRepositor
 }
 
 /** The runner's diagnostic copy of a campaign's control. A pre-v288 runner rejects a boundary with
- * a `repositories` list (#4117), and a pre-v319 one an issue authority with `otherEpics` (#4118), so
+ * a `repositories` list (#4117), and a pre-v322 one an issue authority with `otherEpics` (#4118), so
  * each receives the boundary without them, which names the same first repository and its epics. The
  * server keeps and enforces the full boundary. */
 export function campaignControlForRunner(control: CampaignControl, protocolVersion: number | null | undefined): CampaignControl {

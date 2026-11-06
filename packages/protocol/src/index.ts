@@ -1001,15 +1001,15 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      check judges. A v318 runner sends it only to a v318 control plane; older dashboards show the
 //      launch repository for an issue that names another. (This change first claimed 316, which no
 //      released version uses.)
-// 319: a campaign's epics are repository-qualified (#4118). `issueAuthority.otherEpics` holds the
+// 322: a campaign's epics are repository-qualified (#4118). `issueAuthority.otherEpics` holds the
 //      boundary's other repositories' epics and is stripped for an older runner, which keeps reading
 //      `epics` as the launch repository's. `lineage.epic` and `get_campaign_issue_scope` take an optional
 //      `repository`. `campaign_launch_inspect` takes `epic` and returns `candidates`, sent only to a
-//      v319 runner; an older one is refused by name and nothing changes. A v319 runner sends a
-//      repository only to a v319 control plane. A Full Control launch's `otherIssues` are read through a
-//      Location of each repository with today's plain issue read. (This change first claimed 317, which
-//      campaign repository additions took.)
-export const PROTOCOL_VERSION = 319;
+//      v322 runner; an older one is refused by name and nothing changes. A v322 runner sends a
+//      repository only to a v322 control plane. A Full Control launch's `otherIssues` are read through a
+//      Location of each repository with today's plain issue read. (This change first claimed 317 and
+//      319, which no released version uses for it; 320 and 321 are claimed by open pull requests.)
+export const PROTOCOL_VERSION = 322;
 
 export * from "./campaign-authority.js";
 export * from "./decision-questions.js";
@@ -1613,8 +1613,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   campaignRepositoryAddition: 317,
   /** v318 reads a Location's issue facts for a repository-qualified scope proposal (#4118). */
   repositoryQualifiedProposals: 318,
-  /** v319 reads `issueAuthority.otherEpics` and resolves an epic's members through a Location (#4118). */
-  repositoryQualifiedEpics: 319,
+  /** v322 reads `issueAuthority.otherEpics` and resolves an epic's members through a Location (#4118). */
+  repositoryQualifiedEpics: 322,
 } as const;
 
 /* ========================================================================== */
@@ -4369,8 +4369,9 @@ export interface RunnerRuntimeInfo {
   campaignReview?: import("./campaign-review-job.js").ControlledReviewCapability;
   /** Exact read-only workspace inspection path only; never Full Control readiness. Version 2
    * accepts `campaign_launch_inspect_cancel` and repository-only (zero-issue) inspection.
-   * Version 3 accepts authorized project location paths and returns closed failure codes. */
-  campaignLaunchInspection?: { version: 1 | 2 | 3 };
+   * Version 3 accepts authorized project location paths and returns closed failure codes.
+   * Version 4 also inspects a follow-up `publication` in that Location's repository (#4119). */
+  campaignLaunchInspection?: { version: 1 | 2 | 3 | 4 };
   /** Runner-mediated cross-model review for sessions (#3306). Missing is unsupported. */
   sessionReview?: import("./session-review-job.js").SessionReviewCapability;
   /** Review sessions (#3368): the reviewer harnesses this runner can launch. Missing is unsupported. */

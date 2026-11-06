@@ -187,7 +187,7 @@ approval is invalidated. A legacy campaign with no saved repository stays unveri
   of its repository, and a member anywhere but that repository fails the read, so members count only in a
   boundary repository. One epic's lineage admits only that repository's members
   (`epic_members_unverified`). A scope change that drops an epic drops its authority, in that repository
-  only. A pre-v319 runner receives `epics` alone, and can't be asked to read another repository's epic.
+  only. A pre-v322 runner receives `epics` alone, and can't be asked to read another repository's epic.
 - **Participants.** The root holds the whole scope. Every other Orchestrator participant, and its runner,
   holds only its own Location repository's numbers in the earlier one-repository shape, so a number is
   never read in the wrong repository. A retired participant in no campaign repository records the
