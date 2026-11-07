@@ -13,7 +13,7 @@ import { viewPath } from "../navigation.js";
 import { CampaignHeldChildren, type CampaignHeldChild } from "./CampaignHeldChildren.js";
 import { useDescendantRequestPolling } from "./SessionDetail.js";
 import { holdRecoveryActionFor } from "../session-command-permissions.js";
-import { sessionHolds, type SessionQueueHoldView } from "@wollipog/protocol";
+import { sessionHolds, worktreeRecoveryAction, type SessionQueueHoldView } from "@wollipog/protocol";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -52,9 +52,7 @@ function worktreeHold(overrides: Partial<SessionHoldView> = {}): SessionHoldView
     holdId: "recovery-1",
     since: Date.now() - 120_000,
     reason: "The selected worktree is on branch main, not feat/example.",
-    recoveryAction: "Restore branch feat/example in /work/tree (for example `git -C /work/tree switch feat/example`) " +
-      "and select that worktree again with select_worktree, or select or create another worktree for this session " +
-      "with select_worktree or create_worktree.",
+    recoveryAction: worktreeRecoveryAction({ selectedPath: "/work/tree", expectedBranch: "feat/example" }),
     heldResumes: [{ kind: "workflow_decision_resolution", occurrenceId: "wd_occ_42", since: Date.now() - 60_000 }],
     ...overrides,
   };
@@ -107,8 +105,10 @@ test("held children list each child's link, hold reason, recovery action, and he
     const text = section.textContent ?? "";
     assert.match(text, /Worktree Recovery/);
     assert.match(text, /The selected worktree is on branch main, not feat\/example\./);
-    assert.equal(section.querySelector("dd code")?.textContent, "git -C /work/tree switch feat/example",
-      "the quoted recovery command is rendered as code");
+    assert.match(text, /Restore branch feat\/example in \/work\/tree and select that worktree again with select_worktree/u);
+    assert.doesNotMatch(text, /git -C|`/u, "no command to run inside the agent-managed worktree");
+    assert.deepEqual([...section.querySelectorAll("dd code")].map((node) => node.textContent), ["wd_occ_42"],
+      "only the held decision's id is code; the recovery step is words");
     assert.match(text, /wd_occ_42/);
     assert.match(text, /A hold has nothing to answer\./);
     assert.doesNotMatch(text, /not listed here/, "the summary omits unlisted blocked children when every one is held");

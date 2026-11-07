@@ -36,6 +36,7 @@ import {
   campaignIssueLimitsRequirement,
   campaignIssueScopeChangesRequirement,
   PROTOCOL_VERSION,
+  worktreeRefusalAction,
   type CampaignWorkItemDetail,
   type CampaignWorkItemHandoff,
   type CampaignWorkItemSummary,
@@ -490,9 +491,9 @@ function activityProjection(state: "active" | "cleanup" | "complete" | "stuck"):
         state: "pending" as const, reason: "The last deletion was refused: The forge could not be reached.",
         action: { kind: "delete_merged_branches" as const, occurrenceId: "workflow_delete_4223" } },
       { kind: "worktree" as const, sessionId: "s_child", path: "/home/dev/worktrees/wollipog/s_079714ea231c", status: "refused" as const,
-        reason: "The worktree has uncommitted changes.",
-        action: { kind: "command" as const, command: "git -C '/home/dev/worktrees/wollipog/s_079714ea231c' status",
-          then: "Commit and push the changes you want to keep, or discard them yourself. Then ask the Orchestrator to retire the worktree through Wollipog." } },
+        // The reason and action come from the protocol, as the control plane derives them.
+        reason: "The worktree has uncommitted changes (2 paths): \"report.md\", \"notes.txt\".",
+        action: worktreeRefusalAction("the worktree has uncommitted changes (2 paths): \"report.md\", \"notes.txt\"") },
     ] } } : {}),
     ...(state === "stuck" && !activityLegacy ? { stuck: { total: 2, items: [
       { kind: "unverified_child" as const, sessionId: "s_child", status: "idle", reason: "The child's latest report has not been verified." },

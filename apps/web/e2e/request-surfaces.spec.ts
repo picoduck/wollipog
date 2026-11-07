@@ -724,9 +724,11 @@ for (const viewport of [
     await expect(link).toBeVisible();
     await expect(recovery).toContainText("Worktree Recovery");
     await expect(recovery).toContainText("is on branch main, not fix/issue-1650-decision-resume.");
-    await expect(recovery.locator("dd code").first())
-      .toHaveText("git -C /home/dev/worktrees/issue-1650 switch fix/issue-1650-decision-resume");
-    await expect(recovery).toContainText("select or create another worktree for this session with select_worktree or create_worktree.");
+    await expect(recovery).toContainText("Restore branch fix/issue-1650-decision-resume in /home/dev/worktrees/issue-1650 and " +
+      "select that worktree again with select_worktree, or select or create another worktree for this session with " +
+      "select_worktree or create_worktree.");
+    await expect(recovery).not.toContainText("git -C");
+    await expect(recovery.locator("dd code")).toHaveText(["wd_occ_merge_1752"]);
     await expect(recovery.locator("dt")).toHaveText(["Hold", "Reason", "Recovery Action", "Held Decision Resumes"]);
     await expect(recovery).toContainText("wd_occ_merge_1752");
     await expect(entries.nth(1)).toContainText("Handoff Barrier");
@@ -861,13 +863,35 @@ for (const viewport of [
       .toBeVisible();
     await expect(recovery).toContainText(
       "Only the session owner or its controlling Orchestrator can recover this session's worktree: ask them to restore " +
-      "branch fix/issue-1650-decision-resume in /home/dev/worktrees/issue-1650");
-    await expect(recovery.locator("dd code").first())
-      .toHaveText("git -C /home/dev/worktrees/issue-1650 switch fix/issue-1650-decision-resume");
+      "branch fix/issue-1650-decision-resume in /home/dev/worktrees/issue-1650 and select that worktree again");
+    await expect(recovery).not.toContainText("git -C");
     await expect(recovery).not.toContainText("select_worktree");
     await expect(recovery).not.toContainText("create_worktree");
     await assertNoHorizontalOverflow(page, ".campaign-notices");
   });
+}
+
+// UI evidence: set HELD_RECOVERY_EVIDENCE_DIR to capture the worktree-recovery hold. The capture comes
+// before the assertions, so the same run against the old panel records "before".
+for (const theme of ["dark", "light"] as const) {
+  for (const [device, viewport] of [["desktop", { width: 1280, height: 800 }], ["phone", { width: 390, height: 844 }]] as const) {
+    test(`a worktree-recovery hold names its step without a command on a ${device} ${theme} viewport`, async ({ page }) => {
+      await page.clock.setFixedTime(new Date("2026-11-06T12:00:00Z"));
+      await page.setViewportSize(viewport);
+      await page.goto(`/request-surfaces-e2e.html?scenario=held&theme=${theme}`);
+      const held = page.getByRole("region", { name: "Held Children" });
+      await expect(held).toBeVisible();
+      const recovery = held.locator(".held-children > li").nth(0);
+      // Bring the Recovery Action into the list's capped scroll area before capturing.
+      await recovery.locator("dd").nth(2).scrollIntoViewIfNeeded();
+      if (process.env.HELD_RECOVERY_EVIDENCE_DIR) await held.screenshot({
+        path: `${process.env.HELD_RECOVERY_EVIDENCE_DIR}/held-recovery-${device}-${theme}.png`,
+      });
+      await expect(recovery).toContainText("Restore branch fix/issue-1650-decision-resume in /home/dev/worktrees/issue-1650 and select");
+      await expect(recovery).not.toContainText("git -C");
+      await assertNoHorizontalOverflow(page, ".campaign-notices");
+    });
+  }
 }
 
 for (const viewport of [

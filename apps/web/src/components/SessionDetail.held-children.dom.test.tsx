@@ -77,7 +77,7 @@ const hold = (holdId: string) => ({
   holdId,
   since: Date.now() - 60_000,
   reason: `Worktree for ${holdId} is on the wrong branch.`,
-  recoveryAction: "Restore the branch (for example `git -C /w switch feat/x`) and select that worktree again.",
+  recoveryAction: "Restore branch feat/x in /w and select that worktree again.",
 });
 
 class FakeSocket implements UiSocket {

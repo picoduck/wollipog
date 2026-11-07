@@ -380,6 +380,37 @@ for (const theme of ["dark", "light"] as const) {
   }
 }
 
+// UI evidence: set CAMPAIGN_WORKTREE_CLEANUP_EVIDENCE_DIR to capture the refused-worktree Cleanup row.
+// The capture comes before the assertions, so the same run against the old panel records "before".
+for (const theme of ["dark", "light"] as const) {
+  for (const [device, viewport] of [["desktop", { width: 1440, height: 1000 }], ["phone", { width: 390, height: 844 }]] as const) {
+    test(`a refused worktree's Cleanup row shows what Wollipog knows and the next step, with no command, on a ${device} ${theme} viewport`, async ({ page }) => {
+      await page.clock.setFixedTime(new Date("2026-11-06T12:00:00Z"));
+      await page.setViewportSize(viewport);
+      await page.goto(`/campaign-status-e2e.html?scenario=campaign&activity=cleanup&automation=complete&theme=${theme}`);
+      await expect(page.locator(".campaign-status-summary")).toContainText("Complete, Needs Cleanup");
+      const cleanup = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Cleanup", exact: true }) });
+      const row = cleanup.locator("li").filter({ hasText: "/home/dev/worktrees/wollipog/s_079714ea231c" });
+      await row.scrollIntoViewIfNeeded();
+      if (process.env.CAMPAIGN_WORKTREE_CLEANUP_EVIDENCE_DIR) await page.screenshot({
+        path: `${process.env.CAMPAIGN_WORKTREE_CLEANUP_EVIDENCE_DIR}/worktree-cleanup-${device}-${theme}.png`,
+      });
+      await expect(row.locator("dt")).toHaveText(["Worktree", "Reason", "Action"]);
+      await expect(row.locator("code")).toHaveText(["/home/dev/worktrees/wollipog/s_079714ea231c"]);
+      await expect(row).toContainText('The worktree has uncommitted changes (2 paths): "report.md", "notes.txt".');
+      await expect(row.getByRole("link")).toHaveCount(1);
+      await expect(row).toContainText("Review the child's work from its session in Wollipog. Ask its session or the Orchestrator " +
+        "to commit and push the changes you want to keep, or confirm they are not needed. Then ask the Orchestrator to retire " +
+        "the worktree through Wollipog.");
+      await expect(row).not.toContainText(/git -C|\bgit (status|log)\b/u);
+      await expect(row.getByRole("button")).toHaveCount(0);
+      // The merged branch's deletion command is unchanged: it does not run inside a worktree.
+      await expect(cleanup.getByRole("button", { name: "Copy Command for agent/s_9d2f41c07a11" })).toBeVisible();
+      await assertNoHorizontalOverflow(page, ".campaign-status");
+    });
+  }
+}
+
 test("a campaign without a recorded plan says so", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=planless");
   const notice = page.locator(".campaign-status-summary .notice");
