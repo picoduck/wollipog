@@ -5936,6 +5936,11 @@ export interface GithubIssueClosureSnapshot extends Omit<GithubIssueClosureInspe
   /** Server-derived (#4058): every gap that kept an in-scope closure from delegated proof, each
    * with the action that would let a new request become Orchestrator-owned. */
   deliveryGaps?: IssueClosureDeliveryGap[];
+  /** Server-derived (#4120): delivering pull requests in the campaign's other repositories, each read
+   * MERGED through a Location of its own repository just before the request, at the head and merge
+   * commit stored here, and read again before execution. `delivery` stays the closure repository's,
+   * which its runner verifies. Omitted when there are none. */
+  crossRepositoryDelivery?: Array<{ repository: string; number: number; headSha: string; mergeCommitSha: string }>;
   scopeRevision?: number;
   category: "issue_closure";
   reason: GithubIssueClosureRequest["reason"];
