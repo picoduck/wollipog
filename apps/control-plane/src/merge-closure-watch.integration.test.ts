@@ -366,6 +366,17 @@ test("a report owed when the control plane stopped is delivered exactly once aft
   await f.pass();
   assert.equal(f.ownerQuestions().length, 1);
   assert.equal(f.watch(occurrenceId)!.reportPending, undefined);
+  // A question revoked unanswered (the root ended or restarted) reached nobody: asked again.
+  const [first] = f.ownerQuestions();
+  f.db.raw().prepare("UPDATE workflow_decisions SET status='revoked' WHERE occurrence_id=?").run(first!.occurrenceId);
+  const reported = f.watch(occurrenceId)!;
+  assert.ok(f.db.saveMergeClosureWatch(occurrenceId, reported, { ...reported, reportPending: "landed" }));
+  await f.pass();
+  const [again] = f.ownerQuestions();
+  assert.ok(again && again.occurrenceId !== first!.occurrenceId, "a new question replaces the revoked one");
+  assert.equal(again.requestId, `merge_closure_landed_${occurrenceId}_1`);
+  assert.equal(f.watch(occurrenceId)!.report?.occurrenceId, again.occurrenceId);
+  assert.equal(f.watch(occurrenceId)!.reportPending, undefined);
 });
 
 test("no agent can claim a merge closure report's request id and stand in for the report (#4323)", async () => {
@@ -375,6 +386,11 @@ test("no agent can claim a merge closure report's request id and stand in for th
     resourceSnapshot: { category: "implementation_question", question: "Anything?", options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } });
   assert.equal(spoofed.ok, false);
   assert.match(spoofed.error!, /reserves for its own reports/u);
+  // Nor ask under a report's key, which would replace a waiting report.
+  const replacing = f.svc.createWorkflowDecision("root", { requestId: "my-question", resourceKey: "merge_closure:owner/app#54",
+    resourceSnapshot: { category: "implementation_question", question: "Anything?", options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } });
+  assert.equal(replacing.ok, false);
+  assert.match(replacing.error!, /reserves for its own reports/u);
   await f.pass();
   forge.state = "merged";
   forge.closures = [closure("owner/app#5", "Closes #5")];

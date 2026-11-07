@@ -1162,8 +1162,12 @@ const PULL_REQUEST_WATCH_OUTCOME_TEXT: Record<PullRequestWatchOutcome, string> =
   no_required_checks: "is not in the merge queue, and its base requires no checks",
 };
 
-/** The request ids of the server's merge closure reports (#4323), reserved for the server. */
+/** The request ids and resource keys of the server's merge closure reports (#4323), reserved for
+ * the server: nobody else can stand in for a report, or replace one by asking under its key. */
 export const MERGE_CLOSURE_REPORT_REQUEST_PREFIX = "merge_closure_";
+export const MERGE_CLOSURE_REPORT_RESOURCE_PREFIX = "merge_closure:";
+/** Times one report is asked again after its question was revoked unanswered. */
+const MERGE_CLOSURE_REPORT_ATTEMPTS = 20;
 
 /** How one ended merge-queue watch reads in its session's wake (#4071). Every line is single-line
  * by construction, so neither a reason nor a summary can forge a framing line. */
@@ -14039,14 +14043,23 @@ export class SessionsService {
     const rootId = this.db.campaignRootForMember(decision.sessionId) ?? this.db.campaignRootForMember(decision.controllingSessionId) ??
       (this.db.getSession(decision.controllingSessionId)?.orchestratorPolicy ? decision.controllingSessionId : null);
     const root = rootId ? this.db.getSession(rootId) : null;
-    const requestId = `${MERGE_CLOSURE_REPORT_REQUEST_PREFIX}${kind}_${decision.occurrenceId}`;
-    const resourceKey = `merge_closure:${decision.resourceSnapshot.repository.toLowerCase()}#${decision.resourceSnapshot.pullRequest}`;
-    // Asked already (a retry after its answer was lost): that question is the report. The prefix is
-    // reserved for the server, and only an owner question for this pull request counts.
-    const asked = root ? this.db.workflowDecisionByRequestId(root.id, requestId) : null;
-    if (asked && asked.category === "owner_decision" && asked.resourceKey === resourceKey &&
-        asked.resourceSnapshot.category === "owner_decision" && asked.resourceSnapshot.kind === "question" && asked.authority === "human") {
-      return { report: { occurrenceId: asked.occurrenceId, reportedAt }, delivered: true };
+    const resourceKey = `${MERGE_CLOSURE_REPORT_RESOURCE_PREFIX}${decision.resourceSnapshot.repository.toLowerCase()}#${decision.resourceSnapshot.pullRequest}`;
+    // Asked already (a retry after its answer was lost): a question still waiting for the owner, or
+    // one the owner answered or a newer report replaced, is the report. One revoked unanswered (the
+    // root ended or restarted) reached nobody, so the report is asked again under the next id. Both
+    // the request id and the resource key are reserved for the server.
+    let requestId = "";
+    for (let attempt = 0; attempt < MERGE_CLOSURE_REPORT_ATTEMPTS; attempt++) {
+      requestId = `${MERGE_CLOSURE_REPORT_REQUEST_PREFIX}${kind}_${decision.occurrenceId}${attempt ? `_${attempt}` : ""}`;
+      const asked = root ? this.db.workflowDecisionByRequestId(root.id, requestId) : null;
+      if (!asked) break;
+      const ours = asked.category === "owner_decision" && asked.resourceKey === resourceKey && asked.authority === "human" &&
+        asked.resourceSnapshot.category === "owner_decision" && asked.resourceSnapshot.kind === "question";
+      if (ours && asked.status !== "revoked") return { report: { occurrenceId: asked.occurrenceId, reportedAt }, delivered: true };
+      requestId = "";
+    }
+    if (!requestId) {
+      return { report: { reportedAt, unreported: "The report was asked and withdrawn too many times; it is no longer asked again." }, delivered: true };
     }
     if (!root || isTerminal(root.status)) {
       this.log.warn(`merge closure report for ${decision.occurrenceId} is owed, and has no live campaign root yet`);
@@ -14097,8 +14110,10 @@ export class SessionsService {
     }
     // #4323: the server's merge closure reports are found again by their request id, so nobody else
     // may claim one and stand in for a report.
-    if (request.requestId.startsWith(MERGE_CLOSURE_REPORT_REQUEST_PREFIX) && !internal?.trustedMergeClosureReport) {
-      return fail(`requestId may not start with ${MERGE_CLOSURE_REPORT_REQUEST_PREFIX}, which Wollipog reserves for its own reports`, 400);
+    if ((request.requestId.startsWith(MERGE_CLOSURE_REPORT_REQUEST_PREFIX) || request.resourceKey.startsWith(MERGE_CLOSURE_REPORT_RESOURCE_PREFIX)) &&
+        !internal?.trustedMergeClosureReport) {
+      return fail(`requestId and resourceKey may not start with ${MERGE_CLOSURE_REPORT_REQUEST_PREFIX} or ${MERGE_CLOSURE_REPORT_RESOURCE_PREFIX}, ` +
+        "which Wollipog reserves for its own reports", 400);
     }
     const ownerRule = normalizeWorkflowDecisionOwnerRule(request.ownerRule);
     if (!ownerRule.ok) return fail(ownerRule.message, 400);
