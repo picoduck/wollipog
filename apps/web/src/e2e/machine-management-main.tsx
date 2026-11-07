@@ -440,6 +440,15 @@ const skillsReport = () => ({
 
 const client = {
   ...api,
+  subscriptionUsage: async () => ({
+    sources: (runner?.providerAccounts ?? []).filter(account => account.authStatus === "authenticated").map(account => ({
+      sourceId: `fixture-${account.id}`, runnerId: runner!.runnerId, runnerName: "Design Workstation", runnerStatus: runner!.status,
+      agentId: "fixture", agentName: "Fixture", provider: account.provider, providerAccountId: account.id,
+      state: "available" as const, freshness: "fresh" as const, fetchedAt: Date.now(),
+      buckets: [{ id: "session", label: "Session Window", remainingPercent: 74, resetsAt: Date.now() + 18 * 60 * 60_000 },
+        { id: "weekly", label: "Weekly Window", remainingPercent: 81, resetsAt: Date.now() + 5 * 24 * 60 * 60_000 }],
+    })), staleAfterMs: 600_000, generatedAt: Date.now(),
+  }),
   // Skills on This Machine (#1981): the machine's own skills diagnostics, read when opened.
   runnerSkills: async () => {
     if (skillsFailures > 0) {

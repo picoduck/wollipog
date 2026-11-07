@@ -253,10 +253,10 @@ test("default account settings follow privacy and changing their selection reset
   const management = await context.newPage();
   // The machine's own route: with nothing selected the detail is the All Machines overview (#2986).
   await management.goto("/machine-management-e2e.html?emailLabels=1&machine=native-t14s");
-  await management.locator(".machine-detail-title-row").getByRole("button", { name: "Settings…", exact: true }).click();
-  const dialog = management.getByRole("dialog", { name: "Machine Settings" });
-  const defaults = dialog.getByRole("group", { name: "Default Accounts" });
-  const claude = dialog.getByRole("button", { name: /Default Claude Account:/ });
+  await management.getByRole("button", { name: "Change New Claude Sessions" }).click();
+  const dialog = management.getByRole("dialog", { name: "New Claude Sessions", exact: true });
+  const defaults = dialog;
+  const claude = dialog.getByRole("button", { name: /^Account:/ });
   await claude.click();
   await management.getByRole("option", { name: /work@example\.com/ }).click();
   await expect(claude).toHaveAccessibleName(/work@example\.com/);

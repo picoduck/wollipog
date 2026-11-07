@@ -18,8 +18,6 @@ import { statusMeta } from "./status-meta.js";
  * only the changed fields, each through its own endpoint, in `fieldOrder`.
  */
 
-export type DefaultAccountProvider = ProviderAccountDefinition["provider"];
-export const DEFAULT_ACCOUNT_PROVIDERS: readonly DefaultAccountProvider[] = ["claude", "codex"];
 
 /** Where Machine Settings opens: Change Limit… (#2989) at Capacity Limit, Choose Another
  * Installation… (#2990) at Agent Installations. */
@@ -29,10 +27,7 @@ export interface MachineSettingsValues {
   name: string;
   /** As typed: validated on blur and on save. */
   capacity: string;
-  switching: boolean;
   reviewerSecurity: import("@wollipog/protocol").ReviewerSecurityPolicy;
-  /** Per provider, the chosen account id, or "" for No Default. */
-  defaultAccounts: Partial<Record<DefaultAccountProvider, string>>;
   /** Per installation group, the chosen installation id, or null where none is saved. */
   installations: Record<string, string | null>;
 }
@@ -40,9 +35,7 @@ export interface MachineSettingsValues {
 /** The revisions each conditional write sends back, as last saved. */
 export interface MachineSettingsRevisions {
   capacity: number;
-  switching: number;
   reviewerSecurity: number;
-  defaultAccounts: Partial<Record<DefaultAccountProvider, number>>;
 }
 
 /** The last saved state: what the form compares against, and the revisions it writes with. */
@@ -54,16 +47,11 @@ export interface MachineSettingsSnapshot {
 export type MachineSettingsField =
   | { kind: "name" }
   | { kind: "capacity" }
-  | { kind: "switching" }
   | { kind: "reviewerSecurity" }
-  | { kind: "defaultAccount"; provider: DefaultAccountProvider }
   | { kind: "installation"; group: string };
 
 export const CAPACITY_HELPER = "In units, from 1 to 256. Sessions beyond the limit wait in a queue.";
 export const CAPACITY_ERROR = "Enter a whole number from 1 to 256.";
-export const SWITCHING_DESCRIPTION =
-  "When an account reaches its usage limit, the next turn moves to another account from the same provider on this machine.";
-export const DEFAULT_ACCOUNTS_HELPER = "Used by new sessions on this machine that don't choose an account.";
 export const MISSING_INSTALLATION = "Saved choice not found. Choose another installation.";
 export const DELETE_BLOCKED = "Stop the runner to delete.";
 export const SAVED_TOAST = "Machine settings saved.";
@@ -88,29 +76,11 @@ export function nameError(text: string): string | null {
   return trimmed.length > NAME_MAX ? `Use ${NAME_MAX} characters or fewer.` : null;
 }
 
-export function defaultAccountLabel(provider: DefaultAccountProvider): string {
-  return provider === "claude" ? "Default Claude Account" : "Default Codex Account";
-}
-
 /** An account's sign-in in the shared provider account words (§11.2): Signed In, Sign-In Required
  * or Status Unknown. */
 export function accountStatusLabel(authStatus: ProviderAccountDefinition["authStatus"]): string {
   return statusMeta("provider_account", authStatus === "authenticated" ? "signed_in"
     : authStatus === "unauthenticated" ? "sign_in_required" : "status_unknown").label;
-}
-
-/** The providers Default Accounts offers: each with an account on this machine or a saved choice. */
-export function defaultAccountProviders(runner: RunnerView): DefaultAccountProvider[] {
-  const accounts = runner.providerAccounts ?? [];
-  const choices = runner.providerAccountDefaults ?? [];
-  return DEFAULT_ACCOUNT_PROVIDERS.filter((provider) => accounts.some((account) => account.provider === provider) ||
-    choices.some((choice) => choice.provider === provider));
-}
-
-/** A saved default account that this machine no longer lists. */
-export function missingDefaultAccount(runner: RunnerView, provider: DefaultAccountProvider, accountId: string): boolean {
-  return !!accountId && !(runner.providerAccounts ?? []).some((account) =>
-    account.provider === provider && account.id === accountId);
 }
 
 /* ------------------------------------------------------------------------------------------------
@@ -309,27 +279,16 @@ export function machineSettingsSnapshot(runner: RunnerView | undefined, box: Box
   const runnerId = runner?.runnerId ?? box?.runnerId ?? "";
   const configuredName = runner?.displayName ?? box?.displayName ?? "";
   const configuredCapacity = runner?.capacity?.configuredUnits ?? runner?.runtime?.maxConcurrentSessions;
-  const defaultAccounts: MachineSettingsValues["defaultAccounts"] = {};
-  const defaultRevisions: MachineSettingsRevisions["defaultAccounts"] = {};
-  for (const provider of runner ? defaultAccountProviders(runner) : []) {
-    const choice = runner?.providerAccountDefaults?.find((candidate) => candidate.provider === provider);
-    defaultAccounts[provider] = choice?.accountId ?? "";
-    defaultRevisions[provider] = choice?.revision ?? 0;
-  }
   return {
     values: {
       name: configuredName || runnerDisplay(runner, box, runnerId).name,
       capacity: configuredCapacity?.toString() ?? "",
-      switching: runner?.automaticAccountSwitching?.enabled ?? false,
       reviewerSecurity: runner?.reviewerSecurity?.policy ?? "strict",
-      defaultAccounts,
       installations: Object.fromEntries((runner ? installationGroups(runner) : []).map((group) => [group.key, group.saved])),
     },
     revisions: {
       capacity: runner?.capacity?.revision ?? 0,
-      switching: runner?.automaticAccountSwitching?.revision ?? 0,
       reviewerSecurity: runner?.reviewerSecurity?.revision ?? 0,
-      defaultAccounts: defaultRevisions,
     },
   };
 }
@@ -341,19 +300,14 @@ export function machineSettingsSnapshot(runner: RunnerView | undefined, box: Box
 export function fieldOrder(shown: {
   name: boolean;
   capacity: boolean;
-  switching: boolean;
   reviewerSecurity?: boolean;
-  defaultAccounts: readonly DefaultAccountProvider[];
   /** Installation group keys, in the order the form lists them. */
   installations: readonly string[];
 }): MachineSettingsField[] {
   return [
     ...(shown.name ? [{ kind: "name" as const }] : []),
     ...(shown.capacity ? [{ kind: "capacity" as const }] : []),
-    ...(shown.switching ? [{ kind: "switching" as const }] : []),
     ...(shown.reviewerSecurity ? [{ kind: "reviewerSecurity" as const }] : []),
-    ...DEFAULT_ACCOUNT_PROVIDERS.filter((provider) => shown.defaultAccounts.includes(provider))
-      .map((provider) => ({ kind: "defaultAccount" as const, provider })),
     ...shown.installations.map((group) => ({ kind: "installation" as const, group })),
   ];
 }
@@ -362,9 +316,7 @@ export function fieldChanged(field: MachineSettingsField, draft: MachineSettings
   switch (field.kind) {
     case "name": return draft.name.trim() !== saved.name.trim();
     case "capacity": return capacityValue(draft.capacity) !== capacityValue(saved.capacity);
-    case "switching": return draft.switching !== saved.switching;
     case "reviewerSecurity": return draft.reviewerSecurity !== saved.reviewerSecurity;
-    case "defaultAccount": return (draft.defaultAccounts[field.provider] ?? "") !== (saved.defaultAccounts[field.provider] ?? "");
     case "installation": return (draft.installations[field.group] ?? null) !== (saved.installations[field.group] ?? null);
   }
 }
@@ -374,10 +326,7 @@ export function withField(into: MachineSettingsValues, from: MachineSettingsValu
   switch (field.kind) {
     case "name": return { ...into, name: from.name.trim() };
     case "capacity": return { ...into, capacity: from.capacity.trim() };
-    case "switching": return { ...into, switching: from.switching };
     case "reviewerSecurity": return { ...into, reviewerSecurity: from.reviewerSecurity };
-    case "defaultAccount":
-      return { ...into, defaultAccounts: { ...into.defaultAccounts, [field.provider]: from.defaultAccounts[field.provider] ?? "" } };
     case "installation":
       return { ...into, installations: { ...into.installations, [field.group]: from.installations[field.group] ?? null } };
   }
@@ -388,9 +337,7 @@ export function fieldLabel(field: MachineSettingsField, groups: readonly Install
   switch (field.kind) {
     case "name": return "Machine Name";
     case "capacity": return "Capacity Limit";
-    case "switching": return "Switch Accounts Automatically";
     case "reviewerSecurity": return "Reviewer Executable Policy";
-    case "defaultAccount": return defaultAccountLabel(field.provider);
     case "installation": return `${groups.find((group) => group.key === field.group)?.label ?? "Agent"} Installation`;
   }
 }
@@ -405,5 +352,5 @@ export function unsavedSentence(labels: readonly string[]): string {
 /** What an offline machine's changes do. No field's endpoint needs the machine online: each saves
  * now, and the runner is sent its capacity and switching when it reconnects. */
 export function offlineSentence(name: string): string {
-  return `${name} is offline. Changes save now; Capacity Limit, automatic switching, and reviewer executable policy take effect when it reconnects.`;
+  return `${name} is offline. Changes save now; Capacity Limit and reviewer executable policy take effect when it reconnects.`;
 }

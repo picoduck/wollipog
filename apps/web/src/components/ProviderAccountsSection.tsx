@@ -14,7 +14,8 @@ import { providerHomeBlockingProcessCopy, providerHomeRecoveryCauseCopy } from "
 import { statusMeta } from "../status-meta.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { activeSessionConflict } from "./active-session-conflict.js";
-import { AccountIdentifier } from "./AccountIdentifier.js";
+import { AccountIdentifier, AccountLabel } from "./AccountIdentifier.js";
+import { ProviderAccountSettingsDialog, RunningSessionAccountSettings } from "./ProviderAccountSettings.js";
 import { Modal } from "./common.js";
 import { AddProviderAccountDialog, providerLoginRunning, providerName, type ProviderCredentialImportOffer } from "./AddProviderAccountDialog.js";
 import { MoreHorizontalIcon, SignInIcon } from "./Icons.js";
@@ -23,6 +24,7 @@ import { MenuItem, MenuLabel, MenuSeparator, MenuSurface } from "./Menu.js";
 import { Notice } from "./Notice.js";
 import { ProviderSignIn, providerSignInAlreadyOnMachine, providerSignInHiddenTitle } from "./ProviderLoginCard.js";
 import { StatusBadge } from "./StatusBadge.js";
+import { ProviderAccountUsage, useMachineAccountUsage } from "./ProviderAccountUsage.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
 /** Coded adoption refusals whose runner message is technical, in words the person can act on. */
@@ -265,7 +267,9 @@ function AccountMenu({ name, heading, busy, items }: {
  * expansion under it: its sign-in's steps or ending (#2996). While a sign-in runs for a label that is
  * a hidden email, `hiddenTitle` ("Signing In to Codex") replaces the mask, with "Email hidden" as line 2.
  */
-function ProviderAccountRow({ identity, label, hiddenTitle, provider, profile, lease, status, actions, children }: {
+function ProviderAccountRow({ identity, label, hiddenTitle, provider, profile, lease, status, actions, children, isDefault = false, usage }: {
+  isDefault?: boolean;
+  usage?: ReactNode;
   identity: string;
   label: string;
   hiddenTitle?: string | null;
@@ -277,7 +281,7 @@ function ProviderAccountRow({ identity, label, hiddenTitle, provider, profile, l
   actions?: ReactNode;
   children?: ReactNode;
 }) {
-  const meta = status ? statusMeta("provider_account", status) : null;
+  const meta = status && status !== "signed_in" ? statusMeta("provider_account", status) : null;
   return (
     <>
       <div className={`row row-2${hiddenTitle ? " provider-account-hidden-title" : ""}`} data-account-status={status ?? undefined}>
@@ -286,18 +290,19 @@ function ProviderAccountRow({ identity, label, hiddenTitle, provider, profile, l
           <span className="row-line">
             {hiddenTitle ? <span className="row-title provider-account-signing-title">{hiddenTitle}</span>
               : <AccountIdentifier identity={identity} className="row-title" value={label} label="Account Email" />}
-            {meta && <StatusBadge meta={meta} inline={status === "signed_in"} />}
+            {isDefault && <span className="provider-default-marker">Default</span>}
+            {meta && <StatusBadge meta={meta} />}
           </span>
           <span className="row-sub provider-account-sub">
             {hiddenTitle ? <span>Email hidden</span> : (
               <>
-                <span>{providerName(provider)}</span>
                 {profile && <span>{profile}</span>}
               </>
             )}
             {lease && <span className="provider-account-lease" title={lease.title}>{lease.label}</span>}
           </span>
         </span>
+        {usage}
         {actions && <span className="provider-account-actions">{actions}</span>}
       </div>
       {children && <div className="provider-account-expansion">{children}</div>}
@@ -340,6 +345,16 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   const [recoveryDetails, setRecoveryDetails] = useState<{ runnerId: string; accountId: string } | null>(null);
   const [busy, setBusy] = useState<Readonly<Record<string, BusyAction>>>({});
   const [notice, setNotice] = useState<SectionNotice | null>(null);
+  const [editingProvider, setEditingProvider] = useState<ProviderAccountDefinition["provider"] | null>(null);
+  const [savedDefaults, setSavedDefaults] = useState<NonNullable<RunnerView["providerAccountDefaults"]>>([]);
+  const usage = useMachineAccountUsage();
+  const defaults = (["claude", "codex"] as const).flatMap(provider => {
+    const live = runner.providerAccountDefaults?.find(value => value.provider === provider);
+    const saved = savedDefaults.find(value => value.provider === provider);
+    const value = saved && saved.revision >= (live?.revision ?? 0) ? saved : live;
+    return value ? [value] : [];
+  });
+  const settingsRunner = { ...runner, providerAccountDefaults: defaults };
   const supported = runnerSupportsProtocol(runner.protocolVersion, "providerLogin");
   const removalSupported = runnerSupportsProtocol(runner.protocolVersion, "providerAccountRemoval");
   const canManage = runner.canManage === true;
@@ -616,7 +631,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   // profile actions, an Owner/Admin route of the personal organization.
   const startedAccount = started ? accounts.find((account) => account.id === started.accountId) : undefined;
   const savedDefault = startedAccount
-    ? runner.providerAccountDefaults?.find((entry) => entry.provider === startedAccount.provider)
+    ? defaults.find((entry) => entry.provider === startedAccount.provider)
     : undefined;
   const defaultOffer = startedAccount && canManageProfiles && canManage &&
     runnerSupportsProtocol(runner.protocolVersion, "providerAccounts") && savedDefault?.accountId !== startedAccount.id
@@ -624,11 +639,12 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   const useForNewSessions = (account: ProviderAccountDefinition) => track(account.id, "default", async () => {
     setNotice(null);
     try {
-      await api.updateMachineProviderAccountDefault(runner.runnerId, account.provider, {
+      const { providerAccountDefault } = await api.updateMachineProviderAccountDefault(runner.runnerId, account.provider, {
         accountId: account.id,
         expectedRevision: savedDefault?.revision ?? 0,
       });
       setStarted(null);
+      setSavedDefaults(current => [...current.filter(value => value.provider !== account.provider), providerAccountDefault]);
       showToast(`New ${providerName(account.provider)} sessions on this machine use this account.`, { tone: "success" });
     } catch (cause) {
       setNotice({ title: <>Couldn't Make {identifier(account)} the Default</>, body: (cause as Error).message });
@@ -718,7 +734,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
         <h3 id={headingId} className="section-title">
           Provider Accounts <span className="count">{accounts.length}</span>
         </h3>
-        {canAdd && (
+        {canAdd && count === 0 && (
           <div className="actions">
             <button type="button" className="btn sm" disabled={!online} aria-describedby={online ? undefined : offlineId}
               onClick={() => setAdding("claude")}>
@@ -755,9 +771,21 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
           New {providerName(defaultOffer.provider)} sessions on this machine that don't choose an account will use it.
         </Notice>
       )}
-      {count > 0 && (
-        <div className="surface provider-accounts-list">
-          {accounts.map((account) => {
+      {(["claude", "codex"] as const).filter(provider => accounts.some(account => account.provider === provider) ||
+        newLogins.some(login => login.provider === provider) || defaults.some(value => value.provider === provider) || canAdd).map(provider => {
+        const choice = defaults.find(value => value.provider === provider);
+        const selected = accounts.find(account => account.id === choice?.accountId && account.provider === provider);
+        const canEdit = canManageProfiles && canManage && runnerSupportsProtocol(runner.protocolVersion, "providerAccounts");
+        return <div className="provider-account-group" key={provider}>
+          <div className="provider-settings-heading">
+            <div><h4>{providerName(provider)}</h4><p className="section-note">{choice?.accountId
+              ? selected ? <>New sessions use <AccountLabel value={selected.label} />.</> : "Saved account not found. Choose another account."
+              : "New sessions use each agent's configured account or the first available account."}</p></div>
+            {canEdit && <button type="button" className="btn" disabled={!online} aria-label={`Change New ${providerName(provider)} Sessions`}
+              onClick={() => setEditingProvider(provider)}>Change…</button>}
+          </div>
+          <div className="surface provider-accounts-list">
+          {accounts.filter(account => account.provider === provider).map((account) => {
             const login = loginFor(account.id);
             const signingIn = login !== undefined && providerLoginRunning(login);
             const status = accountStatus(account, signingIn);
@@ -777,6 +805,8 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
                   title: providerHomeLeaseDescription(leases[account.id]!) ?? "An earlier Wollipog runner left this account locked. Choose Recover Account in its menu to try unlocking it.",
                 } : undefined}
                 status={status}
+                isDefault={account.id === choice?.accountId}
+                usage={!signingIn && <ProviderAccountUsage account={account} runnerId={runner.runnerId} online={online} data={usage} />}
                 actions={canManage && (
                   <>
                     {signingIn && cancelButton(login)}
@@ -800,7 +830,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
               </ProviderAccountRow>
             );
           })}
-          {newLogins.map((login) => {
+          {newLogins.filter(login => login.provider === provider).map((login) => {
             const running = providerLoginRunning(login);
             return (
               <ProviderAccountRow
@@ -816,8 +846,16 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
               </ProviderAccountRow>
             );
           })}
-        </div>
-      )}
+          {canAdd && <div className="provider-account-add">
+            <button type="button" className="btn ghost" disabled={!online} onClick={() => setAdding(provider)}>Add {providerName(provider)} Account…</button>
+          </div>}
+          </div>
+        </div>;
+      })}
+      <RunningSessionAccountSettings key={runner.runnerId} runner={runner} online={online} />
+      {editingProvider && canManageProfiles && canManage && <ProviderAccountSettingsDialog key={`${runner.runnerId}:${editingProvider}`} runner={settingsRunner}
+        provider={editingProvider} onClose={() => setEditingProvider(null)}
+        onSaved={value => setSavedDefaults(current => [...current.filter(entry => entry.provider !== value.provider), value])} />}
       {leaseActions && detailsAccount && detailsLease && (
         <Modal title="Account Recovery Details" description={masked(detailsAccount.label)} size="sm"
           onClose={() => setRecoveryDetails(null)}
