@@ -682,8 +682,8 @@ export interface CampaignWorkFilters {
   origin: CampaignWorkOriginFilter;
   state: CampaignWorkItemStateFilter;
   sort: CampaignWorkItemSort;
-  /** #4120: one repository, lower-cased, or `all`. */
-  repository: string;
+  /** #4120: one repository, lower-cased, or `all`. Absent (filters remembered before #4120) is `all`. */
+  repository?: string;
 }
 
 /** Unfinished work first, in the Orchestrator's queue order; finished work is one filter away. */
