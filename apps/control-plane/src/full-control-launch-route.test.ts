@@ -11,7 +11,7 @@ import {
 } from "@wollipog/protocol";
 import { ControlPlaneDb, RUNNER_REPORTED_STOP } from "./db.js";
 import { Hub } from "./hub.js";
-import { SessionsService } from "./sessions.js";
+import { canonicalPrMergeEnqueueCommand, SessionsService } from "./sessions.js";
 import { DECISION_MAX_ATTEMPTS, type DecisionRuntime } from "./decision-runtime.js";
 import { OrchestratorSettings, resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { authorizeFullControl, boundaryWithScopedEpics, campaignBoundaryCurrent, campaignControlForRunner, campaignRepositoryLimits, campaignScopeRepositories, evaluateCampaignAuthority } from "./campaign-authority.js";
@@ -5369,7 +5369,15 @@ test("a Custom campaign's publication and merge in another repository are its ch
   f.db.updateSessionStatus(id, "running", 3);
   const preflights: Array<{ runnerId: string; pullRequest: number }> = [];
   const send = f.hub.sendToRunner.bind(f.hub);
+  const performed: Array<{ runnerId: string; kind: string; location?: unknown }> = [];
   f.hub.sendToRunner = (runnerId, message) => {
+    if (message.type === "forge_decision_action") {
+      performed.push({ runnerId, kind: message.action.kind, ...(message.location ? { location: message.location } : {}) });
+      const answer = message.action.kind === "issue_publication" ? { outcome: "published" as const, issue: 55 } : { outcome: "deleted" as const };
+      queueMicrotask(() => f.hub.resolveRunnerRequest({ type: "forge_decision_action_result", requestId: message.requestId, sessionId: message.sessionId,
+        occurrenceId: message.occurrenceId, ...answer }, runnerId));
+      return true;
+    }
     if (message.type !== "github_merge_preflight") return send(runnerId, message);
     preflights.push({ runnerId, pullRequest: message.pullRequest });
     const closures = [{ issue: message.pullRequest === 7 ? "other/repo#40" : "other/repo#99", sources: ["linked" as const] }];
@@ -5414,7 +5422,165 @@ test("a Custom campaign's publication and merge in another repository are its ch
     const undeclared = await f.sessions.createWorkflowDecisionWithVideo(child, { requestId: "merge-undeclared", resourceKey: "merge-undeclared", resourceSnapshot: merge(8, ["other/repo#40"]) });
     assert.equal(undeclared.status, 409);
     assert.match(undeclared.error!, /other\/repo#99/);
+
+    // A branch deletion in that repository is a person's too, and is carried out by the child's runner.
+    const branch: WorkflowDecisionResourceSnapshot = { category: "merged_branch_deletion", repository: "other/repo", branch: "agent/x", merged: true, pullRequest: 7, headSha: head,
+      mergeCommitSha: "c".repeat(40), dependentPullRequests: { checkedAt: 1, open: [] } };
+    const deletion = await f.sessions.createWorkflowDecisionWithVideo(child, { requestId: "delete", resourceKey: "delete", resourceSnapshot: branch });
+    assert.equal(deletion.ok, true, deletion.error ?? "");
+    assert.deepEqual([deletion.data!.controllingSessionId, deletion.data!.authority], [id, "human"]);
+    assert.equal(asOrchestrator(deletion.data!.occurrenceId).ok, false, "a Custom deletion is never the Orchestrator's to approve");
+    assert.equal(asPerson(deletion.data!.occurrenceId).ok, true);
+    const deleted = await f.sessions.executeWorkflowDecision(child, deletion.data!.occurrenceId, { resourceDigest: deletion.data!.resourceDigest });
+    assert.equal(deleted.data?.forgeAction?.outcome, "deleted", deleted.error ?? "");
+    assert.deepEqual(performed, [{ runnerId: "r2", kind: "branch_deletion" }]);
+
+    // A publication from a Location of another repository, or by the root itself, routes like a Full
+    // Control one: a person approves it, consuming it is refused, and other/repo's runner creates it.
+    performed.length = 0;
+    const launchChild = f.sessions.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude", title: "Launch Child", prompt: "Deliver #12", useWorktree: false, config: {} },
+      undefined, f.scope, false, false, false, { parentSessionId: id });
+    assert.equal(launchChild.ok, true, launchChild.error ?? "created");
+    f.db.updateSessionStatus(launchChild.data!.id, "running", Date.now());
+    for (const [requester, title] of [[launchChild.data!.id, "Repair From the Launch Child"], [id, "Repair From the Root"]] as const) {
+      performed.length = 0;
+      const routed = await f.sessions.createWorkflowDecisionWithVideo(requester, { requestId: `routed-${requester}`, resourceKey: `routed-${requester}`,
+        resourceSnapshot: { ...publication, sanitizedTitle: title } as WorkflowDecisionResourceSnapshot });
+      assert.equal(routed.ok, true, routed.error ?? "");
+      assert.equal(routed.data!.authority, "human", title);
+      assert.equal(f.sessions.resolveWorkflowDecision(id, requester, routed.data!.occurrenceId, { outcome: "approve" }, "human", { kind: "human", id: f.human.userId }, () => true).ok, true, title);
+      const refused = await f.sessions.consumeWorkflowDecision(requester, routed.data!.occurrenceId, { resourceSnapshot: routed.data!.resourceSnapshot });
+      assert.equal(refused.status, 409, title);
+      assert.match(refused.error!, /execute_workflow_decision/u, title);
+      const created = await f.sessions.executeWorkflowDecision(requester, routed.data!.occurrenceId, { resourceDigest: routed.data!.resourceDigest });
+      assert.deepEqual([created.data?.forgeAction?.outcome, created.data?.forgeAction?.publishedIssue, created.data?.status], ["published", 55, "consumed"], created.error ?? title);
+      assert.deepEqual(performed, [{ runnerId: "r2", kind: "issue_publication",
+        location: { workspaceId: "a", workspacePath: "/fixture/two/other", repository: "other/repo" } }], title);
+    }
   } finally { f.db.close(); }
+});
+
+test("Full Control merges and deletes a branch in a second repository through the real routes, each by the child's runner there (#4119)", async () => {
+  const { f, server, id, propose, approve } = await multiRepositoryCampaign();
+  try {
+    f.db.updateSessionStatus(id, "running", Date.now());
+    const seeded = await propose("other-issue", [["other/repo", 40]]);
+    assert.equal(approve(seeded.data!.occurrenceId).ok, true, seeded.error ?? "");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    f.db.registerRunner({ runnerId: "r2", hostname: "r2", os: "linux", version: "test", agents: SECOND_MACHINE_AGENTS, runtime: { ...runtime, campaignLaunchInspection: { version: 3 } },
+      workspaces: [{ id: "a", name: "r2 a", path: "/fixture/two/other" }, { id: "b", name: "r2 b", path: "/fixture/two/repository" }] }, Date.now(), PROTOCOL_VERSION);
+    const created = f.sessions.createSession({ runnerId: "r2", workspaceId: "a", agentId: "claude", title: "Child", prompt: "Deliver #40", useWorktree: false, config: { model: "claude-opus-5-5" } },
+      undefined, f.scope, false, false, false, { parentSessionId: id });
+    assert.equal(created.ok, true, created.error ?? "created");
+    const child = created.data!.id;
+    f.db.updateSessionStatus(child, "running", Date.now());
+
+    const reads: Array<{ runnerId: string; repository: string; pullRequest: number }> = [];
+    const actions: Array<{ runnerId: string; action: unknown }> = [];
+    const send = f.hub.sendToRunner.bind(f.hub);
+    f.hub.sendToRunner = (runnerId, message) => {
+      if (message.type === "github_merge_preflight") {
+        reads.push({ runnerId, repository: message.repository, pullRequest: message.pullRequest });
+        queueMicrotask(() => f.hub.resolveRunnerRequest({ type: "github_merge_preflight_result", requestId: message.requestId, sessionId: message.sessionId, ok: true,
+          check: { checkedAt: Date.now(), closures: message.pullRequest > 8 ? [] : [{ issue: message.pullRequest === 7 ? "other/repo#40" : "other/repo#99", sources: ["linked" as const] }] } }, runnerId));
+        return true;
+      }
+      if (message.type === "forge_decision_action") {
+        actions.push({ runnerId, action: message.action });
+        const outcome = message.action.kind === "branch_deletion" ? "deleted" as const : "enqueued" as const;
+        queueMicrotask(() => f.hub.resolveRunnerRequest({ type: "forge_decision_action_result", requestId: message.requestId, sessionId: message.sessionId,
+          occurrenceId: message.occurrenceId, outcome }, runnerId));
+        return true;
+      }
+      return send(runnerId, message);
+    };
+    const asOrchestrator = (occurrenceId: string) => f.sessions.resolveWorkflowDecision(id, child, occurrenceId, { outcome: "approve" }, "orchestrator", { kind: "agent", id }, () => true);
+    const head = "a".repeat(40), mergeCommit = "c".repeat(40);
+    const merge = (pullRequest: number, intendedClosures: string[]) => ({ category: "pr_merge" as const, repository: "other/repo", pullRequest, headSha: head, reviewResult: "merge" as const,
+      intendedClosures, requiredChecks: { headSha: head, status: "passed" as const, checkedAt: 1, checks: [{ name: "CI", state: "passed" as const }] } });
+
+    // The merge closes an in-scope issue of its own repository, so it is the Orchestrator's, read by the child's runner.
+    const snapshot = merge(7, ["other/repo#40"]);
+    const merged = await f.sessions.createWorkflowDecisionWithVideo(child, { requestId: "merge", resourceKey: "merge", resourceSnapshot: snapshot });
+    assert.equal(merged.ok, true, merged.error ?? "");
+    assert.equal(merged.data!.authority, "orchestrator", JSON.stringify(merged.data!.authorityEvaluation));
+    assert.deepEqual(reads, [{ runnerId: "r2", repository: "other/repo", pullRequest: 7 }]);
+    // One closing an issue outside the scope is refused through the same route, with no decision.
+    const outside = await f.sessions.createWorkflowDecisionWithVideo(child, { requestId: "merge-outside", resourceKey: "merge-outside", resourceSnapshot: merge(8, ["other/repo#99"]) });
+    assert.equal(outside.ok, false);
+    assert.match(outside.error!, /outside this Full Control campaign's issue scope: other\/repo#99/u);
+
+    // Approved, armed and enqueued: the closures are read again and the enqueue goes to r2, never r.
+    assert.equal(asOrchestrator(merged.data!.occurrenceId).ok, true);
+    const armed = await f.sessions.consumeWorkflowDecision(child, merged.data!.occurrenceId,
+      { resourceSnapshot: snapshot, action: { kind: "pr_merge_enqueue", command: canonicalPrMergeEnqueueCommand(snapshot) } });
+    assert.equal(armed.status, 200, armed.error ?? "");
+    reads.length = 0;
+    const enqueued = await f.sessions.executeWorkflowDecision(child, merged.data!.occurrenceId, { resourceDigest: merged.data!.resourceDigest });
+    assert.equal(enqueued.data?.forgeAction?.outcome, "enqueued", enqueued.error ?? "");
+    assert.deepEqual(reads, [{ runnerId: "r2", repository: "other/repo", pullRequest: 7 }]);
+    assert.deepEqual(actions, [{ runnerId: "r2", action: { kind: "pr_merge_enqueue", repository: "other/repo", pullRequest: 7, headSha: head } }]);
+
+    // The merged branch's deletion is the Orchestrator's as well, and is performed by r2.
+    actions.length = 0;
+    const deletion = await f.sessions.createWorkflowDecisionWithVideo(child, { requestId: "delete", resourceKey: "delete", resourceSnapshot: { category: "merged_branch_deletion",
+      repository: "other/repo", branch: "agent/x", merged: true, pullRequest: 7, headSha: head, mergeCommitSha: mergeCommit, dependentPullRequests: { checkedAt: Date.now(), open: [] } } });
+    assert.equal(deletion.ok, true, deletion.error ?? "");
+    assert.equal(deletion.data!.authority, "orchestrator", JSON.stringify(deletion.data!.authorityEvaluation));
+    assert.equal(asOrchestrator(deletion.data!.occurrenceId).ok, true);
+    const deleted = await f.sessions.executeWorkflowDecision(child, deletion.data!.occurrenceId, { resourceDigest: deletion.data!.resourceDigest });
+    assert.equal(deleted.data?.forgeAction?.outcome, "deleted", deleted.error ?? "");
+    assert.deepEqual(actions, [{ runnerId: "r2", action: { kind: "branch_deletion", repository: "other/repo", branch: "agent/x", pullRequest: 7, headSha: head, mergeCommitSha: mergeCommit } }]);
+
+    // The same gates in the launch repository are not this child's.
+    const wrong = await f.sessions.createWorkflowDecisionWithVideo(child, { requestId: "merge-launch", resourceKey: "merge-launch", resourceSnapshot: { ...merge(9, []), repository: "owner/repo" } });
+    assert.deepEqual([wrong.data?.authority, wrong.data?.authorityEvaluation?.reason], ["human", "outside_boundary"], wrong.error ?? "");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a worker the root launches for a child must share that child's repository, and each refusal says so (#4119)", async () => {
+  const f = fixture();
+  saveBudget(f, savedBudget);
+  const c = await launchedMultiRepositoryCampaign(f);
+  try {
+    f.db.updateSessionStatus(c.rootId, "running", Date.now());
+    const launch = (name: string, workspaceId: string, context: Record<string, unknown> = {}) => f.sessions.createSession({ runnerId: "r2", workspaceId, agentId: "claude", title: name,
+      prompt: "Work", useWorktree: false, config: { model: "claude-opus-5-5" } }, undefined, f.scope, false, false, false, { parentSessionId: c.rootId, ...context });
+    const child = launch("Child", "a");
+    assert.equal(child.ok, true, child.error ?? "created");
+    const childId = child.data!.id;
+    f.db.updateSessionStatus(childId, "running", Date.now());
+
+    // Creating a review for that child in another repository's Location is refused outright, and in its own is not.
+    const review = { review: { policy: { requesterSessionId: childId } as never } };
+    assert.equal(launch("Misplaced Review", "b", review).error, "Full Control children must use a Location of a repository in the campaign's boundary");
+
+    // A root-parented worker with nobody to serve may be anywhere in the boundary.
+    const worker = launch("Worker", "b");
+    assert.equal(worker.ok, true, worker.error ?? "created");
+    const workerId = worker.data!.id;
+    f.db.updateSessionStatus(workerId, "running", Date.now());
+    const allocate = () => f.sessions.allocateCampaignBudget(c.rootId, { sessionId: workerId });
+    assert.equal(allocate().ok, true, allocate().error ?? "");
+    const reauthorize = () => f.sessions.setCampaignControl(c.rootId, reauthorization(c.boundary()), f.db.getSession(c.rootId)!.parentControlPolicy!.revision, f.human);
+    assert.equal(reauthorize().ok, true, reauthorize().error ?? "");
+
+    // Once a record names the child it works for, in another repository, it no longer qualifies.
+    f.db.raw().exec("CREATE TABLE IF NOT EXISTS delegated_video_reviews(occurrence_id TEXT, evidence_id TEXT, record TEXT, review_id TEXT, reviewer_session_id TEXT)");
+    f.db.raw().prepare("INSERT INTO delegated_video_reviews(occurrence_id,evidence_id,record,reviewer_session_id) VALUES ('o','e',?,?)").run(JSON.stringify({ childSessionId: childId }), workerId);
+    const allowance = allocate();
+    assert.equal(allowance.ok, false);
+    assert.equal(allowance.error, "campaign allowance requires a Location of the same boundary repository as the session it serves");
+    const worker2 = f.sessions.campaignBudgetWorkerPreflight(c.rootId, { kind: "managed", sessionId: workerId });
+    assert.equal(worker2.ok, false);
+    const refused = reauthorize();
+    assert.equal(refused.ok, false);
+    assert.equal(refused.error, "campaign participants must run in a Location of a repository in the campaign's boundary");
+
+    // Serving the root alone stays free of that, as the root serves every repository.
+    f.db.raw().prepare("UPDATE delegated_video_reviews SET record=? WHERE reviewer_session_id=?").run(JSON.stringify({ childSessionId: c.rootId }), workerId);
+    assert.equal(allocate().ok, true, allocate().error ?? "");
+  } finally { await c.server.close(); f.db.close(); }
 });
 
 test("a closure's delivery facts are read by a Location of the pull request's repository, and the root's login never stands in (#4119)", async () => {

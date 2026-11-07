@@ -1099,6 +1099,41 @@ function recordEpicClosure(h: ReturnType<typeof mergedWorkVerificationFixture>, 
       JSON.stringify({ outcome: change.outcome ?? "closed", completedAt: h.now }));
 }
 
+test("an item in another campaign repository is finished only by a fresh merge in its own repository (#4119)", () => {
+  const h = mergedWorkVerificationFixture("delivered");
+  try {
+    const completion = () => h.db.campaignRecoveryCompletion("root", h.now).state;
+    assert.equal(completion(), "complete");
+    // team/api joins the boundary and the scope, with a committed item of its own.
+    const policy = h.db.getSession("root")!.orchestratorPolicy!;
+    if (policy.control?.mode !== "full_control") throw new Error("fixture control expected");
+    policy.control.boundary.repositories = [{ repository: "picoduck/wollipog", locationIds: [] }, { repository: "team/api", locationIds: [] }];
+    policy.issueScope!.issues = [...(policy.issueScope!.issues ?? policy.issueScope!.issueNumbers.map((number) => ({ repository: "picoduck/wollipog", number }))), { repository: "team/api", number: 50 }];
+    h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
+    const planned = h.svc.recordCampaignPlan("root", { planComplete: true, items: [{ key: "api:50", issue: { repository: "team/api", number: 50 } },
+      { key: "api:60", issue: { repository: "team/api", number: 60 } }] });
+    assert.ok(planned.ok, planned.error ?? "plan refused");
+    const inScope = planned.data!.items.find((item) => item.key === "api:50")!.workItemId;
+    assert.equal(completion(), "recovery_held", "it has named no pull request yet");
+
+    // A merged pull request of the launch repository is not this item's delivery.
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: inScope, stage: { stage: "merged", pullRequests: [h.ref] } }).ok);
+    assert.equal(completion(), "recovery_held", "another repository's merge proves nothing here");
+
+    // Its own pull request needs a fact: none yet, then open, then merged but stale, then fresh and merged.
+    const ref = { repository: "team/api", number: 7 };
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: inScope, stage: { stage: "merged", pullRequests: [ref] } }).ok);
+    assert.equal(completion(), "recovery_held", "no fact about it has been read");
+    h.db.campaignForgeObservations.record("root", "r2", [{ ref, observation: { ...h.observation, state: "open", mergeCommitSha: null } }], h.now);
+    assert.equal(completion(), "recovery_held", "it is still open");
+    h.db.campaignForgeObservations.record("root", "r2", [{ ref, observation: h.observation }], h.now - 60 * 60 * 1000);
+    assert.equal(completion(), "recovery_held", "an old read isn't fresh proof");
+    h.db.campaignForgeObservations.record("root", "r2", [{ ref, observation: h.observation }], h.now);
+    // team/api#60 is outside the scope, so it never held the campaign up.
+    assert.equal(completion(), "complete");
+  } finally { h.db.close(); }
+});
+
 test("an epic placeholder item is finished by its closure proven from members, and nothing else is (#4060)", () => {
   const h = mergedWorkVerificationFixture("delivered");
   try {
