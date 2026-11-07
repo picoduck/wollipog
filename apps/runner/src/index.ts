@@ -28,7 +28,7 @@ import { DatabaseSync } from "node:sqlite";
 import { CampaignLaunchInspections } from "./campaign-launch-inspection.js";
 import WebSocket from "ws";
 import { ProcessingWindow } from "./processing-window.js";
-import { projectReconnectOutboxMessage, republishReconnectState } from "./reconnect-republish.js";
+import { durableUpdateMessage, sessionCommandUpdateMessage, projectReconnectOutboxMessage, republishReconnectState } from "./reconnect-republish.js";
 import {
   parseMessage,
   agentContextKey,
@@ -48,7 +48,6 @@ import {
   type AgentsUpdatedMessage,
   type ControlPlaneToRunner,
   type DurableSessionCommandResultMessage,
-  type DurableSessionCommandUpdateMessage,
   type ExternalSessionDescriptor,
   type GitAction,
   type GitActionRequestMessage,
@@ -67,7 +66,6 @@ import {
   type RunnerMetadata,
   type RunnerToControlPlane,
   type SessionCommandInvocationResultMessage,
-  type SessionCommandInvocationUpdateMessage,
   type SessionEventPayload,
   type SessionSnapshot,
   type SessionWorktreeView,
@@ -1601,17 +1599,7 @@ function flushOutbox(): void {
 }
 
 function sendDurableUpdate(receipt: DurableCommandReceipt): void {
-  const update: DurableSessionCommandUpdateMessage = {
-    type: "durable_session_command_update",
-    commandId: receipt.commandId,
-    sessionId: receipt.sessionId,
-    state: receipt.state,
-    revision: receipt.revision,
-    ...(receipt.error ? { error: receipt.error } : {}),
-    ...(receipt.code ? { code: receipt.code } : {}),
-    ...(receipt.userEventSeq !== undefined ? { userEventSeq: receipt.userEventSeq } : {}),
-  };
-  sendUp(update);
+  sendUp(durableUpdateMessage(receipt));
 }
 
 function durableLifecycle(handle: DurableCommandHandle): DurableCommandLifecycle {
@@ -1640,18 +1628,7 @@ function durableLifecycle(handle: DurableCommandHandle): DurableCommandLifecycle
 }
 
 function sendSessionCommandUpdate(receipt: SessionCommandInvocationReceipt): void {
-  const update: SessionCommandInvocationUpdateMessage = {
-    type: "session_command_invocation_update",
-    invocationId: receipt.invocationId,
-    submissionId: receipt.submissionId,
-    sessionId: receipt.sessionId,
-    state: receipt.state,
-    revision: receipt.revision,
-    ...(receipt.error ? { error: receipt.error } : {}),
-    ...(receipt.code ? { code: receipt.code } : {}),
-    ...(receipt.userEventSeq !== undefined ? { userEventSeq: receipt.userEventSeq } : {}),
-  };
-  sendUp(update);
+  sendUp(sessionCommandUpdateMessage(receipt));
 }
 
 function sessionCommandLifecycle(handle: SessionCommandReceiptHandle): SessionCommandInvocationLifecycle {
@@ -2484,7 +2461,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           if (ws !== socket || socket.readyState !== WebSocket.OPEN || !registered) throw new Error("republish socket replaced");
           socket.send(wire);
         }, () => socket.terminate(), (details) => log(JSON.stringify({ ...details,
-          entryPoint: "runner_republish", republishId })));
+          entryPoint: "runner_republish", republishId })), { durable: durableCommands, invocations: sessionCommandReceipts });
       } else {
         publishNegotiatedSessionSnapshots(sessions, sendUp);
       }
@@ -2508,8 +2485,10 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       sessions.reportCapacity(true);
       sessions.reportGovernanceTrips();
       sessions.recoverAllOrphanedWork();
-      for (const receipt of durableCommands.recentUpdates()) sendDurableUpdate(receipt);
-      for (const receipt of sessionCommandReceipts.recentUpdates()) sendSessionCommandUpdate(receipt);
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "runnerProcessingBarriers")) {
+        for (const receipt of durableCommands.recentUpdates()) sendDurableUpdate(receipt);
+        for (const receipt of sessionCommandReceipts.recentUpdates()) sendSessionCommandUpdate(receipt);
+      }
       break;
     }
     case "register_rejected":

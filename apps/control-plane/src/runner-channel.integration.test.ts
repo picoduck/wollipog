@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -17,6 +17,8 @@ import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { hashToken } from "./auth.js";
 import { ControlPlaneDb } from "./db.js";
 import { MAX_RUNNER_CLIENT_MESSAGE_BYTES, MAX_RUNNER_CONNECTIONS_PER_IP } from "./runner-channel.js";
+import { DurableCommandStore } from "../../runner/src/durable-command-store.js";
+import { SessionCommandReceiptStore, sessionCommandInvocationPayloadDigest } from "../../runner/src/session-command-receipt-store.js";
 import { ProcessingWindow } from "../../runner/src/processing-window.js";
 import { projectReconnectOutboxMessage, republishReconnectState } from "../../runner/src/reconnect-republish.js";
 import { Outbox, flushProjectedOutbox } from "../../runner/src/outbox.js";
@@ -363,7 +365,9 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
 test("2100 retained children with bidirectional bulk reconcile while real HTTP and heartbeat pongs make progress", { timeout: 180_000 }, (t) => retainedBulk(t));
 test("2444 retained children with small reconnect queue frames keep pongs and the first processing ACK responsive", { timeout: 180_000 }, (t) => retainedBulk(t, true));
 
-async function retainedBulk(t: TestContext, smallFrames = false): Promise<void> {
+test("4000 durable receipts and 64 invocation receipts with 2444 retained children keep replay responsive", { timeout: 180_000 }, (t) => retainedBulk(t, true, true));
+
+async function retainedBulk(t: TestContext, smallFrames = false, receiptReplay = false): Promise<void> {
   const port = await reservePort();
   const temp = mkdtempSync(join(tmpdir(), "wollipog-reconcile-responsive-"));
   const databasePath = join(temp, "control-plane.db");
@@ -391,6 +395,37 @@ async function retainedBulk(t: TestContext, smallFrames = false): Promise<void> 
     snapshots.push({ id, workspaceId: "ws", agentId: "claude", title: "Synthetic", status: "completed",
       driver: "claude-code", useWorktree: false, worktreePath: null, config: {}, preview: null,
       pendingApproval: null, tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, createdAt: 1, updatedAt: 2 });
+  }
+  const durableRoot = join(temp, "durable-receipts");
+  const durable = receiptReplay ? new DurableCommandStore(durableRoot, { now: () => Date.now() }) : undefined;
+  const invocations = receiptReplay ? new SessionCommandReceiptStore(join(temp, "invocation-receipts"), { now: () => Date.now() }) : undefined;
+  if (durable && invocations) {
+    const now = Date.now();
+    for (let i = 0; i < 4000; i++) {
+      const commandId = `receipt-${String(i).padStart(4, "0")}`;
+      const sessionId = `child-${i % snapshots.length}`;
+      seed.stageSessionPromptCommand({ commandId, sessionId, runnerId, payloadJson: "null",
+        payloadSha256: "a".repeat(64), expiresAt: now + 600_000, now });
+      seed.recordSessionPromptCommandReceipt({ commandId, sessionId, runnerId, state: "completed", revision: 3, now });
+      // Fixture-only disk population avoids thousands of runner-side flushes during setup.
+      const digest = createHash("sha256").update(commandId).digest("hex");
+      const shard = join(durableRoot, digest.slice(0, 2));
+      mkdirSync(shard, { recursive: true });
+      writeFileSync(join(shard, `${digest}.json`), JSON.stringify({ version: 1, commandId,
+        executionId: `manual-prompt:${sessionId}`, kind: "prompt_session", sessionId, payloadHmac: "a".repeat(64),
+        state: "completed", revision: 3, ownerId: durable.ownerId, createdAt: now, updatedAt: now, expiresAt: now + 600_000 }));
+    }
+    for (let i = 0; i < 64; i++) {
+      const envelope = { type: "invoke_session_command" as const, requestId: `request-${i}`, invocationId: `invocation-${i}`,
+        submissionId: `submission-${i}`, sessionId: `child-${i}`, providerCommandId: "provider", catalogRevision: "catalog",
+        expectedExecutionMode: "passthrough" as const, argumentText: "", expiresAt: now + 600_000, payloadDigest: "" };
+      envelope.payloadDigest = sessionCommandInvocationPayloadDigest(envelope);
+      const claimed: ReturnType<SessionCommandReceiptStore["claim"]> = invocations.claim(envelope);
+      assert.equal(claimed.kind, "new");
+      if (claimed.kind === "new") claimed.handle.completed();
+    }
+    assert.equal(durable.recentUpdates().length, 4000);
+    assert.equal(invocations.recentUpdates().length, 64);
   }
   seed.createShell({ shellId: "burst-shell", sessionId: "child-1499", runnerId, name: "Synthetic Burst", createdAt: 1 });
   seed.raw().exec("PRAGMA synchronous=FULL");
@@ -426,6 +461,27 @@ ws.prototype.send = function(data, ...args) {
 };
 const enqueue = RunnerFrameQueue.prototype.enqueue;
 const smallFrames = ${smallFrames};
+const receiptReplay = ${receiptReplay};
+if (receiptReplay) {
+  const receipt = SessionsService.prototype.onDurablePromptReceipt;
+  let count = 0, totalMs = 0, maxMs = 0;
+  SessionsService.prototype.onDurablePromptReceipt = function(...args) {
+    const start = performance.now();
+    try { return Reflect.apply(receipt, this, args); }
+    finally {
+      const elapsed = performance.now() - start;
+      totalMs += elapsed; maxMs = Math.max(maxMs, elapsed);
+      if (++count === 4000) console.error('RECEIPT_COST='+JSON.stringify({count,totalMs,maxMs,meanMs:totalMs/count}));
+    }
+  };
+  const invocation = SessionsService.prototype.onSessionCommandInvocationReceipt;
+  let invocationCount = 0;
+  SessionsService.prototype.onSessionCommandInvocationReceipt = function(...args) {
+    const result = Reflect.apply(invocation, this, args);
+    if (++invocationCount === 64) console.error('INVOCATION_RECEIPTS=' + invocationCount);
+    return result;
+  };
+}
 {
   const hydrate = SessionsService.prototype.hydrateRunnerSessionsCooperatively;
   SessionsService.prototype.hydrateRunnerSessionsCooperatively = async function(...args) {
@@ -446,7 +502,7 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
     if (smallFrames) {
       const handleSingle = Reflect.get(this,'handle');
       Reflect.set(this,'handle',async (message, preparation) => {
-        if (message.type === 'session_queue') await delay(2);
+        if (message.type === 'session_queue' || (receiptReplay && (message.type === 'durable_session_command_update' || message.type === 'session_command_invocation_update'))) await delay(2);
         return handleSingle(message, preparation);
       });
     }
@@ -457,6 +513,7 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
 `);
   let runnerOnlineAt: number | undefined;
   let output = "";
+  let receiptDiagnostics = "";
   let reconciliationCompleted = false;
   const trace = new ReconciliationDiagnostics();
   const captureStdout = trace.capture();
@@ -475,7 +532,12 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
     reconciliationCompleted ||= output.includes("runner_reconciliation_completed");
     if (output.includes("runner online:")) runnerOnlineAt ??= performance.now();
   });
-  child.stderr?.on("data", (chunk) => { captureStderr(chunk); output = (output + String(chunk)).slice(-128_000); });
+  child.stderr?.on("data", (chunk) => {
+    captureStderr(chunk);
+    output = (output + String(chunk)).slice(-128_000);
+    // Keep pressure/receipt probes apart from high-volume HTTP stdout throughout the replay.
+    receiptDiagnostics = (receiptDiagnostics + String(chunk)).slice(-16_000);
+  });
   const sockets: StrictSocket[] = [];
   let read: DatabaseSync | undefined;
   t.after(async () => {
@@ -560,6 +622,15 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
       flushProjectedOutbox(outbox, (message) => projectReconnectOutboxMessage(message, barrierSupported, (value) => value),
         (message) => socket.send(JSON.stringify(message)), () => assert.fail("projection failed"), () => assert.fail("send failed"));
     }
+    if (receiptReplay) {
+      // The live receipt burst was observed after runner online. Isolate that phase from the
+      // deliberately slow registration fixture so a pause measures receipt handling alone.
+      const onlineDeadline = performance.now() + 30_000;
+      while (runnerOnlineAt === undefined) {
+        assert.ok(performance.now() < onlineDeadline, "runner did not come online before receipt replay");
+        await delay(20);
+      }
+    }
     republishStarted = performance.now();
     if (barrierSupported) {
       window = smallFrames ? republishReconnectState({
@@ -567,7 +638,7 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
         republishSessionSnapshot: (id) => current.get(id),
         republishSessionQueue: (id) => ({ type: "session_queue", sessionId: id, queue: [] }),
       }, (message) => message, (wire) => socket.send(wire), () => socket.terminate(),
-      (details) => t.diagnostic(JSON.stringify(details))) : new ProcessingWindow(snapshots.map((snapshot) => snapshot.id), (id) => {
+      (details) => t.diagnostic(JSON.stringify(details)), durable && invocations ? { durable, invocations } : undefined) : new ProcessingWindow(snapshots.map((snapshot) => snapshot.id), (id) => {
         const snapshot = current.get(id);
         return snapshot ? JSON.stringify({ type: "session_runtime_updated", snapshot }) : null;
       }, (wire) => socket.send(wire), () => socket.terminate(), (details) => t.diagnostic(JSON.stringify(details)));
@@ -656,7 +727,14 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
       earlyFingerprint, "the live update following an in-flight republish must win");
     assert.equal(downstreamScopeCount, 60);
     assert.ok(downstreamSkillBytes >= 65536);
-    assert.doesNotMatch(output, /BULK_PRESSURE=.*"paused":true/, "compatible replay must not pause receive");
+    if (receiptReplay) {
+      assert.match(receiptDiagnostics, /RECEIPT_COST=\{"count":4000,/);
+      assert.match(receiptDiagnostics, /INVOCATION_RECEIPTS=64/);
+      assert.equal(read.prepare("SELECT COUNT(*) AS n FROM session_prompt_commands WHERE state='completed' AND revision=3").get()?.n,
+        4000, "duplicate receipt replay preserves all terminal command revisions");
+      t.diagnostic(receiptDiagnostics.match(/RECEIPT_COST=.*/)![0]);
+    }
+    assert.doesNotMatch(receiptReplay ? receiptDiagnostics : output, /BULK_PRESSURE=.*"paused":true/, "compatible replay must not pause receive");
     assert.ok(maxHealthMs < 2000);
     assert.ok(maxPongMs < 2000);
     assert.equal(reconciliationCompleted, true);
