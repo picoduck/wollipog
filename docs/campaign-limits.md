@@ -77,6 +77,15 @@ evidence for (a WSL, container or cloud provider, a platform without it, or a fe
 set) is never lifted by a later runner process, so its slot stays held. On a host without
 delegated cgroup v2, only a reboot proves a crashed runner's providers gone.
 
+A runner older than protocol 307 cannot prove any of this (#3788): it has no retirement fence
+or process-tree proof, so its final checkpoint and a reconnect inventory without the session are
+only attestations. The control plane records each worker generation such a runner serves: before sending it one,
+when it registers, on each status or snapshot it sends, and, on upgrade, every live worker whose
+runner it last saw at an older or unknown protocol. That generation's slot and reservation stay
+held whatever that runner, or the same runner after an upgrade, later reports for it. A relaunch
+under a new generation needs and gets its own proof. Until a person-confirmed release exists
+(#4331), raising the concurrency allowance is the only way past such a slot.
+
 In every case a worker's unspent reservation stays outstanding until its usage settles from the
 durable checkpoint, exactly once. Every campaign read settles ended workers whose hydrated history covers
 their checkpoint, so a campaign that held slots or reservations for already-ended workers is

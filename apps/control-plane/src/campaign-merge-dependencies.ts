@@ -11,6 +11,7 @@
  */
 import type {
   CampaignIssueRef,
+  CampaignMergeHoldState,
   CampaignMergeDependencyStatus,
   CampaignMergeDependencyView,
   CampaignPullRequestRef,
@@ -30,11 +31,36 @@ export function campaignItemRepository(input: {
   return repository ? repository.toLowerCase() : null;
 }
 
-/** Whether a dependency is a merge dependency: both repositories are known and differ. An item whose
- * repository is unknown keeps today's behavior. */
-export function isCampaignMergeDependency(dependentRepository: string | null, prerequisiteRepository: string | null): boolean {
-  return Boolean(dependentRepository && prerequisiteRepository &&
-    dependentRepository.toLowerCase() !== prerequisiteRepository.toLowerCase());
+/** Every repository an item may work in, lower-cased and without repeats: its child's placement, each
+ * pull request it names, and its issue's. A pull request's own repository counts even when the child
+ * is placed elsewhere. Empty when none is known. */
+export function campaignItemRepositories(input: {
+  placement: string | null;
+  pullRequests: readonly CampaignPullRequestRef[];
+  issue: CampaignIssueRef | null;
+}): string[] {
+  return [...new Set([input.placement, ...input.pullRequests.map((ref) => ref.repository), input.issue?.repository ?? null]
+    .flatMap((repository) => repository ? [repository.toLowerCase()] : []))];
+}
+
+/**
+ * Whether a dependency is a merge dependency (#4120). It fails closed:
+ * - in a campaign of one repository (`campaignRepositories` lists one), an item whose repository is
+ *   unknown works in it, so a dependency is a merge dependency only when a named repository differs;
+ * - in a campaign of several, an item whose repository is unknown might work in any of them, so a
+ *   dependency on or from one is a merge dependency;
+ * - otherwise it is one when any repository the prerequisite works in differs from any the dependent
+ *   works in.
+ * A campaign that records no repository (from before #4117) keeps its dependencies display-only.
+ */
+export function isCampaignMergeDependency(dependentRepositories: readonly string[], prerequisiteRepositories: readonly string[],
+  campaignRepositories: readonly string[]): boolean {
+  if (!campaignRepositories.length) return false;
+  const resolve = (repositories: readonly string[]) => repositories.length ? repositories.map((repository) => repository.toLowerCase())
+    : campaignRepositories.length === 1 ? [campaignRepositories[0]!.toLowerCase()] : null;
+  const dependent = resolve(dependentRepositories), prerequisite = resolve(prerequisiteRepositories);
+  if (!dependent || !prerequisite) return true;
+  return prerequisite.some((repository) => dependent.some((other) => other !== repository));
 }
 
 /** What the rules read about one prerequisite. */
@@ -42,10 +68,13 @@ export interface CampaignMergePrerequisite {
   id: string;
   key: string;
   title: string | null;
-  repository: string;
+  /** Its repository for display (`campaignItemRepository`); null when none is known. */
+  repository: string | null;
   commitment: CampaignWorkItemCommitmentState;
-  /** Every pull request it names, with its stored forge fact, in order. */
-  pullRequests: ReadonlyArray<{ ref: CampaignPullRequestRef; fact: ForgeFact }>;
+  /** Every pull request it names, with its stored forge fact, in order. `outside`: the pull request
+   * is in no repository of the campaign, so its fact (read through the root's login at best) never
+   * meets a hold; the store gives it an unavailable fact. */
+  pullRequests: ReadonlyArray<{ ref: CampaignPullRequestRef; fact: ForgeFact; outside?: true }>;
 }
 
 const shown = (fact: ForgeFact): "open" | "closed" | "merged" | "unknown" =>
@@ -66,7 +95,7 @@ export function campaignMergeDependencyView(prerequisite: CampaignMergePrerequis
     id: prerequisite.id,
     key: prerequisite.key,
     title: prerequisite.title,
-    repository: prerequisite.repository.toLowerCase(),
+    repository: prerequisite.repository?.toLowerCase() ?? null,
     status: campaignMergeDependencyStatus(prerequisite),
     pullRequests: prerequisite.pullRequests.map(({ ref, fact }) => ({ ref: { repository: ref.repository, number: ref.number }, state: shown(fact) })),
   };
@@ -74,22 +103,32 @@ export function campaignMergeDependencyView(prerequisite: CampaignMergePrerequis
 
 /** Why a merge is held on this prerequisite, or null when it is met. Only a FRESH observation of
  * MERGED meets it: a stale or unavailable fact, an open or enqueued pull request, or a prerequisite
- * that names none holds the merge. A closed one or a cancelled prerequisite holds it for good. */
+ * that names none holds the merge. A closed one or a cancelled prerequisite holds it for good.
+ * `staleMergedMeets` is for checks of a merge already armed, and only those: the arming read
+ * proved every prerequisite it had MERGED afresh, the ledger refuses new ones while it is armed, and
+ * a forge never un-merges, so a stored MERGED that has aged still meets it. Before arming, a
+ * prerequisite added after the authoritative read has only what is stored, which proves nothing. */
 export interface CampaignMergeHold {
-  prerequisite: { id: string; key: string; title: string | null; repository: string };
+  prerequisite: { id: string; key: string; title: string | null; repository: string | null };
   pullRequest: CampaignPullRequestRef | null;
-  state: "open" | "closed" | "unobserved" | "none" | "cancelled";
+  state: CampaignMergeHoldState;
   /** The head of the pull request it waits on, when one was observed. */
   headSha: string | null;
 }
 
-export function campaignMergeHold(prerequisite: CampaignMergePrerequisite): CampaignMergeHold | null {
-  const identity = { id: prerequisite.id, key: prerequisite.key, title: prerequisite.title, repository: prerequisite.repository.toLowerCase() };
+export function campaignMergeHold(prerequisite: CampaignMergePrerequisite, options: { staleMergedMeets?: boolean } = {}): CampaignMergeHold | null {
+  const identity = { id: prerequisite.id, key: prerequisite.key, title: prerequisite.title, repository: prerequisite.repository?.toLowerCase() ?? null };
   if (prerequisite.commitment !== "committed") return { prerequisite: identity, pullRequest: null, state: "cancelled", headSha: null };
   if (!prerequisite.pullRequests.length) return { prerequisite: identity, pullRequest: null, state: "none", headSha: null };
+  // No Location of that repository can read it, so nothing proves it merged; it waits for the
+  // repository to join the campaign.
+  const outside = prerequisite.pullRequests.find((entry) => entry.outside);
+  if (outside) return { prerequisite: identity, pullRequest: outside.ref, state: "outside", headSha: null };
   const closed = prerequisite.pullRequests.find(({ fact }) => fact.availability === "fresh" && fact.value.state === "closed");
   if (closed) return { prerequisite: identity, pullRequest: closed.ref, state: "closed", headSha: closed.fact.availability === "fresh" ? closed.fact.value.headSha : null };
-  const waiting = prerequisite.pullRequests.find(({ fact }) => fact.availability !== "fresh" || fact.value.state !== "merged");
+  const met = (fact: ForgeFact) => fact.availability === "fresh" ? fact.value.state === "merged"
+    : fact.availability === "stale" && options.staleMergedMeets === true && fact.value.state === "merged";
+  const waiting = prerequisite.pullRequests.find(({ fact }) => !met(fact));
   if (!waiting) return null;
   const { fact } = waiting;
   const head = fact.availability === "unavailable" ? fact.lastValue?.headSha ?? null : fact.value.headSha;
@@ -98,7 +137,8 @@ export function campaignMergeHold(prerequisite: CampaignMergePrerequisite): Camp
 
 /** The first unmet prerequisite, closed or cancelled ones before those still open: a merge that can
  * never be attempted says so rather than waiting. */
-export function campaignFirstMergeHold(prerequisites: readonly CampaignMergePrerequisite[]): CampaignMergeHold | null {
-  const holds = prerequisites.map(campaignMergeHold).filter((hold): hold is CampaignMergeHold => hold !== null);
+export function campaignFirstMergeHold(prerequisites: readonly CampaignMergePrerequisite[],
+  options: { staleMergedMeets?: boolean } = {}): CampaignMergeHold | null {
+  const holds = prerequisites.map((prerequisite) => campaignMergeHold(prerequisite, options)).filter((hold): hold is CampaignMergeHold => hold !== null);
   return holds.find((hold) => hold.state === "closed" || hold.state === "cancelled") ?? holds[0] ?? null;
 }
