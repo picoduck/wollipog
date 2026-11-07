@@ -23861,23 +23861,35 @@ export class ControlPlaneDb {
    * the Orchestrator's scope proposals that wait for the owner for want of lineage (#4267), and its
    * requests to add a repository, which are always the owner's (#4117).
    * Owner decisions, handoffs and owner rules count wherever the campaign controls them (#4337): by
-   * the root or by an Orchestrator nested in its membership, for a session in that membership. The
-   * scope and repository requests stay the root's own. The count and the items read one predicate. */
+   * the root for itself or a member, or by an Orchestrator nested in its membership for one of that
+   * Orchestrator's own descendants, the one shape the owner can resolve there (resolveWorkflowDecision
+   * admits a nested controller only through isSessionDescendant). The scope and repository requests
+   * stay the root's own. The count and the items read one predicate. */
   campaignOwnerDecisions(controllingSessionId: string): NonNullable<OrchestratorCampaignProjection["ownerDecisions"]> | null {
     const descendants = this.campaignDescendantIds(controllingSessionId);
-    const members = JSON.stringify([controllingSessionId, ...descendants]);
-    // Only an Orchestrator controls gates; a descendant of any other role never names a controller here.
-    const controllers = JSON.stringify([controllingSessionId, ...(descendants.length ? (this.stmt(
-      `SELECT id, session_role, permission_mode FROM sessions WHERE id IN (SELECT value FROM json_each(?))`,
-    ).all(JSON.stringify(descendants)) as unknown as Array<{ id: string; session_role: string | null; permission_mode: string | null }>)
-      .filter((row) => sessionRole({ role: row.session_role as SessionRole | null, permissionMode: row.permission_mode }) === "orchestrator")
-      .map((row) => row.id) : [])]);
-    const where = `status='pending' AND authority='human'
-      AND controlling_session_id IN (SELECT value FROM json_each(?)) AND session_id IN (SELECT value FROM json_each(?))
-      AND (category='owner_decision' OR owner_handoff IS NOT NULL OR owner_rule IS NOT NULL
+    // Each [controller, requester] pair the campaign controls: the root over itself and every member,
+    // and each nested Orchestrator over its own descendants, never over itself.
+    const pairs: Array<[string, string]> = [controllingSessionId, ...descendants].map((id) => [controllingSessionId, id]);
+    const controllers = [controllingSessionId];
+    if (descendants.length) {
+      const nested = (this.stmt(
+        `SELECT id, session_role, permission_mode FROM sessions WHERE id IN (SELECT value FROM json_each(?))`,
+      ).all(JSON.stringify(descendants)) as unknown as Array<{ id: string; session_role: string | null; permission_mode: string | null }>)
+        // Only an Orchestrator controls gates; a descendant of any other role never names a controller here.
+        .filter((row) => sessionRole({ role: row.session_role as SessionRole | null, permissionMode: row.permission_mode }) === "orchestrator");
+      for (const { id } of nested) {
+        controllers.push(id);
+        for (const member of this.campaignDescendantIds(id)) pairs.push([id, member]);
+      }
+    }
+    // Narrowed to the campaign's controllers first, so the controller index still serves the read.
+    const where = `controlling_session_id IN (SELECT value FROM json_each(?)) AND status='pending' AND authority='human'
+      AND ((category='owner_decision' OR owner_handoff IS NOT NULL OR owner_rule IS NOT NULL)
+          AND EXISTS (SELECT 1 FROM json_each(?) pair WHERE json_extract(pair.value, '$[0]')=controlling_session_id
+            AND json_extract(pair.value, '$[1]')=session_id)
         OR controlling_session_id=? AND (category='campaign_repository_addition'
           OR category='campaign_issue_scope' AND session_id=controlling_session_id AND json_type(resource_snapshot, '$.ownerReview')='object'))`;
-    const params = [controllers, members, controllingSessionId];
+    const params = [JSON.stringify(controllers), JSON.stringify(pairs), controllingSessionId];
     const total = Number((this.stmt(`SELECT COUNT(*) AS count FROM workflow_decisions WHERE ${where}`)
       .get(...params) as { count: number }).count);
     if (!total) return null;
