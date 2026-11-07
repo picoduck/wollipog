@@ -344,6 +344,40 @@ test("a generation a runner served while too old to prove retirement keeps its s
   } finally { h.db.close(); }
 });
 
+test("a generation sent to a runner too old to prove retirement is marked before it leaves, even if no report ever arrives (#3788)", () => {
+  const h = harness(":memory:", concurrencyOnly(1), OLDER_RUNNER);
+  try {
+    // The older runner is sent the worker after it registered; its connection drops before any report.
+    const child = spawned(h);
+    assert.equal(unprovable(h, child), true, "the launch marks the generation it sends");
+    h.db.registerRunner(metadata, 10, PROTOCOL_VERSION);
+    h.svc.reconcileRunnerSessions("r", ["root"]);
+    runnerEnds(h, child, 0, "failed");
+    assert.equal(occupied(h), 1, "the upgraded runner's absence and relay free nothing");
+    assert.match(spawn(h).error ?? "", /concurrency allowance reached/u);
+    assert.deepEqual(settlements(h, child), []);
+  } finally { h.db.close(); }
+});
+
+test("a relaunch sent to a runner too old to prove retirement is marked, and an unsent one restores the prior mark (#3788)", () => {
+  const h = harness(":memory:", concurrencyOnly(1));
+  try {
+    const child = spawned(h);
+    works(h, child, 0.5);
+    // The control plane last saw the runner at an older build, without a registration in between.
+    h.db.raw().prepare("UPDATE runners SET protocol_version=? WHERE runner_id='r'").run(OLDER_RUNNER);
+    const prior = h.db.campaignBudgets.dispatchState(child);
+    assert.equal(prior.unprovableGeneration, null);
+    const relaunch = h.db.campaignBudgets.replaceDispatch(child);
+    assert.notEqual(relaunch.generation, prior.generation);
+    assert.equal(unprovable(h, child), true, "the relaunched generation is marked before it is sent");
+    // The send proved nothing was enqueued: the prior generation and its own (absent) mark return.
+    h.db.campaignBudgets.restoreUnsentDispatch(child, prior);
+    assert.equal(h.db.campaignBudgets.dispatch(child)!.generation, prior.generation);
+    assert.equal(unprovable(h, child), false);
+  } finally { h.db.close(); }
+});
+
 test("a control-plane upgrade marks live members last served by a runner too old to prove retirement (#3788)", () => {
   for (const protocol of [OLDER_RUNNER, PROTOCOL_VERSION]) {
     const dir = mkdtempSync(join(tmpdir(), "campaign-slot-upgrade-"));

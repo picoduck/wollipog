@@ -5782,7 +5782,7 @@ export class SessionsService {
     const { sessionId: launchSessionId, ...sharedSpec } = commandSpec;
     const spec: SessionLaunchSpec = {
       sessionId: launchSessionId,
-      campaignBudgetDispatch: this.db.campaignBudgets.dispatch(id),
+      campaignBudgetDispatch: this.db.campaignBudgets.dispatchTo(id),
       ...sharedSpec,
       // The original frames also had distinct orchestrator containers; their nested values and
       // config were already shared. Preserve that ownership without changing the staged frame.
@@ -11885,7 +11885,7 @@ export class SessionsService {
     const holdFor = hasBlockingPendingRequest(configured.pendingApproval) ? "control_plane" as const
       : this.runnerHoldAfter(configured, this.guardrailFields(configured));
     return this.hub.sendToRunner(session.runnerId, { type: "rearm_governance", sessionId,
-      campaignBudgetDispatch: this.db.campaignBudgets.dispatch(sessionId),
+      campaignBudgetDispatch: this.db.campaignBudgets.dispatchTo(sessionId),
       config: { ...(allocation.costUsd === undefined ? {} : { costBudgetUsd: allocation.costUsd }),
         ...(allocation.toolCalls === undefined ? {} : { maxToolCalls: allocation.toolCalls }) }, ...(holdFor ? { holdFor } : {}) });
   }
@@ -19966,7 +19966,7 @@ export class SessionsService {
         : (member.orchestrator ? false : (req.useWorktree ?? true));
       const spec: SessionLaunchSpec = {
         sessionId: id,
-        campaignBudgetDispatch: this.db.campaignBudgets.dispatch(id),
+        campaignBudgetDispatch: this.db.campaignBudgets.dispatchTo(id),
         workspaceId: req.workspaceId,
         workspacePath,
         agentId: member.agentId,
@@ -20912,7 +20912,7 @@ export class SessionsService {
       const spec: SessionLaunchSpec = {
         sessionId: id,
         workspaceId: req.workspaceId,
-        campaignBudgetDispatch: this.db.campaignBudgets.dispatch(id),
+        campaignBudgetDispatch: this.db.campaignBudgets.dispatchTo(id),
         workspacePath,
         agentId,
         agentVersion: launch.version,

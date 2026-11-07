@@ -532,15 +532,19 @@ export class CampaignBudgetLedger {
       WHERE s.runner_id=? AND m.active=1`).all(runnerId) as Array<{session_id:string}>).map((r)=>r.session_id);
   }
 
-  dispatchState(sessionId:string):{active:boolean;generation:string;checkpoint:string|null} {
+  dispatchState(sessionId:string):{active:boolean;generation:string;checkpoint:string|null;unprovableGeneration:string|null} {
     const checkpoint=this.sql.prepare("SELECT checkpoint FROM campaign_budget_checkpoints WHERE session_id=?").get(sessionId) as {checkpoint:string}|undefined;
-    return {active:this.active(sessionId),generation:this.dispatch(sessionId)!.generation,checkpoint:checkpoint?.checkpoint??null};
+    const generation=this.dispatch(sessionId)!.generation;
+    const marker=this.sql.prepare("SELECT unprovable_generation AS g FROM campaign_budget_members WHERE session_id=?").get(sessionId) as {g:string|null}|undefined;
+    return {active:this.active(sessionId),generation,checkpoint:checkpoint?.checkpoint??null,unprovableGeneration:marker?.g??null};
   }
 
   /** Only for a runner send that proved no command was enqueued; preserve old final evidence. */
   restoreUnsentDispatch(sessionId: string, state: ReturnType<CampaignBudgetLedger["dispatchState"]>): void {
     this.atomic(()=>{
-      this.sql.prepare("UPDATE campaign_budget_members SET active=?,generation=? WHERE session_id=?").run(state.active?1:0,state.generation,sessionId);
+      // The prior generation keeps the mark it had (#3788); the unsent one never reached a runner.
+      this.sql.prepare("UPDATE campaign_budget_members SET active=?,generation=?,unprovable_generation=? WHERE session_id=?")
+        .run(state.active?1:0,state.generation,state.unprovableGeneration,sessionId);
       this.sql.prepare("DELETE FROM campaign_budget_checkpoints WHERE session_id=?").run(sessionId);
       if(state.checkpoint) this.sql.prepare("INSERT INTO campaign_budget_checkpoints VALUES (?,?)").run(sessionId,state.checkpoint);
     });
@@ -570,6 +574,21 @@ export class CampaignBudgetLedger {
           WHERE s.id=campaign_budget_members.session_id AND s.runner_id=?
             AND (r.protocol_version IS NULL OR r.protocol_version < ?))`)
       .run(sessionId, runnerId, RUNNER_CAPABILITY_MIN_PROTOCOL.campaignProviderRetirementProof);
+  }
+
+  /** The generation to send to the session's runner. Sending it to a runner too old to prove
+   * retirement, or one whose protocol is unknown, marks it as `noteServingRunner` would, before the
+   * command leaves: that runner may run it even if none of its reports ever arrives (#3788). */
+  dispatchTo(sessionId: string): import("@wollipog/protocol").CampaignBudgetDispatch | undefined {
+    const dispatch = this.dispatch(sessionId);
+    if (dispatch) {
+      this.sql.prepare(`UPDATE campaign_budget_members SET unprovable_generation=generation
+        WHERE session_id=? AND active=1 AND unprovable_generation IS NOT generation
+          AND EXISTS (SELECT 1 FROM sessions s LEFT JOIN runners r ON r.runner_id=s.runner_id
+            WHERE s.id=campaign_budget_members.session_id AND (r.protocol_version IS NULL OR r.protocol_version < ?))`)
+        .run(sessionId, RUNNER_CAPABILITY_MIN_PROTOCOL.campaignProviderRetirementProof);
+    }
+    return dispatch;
   }
 
   /** `noteServingRunner` for every live member a registering runner too old to prove retirement owns. */
@@ -648,12 +667,13 @@ export class CampaignBudgetLedger {
     }
     return { rootSessionId: row.root_id, generation: row.generation };
   }
-
+  /** Each replacement invalidates old terminal receipts before any runner dispatch, and is marked
+   * before it leaves for a runner too old to prove its retirement (#3788). */
   /** Each replacement invalidates old terminal receipts before any runner dispatch. */
   replaceDispatch(sessionId: string): import("@wollipog/protocol").CampaignBudgetDispatch {
     this.sql.prepare("UPDATE campaign_budget_members SET generation=? WHERE session_id=?").run(randomUUID(),sessionId);
     this.sql.prepare("DELETE FROM campaign_budget_checkpoints WHERE session_id=?").run(sessionId);
-    return this.dispatch(sessionId)!;
+    return this.dispatchTo(sessionId)!;
   }
 
   completedAttestation(sessionId:string):{rootSessionId:string;sessionId:string;checkpoint:import("@wollipog/protocol").CampaignBudgetUsageCheckpoint;
