@@ -3026,6 +3026,19 @@ export class SessionsService {
     if (!parsed.ok) return fail(parsed.error, 400);
     const now = Date.now();
     if (parsed.value.hookEventName !== "PreToolUse") return ok({ decision: "defer" });
+    // #4120: an allow here, or a defer under a provider mode that asks nobody, would let a held armed
+    // merge run unseen. The hook can't see which command it is, so every shell command is denied
+    // while one is held, and the session is parked on the prerequisite.
+    if (parsed.value.context?.toolName === "Bash") {
+      const heldArmed = this.heldArmedMergeOfSession(session);
+      if (heldArmed) {
+        if (this.db.pullRequestWatches.visibleFor(sessionId)?.state !== "watching") {
+          this.mergeHeld(session, heldArmed.decision.occurrenceId, heldArmed.held);
+        }
+        return ok({ decision: "deny", reason: `${campaignMergeHoldReason(heldArmed.held.hold)} Shell commands are blocked until then, ` +
+          "since this session's armed merge must not run." });
+      }
+    }
     if (!parsed.value.toolUseId) {
       if (parsed.value.approvalRequestId) {
         return fail("policy hook approval polling requires a stable toolUseId", 409);
@@ -11538,6 +11551,20 @@ export class SessionsService {
     return null;
   }
 
+  /** #4120: a held armed merge of this session's, whatever command it would run. Claude's policy hook
+   * never carries a command (raw tool input does not cross that boundary), so it can't tell the armed
+   * command from any other: while one is held, none of the session's shell commands may be allowed there. */
+  private heldArmedMergeOfSession(session: SessionView):
+    { decision: WorkflowDecisionView; held: { campaignId: string; hold: CampaignMergeHold } } | null {
+    for (const decision of this.db.unconsumedWorkflowDecisionsForSession(session.id)) {
+      if (decision.status !== "approved" || decision.resourceSnapshot.category !== "pr_merge" ||
+          decision.actionAdmission?.kind !== "pr_merge_enqueue") continue;
+      const held = this.campaignMergeHoldNow(session, decision.resourceSnapshot);
+      if (held) return { decision, held };
+    }
+    return null;
+  }
+
   /** #4120: refuse a held merge with its fixed reason, leaving the approval as it is. A prerequisite
    * still to merge parks the requester on it (#4071's wake, kept by the control plane, since the
    * requester's runner may not read that repository), so its turn can end and it is woken once the
@@ -18517,6 +18544,9 @@ export class SessionsService {
       if (optionId !== "allow" && optionId !== "deny") {
         return fail("policy hook approvals require the Allow or Deny option", 409);
       }
+      // #4120: as at evaluation, a held armed merge blocks allowing any of the session's shell commands.
+      const heldArmed = optionId === "allow" && pending.context?.toolName === "Bash" ? this.heldArmedMergeOfSession(session) : null;
+      if (heldArmed) return this.mergeHeld(session, heldArmed.decision.occurrenceId, heldArmed.held);
       const resolved = this.db.resolvePolicyHookApproval(
         sessionId,
         requestId,

@@ -843,3 +843,32 @@ test("a merge of a finished item's pull request parked on its prerequisite is wo
     assert.deepEqual([fired.state, fired.outcome], ["fired", "merged"]);
   } finally { observations.dispose(); observer.dispose(); h.observer.dispose(); h.db.close(); }
 });
+
+test("while a session's armed merge is held, Claude's policy hook denies its shell commands, which it can't tell apart (#4120)", async () => {
+  const h = await fixture();
+  try {
+    h.forge.set("owner/api#7", pull("merged"));
+    const merge = h.approvedMerge("app", "owner/app", 5);
+    assert.equal((await merge.arm()).ok, true);
+    const hook = (toolUseId: string, toolName: string) => h.svc.evaluatePolicyHook("app", { hookEventName: "PreToolUse", providerSessionId: "provider-app",
+      permissionMode: "bypassPermissions", toolUseId, context: { toolName } });
+    // Not held: the hook defers as before (no policy matches).
+    assert.equal(hook("bash-1", "Bash").data?.decision, "defer");
+    // The prerequisite's fact stops being fresh: a shell command, possibly the armed merge, is denied.
+    h.forge.delete("owner/api#7");
+    await h.observer.readNow("root", [{ repository: "owner/api", number: 7 }]);
+    const denied = hook("bash-2", "Bash");
+    assert.equal(denied.data?.decision, "deny");
+    assert.match(denied.data?.reason ?? "", /^Merge held until prerequisite pull request owner\/api#7 \(api in owner\/api\) is observed MERGED; it is not freshly observed\..* Shell commands are blocked until then/su);
+    const watch = h.db.pullRequestWatches.visibleFor("app")!;
+    assert.deepEqual([watch.repository, watch.number, watch.state], ["owner/api", 7, "watching"], "parked on the prerequisite");
+    // Other tools are not affected, and the approval stays armed.
+    assert.equal(hook("read-1", "Read").data?.decision, "defer");
+    const held = h.db.workflowDecisionByOccurrence(merge.occurrenceId)!;
+    assert.deepEqual([held.status, held.actionAdmission?.kind], ["approved", "pr_merge_enqueue"]);
+    // Once observed MERGED again, shell commands pass the hook again.
+    h.forge.set("owner/api#7", pull("merged"));
+    await h.observer.readNow("root", [{ repository: "owner/api", number: 7 }]);
+    assert.equal(hook("bash-3", "Bash").data?.decision, "defer");
+  } finally { h.observer.dispose(); h.db.close(); }
+});

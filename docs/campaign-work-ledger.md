@@ -235,10 +235,15 @@ possible later work.
   rejected there; the approval stays armed and the requester is parked on the prerequisite. A card
   for that command asked before the hold formed can't be allowed while it holds; it can still be
   rejected.
-- **What can't be intercepted.** A provider running the armed command with no permission request
-  (Claude Code in an auto or Full Access mode) reports it only afterwards, so the guard above is the
-  only fence on that path. A person merging on the forge, and a raw `gh pr merge` that was never
-  armed, are outside Wollipog's gate; agents are told never to run one.
+- **Claude's policy hook.** The hook never carries a command (raw tool input doesn't cross that
+  boundary), so it can't tell the armed command from another shell command. While a session's armed
+  merge is held, the hook denies every shell command of that session and parks it on the
+  prerequisite, and a policy-hook card for a shell command can't be allowed; other tools are
+  unaffected, and shell commands pass again once the hold lifts.
+- **What can't be intercepted.** A provider running the armed command with neither a permission
+  request nor a policy-hook evaluation reports it only afterwards, so the guard above is the only
+  fence on that path. A person merging on the forge, and a raw `gh pr merge` that was never armed,
+  are outside Wollipog's gate; agents are told never to run one.
 - **Wake.** A refusal while the prerequisite is still to merge parks the requester on that pull
   request with #4071's watch, which the control plane keeps itself (`PREREQUISITE_MERGE_WATCH_RUNNER`):
   the requester's runner may not be able to read that repository. The watch appears in
