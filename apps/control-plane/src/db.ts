@@ -27267,13 +27267,36 @@ export class ControlPlaneDb {
   }
 
   clearRejectedSteeringResolution(requestId: string): boolean {
-    const cleared = this.stmt(
-      `UPDATE session_steering_attempts SET resolution_action=NULL,resolution_request_id=NULL,
-       resolution_receipt_json=NULL,resolution_requested_at=NULL,updated_at=updated_at+1
-       WHERE resolution_request_id=? AND resolved_at IS NULL
-         AND json_extract(resolution_receipt_json,'$.applied')=0`,
-    ).run(requestId);
-    return Number(cleared.changes) > 0;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const cleared = this.stmt(
+        `UPDATE session_steering_attempts SET resolution_action=NULL,resolution_request_id=NULL,
+         resolution_receipt_json=NULL,resolution_requested_at=NULL,updated_at=updated_at+1
+         WHERE resolution_request_id=? AND resolved_at IS NULL
+           AND json_extract(resolution_receipt_json,'$.applied')=0
+         RETURNING session_id,submission_id,turn_id,updated_at`,
+      ).get(requestId) as { session_id: string; submission_id: string; turn_id: string; updated_at: number } | undefined;
+      // The runner may have accepted while this recovery request was in flight. Its durable
+      // event was fenced by the staged action; reconsider it only after a definite refusal.
+      // Applied recovery remains immutable, and unrelated history cannot prove this delivery.
+      if (cleared) {
+        const payload = "CASE WHEN json_valid(payload) THEN payload ELSE '{}' END";
+        const evidence = this.stmt(
+          `SELECT 1 FROM session_events WHERE session_id=? AND kind='user_message'
+           AND json_extract(${payload},'$.deliveryIntent')='steer'
+           AND json_extract(${payload},'$.submissionId')=?
+           AND json_extract(${payload},'$.turnId')=? LIMIT 1`,
+        ).get(cleared.session_id, cleared.submission_id, cleared.turn_id);
+        if (evidence) this.resolveSteeringAttemptFromUserMessage(
+          cleared.session_id, cleared.submission_id, cleared.turn_id, cleared.updated_at,
+        );
+      }
+      this.db.exec("COMMIT");
+      return Boolean(cleared);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   pendingSteeringResolutionMessages(
