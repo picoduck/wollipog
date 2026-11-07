@@ -1441,6 +1441,11 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * of being refused, so the control plane may fence its standing dismissal permanently (#2940). */
   durableAuthDismissal: 230,
   campaignBudgetAdmission: 218,
+  /** The runner attests a campaign worker's final checkpoint, and omits it from a reconnect
+   * inventory, only once it has proven every provider process tree of that generation gone
+   * (#3788, #4257, #4256). 307 is the first protocol on main that carries all three. An older
+   * runner's checkpoint or absence never frees the generation's concurrency slot. */
+  campaignProviderRetirementProof: 307,
   workflowDecisionActionAdmission: 151,
   workflowDecisionActionReconciliation: 153,
   /** v269 control plane withdraws a pending or approved, unconsumed workflow decision (#3917). */

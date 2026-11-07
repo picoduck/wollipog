@@ -5808,7 +5808,7 @@ export class SessionsService {
     const { sessionId: launchSessionId, ...sharedSpec } = commandSpec;
     const spec: SessionLaunchSpec = {
       sessionId: launchSessionId,
-      campaignBudgetDispatch: this.db.campaignBudgets.dispatch(id),
+      campaignBudgetDispatch: this.db.campaignBudgets.dispatchTo(id),
       ...sharedSpec,
       // The original frames also had distinct orchestrator containers; their nested values and
       // config were already shared. Preserve that ownership without changing the staged frame.
@@ -11950,7 +11950,7 @@ export class SessionsService {
     const holdFor = hasBlockingPendingRequest(configured.pendingApproval) ? "control_plane" as const
       : this.runnerHoldAfter(configured, this.guardrailFields(configured));
     return this.hub.sendToRunner(session.runnerId, { type: "rearm_governance", sessionId,
-      campaignBudgetDispatch: this.db.campaignBudgets.dispatch(sessionId),
+      campaignBudgetDispatch: this.db.campaignBudgets.dispatchTo(sessionId),
       config: { ...(allocation.costUsd === undefined ? {} : { costBudgetUsd: allocation.costUsd }),
         ...(allocation.toolCalls === undefined ? {} : { maxToolCalls: allocation.toolCalls }) }, ...(holdFor ? { holdFor } : {}) });
   }
@@ -20090,7 +20090,7 @@ export class SessionsService {
         : (member.orchestrator ? false : (req.useWorktree ?? true));
       const spec: SessionLaunchSpec = {
         sessionId: id,
-        campaignBudgetDispatch: this.db.campaignBudgets.dispatch(id),
+        campaignBudgetDispatch: this.db.campaignBudgets.dispatchTo(id),
         workspaceId: req.workspaceId,
         workspacePath,
         agentId: member.agentId,
@@ -21036,7 +21036,7 @@ export class SessionsService {
       const spec: SessionLaunchSpec = {
         sessionId: id,
         workspaceId: req.workspaceId,
-        campaignBudgetDispatch: this.db.campaignBudgets.dispatch(id),
+        campaignBudgetDispatch: this.db.campaignBudgets.dispatchTo(id),
         workspacePath,
         agentId,
         agentVersion: launch.version,
@@ -21092,6 +21092,9 @@ export class SessionsService {
       this.log.warn(`ignoring session_status for ${sessionId} from ${fromRunnerId} (owned by ${session.runnerId})`);
       return;
     }
+    // A runner too old to prove provider retirement serves this generation: neither its checkpoint
+    // nor anything a later runner relays for it frees the slot (#3788).
+    if (fromRunnerId) this.noteServingRunner(sessionId, fromRunnerId);
     if (fromRunnerId && isTerminal(status) && budgetCheckpoint) {
       this.db.campaignBudgets.recordCheckpoint(sessionId, budgetCheckpoint);
       // History can arrive after terminal status. Its durable hydration completes settlement.
@@ -22407,6 +22410,13 @@ export class SessionsService {
     }
   }
 
+  /** Mark the session's live campaign generation when `runnerId`, its owner, is too old to prove
+   * provider retirement (#3788). A current runner costs one cached protocol lookup per report. */
+  private noteServingRunner(sessionId: string, runnerId: string): void {
+    if (runnerSupportsProtocol(this.runnerProtocolVersion(runnerId), "campaignProviderRetirementProof")) return;
+    this.db.campaignBudgets.noteServingRunner(sessionId, runnerId);
+  }
+
   /** Side chats use archived only to stay out of ordinary lists, not as a Stop intent.
    * A provisional disconnect may recover, but an ended child must not come back to life.
    * Pending explicit Stops are enforced separately, until terminal evidence confirms them. */
@@ -22430,7 +22440,9 @@ export class SessionsService {
     for (const s of this.db.listSessions({ includeArchived: true })) {
       if (s.runnerId !== runnerId) continue;
       if (this.dedicatedMediaLifecycle(s)) continue;
-      // No provider of an absent session runs, so its campaign slot is free (#2940).
+      // No provider of an absent session runs, so its campaign slot is free (#2940), unless the
+      // runner is too old to prove that, which keeps it held (#3788).
+      this.noteServingRunner(s.id, runnerId);
       if (!liveSet.has(s.id)) this.db.campaignBudgets.noteProviderAbsent(s.id);
       if (this.db.hasSessionStopIntent(s.id)) {
         if (liveSet.has(s.id)) {
@@ -22662,7 +22674,10 @@ export class SessionsService {
       const chunk = snapshots.slice(offset, offset + 32);
       for(const snap of chunk) {
         const owner=this.db.getSession(snap.id);
-        if(owner?.runnerId===runnerId && isTerminal(snap.status) && snap.campaignBudgetCheckpoint) this.db.campaignBudgets.recordCheckpoint(snap.id,snap.campaignBudgetCheckpoint);
+        if(owner?.runnerId!==runnerId) continue;
+        // A runner too old to prove provider retirement keeps the generation's slot held (#3788).
+        this.noteServingRunner(snap.id,runnerId);
+        if(isTerminal(snap.status) && snap.campaignBudgetCheckpoint) this.db.campaignBudgets.recordCheckpoint(snap.id,snap.campaignBudgetCheckpoint);
       }
       const unsupportedCostSessions = new Set(chunk.filter((snap) =>
         this.unsupportedCostReconciliation(runnerId, snap)).map((snap) => snap.id));
@@ -22848,7 +22863,9 @@ export class SessionsService {
       if (s.runnerId === runnerId && !byId.has(s.id)) {
         if (this.dedicatedMediaLifecycle(s)) continue;
         campaignBefore(s);
-        // An inventory without the session holds no provider of it, so its campaign slot is free (#2940).
+        // An inventory without the session holds no provider of it, so its campaign slot is free (#2940),
+        // unless the runner is too old to prove that, which keeps it held (#3788).
+        this.noteServingRunner(s.id, runnerId);
         this.db.campaignBudgets.noteProviderAbsent(s.id);
         if (this.db.hasSessionStopIntent(s.id)) this.settleStopIntent(s.id, now, "runner_absent");
         if (isTerminal(s.status)) this.revokeUnconsumedWorkflowDecisionsForSession(s.id, "provider-session-absent");
@@ -22929,6 +22946,8 @@ export class SessionsService {
   applySessionRuntimeUpdate(runnerId: string, snapshot: SessionSnapshot, batch?: RunnerAttentionBatch): void {
     const existing = this.db.getSession(snapshot.id);
     if (!existing || existing.runnerId !== runnerId || this.db.isTombstoned(snapshot.id)) return;
+    // A runner too old to prove provider retirement keeps the generation's slot held (#3788).
+    this.noteServingRunner(snapshot.id, runnerId);
     if(isTerminal(snapshot.status) && snapshot.campaignBudgetCheckpoint) this.db.campaignBudgets.recordCheckpoint(snapshot.id,snapshot.campaignBudgetCheckpoint);
     if (this.pendingMediaLifecycle(existing)) snapshot = { ...snapshot, status: existing.status };
     const unsupportedCost = this.unsupportedCostReconciliation(runnerId, snapshot);
@@ -23047,6 +23066,7 @@ export class SessionsService {
       campaignBefore: this.runtimeCampaignBefore(existing, runtimeSnapshot, batch),
       // The single-snapshot path's writes before its update, in its order; none publishes.
       before: () => {
+        this.noteServingRunner(sessionId, runnerId);
         if (terminal && snapshot.campaignBudgetCheckpoint) {
           this.db.campaignBudgets.recordCheckpoint(sessionId, snapshot.campaignBudgetCheckpoint);
         }
