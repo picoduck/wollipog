@@ -54,8 +54,9 @@ export interface MergeClosureWatcherDeps {
   revokeApproved(decision: WatchedMerge): void;
   /** Tell the child its decision no longer covers the merge. True once delivered or queued. */
   notifyChild(decision: WatchedMerge, watch: MergeClosureWatch): boolean;
-  /** Tell the campaign's owner. */
-  reportOwner(decision: WatchedMerge, watch: MergeClosureWatch, kind: MergeClosureReportKind): NonNullable<MergeClosureWatch["report"]>;
+  /** Tell the campaign's owner. `delivered` is false while nobody could be told, so it is retried. */
+  reportOwner(decision: WatchedMerge, watch: MergeClosureWatch, kind: MergeClosureReportKind):
+    { report: NonNullable<MergeClosureWatch["report"]>; delivered: boolean };
   /** The decision's watch changed in a way its views show. */
   changed(decision: WatchedMerge): void;
   log(event: Record<string, unknown>): void;
@@ -195,9 +196,16 @@ export class MergeClosureWatcher {
       const now = this.now();
       const due: WatchedMerge[] = [];
       for (const decision of this.deps.targets()) {
-        const watch = decision.closureWatch ?? this.begin(decision, now);
-        if (!watch || (watch.state !== "watching" && watch.state !== "invalidated")) continue;
+        let watch = decision.closureWatch ?? this.begin(decision, now);
+        if (!watch) continue;
         const current = { ...decision, closureWatch: watch };
+        // A report owed and not delivered (a crash before it, or nobody to deliver it to yet) is
+        // retried every read interval, whatever the state.
+        if (watch.reportPending && now - watch.updatedAt >= MERGE_CLOSURE_WATCH.readIntervalMs) {
+          this.report(current, watch, watch.reportPending);
+          watch = current.closureWatch!;
+        }
+        if (watch.state !== "watching" && watch.state !== "invalidated") continue;
         if (now - watch.since > MERGE_CLOSURE_WATCH.expireAfterMs) {
           this.store(current, { ...watch, state: "ended", updatedAt: now, endReason: "Still open two weeks after approval; no longer watched." });
           continue;
@@ -354,7 +362,29 @@ export class MergeClosureWatcher {
     // Wollipog could not take it out of the queue: a person has to, before it lands.
     const stuck = watch.dequeue && watch.dequeue.attempts >= MERGE_CLOSURE_WATCH.maxDequeueAttempts &&
       watch.dequeue.outcome !== "dequeued" && watch.dequeue.outcome !== "not_queued";
-    if (stuck && !watch.report) this.store(decision, { ...watch, report: this.deps.reportOwner(decision, watch, "not_dequeued") });
+    if (stuck && !watch.report && !watch.reportPending) this.report(decision, watch, "not_dequeued");
+  }
+
+  /**
+   * Owe the owner a report in the same write as the state that owes it, then deliver it. A report
+   * that could not be delivered (no live root, a refused question, a crash between the two writes)
+   * stays owed and is retried every read interval: a watch owing one is still selected whatever its
+   * state. The owner question's request id is fixed per decision and kind, so a retry after a lost
+   * answer finds the same question instead of asking twice.
+   */
+  private report(decision: WatchedMerge, next: MergeClosureWatch, kind: MergeClosureReportKind): void {
+    const owed: MergeClosureWatch = { ...next, reportPending: kind, updatedAt: this.now() };
+    if (!this.store(decision, owed)) return;
+    let outcome: ReturnType<MergeClosureWatcherDeps["reportOwner"]>;
+    try {
+      outcome = this.deps.reportOwner(decision, owed, kind);
+    } catch (error) {
+      this.deps.warn(`merge closure report for ${decision.occurrenceId} failed: ${String(error)}`);
+      return;
+    }
+    const done: MergeClosureWatch = { ...owed, report: outcome.report, updatedAt: this.now() };
+    if (outcome.delivered) delete done.reportPending;
+    this.store(decision, done);
   }
 
   private landed(decision: WatchedMerge, read: MergeClosureWatch, closures: PullRequestClosure[], now: number): void {
@@ -363,9 +393,7 @@ export class MergeClosureWatcher {
       this.store(decision, { ...read, state: "verified", updatedAt: now });
       return;
     }
-    const landed: MergeClosureWatch = { ...read, state: "landed_unapproved", unapprovedClosures: extra, updatedAt: now };
-    if (!this.store(decision, landed)) return;
-    this.store(decision, { ...landed, report: this.deps.reportOwner(decision, landed, "landed") });
+    this.report(decision, { ...read, state: "landed_unapproved", unapprovedClosures: extra, updatedAt: now }, "landed");
   }
 
   private unread(decision: WatchedMerge, reason: string, now: number): void {
@@ -375,9 +403,10 @@ export class MergeClosureWatcher {
     if (now - since >= MERGE_CLOSURE_WATCH.giveUpAfterMs) {
       next = { ...next, state: "unverified", endReason: "What this merge closes could not be read for a day; it is no longer watched." };
     }
-    if (!this.store(decision, next)) return;
-    if (!next.report && now - since >= MERGE_CLOSURE_WATCH.unreadReportAfterMs) {
-      this.store(decision, { ...next, report: this.deps.reportOwner(decision, next, "unverified") });
+    if (!next.report && !next.reportPending && now - since >= MERGE_CLOSURE_WATCH.unreadReportAfterMs) {
+      this.report(decision, next, "unverified");
+      return;
     }
+    this.store(decision, next);
   }
 }

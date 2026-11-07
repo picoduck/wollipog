@@ -98,6 +98,9 @@ export interface MergeClosureWatch {
   childNotifiedAt?: number;
   /** The owner was told, through this owner question on the campaign's root, or why not. */
   report?: { occurrenceId?: string; reportedAt: number; unreported?: string };
+  /** A report owed and not delivered yet. Stored with the state that owes it, and retried every
+   * read interval, whatever the state, until it is delivered. */
+  reportPending?: "landed" | "unverified" | "not_dequeued";
   endReason?: string;
 }
 

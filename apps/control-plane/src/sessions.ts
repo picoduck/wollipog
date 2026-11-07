@@ -14027,31 +14027,37 @@ export class SessionsService {
   /** Tell the campaign's owner about a merge whose closures nobody approved, or that could not be
    * checked (#4323): an Owner Question on the campaign's root, which only that person answers and
    * which grants nothing. Without a root that can carry one, the root Orchestrator is told instead
-   * and the report records why. */
-  private reportMergeClosureToOwner(decision: WatchedMerge, watch: MergeClosureWatch, kind: MergeClosureReportKind): NonNullable<MergeClosureWatch["report"]> {
+   * and the report records why. While the root has ended nobody can be told: the report stays owed
+   * and the watcher retries it, so it reaches the owner if the root runs again. */
+  private reportMergeClosureToOwner(decision: WatchedMerge, watch: MergeClosureWatch, kind: MergeClosureReportKind):
+    { report: NonNullable<MergeClosureWatch["report"]>; delivered: boolean } {
     const reportedAt = Date.now();
     const text = mergeClosureOwnerReport(decision, watch, kind);
     const rootId = this.db.campaignRootForMember(decision.sessionId) ?? this.db.campaignRootForMember(decision.controllingSessionId) ??
       (this.db.getSession(decision.controllingSessionId)?.orchestratorPolicy ? decision.controllingSessionId : null);
     const root = rootId ? this.db.getSession(rootId) : null;
+    const requestId = `merge_closure_${kind}_${decision.occurrenceId}`;
+    // Asked already (a retry after its answer was lost): that question is the report.
+    const asked = root ? this.db.workflowDecisionByRequestId(root.id, requestId) : null;
+    if (asked) return { report: { occurrenceId: asked.occurrenceId, reportedAt }, delivered: true };
     if (!root || isTerminal(root.status)) {
-      this.log.warn(`merge closure report for ${decision.occurrenceId} has no live campaign root: ${text.question}`);
-      return { reportedAt, unreported: "The campaign's root Orchestrator has ended." };
+      this.log.warn(`merge closure report for ${decision.occurrenceId} is owed, and has no live campaign root yet`);
+      return { report: { reportedAt, unreported: "The campaign's root Orchestrator has ended; the report is retried while it is owed." }, delivered: false };
     }
     if (runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "ownerQuestions")) {
       const created = this.createWorkflowDecision(root.id, {
-        requestId: `merge_closure_${kind}_${decision.occurrenceId}`,
+        requestId,
         resourceKey: `merge_closure:${decision.resourceSnapshot.repository.toLowerCase()}#${decision.resourceSnapshot.pullRequest}`,
         resourceSnapshot: { category: "owner_decision", kind: "question", question: text.question, material: text.material, options: text.options },
       }, () => true, { trustedOwnerDecision: true });
-      if (created.ok && created.data) return { occurrenceId: created.data.occurrenceId, reportedAt };
+      if (created.ok && created.data) return { report: { occurrenceId: created.data.occurrenceId, reportedAt }, delivered: true };
       this.log.warn(`merge closure owner question for ${decision.occurrenceId} was refused: ${created.error}`);
     }
     // An older root, or a refused question: the root Orchestrator is told, and the record says so.
     const told = this.prompt(root.id, `${text.question}\n\n${text.material}\n\nReport this to the campaign's owner.`);
-    return { reportedAt, unreported: told.ok
+    return { report: { reportedAt, unreported: told.ok
       ? "The campaign's root cannot carry an owner question, so its Orchestrator was told instead."
-      : `Neither the owner nor the root Orchestrator could be told: ${told.error ?? "the message was refused"}` };
+      : `Neither the owner nor the root Orchestrator could be told: ${told.error ?? "the message was refused"}` }, delivered: told.ok };
   }
 
   createWorkflowDecision(

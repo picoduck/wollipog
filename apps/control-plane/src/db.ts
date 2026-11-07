@@ -7572,9 +7572,11 @@ export class ControlPlaneDb {
         AND (status='consumed' OR forge_action IS NOT NULL)`).run(JSON.stringify({ state: "not_watched", since: at, updatedAt: at,
         endReason: "Consumed before merges were watched until they land." } satisfies MergeClosureWatch));
     }
+    // Live watches and those still owing their owner a report.
     db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_closure_watch
       ON workflow_decisions(created_at) WHERE category='pr_merge' AND
-        (closure_watch IS NULL OR json_extract(closure_watch, '$.state') IN ('watching','invalidated'))`);
+        (closure_watch IS NULL OR json_extract(closure_watch, '$.state') IN ('watching','invalidated')
+          OR json_extract(closure_watch, '$.reportPending') IS NOT NULL)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_held_resume
       ON workflow_decisions(session_id, resolved_at) WHERE resume_state='held'`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_resume_command
@@ -23702,13 +23704,14 @@ export class ControlPlaneDb {
   }
 
   /** Consumed pull-request merge gates these sessions passed: completed-closure delivery candidates
-   * (#2940). A merge whose closures changed after approval is not one: its decision no longer
-   * covers it (#4323). */
+   * (#2940). A merge whose closures changed after approval, or that landed closing an issue it did
+   * not approve, is not one: its decision does not cover what happened (#4323). */
   consumedPullRequestMerges(sessionIds: readonly string[]): WorkflowDecisionView[] {
     if (!sessionIds.length) return [];
     return (this.stmt(
       `SELECT * FROM workflow_decisions WHERE category='pr_merge' AND status='consumed'
          AND json_extract(closure_watch, '$.invalidatedAt') IS NULL
+         AND COALESCE(json_extract(closure_watch, '$.state'), '')<>'landed_unapproved'
          AND session_id IN (SELECT value FROM json_each(?))
        ORDER BY created_at ASC, occurrence_id ASC`,
     ).all(JSON.stringify([...new Set(sessionIds)])) as unknown[]).map(workflowDecisionFromRow).filter(
@@ -23716,15 +23719,19 @@ export class ControlPlaneDb {
     );
   }
 
-  /** #4323: consumed merges (or merges whose enqueue Wollipog performed) not watched yet, and those
-   * still watched, oldest first. Read through their partial index. */
-  mergeClosureWatchTargets(limit = 500): WorkflowDecisionView[] {
+  /** #4323: consumed merges (or merges whose enqueue Wollipog performed) not watched yet, those still
+   * watched, and those still owing their owner a report. Unstarted ones first, then the least
+   * recently updated, so every watch reaches the front however many there are: each read, quiet or
+   * not, moves its watch to the back. Read through their partial index. */
+  mergeClosureWatchTargets(limit = 2_000): WorkflowDecisionView[] {
     return (this.stmt(
       `SELECT * FROM workflow_decisions WHERE category='pr_merge'
-         AND (closure_watch IS NULL OR json_extract(closure_watch, '$.state') IN ('watching','invalidated'))
+         AND (closure_watch IS NULL OR json_extract(closure_watch, '$.state') IN ('watching','invalidated')
+           OR json_extract(closure_watch, '$.reportPending') IS NOT NULL)
          AND (closure_watch IS NOT NULL OR status='consumed' OR
            (forge_action IS NOT NULL AND json_extract(forge_action, '$.outcome') NOT IN ('refused','in_progress')))
-       ORDER BY created_at ASC, occurrence_id ASC LIMIT ?`,
+       ORDER BY closure_watch IS NOT NULL, COALESCE(json_extract(closure_watch, '$.updatedAt'), 0) ASC, created_at ASC, occurrence_id ASC
+       LIMIT ?`,
     ).all(limit) as unknown[]).map(workflowDecisionFromRow).filter(
       (decision): decision is WorkflowDecisionView => decision !== null,
     );

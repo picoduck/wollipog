@@ -206,6 +206,10 @@ test("a merge that lands with an unapproved closure is reported to the campaign'
   assert.match(snapshot.material!, /- owner\/app#7: the description says "Fixes #7 as a side effect"/u);
   assert.match(snapshot.material!, new RegExp(occurrenceId, "u"));
   assert.deepEqual(f.requests.map((request) => request.operation), ["read", "read"], "a landed merge is never dequeued");
+  assert.deepEqual(f.db.consumedPullRequestMerges(["child"]), [], "an unapproved landing proves no delivery");
+  assert.equal(landed.reportPending, undefined, "delivered");
+  await f.pass();
+  assert.equal(f.ownerQuestions().length, 1, "reported once");
 });
 
 test("an unreadable forge never counts as unchanged: the owner is told, and a day later the watch ends unverified (#4323)", async () => {
@@ -317,6 +321,63 @@ test("under Full Control the report is the owner's, in their Waiting for You req
   assert.deepEqual(waiting.data?.requests.map((request) => request.occurrenceId), [question.occurrenceId]);
   assert.equal(f.svc.descendantRequests("root", () => true, "orchestrator").data?.requests.length ?? 0, 0);
   assert.match((question.resourceSnapshot as { material: string }).material, /- owner\/app#6: linked to the pull request on the forge/u);
+});
+
+test("a landing report owed while the campaign's root has ended stays owed and reaches the owner once the root runs again (#4323)", async () => {
+  const f = fixture();
+  const { occurrenceId, forge } = f.consumedMerge(f.github(52));
+  await f.pass();
+  f.db.updateSessionStatus("root", "completed", 3);
+  forge.state = "merged";
+  forge.closures = [closure("owner/app#3", "Closes #3")];
+  await f.pass();
+  assert.equal(f.watch(occurrenceId)!.state, "landed_unapproved");
+  assert.equal(f.watch(occurrenceId)!.reportPending, "landed");
+  assert.match(f.watch(occurrenceId)!.report!.unreported!, /root Orchestrator has ended/u);
+  assert.deepEqual(f.ownerQuestions(), []);
+  await f.pass();
+  assert.equal(f.watch(occurrenceId)!.reportPending, "landed", "still owed");
+  f.db.updateSessionStatus("root", "running", 4);
+  await f.pass();
+  assert.equal(f.watch(occurrenceId)!.reportPending, undefined);
+  const [question] = f.ownerQuestions();
+  assert.ok(question);
+  assert.equal(f.watch(occurrenceId)!.report?.occurrenceId, question.occurrenceId);
+  assert.equal(f.requests.length, 2, "an owed report is retried without reading the forge again");
+});
+
+test("a report owed when the control plane stopped is delivered exactly once after restart (#4323)", async () => {
+  const f = fixture();
+  const { occurrenceId } = f.consumedMerge(f.github(53));
+  await f.pass();
+  // As a crash between the two writes leaves it: landed and owing its report, nothing asked yet.
+  const before = f.watch(occurrenceId)!;
+  assert.ok(f.db.saveMergeClosureWatch(occurrenceId, before, { ...before, state: "landed_unapproved", reportPending: "landed",
+    unapprovedClosures: [closure("owner/app#9", "Closes #9")], updatedAt: before.updatedAt }));
+  const reads = f.requests.length;
+  await f.pass();
+  await f.pass();
+  assert.equal(f.ownerQuestions().length, 1);
+  assert.equal(f.watch(occurrenceId)!.reportPending, undefined);
+  assert.equal(f.requests.length, reads, "a landed watch is not read again");
+  // A lost answer after the question was created finds that question, never a second one.
+  const delivered = f.watch(occurrenceId)!;
+  assert.ok(f.db.saveMergeClosureWatch(occurrenceId, delivered, { ...delivered, reportPending: "landed" }));
+  await f.pass();
+  assert.equal(f.ownerQuestions().length, 1);
+  assert.equal(f.watch(occurrenceId)!.reportPending, undefined);
+});
+
+test("watch targets put unstarted merges first, then the least recently updated, so none is starved (#4323)", async () => {
+  const f = fixture();
+  const ids = [f.consumedMerge(f.github(60)).occurrenceId, f.consumedMerge(f.github(61)).occurrenceId, f.consumedMerge(f.github(62)).occurrenceId];
+  const at = (updatedAt: number) => ({ state: "watching" as const, since: 1, updatedAt });
+  assert.ok(f.db.saveMergeClosureWatch(ids[0]!, undefined, at(30)));
+  assert.ok(f.db.saveMergeClosureWatch(ids[1]!, undefined, at(10)));
+  assert.deepEqual(f.db.mergeClosureWatchTargets(2).map((decision) => decision.occurrenceId), [ids[2], ids[1]], "the unstarted one, then the stalest");
+  assert.ok(f.db.saveMergeClosureWatch(ids[2]!, undefined, at(40)));
+  assert.ok(f.db.saveMergeClosureWatch(ids[1]!, at(10), at(50)));
+  assert.deepEqual(f.db.mergeClosureWatchTargets(2).map((decision) => decision.occurrenceId), [ids[0], ids[2]], "a read moves a watch to the back");
 });
 
 test("a newer consumed merge of the same pull request from another session does not end the watch (#4323)", async () => {

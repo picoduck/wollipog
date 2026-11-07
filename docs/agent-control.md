@@ -1711,7 +1711,10 @@ in any other state. The decision records the result as `closureWatch`:
 - Merged: each issue it closed that `intendedClosures` does not list makes the watch
   `landed_unapproved`, and the campaign's owner gets an Owner Question on the campaign's root naming
   the pull request and quoting the text that closed each issue as a single line. Wollipog reopens
-  nothing. A merge with exactly the approved closures is `verified`.
+  nothing, and the decision no longer proves delivery. A merge with exactly the approved closures is
+  `verified`. A report is stored as owed (`reportPending`) in the same write as the state that owes
+  it, and retried every read interval until delivered, also after a restart or while the campaign's
+  root has ended; a retry finds the question it already asked.
 - An unreadable forge or an offline runner never counts as unchanged: after 30 minutes the owner is
   told the merge cannot be checked, and after a day the watch ends `unverified`. Failing dequeues are
   retried up to ten times, then reported to the owner.
