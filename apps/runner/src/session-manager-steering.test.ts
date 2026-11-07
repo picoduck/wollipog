@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +15,7 @@ import type {
   SteerSessionResultMessage,
 } from "@wollipog/protocol";
 import { CodexAppServerDriver } from "./drivers/codex-app-server.js";
+import { ClaudeCodeDriver } from "./drivers/claude-code.js";
 import type { Driver, DriverCallbacks, DriverSteerResult } from "./drivers/driver.js";
 import { JsonRpcPeer } from "./jsonrpc.js";
 import {
@@ -124,6 +126,74 @@ function durable(commandId: string): DurableCommandLifecycle {
     uncertain: () => {},
   };
 }
+
+test("a busy fake Claude acknowledges after the deadline and reconciles only its exact attempt once", async () => {
+  const child = Object.assign(new EventEmitter(), {
+    pid: 123, stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+  });
+  const writes: string[] = [];
+  child.stdin.on("data", (chunk) => writes.push(String(chunk)));
+  const driver = new ClaudeCodeDriver({
+    command: "fake-claude", args: [], cwd: tmpdir(), env: {}, context: { kind: "native" },
+    config: { permissionMode: "acceptEdits" }, capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: true,
+      supportsApprovals: true, supportsSteering: true, permissionModes: ["acceptEdits"],
+    },
+  }, { onEvent: () => {}, onStderr: () => {}, onExit: () => {} }, {
+    spawn: () => child, kill: () => {},
+  } as any);
+  const turn = driver.prompt("busy in a long tool call");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const h = harness({ steer: (input) => driver.steer(input) });
+  (h.manager as any).steeringSubmissionTimeoutMs = 20;
+  const request = { sessionId: "s_steer", turnId: "turn-a", submissionId: "late-claude", text: "change direction" };
+  try {
+    // Successful stdin writes, with no provider replay, prove nothing.
+    assert.equal((await h.manager.steerSession(request)).disposition, "uncertain");
+    assert.equal(h.store.readEvents("s_steer").filter(e => e.payload.kind === "user_message").length, 0);
+    const message = JSON.parse(writes.join("").trim().split("\n").at(-1)!);
+    const replay = { type: "user", isReplay: true, uuid: message.uuid,
+      session_id: (driver as any).sessionId, message: message.message };
+    child.stdout.write(JSON.stringify({ ...replay, uuid: "another-attempt" }) + "\n");
+    child.stdout.write(JSON.stringify({ ...replay, session_id: "another-session" }) + "\n");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal((await h.manager.steerSession(request)).disposition, "uncertain");
+    child.stdout.write(JSON.stringify(replay) + "\n");
+    await waitFor(() => h.store.readEvents("s_steer").some(e => e.payload.kind === "user_message"));
+    assert.equal((await h.manager.steerSession(request)).disposition, "accepted");
+    child.stdout.write(JSON.stringify(replay) + "\n");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const events = h.store.readEvents("s_steer").filter(e => e.payload.kind === "user_message");
+    assert.equal(events.length, 1);
+    assert.equal((events[0]!.payload as any).submissionId, request.submissionId);
+    assert.equal(writes.join("").trim().split("\n").length, 2, "neither reconciliation nor retry resends");
+  } finally {
+    child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+    await turn;
+    driver.dispose(); child.emit("close", 0); h.cleanup();
+  }
+});
+
+test("late steering evidence cannot revive rejection or an attempt already recovered by the owner", async () => {
+  for (const outcome of ["rejected", "uncertain"] as const) {
+    let acknowledge!: (providerTurnId: string) => void;
+    const h = harness({ steer: async (input) => {
+      acknowledge = input.onLateAccepted!;
+      return { outcome, reason: "not acknowledged" };
+    } });
+    const request = { sessionId: "s_steer", turnId: "turn-a", submissionId: outcome, text: "continue" };
+    try {
+      assert.equal((await h.manager.steerSession(request)).disposition, outcome);
+      if (outcome === "uncertain") {
+        assert.equal(h.manager.resolveSteeringAttempt({ ...request, action: "dismiss" }).applied, true);
+      }
+      acknowledge("provider-turn-a");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal((await h.manager.steerSession(request)).disposition, outcome);
+      assert.equal(h.store.readEvents("s_steer").filter(e => e.payload.kind === "user_message").length, 0);
+    } finally { h.cleanup(); }
+  }
+});
 
 /** Launch through the manager so these tests exercise its real callback registration. */
 async function callbackHarness() {
