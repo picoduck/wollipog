@@ -4544,7 +4544,8 @@ test("concurrent requests retain every created branch and deletion leaves attach
       manager.selectWorktree("s_multi", first.worktree.path)]) {
       await assert.rejects(refused, (error: Error) => {
         assert.ok(error.message.includes(`is on fix/reattach-drift, not ${first.worktree.branch}`), error.message);
-        assert.ok(error.message.includes(`git -C ${first.worktree.path} switch ${first.worktree.branch}`), error.message);
+        assert.ok(error.message.includes(`Restore branch ${first.worktree.branch} in ${first.worktree.path} and select`), error.message);
+        assert.ok(!error.message.includes("git -C"), "no command to run inside the agent-managed worktree");
         assert.match(error.message, /select_worktree/u);
         assert.match(error.message, /create_worktree/u);
         return true;

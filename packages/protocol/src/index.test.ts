@@ -1976,7 +1976,7 @@ test("image tool results are installation truth that session snapshots never dro
   assert.equal(mergeSessionCapabilities(caps(), plain), plain, "nothing to inherit keeps the snapshot as is");
 });
 
-test("a worktree-recovery hold names its recovery step with a pasteable command (#1650)", () => {
+test("a worktree-recovery hold names its recovery step, the branch and the worktree, without a command to run inside it (#1650)", () => {
   const recovery = {
     recoveryId: "worktree-recovery:x",
     detectedAt: 7,
@@ -1984,10 +1984,12 @@ test("a worktree-recovery hold names its recovery step with a pasteable command 
     expectedBranch: "agent/s_1",
     detail: "the selected worktree could not be verified before a live turn",
   };
-  assert.match(worktreeRecoveryAction(recovery),
-    /git -C '\/tmp\/my repo\/it'\\''s here' switch agent\/s_1/u, "a path with spaces or quotes is shell-quoted");
-  assert.match(worktreeRecoveryAction({ selectedPath: "/w/s_1", expectedBranch: "agent/s_1" }),
-    /git -C \/w\/s_1 switch agent\/s_1/u);
+  assert.equal(worktreeRecoveryAction(recovery),
+    "Restore branch agent/s_1 in /tmp/my repo/it's here and select that worktree again with select_worktree, or select " +
+    "or create another worktree for this session with select_worktree or create_worktree.");
+  for (const reader of [undefined, { canManageWorktrees: true }, { canManageWorktrees: false }]) {
+    assert.doesNotMatch(worktreeRecoveryAction(recovery, reader), /`|\bgit\b|-C\b/u, "no shell command for the agent-managed worktree");
+  }
   assert.match(worktreeRecoveryAction(recovery), /select_worktree/u);
   assert.match(worktreeRecoveryAction(recovery), /create_worktree/u);
   assert.deepEqual(sessionHolds({}), []);
@@ -2013,7 +2015,7 @@ test("worktree-recovery advice names select_worktree and create_worktree only to
   const refused = worktreeRecoveryAction(recovery, { canManageWorktrees: false });
   assert.equal(refused,
     "Only the session owner or its controlling Orchestrator can recover this session's worktree: ask them to restore " +
-    "branch agent/s_1 in /w/s_1 (for example `git -C /w/s_1 switch agent/s_1`) and select that worktree again, or to " +
+    "branch agent/s_1 in /w/s_1 and select that worktree again, or to " +
     "select or create another worktree for this session.");
   assert.doesNotMatch(refused, /select_worktree|create_worktree/u);
 

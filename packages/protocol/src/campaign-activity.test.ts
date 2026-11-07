@@ -16,23 +16,30 @@ const REFUSALS = [
   "a reason this version does not know",
 ];
 
-test("a refused worktree is only inspected, and the person keeps or discards its work before Wollipog retires it (#4146)", () => {
-  const path = "/home/dev/worktrees/it's here";
+test("a refused worktree gets a next step in words, never a command to run inside the agent-managed worktree", () => {
   for (const reason of REFUSALS) {
-    const action = worktreeRefusalAction(path, reason);
-    assert.equal(action.kind, "command", reason);
-    assert.match(action.command, /^git -C '\/home\/dev\/worktrees\/it'\\''s here' (status|log --oneline)/u, reason);
-    assert.doesNotMatch(action.command, /\b(remove|prune|clean|reset|checkout|restore|stash|rm|push|delete)\b|--force|-f\b/u,
-      `${reason}: the command reads only`);
-    assert.ok(action.then.length > 0, `${reason}: says what settles it`);
-    assert.doesNotMatch(action.then, /--force|reset --hard|git clean/u, reason);
+    const action = worktreeRefusalAction(reason);
+    assert.deepEqual(Object.keys(action).sort(), ["kind", "text"], `${reason}: no command field`);
+    assert.equal(action.kind, "person", reason);
+    assert.ok(action.text.length > 0, `${reason}: says what settles it`);
+    assert.doesNotMatch(action.text, /`|\bgit\b|\bgh\b|\bcd\b|\bpnpm\b|\bnpm\b|\bmake\b|-C\b|\$\(|\|/u,
+      `${reason}: names no tool to run in the worktree`);
+    assert.doesNotMatch(action.text, /--force|reset --hard|\bclean\b|\bprune\b|\bdiscard\b|worktree remove/u,
+      `${reason}: never removes, resets, cleans or discards anything`);
   }
-  const dirty = worktreeRefusalAction(path, REFUSALS[4]!);
-  assert.equal(dirty.command, "git -C '/home/dev/worktrees/it'\\''s here' status");
-  assert.equal(dirty.then, "Commit and push the changes you want to keep, or discard them yourself. Then ask the Orchestrator to retire the worktree through Wollipog.");
-  assert.equal(worktreeRefusalAction(path, "the branch has unpushed commits").command,
-    "git -C '/home/dev/worktrees/it'\\''s here' log --oneline '@{upstream}..HEAD'");
-  assert.match(worktreeRefusalAction(path, "attached operator-owned worktrees are not retired").then, /Wollipog leaves it in place/u);
+  // Each reason keeps its own guidance.
+  assert.equal(worktreeRefusalAction(REFUSALS[4]!).text,
+    "Review the child's work from its session in Wollipog. Ask its session or the Orchestrator to commit and push the " +
+    "changes you want to keep, or confirm they are not needed. Then ask the Orchestrator to retire the worktree through Wollipog.");
+  assert.match(worktreeRefusalAction("the branch has unpushed commits").text, /push the commits you want to keep/u);
+  assert.match(worktreeRefusalAction("the branch has no upstream").text, /push the branch if its commits are needed/u);
+  assert.match(worktreeRefusalAction("attached operator-owned worktrees are not retired").text, /Wollipog leaves it in place/u);
+  assert.match(worktreeRefusalAction("the linked pull request is not verified as merged").text,
+    /Wollipog retires the worktree once the forge reports the merge/u);
+  assert.match(worktreeRefusalAction("a reason this version does not know").text, /Decide what to keep\. Then ask the Orchestrator/u);
+  for (const reason of ["the worktree has uncommitted changes", "the branch has unpushed commits", "the branch has no upstream", "runner ownership could not be proven"]) {
+    assert.match(worktreeRefusalAction(reason).text, /retire the worktree through Wollipog\.$/u, reason);
+  }
 });
 
 test("cleanup reasons read as sentences, and a branch's deletion command names exactly that branch (#4146)", () => {

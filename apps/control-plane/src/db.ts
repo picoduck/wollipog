@@ -22899,11 +22899,12 @@ export class ControlPlaneDb {
     // Delete Merged Branches performs.
     items.sort((a, b) => Number(b.action.kind === "delete_merged_branches") - Number(a.action.kind === "delete_merged_branches"));
     for (const worktree of worktrees) {
-      // A refused worktree may hold work Wollipog must preserve: the person inspects it and decides
-      // what to keep, and nothing offered here removes or discards it.
+      // A refused worktree may hold work Wollipog must preserve: the person reviews it through the
+      // child's session and decides what to keep. Nothing offered here removes or discards it, and
+      // no command is offered to run inside the agent-managed worktree.
       const reason = cleanupReasonSentence(worktree.reason);
       items.push({ kind: "worktree", sessionId: worktree.sessionId, path: worktree.path, status: worktree.status, reason,
-        action: worktree.status === "refused" ? worktreeRefusalAction(worktree.path, worktree.reason) : { kind: "automatic", text: reason } });
+        action: worktree.status === "refused" ? worktreeRefusalAction(worktree.reason) : { kind: "automatic", text: reason } });
     }
     for (const handoff of handoffs) {
       items.push({ kind: "handoff", workItemId: handoff.workItemId, title: handoff.title, issue: handoff.issue,

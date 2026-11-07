@@ -8818,16 +8818,16 @@ export interface WorktreeRecoveryView {
  *
  * `reader` is what the principal reading the advice may do to the held session (#1863). One that
  * may not manage its worktrees is told who can, rather than handed tools its route refuses.
- * Without a reader every tool is named. */
+ * Without a reader every tool is named.
+ *
+ * The advice names no shell command: the selected worktree is agent-managed, and the same text
+ * reaches people in Campaign Status and the session's held-children view, so it says what to
+ * restore rather than handing a person a line to run inside that worktree. */
 export function worktreeRecoveryAction(
   recovery: Pick<WorktreeRecoveryView, "selectedPath" | "expectedBranch">,
   reader?: WorktreeRecoveryReader,
 ): string {
-  // The example is meant to be pasted, so a path with spaces or shell syntax is quoted.
-  const shellWord = (value: string) =>
-    /^[\w@%+=:,./-]+$/u.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
-  const restore = `branch ${recovery.expectedBranch} in ${recovery.selectedPath} ` +
-    `(for example \`git -C ${shellWord(recovery.selectedPath)} switch ${shellWord(recovery.expectedBranch)}\`)`;
+  const restore = `branch ${recovery.expectedBranch} in ${recovery.selectedPath}`;
   if (reader && !reader.canManageWorktrees) {
     return "Only the session owner or its controlling Orchestrator can recover this session's worktree: ask them " +
       `to restore ${restore} and select that worktree again, or to select or create another worktree for this session.`;

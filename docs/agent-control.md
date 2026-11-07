@@ -1884,8 +1884,10 @@ with no pending request. Before, its decision resume was dropped and nothing tol
   each blocked child with the recovery action its hold names.
 - **Refusals name the recovery step.** Prompting a held session, retrying its not-sent message, and
   attaching or selecting a worktree now on another branch all return a 409. The message says to
-  restore the expected branch (`git -C <path> switch <branch>`) and select that worktree again with
-  `select_worktree`, or to select or create another worktree.
+  restore the expected branch in the named worktree and select that worktree again with
+  `select_worktree`, or to select or create another worktree. The same text reaches people in
+  Campaign Status, so it names the branch and path, not a shell command to run inside the
+  agent-managed worktree.
 
 The mechanism is not specific to worktrees. A hold is one `SessionHoldView` kind, derived in one
 place (`sessionHolds` in the protocol package, fed by the control plane's session row). The
