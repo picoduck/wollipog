@@ -100,9 +100,12 @@ function itemStateAt(
   // An attempt opened before recording began has no observed status until its first transition.
   if (open && !status) return null;
   const delivered = latest !== undefined && latest.deliveredAt !== null && latest.deliveredAt <= at;
+  // #4120: the current hold belongs to the item's last attempt, from its verification on: it never
+  // reaches back into that attempt's work, nor into an earlier attempt's delivered span.
+  const held = delivered && item.heldAfterDelivery !== undefined &&
+    item.attempts.every((attempt) => attempt.ordinal <= latest!.ordinal);
   return deriveCampaignWorkItemState({
-    // #4120: only the instants after its verification: the hold never reaches back into its work.
-    ...(delivered && item.heldAfterDelivery ? { mergeDependencies: [item.heldAfterDelivery], ownPullRequestsMerged: false } : {}),
+    ...(held ? { mergeDependencies: [item.heldAfterDelivery!], ownPullRequestsMerged: false } : {}),
     id: item.id,
     commitment: record.commitment,
     dispatchState: record.dispatchState,
