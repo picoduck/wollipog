@@ -414,6 +414,11 @@ the issues a merge request closes then decides.
   each reference and its line, and a changed description revokes an approval at consume. Fix the text
   or the declaration and request again. The decision's `closingReferenceCheck` shows its reviewer what
   the merge closes; it is absent ("Not checked") when the child's runner predates the check.
+- After the decision is consumed, a current runner keeps reading what the merge would close until it
+  lands. Don't edit the description, title or commits of a queued pull or merge request: if what it
+  would close changes, Wollipog takes it out of the merge queue or train, the decision stops covering
+  it, and you are told why. Fix the text and request a new `pr_merge` for that head. A merge that
+  lands closing an issue nobody approved is reported to the campaign's owner.
 
 ## Review Sessions
 

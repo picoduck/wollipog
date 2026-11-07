@@ -23740,16 +23740,19 @@ export class ControlPlaneDb {
     return Number(result.changes) === 1;
   }
 
-  /** Whether a later `pr_merge` for the same pull request and head is pending, approved or consumed. */
+  /** Whether a later `pr_merge` for the same pull request, at any head, was consumed or enqueued by
+   * Wollipog: approved and checked itself, so it carries its own watch (#4323). One still pending or
+   * approved does not count. */
   newerMergeDecision(decision: WorkflowDecisionView): boolean {
     const snapshot = decision.resourceSnapshot;
     if (snapshot.category !== "pr_merge") return false;
     return this.stmt(
-      `SELECT 1 FROM workflow_decisions WHERE category='pr_merge' AND occurrence_id<>? AND created_at>=?
-         AND status IN ('pending','approved','consumed')
-         AND lower(json_extract(resource_snapshot, '$.repository'))=? AND json_extract(resource_snapshot, '$.pullRequest')=?
-         AND json_extract(resource_snapshot, '$.headSha')=? LIMIT 1`,
-    ).get(decision.occurrenceId, decision.createdAt, snapshot.repository.toLowerCase(), snapshot.pullRequest, snapshot.headSha) !== undefined;
+      `SELECT 1 FROM workflow_decisions WHERE category='pr_merge' AND occurrence_id<>?
+         AND (created_at>? OR (created_at=? AND occurrence_id>?))
+         AND (status='consumed' OR (forge_action IS NOT NULL AND json_extract(forge_action, '$.outcome') NOT IN ('refused','in_progress')))
+         AND lower(json_extract(resource_snapshot, '$.repository'))=? AND json_extract(resource_snapshot, '$.pullRequest')=? LIMIT 1`,
+    ).get(decision.occurrenceId, decision.createdAt, decision.createdAt, decision.occurrenceId,
+      snapshot.repository.toLowerCase(), snapshot.pullRequest) !== undefined;
   }
 
   unconsumedWorkflowDecisionsForController(controllingSessionId: string): WorkflowDecisionView[] {

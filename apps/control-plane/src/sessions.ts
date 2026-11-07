@@ -16210,7 +16210,10 @@ export class SessionsService {
         this.workflowDecisionRelationship(child.id, child.id)) {
       return { session: child, policy: child.parentControlPolicy };
     }
-    if ((category === "issue_closure" || category === "campaign_issue_scope" || category === "campaign_follow_up_admission") &&
+    // An owner decision is always its owner's. Only the server creates one on a Custom campaign's
+    // root: a merge's report of closures nobody approved (#4323).
+    if ((category === "issue_closure" || category === "campaign_issue_scope" || category === "campaign_follow_up_admission" ||
+        category === "owner_decision") &&
         sessionRole(child) === "orchestrator" && child.parentControlPolicy) {
       return { session: child, policy: child.parentControlPolicy };
     }

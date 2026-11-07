@@ -82,9 +82,15 @@ function changeRequestUrl(snapshot: MergeSnapshot): string {
 /** Closures a report names one by one before summarizing the rest. */
 const SHOWN_CLOSURES = 20;
 
-/** One closure as untrusted text from the forge: one line, bounded, quoted, never Markdown. */
+/** Untrusted text as one plain line: no line breaks, code spans, tags or link syntax. */
+function oneLine(text: string): string {
+  return text.replace(/[\r\n\t]+/gu, " ").replace(/[`<>[\]]/gu, "'").trim();
+}
+
+/** One closure as untrusted text from the forge: one line, bounded, quoted, never Markdown. Only
+ * this, never the comparison sentence that embeds the same text, reaches a prompt or the owner. */
 function closureLine(closure: PullRequestClosure): string {
-  const excerpt = closure.excerpt?.replace(/[\r\n\t]+/gu, " ").replace(/[`<>]/gu, "'").trim();
+  const excerpt = closure.excerpt === undefined ? undefined : oneLine(closure.excerpt);
   const sources = closure.sources.includes("linked") && !excerpt ? "linked to the pull request on the forge"
     : closure.sources.includes("linked") ? "linked on the forge, and the description says" : "the description says";
   return `- ${closure.issue}: ${sources}${excerpt ? ` "${excerpt.length > 200 ? `${excerpt.slice(0, 199)}…` : excerpt}"` : ""}`;
@@ -106,7 +112,7 @@ export function mergeClosureChangedPrompt(decision: WatchedMerge, watch: MergeCl
   return [
     `What ${changeRequestUrl(snapshot)} would close changed after its pr_merge decision (${decision.occurrenceId}) was approved, ` +
       `so that decision no longer covers this ${kind}. ${dequeued} while it stays open at ${snapshot.headSha}.`,
-    watch.mismatch?.message ?? "",
+    `The decision approved closing ${snapshot.intendedClosures?.length ? snapshot.intendedClosures.join(", ") : "no issue"}.`,
     watch.mismatch?.closures.length ? `It would now close:\n${closureList(watch.mismatch.closures)}` : "It would now close no issue.",
     "Fix the description (reference an issue that must stay open as \"Refs #N\"), check it with `wollipog pr closures`, " +
       "and request a new pr_merge decision for this head before merging again.",
@@ -145,13 +151,13 @@ export function mergeClosureOwnerReport(decision: WatchedMerge, watch: MergeClos
     return {
       question: `What ${url} would close changed after its merge was approved, and Wollipog could not take it out of the queue. ` +
         "Remove it from the queue before it lands, or it may close issues nobody approved.",
-      material: [...facts, `- Last attempt: ${watch.dequeue?.outcome ?? "none"}`, "", watch.mismatch?.message ?? "",
-        "", "What it would close:", closureList(watch.mismatch?.closures ?? [])].join("\n"),
+      material: [...facts, `- Last attempt: ${watch.dequeue?.outcome ?? "none"}`,
+        "", "What it would close:", closureList(watch.mismatch?.closures ?? []) || "- no issue"].join("\n"),
       options: [],
     };
   }
   return {
-    question: `Wollipog cannot check what ${url} closes after its merge was approved: ${watch.failure ?? "the forge could not be read"} ` +
+    question: `Wollipog cannot check what ${url} closes after its merge was approved: ${oneLine(watch.failure ?? "the forge could not be read.")} ` +
       "Check that it closes only the approved issues, before or after it lands.",
     material: facts.join("\n"),
     options: [],
@@ -214,9 +220,11 @@ export class MergeClosureWatcher {
   /** Start watching a consumed merge, or record why it is not watched. */
   private begin(decision: WatchedMerge, now: number): MergeClosureWatch | null {
     const runner = this.deps.childRunner(decision.sessionId);
-    const watch: MergeClosureWatch = runner && runnerSupportsProtocol(runner.protocolVersion, "mergeClosureWatch")
-      ? { state: "watching", since: now, updatedAt: now }
-      : { state: "not_watched", since: now, updatedAt: now, endReason: "The child's runner predates the merge closure watch." };
+    // Only a runner known to be too old keeps today's behavior. A child already gone is watched
+    // anyway: its reads fail, and the owner is told the merge could not be checked.
+    const watch: MergeClosureWatch = runner && !runnerSupportsProtocol(runner.protocolVersion, "mergeClosureWatch")
+      ? { state: "not_watched", since: now, updatedAt: now, endReason: "The child's runner predates the merge closure watch." }
+      : { state: "watching", since: now, updatedAt: now };
     return this.deps.save(decision.occurrenceId, undefined, watch) ? watch : null;
   }
 
@@ -279,7 +287,14 @@ export class MergeClosureWatcher {
     const read: MergeClosureWatch = { ...watch, checkedAt: now, updatedAt: now };
     delete read.unreadSince;
     delete read.failure;
+    // A newer merge of this pull request that was itself approved and consumed has its own checks
+    // and its own watch, including of the landing. A request still pending or approved does not.
+    if (answer.state !== "closed" && this.deps.newerDecision(decision)) {
+      this.store(decision, { ...read, state: "ended", endReason: "A newer consumed merge decision for this pull request replaced this one." });
+      return;
+    }
     if (answer.state === "merged") {
+      // Whatever head it merged at, what it closed is checked against this decision.
       this.landed(decision, read, check.closures, now);
       return;
     }
@@ -287,21 +302,20 @@ export class MergeClosureWatcher {
       this.store(decision, { ...read, state: "ended", endReason: "Closed without merging." });
       return;
     }
+    const quiet = () => {
+      // Only the read time is kept, quietly, unless it recovers from failed reads.
+      if (watch.unreadSince !== undefined) this.store(decision, read);
+      else if (this.deps.save(decision.occurrenceId, watch, read)) decision.closureWatch = read;
+    };
     if (answer.headSha.toLowerCase() !== snapshot.headSha) {
-      // The decision is pinned to its head and never covered another one.
-      this.store(decision, { ...read, state: "ended", endReason: "The pull request moved to another head, which this decision never covered." });
+      // The decision never covered another head, and its dequeue is pinned to its own: keep reading,
+      // so a merge that lands from there is still checked and reported.
+      quiet();
       return;
     }
     const mismatch = prMergeClosureMismatch(snapshot.intendedClosures ?? [], check.closures, gitlab ? "gitlab" : "github");
     if (!mismatch && watch.state === "watching") {
-      // Unchanged: only the read time is kept, quietly, unless it recovers from failed reads.
-      if (watch.unreadSince !== undefined) this.store(decision, read);
-      else if (this.deps.save(decision.occurrenceId, watch, read)) decision.closureWatch = read;
-      return;
-    }
-    if (this.deps.newerDecision(decision)) {
-      // The child asked again: the newer decision has its own checks and its own watch.
-      this.store(decision, { ...read, state: "ended", endReason: "A newer merge decision for this pull request replaced this one." });
+      quiet();
       return;
     }
     let next: MergeClosureWatch = read;
