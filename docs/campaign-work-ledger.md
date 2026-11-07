@@ -231,8 +231,10 @@ possible later work.
   prerequisite cancelled, a pull request named on a prerequisite's stage or delivery, or a
   prerequisite moved into another repository. Make the change after the merge settles. When the
   provider does ask (a permission request for the armed command), the stored hold is checked once
-  more and a held merge is rejected there; the approval stays armed and the requester is parked on
-  the prerequisite.
+  more, before automatic admission, a policy or a person could allow it, and a held merge is
+  rejected there; the approval stays armed and the requester is parked on the prerequisite. A card
+  for that command asked before the hold formed can't be allowed while it holds; it can still be
+  rejected.
 - **What can't be intercepted.** A provider running the armed command with no permission request
   (Claude Code in an auto or Full Access mode) reports it only afterwards, so the guard above is the
   only fence on that path. A person merging on the forge, and a raw `gh pr merge` that was never
@@ -260,8 +262,10 @@ possible later work.
   facts (a cancelled prerequisite). The item's derived state is the campaign's and is shown to every
   reader, as its reported stage is.
 - **Reading.** The background pass also reads the pull requests of every unfinished dependent's
-  prerequisites, so a delivered prerequisite keeps being read until it merges or closes; a pull
-  request outside the campaign's repositories is never read. With no Location of the prerequisite's
+  prerequisites, so a delivered prerequisite keeps being read until it merges or closes, and every
+  prerequisite pull request a held merge is parked on, whatever state its items are in (a merge of a
+  finished item's pull request is held too); a pull request outside the campaign's repositories is
+  never read. With no Location of the prerequisite's
   repository online, its facts read `unavailable` and the hold stays.
 
 The Orchestrator states "not safe to land alone" by recording the dependency; items without one

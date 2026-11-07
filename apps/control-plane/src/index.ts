@@ -1118,8 +1118,9 @@ const campaignForgeObserver = new CampaignForgeObserver({
   observingRunner: (campaignId, repository) => db.campaignForgeObservingRunner(campaignId, repository, (runnerId) => hub.isRunnerOnline(runnerId)),
   requestFromRunner: (runnerId, requestId, message, timeoutMs) => hub.requestFromRunner(runnerId, requestId, message, timeoutMs),
   store: db.campaignForgeObservations,
-  // Unfinished items' pull requests, and merged campaign pull requests whose branch is pending (#4067).
-  backgroundTargets: (include) => [...db.campaignWorkLedger.forgeBackgroundTargets(include), ...db.campaignMergedBranchTargets(include)],
+  // Unfinished items' pull requests, merged campaign pull requests whose branch is pending (#4067), and the
+  // prerequisites held merges are parked on (#4120).
+  backgroundTargets: (include) => db.campaignForgeBackgroundTargets(include),
   changed: (campaignId) => campaignWorkObservations.forgeChanged(campaignId),
   warn: (message) => app.log.warn(message),
   newRequestId: () => `campaign_forge_${randomUUID()}`,

@@ -356,11 +356,15 @@ export class CampaignForgeObserver {
     try {
       const now = this.now();
       const due: Array<{ campaignId: string; ref: CampaignPullRequestRef; readAt: number }> = [];
+      // The same pull request may be named by several targets of one campaign; it is read once.
+      const seen = new Set<string>();
       for (const { campaignId, refs: targets } of this.deps.backgroundTargets((campaignId) => askable(this.deps.observingRunner(campaignId)))) {
         for (const { runner, refs } of this.readers(campaignId, targets)) {
           const branchesReported = runnerSupportsProtocol(runner?.protocolVersion ?? null, "forgeDecisionActions");
           const state = this.deps.store.readState(campaignId, refs, branchesReported);
           for (const ref of refs) {
+            if (seen.has(`${campaignId}|${forgeRefKey(ref)}`)) continue;
+            seen.add(`${campaignId}|${forgeRefKey(ref)}`);
             const stored = state.get(forgeRefKey(ref));
             if (stored?.finished) continue;
             // A read that stored nothing (timed out, disconnected, malformed) still counts.

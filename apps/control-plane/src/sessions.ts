@@ -11521,6 +11521,23 @@ export class SessionsService {
     return scope && hold ? { campaignId: scope.campaignId, hold } : null;
   }
 
+  /** #4120: the hold on an armed merge that this permission request would run, whoever answers it:
+   * automatic admission, a policy, or a person. Null when the request runs no armed merge of the
+   * session's, or that merge is not held. */
+  private heldArmedMerge(session: SessionView, approval: PendingApproval):
+    { decision: WorkflowDecisionView; held: { campaignId: string; hold: CampaignMergeHold } } | null {
+    if (approval.kind === "authentication" || approval.kind === "question") return null;
+    const command = session.driver === "codex-app-server" ? approval.context?.commandIdentity?.input : approval.context?.input;
+    if (typeof command !== "string" || !command) return null;
+    const action: WorkflowDecisionAction = { kind: "pr_merge_enqueue", command };
+    for (const decision of this.db.approvedWorkflowDecisionsForAction(session.id, auditDigest(action)!)) {
+      if (decision.resourceSnapshot.category !== "pr_merge" || decision.actionAdmission?.command !== command) continue;
+      const held = this.campaignMergeHoldNow(session, decision.resourceSnapshot);
+      if (held) return { decision, held };
+    }
+    return null;
+  }
+
   /** #4120: refuse a held merge with its fixed reason, leaving the approval as it is. A prerequisite
    * still to merge parks the requester on it (#4071's wake, kept by the control plane, since the
    * requester's runner may not read that repository), so its turn can end and it is woken once the
@@ -18707,6 +18724,13 @@ export class SessionsService {
     if (pending.kind !== "question" && optionId !== null && !pending.options.some((option) => option.optionId === optionId)) {
       return fail("approval option is not offered by this request", 409);
     }
+    // #4120: a card asked before an armed merge gained its hold can't be allowed while it is held,
+    // by anyone; rejecting or cancelling it stays possible.
+    const chosen = optionId === null ? undefined : pending.options.find((option) => option.optionId === optionId);
+    if (pending.kind !== "question" && chosen && chosen.kind !== "cancel" && !chosen.kind?.startsWith("reject")) {
+      const heldArmed = this.heldArmedMerge(session, pending);
+      if (heldArmed) return this.mergeHeld(session, heldArmed.decision.occurrenceId, heldArmed.held);
+    }
     // Who decided (#2628): the runner records it on this exact resolution, so the Decision Record
     // names the member per occurrence. Parent Control decisions name their parent session instead.
     const resolvedBy: PermissionResolver | undefined = actor.kind === "human" && actor.id && !resolvedByParentSessionId
@@ -21926,25 +21950,25 @@ export class SessionsService {
         );
       }
 
-      const actionAdmission = effectiveEffect === "deny" || approval.humanRequired
-        ? null
-        : this.workflowDecisionActionForPermission(session(), approval);
       // #4120: an armed merge that gained a hold since arming (a prerequisite PR not yet observed
-      // MERGED afresh) is refused here, at the last point the control plane sees the command.
+      // MERGED afresh) is refused here, at the last point the control plane sees the command, before
+      // automatic admission, a policy or a person could allow it: nobody may answer it with an allow.
       // The approval stays armed; the requester is parked on the prerequisite and woken once it merges.
-      const heldAtAdmission = actionAdmission?.decision.resourceSnapshot.category === "pr_merge"
-        ? this.campaignMergeHoldNow(session(), actionAdmission.decision.resourceSnapshot) : null;
-      if (actionAdmission && heldAtAdmission) {
+      const heldArmed = this.heldArmedMerge(session(), approval);
+      if (heldArmed) {
         const optionId = approval.options.find((option) => option.kind === "reject_once")?.optionId ?? null;
         this.hub.sendToRunner(head.runnerId, { type: "resolve_permission", sessionId, requestId: approval.requestId, optionId });
         this.recordGovernanceAudit(session(), approval, "resolution", "denied", { kind: "system", id: "campaign-merge-hold" }, now, {
           optionId,
           ...(policyDecision.policy ? { governancePolicyId: policyDecision.policy.policyId } : {}),
         });
-        this.mergeHeld(session(), actionAdmission.decision.occurrenceId, heldAtAdmission);
+        this.mergeHeld(session(), heldArmed.decision.occurrenceId, heldArmed.held);
         this.hub.sessionChangedById(sessionId);
         return;
       }
+      const actionAdmission = effectiveEffect === "deny" || approval.humanRequired
+        ? null
+        : this.workflowDecisionActionForPermission(session(), approval);
       if (actionAdmission) {
         const actor: GovernanceActor = { kind: "system", id: "workflow-decision-action-admission" };
         const sent = this.hub.sendToRunner(head.runnerId, {

@@ -756,3 +756,90 @@ test("a prerequisite observed MERGED through its Location wakes the parked child
     assert.ok(h.reads.every((read) => read.runnerId === "r2"), "read through the owner/api Location");
   } finally { observations.dispose(); observer.dispose(); h.observer.dispose(); h.db.close(); }
 });
+
+test("a held armed merge's permission request is rejected even when a person must answer it, and a card asked earlier can't be allowed (#4120)", async () => {
+  const h = await fixture();
+  try {
+    h.forge.set("owner/api#7", pull("merged"));
+    const merge = h.approvedMerge("app", "owner/app", 5);
+    assert.equal((await merge.arm()).ok, true);
+    // A governance policy sends the command to a person instead of automatic admission.
+    h.db.upsertGovernancePolicy({ policyId: "protected", name: "Protected", effect: "ask", priority: 1, enabled: true,
+      scope: { toolName: "Bash" }, conditions: { humanRequired: true } }, Date.now());
+    const command = canonicalPrMergeEnqueueCommand(merge.snapshot);
+    const ask = (requestId: string) => h.svc.onSessionEvent("app", { kind: "permission_request", requestId, occurrenceId: requestId,
+      requestSource: "provider_tool", title: "Enqueue PR", context: { toolName: "Bash", input: command },
+      options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }] });
+    const resolutions = () => h.sent.filter((message) => message.type === "resolve_permission")
+      .map((message) => [(message as { requestId: string }).requestId, (message as { optionId: string | null }).optionId]);
+    const cards = () => (h.db.getSession("app")!.pendingApproval ? [h.db.getSession("app")!.pendingApproval!] : [])
+      .flatMap((approval) => [approval, ...((approval as { queued?: Array<{ requestId: string }> }).queued ?? [])]).map((approval) => approval.requestId);
+
+    // Not held: the person is asked, as the policy says.
+    h.sent.length = 0;
+    ask("asked-early");
+    assert.deepEqual(resolutions(), [], "nothing settled it automatically");
+    assert.ok(cards().includes("asked-early"));
+    assert.equal(h.db.getSession("app")!.pendingApproval!.humanRequired, true);
+
+    // The prerequisite's fact stops being fresh. The card asked earlier can't be allowed now, by anyone...
+    h.forge.delete("owner/api#7");
+    await h.observer.readNow("root", [{ repository: "owner/api", number: 7 }]);
+    const identity = h.db.localIdentityContext();
+    const allowed = h.svc.approve("app", "asked-early", "once", { kind: "human", id: identity.userId });
+    assert.equal(allowed.status, 409);
+    assert.match(allowed.error!, /^Merge held until prerequisite pull request owner\/api#7 \(api in owner\/api\) is observed MERGED; it is not freshly observed\./u);
+    assert.deepEqual(resolutions(), [], "no allow reached the runner");
+    assert.ok(cards().includes("asked-early"), "the card stays for a rejection");
+    // ...and a new request for the command is rejected at once, with no card to allow.
+    ask("asked-late");
+    assert.deepEqual(resolutions(), [["asked-late", "reject"]]);
+    assert.ok(!cards().includes("asked-late"));
+    const held = h.db.workflowDecisionByOccurrence(merge.occurrenceId)!;
+    assert.deepEqual([held.status, held.actionAdmission?.kind], ["approved", "pr_merge_enqueue"], "still approved and armed");
+    // Rejecting the early card still works.
+    assert.equal(h.svc.approve("app", "asked-early", "reject", { kind: "human", id: identity.userId }).ok, true);
+    assert.deepEqual(resolutions(), [["asked-late", "reject"], ["asked-early", "reject"]]);
+  } finally { h.observer.dispose(); h.db.close(); }
+});
+
+test("a merge of a finished item's pull request parked on its prerequisite is woken by the background pass (#4120)", async () => {
+  const h = await fixture();
+  const observations = new CampaignWorkObservations({ db: h.db, refresh: (id) => h.svc.campaignWorkObserved(id), warn: () => undefined, delayMs: 60_000 });
+  let count = 0, clock = Date.now();
+  // Wired as index.ts wires the background pass: its targets are `campaignForgeBackgroundTargets`.
+  const observer = new CampaignForgeObserver({
+    observingRunner: (campaignId, repository) => h.db.campaignForgeObservingRunner(campaignId, repository, (runnerId) => h.hub.isRunnerOnline(runnerId)),
+    requestFromRunner: (runnerId, requestId, message, timeout) => h.hub.requestFromRunner(runnerId, requestId, message, timeout),
+    store: h.db.campaignForgeObservations, backgroundTargets: (include) => h.db.campaignForgeBackgroundTargets(include),
+    changed: (id) => observations.forgeChanged(id), warn: () => undefined, newRequestId: () => `background_${++count}`, now: () => clock,
+  });
+  try {
+    h.forge.set("owner/api#7", pull("open"));
+    h.stage("app", "owner/app", 5);
+    // Both items are verified delivered while their pull requests are still open.
+    for (const [child, key] of [["api", "api"], ["app", "app"]] as const) {
+      h.db.updateSessionStatus(child, "idle", Date.now());
+      const report = h.db.appendEvent(child, { kind: "agent_message", text: `Delivered ${key}.`, final: true }, Date.now()).seq;
+      const verified = h.svc.verifyCampaignChild("root", { childSessionId: child, reportEventSeq: report, followUpsAccounted: true,
+        workItem: { id: h.item(key), outcome: "delivered" } });
+      assert.ok(verified.ok, verified.error ?? "verified");
+    }
+    assert.deepEqual([h.detail("api").primaryState, h.detail("app").primaryState], ["delivered", "delivered"]);
+    h.db.updateSessionStatus("app", "running", Date.now());
+    assert.equal((await h.approvedMerge("app", "owner/app", 5).arm()).status, 409);
+    const watch = h.db.pullRequestWatches.visibleFor("app")!;
+    assert.deepEqual([watch.repository, watch.number, watch.state], ["owner/api", 7, "watching"]);
+    h.db.updateSessionStatus("app", "idle", Date.now());
+
+    // It merges; nothing reads it on demand. The next background pass after the interval does.
+    h.forge.set("owner/api#7", pull("merged"));
+    h.reads.length = 0;
+    clock += 10 * 60_000;
+    await observer.backgroundPass();
+    assert.ok(h.reads.some((read) => read.runnerId === "r2" && read.refs.includes("owner/api#7")), "read through the owner/api Location");
+    observations.flush();
+    const fired = h.db.pullRequestWatches.view(watch.watchId)!;
+    assert.deepEqual([fired.state, fired.outcome], ["fired", "merged"]);
+  } finally { observations.dispose(); observer.dispose(); h.observer.dispose(); h.db.close(); }
+});

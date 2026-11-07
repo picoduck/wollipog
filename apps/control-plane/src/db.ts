@@ -32,7 +32,7 @@ import { applyCampaignBehavior, campaignBehaviorProjection, changedCampaignBehav
 import type { OrchestratorCampaignBehavior, OrchestratorCampaignBehaviorKey } from "@wollipog/protocol";
 import { ReviewSessions, type NewReviewSession } from "./review-sessions.js";
 import { DelegatedImageReviews, type NewDelegatedImageReview } from "./delegated-image-reviews.js";
-import { PullRequestWatches } from "./pull-request-watches.js";
+import { PREREQUISITE_MERGE_WATCH_RUNNER, PullRequestWatches } from "./pull-request-watches.js";
 import { SessionWaits } from "./session-waits.js";
 import { ReviewSettingsStore, type ReviewPolicyCapture } from "./review-settings.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
@@ -23032,6 +23032,29 @@ export class ControlPlaneDb {
 
   /** For the forge observer's background pass (#4067): each live campaign's merged pull requests
    * whose branch is pending, so a branch deleted by anyone is eventually seen gone. */
+  /** What the campaign forge observer reads in the background (slice 8 of #2417): unfinished items'
+   * pull requests, merged campaign pull requests whose branch is pending (#4067), and the
+   * prerequisites held merges are parked on (#4120). */
+  campaignForgeBackgroundTargets(include: (campaignId: string) => boolean): Array<{ campaignId: string; refs: CampaignPullRequestRef[] }> {
+    return [...this.campaignWorkLedger.forgeBackgroundTargets(include), ...this.campaignMergedBranchTargets(include),
+      ...this.campaignPrerequisiteWatchTargets(include)];
+  }
+
+  /** #4120: the prerequisite pull requests held merges are parked on, per campaign. They are read in
+   * the background whatever the state of the items involved: a merge of a finished item's pull request
+   * is held too, and only a read can fire its wake. */
+  campaignPrerequisiteWatchTargets(include: (campaignId: string) => boolean = () => true): Array<{ campaignId: string; refs: CampaignPullRequestRef[] }> {
+    const targets = new Map<string, Map<string, CampaignPullRequestRef>>();
+    for (const watch of this.pullRequestWatches.watchingOn(PREREQUISITE_MERGE_WATCH_RUNNER)) {
+      const campaignId = this.campaignRootForMember(watch.sessionId);
+      if (!campaignId || !include(campaignId)) continue;
+      const refs = targets.get(campaignId) ?? new Map<string, CampaignPullRequestRef>();
+      refs.set(`${watch.repository.toLowerCase()}#${watch.number}`, { repository: watch.repository, number: watch.number });
+      targets.set(campaignId, refs);
+    }
+    return [...targets].map(([campaignId, refs]) => ({ campaignId, refs: [...refs.values()] }));
+  }
+
   campaignMergedBranchTargets(include: (campaignId: string) => boolean = () => true): Array<{ campaignId: string; refs: CampaignPullRequestRef[] }> {
     const roots = (this.stmt("SELECT id FROM sessions WHERE archived=0 AND orchestrator_policy IS NOT NULL AND parent_session_id IS NULL")
       .all() as Array<{ id: string }>).map((row) => row.id).filter(include);
