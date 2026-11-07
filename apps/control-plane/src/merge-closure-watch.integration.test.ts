@@ -318,3 +318,25 @@ test("under Full Control the report is the owner's, in their Waiting for You req
   assert.equal(f.svc.descendantRequests("root", () => true, "orchestrator").data?.requests.length ?? 0, 0);
   assert.match((question.resourceSnapshot as { material: string }).material, /- owner\/app#6: linked to the pull request on the forge/u);
 });
+
+test("a newer consumed merge of the same pull request from another session does not end the watch (#4323)", async () => {
+  const f = fixture();
+  const first = f.consumedMerge(f.github(51));
+  await f.pass();
+  first.forge.closures = [closure("owner/app#2", "Closes #2")];
+  await f.pass();
+  assert.equal(f.watch(first.occurrenceId)!.state, "invalidated");
+  const identity = f.db.localIdentityContext();
+  f.db.createSession({ id: "other", runnerId: "c", workspaceId: "w", agentId: "agent", title: "other", useWorktree: false, driver: "claude-code",
+    config: { model: "opus" }, now: 1, parentSessionId: "root",
+    scope: { organizationId: identity.organizationId, owner: { kind: "user", userId: identity.userId } } });
+  const snapshot = f.github(51, ["owner/app#2"]);
+  assert.ok(f.db.createWorkflowDecision({ requestId: "other-merge", occurrenceId: "workflow_other", sessionId: "other", controllingSessionId: "root",
+    category: "pr_merge", resourceKey: "owner/app#51", resourceSnapshot: snapshot, resourceDigest: "digest-other", policyRevision: 0,
+    authority: "orchestrator", createdAt: 200 }));
+  f.db.raw().prepare("UPDATE workflow_decisions SET status='consumed', consumed_at=200 WHERE occurrence_id='workflow_other'").run();
+  first.forge.queued = true;
+  await f.pass();
+  assert.equal(f.watch(first.occurrenceId)!.state, "invalidated");
+  assert.equal(first.forge.queued, false, "still kept out of the queue");
+});

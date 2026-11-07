@@ -23742,17 +23742,20 @@ export class ControlPlaneDb {
 
   /** Whether a later `pr_merge` for the same pull request, at any head, was consumed or enqueued by
    * Wollipog: approved and checked itself, so it carries its own watch (#4323). One still pending or
-   * approved does not count. */
+   * approved does not count, nor one from another session or controller, nor one whose own watch will
+   * not check the landing (an older runner's, or one that ended). */
   newerMergeDecision(decision: WorkflowDecisionView): boolean {
     const snapshot = decision.resourceSnapshot;
     if (snapshot.category !== "pr_merge") return false;
     return this.stmt(
       `SELECT 1 FROM workflow_decisions WHERE category='pr_merge' AND occurrence_id<>?
+         AND session_id=? AND controlling_session_id=?
          AND (created_at>? OR (created_at=? AND occurrence_id>?))
          AND (status='consumed' OR (forge_action IS NOT NULL AND json_extract(forge_action, '$.outcome') NOT IN ('refused','in_progress')))
+         AND (closure_watch IS NULL OR json_extract(closure_watch, '$.state') NOT IN ('not_watched','ended'))
          AND lower(json_extract(resource_snapshot, '$.repository'))=? AND json_extract(resource_snapshot, '$.pullRequest')=? LIMIT 1`,
-    ).get(decision.occurrenceId, decision.createdAt, decision.createdAt, decision.occurrenceId,
-      snapshot.repository.toLowerCase(), snapshot.pullRequest) !== undefined;
+    ).get(decision.occurrenceId, decision.sessionId, decision.controllingSessionId, decision.createdAt, decision.createdAt,
+      decision.occurrenceId, snapshot.repository.toLowerCase(), snapshot.pullRequest) !== undefined;
   }
 
   unconsumedWorkflowDecisionsForController(controllingSessionId: string): WorkflowDecisionView[] {
