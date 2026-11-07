@@ -1029,7 +1029,13 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      `repositories` list v317 added, and a Custom seed proposal refuses `repositoryNames` by name
 //      rather than ignoring it. Both are the control plane's: no runner or client needs this version.
 // 325: human-controlled reviewer executable permission policy on each Machine.
-export const PROTOCOL_VERSION = 325;
+// 326: forge facts about another campaign repository's pull requests are read through one of its
+//      Locations (#4119). `campaign_forge_observe` may name a `location`: the runner reads with its
+//      own forge login, without an Orchestrator session, and refuses a pull request of any other
+//      repository. A runner below v326 is never sent one, and its Location's facts read
+//      `runner_unsupported` rather than falling back to the root's login. (This change first
+//      claimed 325, which another change took.)
+export const PROTOCOL_VERSION = 326;
 
 export * from "./campaign-authority.js";
 export * from "./decision-questions.js";
@@ -1632,6 +1638,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   repositoryQualifiedIssueScope: 313,
   /** v323 inspects and closes an issue in a named Location's own path (#4119). */
   locationIssueClosure: 323,
+  /** v326 reads forge facts about a repository's pull requests in a named Location (#4119). */
+  locationForgeObservation: 326,
   /** v317 asks for and carries out a campaign repository addition (#4117). */
   campaignRepositoryAddition: 317,
   /** v318 reads a Location's issue facts for a repository-qualified scope proposal (#4118). */
@@ -10822,6 +10830,9 @@ export interface CampaignForgeObserveMessage {
   /** The root campaign Orchestrator session whose repository context runs `gh`. */
   sessionId: string;
   pullRequests: CampaignPullRequestRef[];
+  /** v326 (#4119): the Location of the pull requests' repository whose runner reads them, with its
+   * own forge login, when that is not the root's. Resolved by the control plane, never by an agent. */
+  location?: GithubIssueClosureLocation;
   /** #3600: this control plane accepts GitLab merge-request observations, so the runner may read
    * host-qualified GitLab refs through `glab`. Without it (an older control plane, which would reject
    * the whole answer), and on an older runner that ignores it, GitLab refs stay `forge_unsupported`. */

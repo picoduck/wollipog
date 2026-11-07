@@ -263,7 +263,8 @@ scope, the boundary, the active children, the evidence digest and the Location's
 `commit`. Without a commit in time, nothing is written. The runner fences what only it can see: the checkout's
 origin, the forge digest, and one durable attempt record per occurrence. A repository that is not one of the campaign's is refused before anything is inspected, and
 an owner's approved `campaign_repository_addition` is the way in. A scope change whose changed repository is
-not the closure's still invalidates it, as it always has.
+not the closure's still invalidates it, as it always has. The forge facts its delivery proof rests on are read
+through a Location of the pull request's repository too (see Forge Status in `campaign-work-ledger.md`).
 
 Campaign GitHub operations support validated local and SSH host targets belonging to the runner.
 Container and cloud placements are unsupported. A target refusal is reported separately from origin

@@ -1115,10 +1115,7 @@ db.campaignWorkLedger.accounting.observeUsage((campaignSessionId) => campaignWor
 // runner hosting the root campaign through its own `gh` login, on demand and in a bounded
 // background pass. Changes ride the same coalesced revision as observed session changes.
 const campaignForgeObserver = new CampaignForgeObserver({
-  observingRunner: (campaignId) => {
-    const runner = db.campaignForgeObservingRunner(campaignId);
-    return runner ? { ...runner, online: runner.online && hub.isRunnerOnline(runner.runnerId) } : null;
-  },
+  observingRunner: (campaignId, repository) => db.campaignForgeObservingRunner(campaignId, repository, (runnerId) => hub.isRunnerOnline(runnerId)),
   requestFromRunner: (runnerId, requestId, message, timeoutMs) => hub.requestFromRunner(runnerId, requestId, message, timeoutMs),
   store: db.campaignForgeObservations,
   // Unfinished items' pull requests, and merged campaign pull requests whose branch is pending (#4067).

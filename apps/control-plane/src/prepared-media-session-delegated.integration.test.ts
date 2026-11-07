@@ -10,6 +10,7 @@ import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, isTerm
 import { RunnerMediaDispatchFences } from "../../runner/src/media-dispatch-fences.js";
 import { ControlPlaneDb } from "./db.js";
 import { mintCampaignEvidenceAuthority } from "./evidence-authority.js";
+import { reviewerPlaces } from "./delegated-video-reviews.js";
 import { composeHostingVideoEvidence } from "./hosting-video-evidence.js";
 import { registerVideoEvidenceReviewRoutes } from "./video-evidence-review-routes.js";
 import { Hub } from "./hub.js";
@@ -43,7 +44,10 @@ const syntheticDecoder: VideoReviewDecoder = {
   candidate: async () => ({ ok: false, code: "decoder_unavailable", reason: "No candidate profile in this test.", retryable: false }),
 };
 
-async function harness(t: { after(fn: () => void): void }, options: { proof?: boolean; childContract?: boolean; decoder?: VideoReviewDecoder } = {}) {
+async function harness(t: { after(fn: () => void): void }, options: { proof?: boolean; childContract?: boolean; decoder?: VideoReviewDecoder;
+  /** The child works in a second boundary repository, on a second runner (#4119). The root's runner
+   * always has a certified reviewer; `attested` says whether that repository's Location has one too. */
+  otherRepository?: { attested: boolean } } = {}) {
   const native = await videoPreparationDecoderAvailable();
   const db = ControlPlaneDb.open(":memory:");
   const human: HumanPrincipal = { ...db.localIdentityContext(), kind: "human", actorId: "synthetic-human" };
@@ -59,6 +63,9 @@ async function harness(t: { after(fn: () => void): void }, options: { proof?: bo
     workspaces: [{ id: "w", name: "Repo", path: "/synthetic-repo" }],
     agents: [agent("claude", true), agent("child-agent", options.childContract !== false, false)] };
   db.registerRunner(metadata, 1, PROTOCOL_VERSION);
+  if (options.otherRepository) db.registerRunner({ runnerId: "r2", hostname: "synthetic-api", os: "linux", version: "test",
+    workspaces: [{ id: "a", name: "Api", path: "/synthetic-api" }],
+    agents: [agent("claude", true, options.otherRepository.attested), agent("child-agent", true, false)] }, 1, PROTOCOL_VERSION);
   db.setUsageRateTable(new Map([["claude-opus-5-5", { inputCostPerToken: 0.000001, outputCostPerToken: 0.000001,
     cacheReadCostPerToken: 0.000001, cacheCreationCostPerToken: 0.000001 }]]));
   const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
@@ -68,8 +75,9 @@ async function harness(t: { after(fn: () => void): void }, options: { proof?: bo
     driver: "claude-code", config: { model: "claude-opus-5-5" }, scope: audience, creationActor: "human", role: "orchestrator",
     orchestratorPolicy: policy, parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } }, now: 2 });
   db.updateSessionStatus("root", "running", 3);
-  const hub = new Hub(db), sent: ControlPlaneToRunner[] = [];
-  hub.isRunnerOnline = () => true; hub.sendToRunner = (_, message) => { sent.push(message); return true; };
+  const hub = new Hub(db), sent: ControlPlaneToRunner[] = [], dispatchedTo: string[] = [];
+  hub.isRunnerOnline = () => true;
+  hub.sendToRunner = (runnerId, message) => { sent.push(message); if (message.type === "media_review_dispatch") dispatchedTo.push(runnerId); return true; };
   hub.sessionChanged = () => {}; hub.sessionChangedById = () => {};
   const log = { info() {}, warn() {}, error() {} };
   assert.ok(new SessionsService(db, hub, log).setCampaignControl("root", { mode: "full_control", objective: "Review #1321",
@@ -77,6 +85,13 @@ async function harness(t: { after(fn: () => void): void }, options: { proof?: bo
       unpriced: "stop", toolCalls: 1000, costUsd: 200, concurrency: 3 } }, 1, human).ok);
   const rootPolicy = db.getSession("root")!.orchestratorPolicy!;
   const boundary = rootPolicy.control!.mode === "full_control" ? rootPolicy.control!.boundary : assert.fail("No fixture boundary");
+  if (options.otherRepository) {
+    const project = db.createProject({ name: "Multi", scope: audience });
+    const location = db.addProjectLocation(project.id, { runnerId: "r2", workspaceId: "a" });
+    db.raw().prepare("UPDATE sessions SET project_id=? WHERE id='root'").run(project.id);
+    boundary.repositories = [{ repository: "picoduck/wollipog", locationIds: [] }, { repository: "other/api", locationIds: [location.id] }];
+    rootPolicy.issueScope!.issues = [{ repository: "other/api", number: 40 }, { repository: "picoduck/wollipog", number: 1321 }];
+  }
   const disclosures = {
     destination: () => ({ organizationId: human.organizationId, privacy: "private" as const, disclosureRevision: 1 }),
     provider: () => ({ disclosureRevision: 1, retentionDisclosure: "Synthetic test disclosure.",
@@ -88,7 +103,7 @@ async function harness(t: { after(fn: () => void): void }, options: { proof?: bo
   assert.ok(boundary.evidenceAuthority);
   // Fixture-only Human boundary composition, as the prepared-media integration harness does.
   db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(rootPolicy));
-  db.createSession({ id: "child", parentSessionId: "root", runnerId: "r", workspaceId: "w", agentId: "child-agent", title: "Synthetic Child",
+  db.createSession({ id: "child", parentSessionId: "root", runnerId: options.otherRepository ? "r2" : "r", workspaceId: options.otherRepository ? "a" : "w", agentId: "child-agent", title: "Synthetic Child",
     useWorktree: false, driver: "claude-code", scope: audience, config: { model: "claude-opus-5-5", costBudgetUsd: 2, maxToolCalls: 10 }, now: 4 });
   db.updateSessionStatus("child", "running", 5);
   db.createWorkflowArtifactBytes({ artifactId: "source", sessionId: "child", kind: "video", name: "Synthetic.webm", mimeType: "video/webm",
@@ -110,13 +125,26 @@ async function harness(t: { after(fn: () => void): void }, options: { proof?: bo
     video.preparedMediaRuntime, video.workflowVideoApprovals, disclosures, video.operatorValidationPermits, video.preparedMediaActiveStops);
   video.attach(sessions, hub);
   t.after(() => { video.delegated.close(); db.close(); });
+  if (options.otherRepository) {
+    // The child's work is an issue of that repository.
+    const planned = sessions.recordCampaignPlan("root", { items: [{ key: "issue:40", issue: { repository: "other/api", number: 40 } }], planComplete: true });
+    assert.ok(planned.ok, planned.error ?? "plan");
+    const page = db.campaignWorkLedger.page("root", { state: "all", limit: 100 }, Date.now());
+    assert.ok(page.ok);
+    const assigned = sessions.assignCampaignWorkItem("root", { workItemId: page.data.items[0]!.id, childSessionId: "child" });
+    assert.ok(assigned.ok, assigned.error ?? "assign");
+  }
   let proofId: string | null = null;
   if (options.proof !== false) {
-    const target = syntheticVideoReviewerTarget({ runnerId: "r", agentId: "claude", driver: "claude-code", modelId: "claude-opus-5-5",
-      protocolVersion: PROTOCOL_VERSION, contract, attestation, providerId: "synthetic-provider" });
-    const proof = video.liveValidation.recordInspectedRuns(human, target, syntheticInspectedVideoRuns(target, human.userId), now - 1_000);
-    assert.ok(proof);
-    proofId = proof.proofId;
+    const recordProof = (runnerId: string) => {
+      const target = syntheticVideoReviewerTarget({ runnerId, agentId: "claude", driver: "claude-code", modelId: "claude-opus-5-5",
+        protocolVersion: PROTOCOL_VERSION, contract, attestation, providerId: "synthetic-provider" });
+      const proof = video.liveValidation.recordInspectedRuns(human, target, syntheticInspectedVideoRuns(target, human.userId), now - 1_000);
+      assert.ok(proof);
+      return proof.proofId;
+    };
+    proofId = recordProof("r");
+    if (options.otherRepository?.attested) proofId = recordProof("r2");
   }
   const principal = (id: string, orchestrator: boolean): AgentPrincipal => ({ kind: "agent", actorId: id, credentialSessionId: id,
     orchestrator, organizationId: human.organizationId, delegatedScope: audience });
@@ -157,7 +185,7 @@ async function harness(t: { after(fn: () => void): void }, options: { proof?: bo
         observation: "Disclosed synthetic observation." },
         { criterionId: "coherent_flow", outcome: "pass", observedFrameIndices: [1], observation: "Disclosed synthetic observation." }] });
   };
-  return { db, video, sessions, sent, owner, request, dispatches, runner, review, snapshot, timers, human, principal,
+  return { db, video, sessions, sent, dispatchedTo, owner, request, dispatches, runner, review, snapshot, timers, human, principal,
     revokeProof: () => assert.ok(video.liveValidation.revoke(human, proofId!)),
     readbacks: () => sent.filter((m): m is Extract<ControlPlaneToRunner, { type: "media_review_readback" }> => m.type === "media_review_readback"),
     advance: (ms: number) => { now += ms; }, now: () => now,
@@ -1003,6 +1031,47 @@ test("busy deadline x requeues and a restart: later busy refusals keep the first
   assert.equal(await restarted.delegated.onNeverDispatched("r", h.runner.neverDispatched(h.dispatches().at(-1)!), "host_busy"), true);
   const row = h.db.raw().prepare("SELECT record FROM delegated_video_reviews").get() as { record: string };
   assert.equal((JSON.parse(row.record) as { firstBusyAt: number }).firstBusyAt, first, "the anchor never moves");
+});
+
+test("a child in another boundary repository gets its video reviewer on a Location of that repository, and nowhere else (#4119)", async (t) => {
+  const h = await harness(t, { otherRepository: { attested: true } });
+  const root = h.db.getSession("root")!, child = h.db.getSession("child")!;
+  assert.deepEqual(reviewerPlaces(h.db, root, child), [{ runnerId: "r2", workspaceId: "a", workspacePath: "/synthetic-api", repository: "other/api" }]);
+  assert.deepEqual(reviewerPlaces(h.db, root, root), [{ runnerId: "r", workspaceId: "w" }], "the launch repository's stays the root's own place");
+  assert.deepEqual(reviewerPlaces(h.db, root, { ...child, workspaceId: "elsewhere" }), [], "a child in no boundary repository has none");
+
+  // The reviewer starts on that Location's runner, in its workspace, though the root's runner has a
+  // certified one too, and the whole review runs through it.
+  const prepared = await h.video.delegated.prepare(h.owner, h.request);
+  assert.equal(prepared.ok && prepared.status, "dispatched", JSON.stringify(prepared));
+  const [dispatch] = h.dispatches();
+  assert.ok(dispatch);
+  assert.deepEqual(h.dispatchedTo, ["r2"]);
+  assert.equal(dispatch.identity.runnerId, "r2");
+  const reviewer = h.db.getSession(dispatch.grant.reviewerSessionId)!;
+  assert.deepEqual([reviewer.runnerId, reviewer.workspaceId], ["r2", "a"]);
+  assert.equal(await h.video.delegated.onDispatchReceipt("r", h.runner.accepted(dispatch)), false, "the root's runner doesn't own it");
+  assert.equal(await h.video.delegated.onDispatchReceipt("r2", h.runner.accepted(dispatch)), true);
+  const verdict = h.review(dispatch);
+  assert.ok(verdict, "its media and verdict flow through the review it was granted");
+
+  // Admission reads the child's own issue, in its own repository: with that one out of the campaign's
+  // scope, the launch repository's numbers don't stand in for it.
+  const unscoped = await harness(t, { otherRepository: { attested: true } });
+  const policy = unscoped.db.getSession("root")!.orchestratorPolicy!;
+  policy.issueScope!.issues = [{ repository: "picoduck/wollipog", number: 1321 }];
+  unscoped.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
+  const outOfScope = await unscoped.video.delegated.prepare(unscoped.owner, unscoped.request);
+  assert.equal(outOfScope.ok && outOfScope.status === "dispatched", false, JSON.stringify(outOfScope));
+  assert.equal(unscoped.dispatches().length, 0);
+
+  // The same evidence with no attested reviewer at that Location is refused, even with a certified
+  // one on the root's runner: the peer never falls back to another repository's place.
+  const none = await harness(t, { otherRepository: { attested: false } });
+  assert.deepEqual(await none.video.delegated.prepare(none.owner, none.request), { ok: false, code: "reviewer_unavailable",
+    reason: "No Location of the child's repository has an attested media-only Claude Code reviewer for the certified model." });
+  assert.equal(none.dispatches().length, 0);
+  assert.equal(none.db.raw().prepare("SELECT COUNT(*) AS n FROM prepared_media_sessions").get()!.n, 0);
 });
 
 test("preparation refuses specifically before reserving anything", async (t) => {

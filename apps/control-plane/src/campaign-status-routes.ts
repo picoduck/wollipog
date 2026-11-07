@@ -74,19 +74,21 @@ export function workItemForPrincipal<T extends CampaignWorkItemSummary>(
 /* ------------------------------ Forge visibility ------------------------------ */
 
 /**
- * Forge facts are read through the `gh` login of the runner hosting the root campaign. Reading the
- * campaign is not enough to see them: a human also needs access to that runner, so a shared
- * campaign never extends a personal runner owner's GitHub visibility. An agent reaches these routes
- * only as the campaign's own Orchestrator. Everyone else gets `unavailable{not_authorized}`, with
- * no last value; reported stages and pull-request references stay visible to every reader.
+ * Forge facts are read through the login of the runner that reads them: the one hosting the root
+ * campaign, or a Location's for another campaign repository (#4119). Reading the campaign is not
+ * enough to see them: a human also needs access to that runner, so a shared campaign never extends
+ * a personal runner owner's GitHub visibility. An agent reaches these routes only as the campaign's
+ * own Orchestrator. Everyone else gets `unavailable{not_authorized}`, with no last value; reported
+ * stages and pull-request references stay visible to every reader.
  */
-export function forgeFactsForPrincipal<T extends CampaignWorkItemDetail>(item: T, visible: boolean): T {
-  if (visible || !item.observed.pullRequests) return item;
+export function forgeFactsForPrincipal<T extends CampaignWorkItemDetail>(item: T, visible: boolean | ((ref: CampaignPullRequestRef) => boolean)): T {
+  if (visible === true || !item.observed.pullRequests) return item;
   return {
     ...item,
     observed: {
       ...item.observed,
-      pullRequests: item.observed.pullRequests.map((entry) => ({ ref: entry.ref, fact: FORGE_NOT_AUTHORIZED })),
+      pullRequests: item.observed.pullRequests.map((entry) => visible !== false && visible(entry.ref) ? entry
+        : { ref: entry.ref, fact: FORGE_NOT_AUTHORIZED }),
     },
   };
 }
@@ -98,8 +100,12 @@ interface CampaignReader {
   rootId: string;
   /** Session-cost visibility for this principal; null is a deleted attempt session. */
   canSee(sessionId: string | null): boolean;
-  /** Whether this principal may see forge facts read by the runner hosting the root. */
-  forgeVisible(): boolean;
+  /** Whether this principal has access to the runner hosting the root, or to the runner that would
+   * read a repository's pull requests now: what causing a read needs. */
+  forgeVisible(repository?: string): boolean;
+  /** Whether this principal may see this pull request's fact: access to the runner whose login
+   * supplied it, whichever would read it next (#4119). */
+  forgeFactVisible(ref: CampaignPullRequestRef): boolean;
 }
 
 function text(query: Record<string, unknown>, name: string): string | undefined {
@@ -163,16 +169,24 @@ export function registerCampaignStatusRoutes(
       }
       return result;
     };
-    let forge: boolean | undefined;
-    const forgeVisible = (): boolean => {
-      if (forge === undefined) {
+    const forge = new Map<string, boolean>();
+    const forgeVisible = (repository?: string): boolean => {
+      const key = repository?.toLowerCase() ?? "";
+      let result = forge.get(key);
+      if (result === undefined) {
         // The agent branch above already limited an agent to its own campaign's Orchestrator.
-        const runner = principal.kind === "agent" ? null : db.campaignForgeObservingRunner(rootId);
-        forge = principal.kind === "agent" || (runner !== null && db.canAccessRunner(principal, runner.runnerId));
+        const runner = principal.kind === "agent" ? null : db.campaignForgeObservingRunner(rootId, repository);
+        result = principal.kind === "agent" || (runner !== null && db.canAccessRunner(principal, runner.runnerId));
+        forge.set(key, result);
       }
-      return forge;
+      return result;
     };
-    return { principal, rootId, canSee, forgeVisible };
+    const forgeFactVisible = (ref: CampaignPullRequestRef): boolean => {
+      if (principal.kind === "agent") return true;
+      const supplier = db.campaignForgeObservations.supplier(rootId, ref);
+      return supplier ? db.canAccessRunner(principal, supplier) : forgeVisible(ref.repository);
+    };
+    return { principal, rootId, canSee, forgeVisible, forgeFactVisible };
   };
 
   const everySessionVisible = (read: CampaignReader) =>
@@ -259,7 +273,7 @@ export function registerCampaignStatusRoutes(
       revision: ledger.revision(read.rootId),
       item: forgeFactsForPrincipal(
         workItemForPrincipal(item, item.attempts.map((attempt) => attempt.sessionId), read.canSee),
-        read.forgeVisible(),
+        read.forgeFactVisible,
       ),
     };
     return reply.send(response);
@@ -278,12 +292,13 @@ export function registerCampaignStatusRoutes(
     const ledger = db.campaignWorkLedger;
     const before = itemId.length <= 256 ? ledger.detail(read.rootId, itemId, Date.now()) : null;
     if (!before) return reply.code(404).send({ error: "work item not found in this campaign" });
-    const refs = before.observed.pullRequests?.map((entry) => entry.ref) ?? [];
+    // A reader who may not see a repository's facts can't cause a read through its Location's login.
+    const refs = (before.observed.pullRequests?.map((entry) => entry.ref) ?? []).filter((ref) => read.forgeVisible(ref.repository));
     if (refs.length > 0 && deps.refreshForge) await deps.refreshForge(read.rootId, refs);
     const item = ledger.detail(read.rootId, itemId, Date.now());
     const response: CampaignForgeRefreshResponse = {
       revision: ledger.revision(read.rootId),
-      pullRequests: item?.observed.pullRequests ?? [],
+      pullRequests: item ? forgeFactsForPrincipal(item, read.forgeFactVisible).observed.pullRequests ?? [] : [],
     };
     return reply.send(response);
   });

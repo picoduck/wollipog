@@ -43,8 +43,8 @@ import {
   validProviderHomeLaunchRefusal, validProviderHomeWait, validWorktreeSwitch,
 } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
-import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignDispatchScopeRefusal, campaignBoundaryCurrent, campaignIssueInScope, campaignLaunchRepository, campaignRepositoryLimits, campaignScopeRepositories, remintCampaignBoundary } from "./campaign-authority.js";
-import { campaignBoundaryRepositoryAt, campaignLocationRepository } from "./campaign-repository-boundary.js";
+import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignDispatchScopeRefusal, campaignBoundaryCurrent, campaignIssueInScope, campaignLaunchRepository, campaignOtherRepository, campaignRepositoryLimits, campaignScopeRepositories, remintCampaignBoundary } from "./campaign-authority.js";
+import { campaignBoundaryRepositoryAt, campaignLocationRepository, campaignRepositoryPlaces } from "./campaign-repository-boundary.js";
 import { genericRequestScreenData, storedCredentialScreenFact } from "./credential-screen.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
 import { grantReviewMaxIssues, ownerReviewMaxIssues, proposalMaxIssues } from "./scope-grant.js";
@@ -398,6 +398,7 @@ import { CAMPAIGN_RECOVERY_SCHEMA, CampaignRecoveryStore, type CampaignRecoveryV
 import {
   CAMPAIGN_FORGE_OBSERVATION_SCHEMA,
   CampaignForgeObservationStore,
+  type CampaignForgeObservingRunner,
   type ForgeObserverState,
 } from "./campaign-forge-observations.js";
 import { CAMPAIGN_WORK_ACCOUNTING_SCHEMA, type CampaignUsageMembership } from "./campaign-work-accounting.js";
@@ -6499,23 +6500,38 @@ export class ControlPlaneDb {
   get campaignForgeObservations(): CampaignForgeObservationStore {
     this.campaignForgeObservationStore ??= new CampaignForgeObservationStore(
       this.db,
-      (campaignId) => this.campaignForgeObserverState(campaignId),
+      (campaignId, repository) => this.campaignForgeObserverState(campaignId, repository),
     );
     return this.campaignForgeObservationStore;
   }
 
-  /** The runner hosting the root campaign session reads its forge status (slice 8). */
-  campaignForgeObservingRunner(campaignId: string): { runnerId: string; protocolVersion: number | null; online: boolean } | null {
-    const row = this.stmt("SELECT runner_id FROM sessions WHERE id=?").get(campaignId) as { runner_id: string } | undefined;
+  /** Who reads forge status about this repository's pull requests (slice 8, #4119). Another campaign
+   * repository's are read by the runner of one of its Locations, with that runner's own login: the
+   * first that can answer now, or the first at all so a fact can name why it can't. A repository
+   * with no Location left has no reader, and the root's login never stands in for one. Everything
+   * else is read by the runner hosting the root campaign session. */
+  campaignForgeObservingRunner(campaignId: string, repository?: string, isOnline: (runnerId: string) => boolean = () => true): CampaignForgeObservingRunner | null {
+    // Columns, not a session view: building a view reads forge facts, which ask this.
+    const row = this.stmt("SELECT runner_id, project_id, orchestrator_policy FROM sessions WHERE id=?").get(campaignId) as
+      { runner_id: string; project_id: string | null; orchestrator_policy: string | null } | undefined;
     if (!row) return null;
-    const runner = this.getRunner(row.runner_id);
-    return { runnerId: row.runner_id, protocolVersion: runner?.protocolVersion ?? null, online: runner?.status === "online" };
+    const reader = (runnerId: string): CampaignForgeObservingRunner => {
+      const runner = this.getRunner(runnerId);
+      return { runnerId, protocolVersion: runner?.protocolVersion ?? null, online: runner?.status === "online" && isOnline(runnerId) };
+    };
+    const root = repository ? { projectId: row.project_id, orchestratorPolicy: orchestratorCampaignPolicyFromJson(row.orchestrator_policy) ?? undefined } : null;
+    const other = root ? campaignOtherRepository(root, repository) : null;
+    const entry = other ? campaignScopeRepositories(root!).find((candidate) => candidate.repository === other) : undefined;
+    if (!root || !entry) return reader(row.runner_id);
+    const places = campaignRepositoryPlaces(this, root, entry).map((place) => ({ ...reader(place.runnerId), location:
+      { workspaceId: place.workspaceId, workspacePath: place.workspacePath, repository: place.repository } }));
+    return places.find((place) => place.online && runnerSupportsProtocol(place.protocolVersion, "locationForgeObservation")) ?? places[0] ?? null;
   }
 
-  private campaignForgeObserverState(campaignId: string): ForgeObserverState {
-    const runner = this.campaignForgeObservingRunner(campaignId);
+  private campaignForgeObserverState(campaignId: string, repository?: string): ForgeObserverState {
+    const runner = this.campaignForgeObservingRunner(campaignId, repository);
     if (!runner) return "offline";
-    if (!runnerSupportsProtocol(runner.protocolVersion, "campaignForgeStatus")) return "unsupported";
+    if (!runnerSupportsProtocol(runner.protocolVersion, runner.location ? "locationForgeObservation" : "campaignForgeStatus")) return "unsupported";
     return runner.online ? "online" : "offline";
   }
 

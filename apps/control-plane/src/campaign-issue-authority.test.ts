@@ -3828,6 +3828,79 @@ test("#4066 supersession between Orchestrator-owned occurrences is unchanged, an
   } finally { h.db.close(); }
 });
 
+test("a follow-up from work in the same repository, when that isn't the launch one, is inspected and consumed through its Location and joins the scope (#4119)", async () => {
+  const h = harness();
+  try {
+    h.db.registerRunner({ runnerId: "r2", hostname: "r2", os: "linux", version: "test", workspaces: [{ id: "a", name: "Api", path: "/repos/api" }], agents: [],
+      runtime: { maxConcurrentSessions: 4, campaignLaunchInspection: { version: 4 } } as RunnerMetadata["runtime"] }, 1, PROTOCOL_VERSION);
+    const project = h.db.createProject({ name: "Multi" });
+    const api = h.db.addProjectLocation(project.id, { runnerId: "r2", workspaceId: "a" });
+    h.db.raw().prepare("UPDATE sessions SET project_id=? WHERE id='root'").run(project.id);
+    // team/api is in the boundary, and team/api#50 is in the scope: the work the follow-up comes from.
+    const policy = h.db.getSession("root")!.orchestratorPolicy!;
+    if (policy.control?.mode !== "full_control") throw new Error("fixture control expected");
+    policy.control.boundary.repositories = [{ repository: "team/repo", locationIds: [] }, { repository: "team/api", locationIds: [api.id] }];
+    policy.issueScope!.issues = [{ repository: "team/api", number: 50 }, { repository: "team/repo", number: 100 }];
+    h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
+    assert.equal(campaignBoundaryCurrent(h.db.getSession("root")!), true);
+    const planned = h.svc.recordCampaignPlan("root", { items: [{ key: "issue:100", issue: { repository: "team/repo", number: 100 } },
+      { key: "issue:50", issue: { repository: "team/api", number: 50 } }], planComplete: true });
+    assert.ok(planned.ok, planned.error ?? "plan");
+    const page = h.db.campaignWorkLedger.page("root", { state: "all", limit: 100 }, Date.now());
+    assert.ok(page.ok);
+    const origin = page.data.items.find((item) => item.issue?.repository === "team/api")!;
+
+    const inspections: Array<{ runnerId: string; workspacePath?: string; issues: number[] }> = [];
+    const rootPublicationReads: string[] = [];
+    const runner = h.hub.requestFromRunner;
+    h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+      if (message.type === "campaign_issue_scope" && message.operation === "publication_inspect") rootPublicationReads.push(runnerId);
+      if (message.type !== "campaign_launch_inspect") return runner(runnerId, requestId, message, timeout);
+      inspections.push({ runnerId, workspacePath: message.workspacePath, issues: message.issueNumbers });
+      const result = { type: "campaign_launch_inspection_result" as const, requestId, workspaceId: message.workspaceId, ok: true, repository: "team/api",
+        issueNumbers: message.issueNumbers, digest: "d".repeat(64) };
+      return message.issueNumbers.length ? result : { ...result, publicationDigest: issueEvidenceDigest(message.publication), duplicateSearch: "subject" as const };
+    };
+    const title = "Api repair found in the API";
+    const recorded = h.svc.recordCampaignFollowUp("root", { originSessionId: "child", repository: "team/api", title, originWorkItemIds: [origin.id] });
+    assert.ok(recorded.ok, recorded.error ?? "record");
+    assert.ok(h.svc.adjudicateCampaignRecommendation("root", { recommendationId: recorded.data!.id, disposition: "accepted",
+      reason: "Observed while delivering team/api#50", publicationRequired: true }).ok);
+    const snapshot = { category: "follow_up_issue_publication" as const, repository: "team/api", sanitizedTitle: title, sanitizedBody: body, labels: [], recommendationId: recorded.data!.id };
+
+    // The Orchestrator owns it, its duplicate search ran through team/api's Location, and it has no
+    // cross-repository lineage to record: its origin is in the same repository.
+    const admitted = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "same-repository", resourceKey: "same-repository", resourceSnapshot: snapshot });
+    assert.ok(admitted.ok, admitted.error ?? "request");
+    assert.equal(admitted.data!.authority, "orchestrator", JSON.stringify(admitted.data!.authorityEvaluation));
+    assert.deepEqual(inspections, [{ runnerId: "r2", workspacePath: "/repos/api", issues: [] }]);
+    const evidence = publicationEvidence(h.db, h.db.getSession("root")!, snapshot);
+    assert.ok(evidence);
+    assert.equal(evidence.lineage, undefined);
+    assert.deepEqual(evidence.origins, [{ repository: "team/api", number: 50 }]);
+
+    // Consumption inspects again through the same Location, and the root's runner is never asked.
+    assert.ok(h.svc.resolveWorkflowDecision("root", "child", admitted.data!.occurrenceId, { outcome: "approve" }, "orchestrator",
+      { kind: "agent", id: "root" }, () => true).ok);
+    const consumed = await h.svc.consumeWorkflowDecision("child", admitted.data!.occurrenceId, { resourceSnapshot: admitted.data!.resourceSnapshot });
+    assert.ok(consumed.ok, consumed.error ?? "consume");
+    assert.deepEqual(inspections.map((read) => [read.runnerId, read.workspacePath]), [["r2", "/repos/api"], ["r2", "/repos/api"]]);
+    assert.deepEqual(rootPublicationReads, []);
+
+    // Once published and read back through that Location, it joins the scope as its repository's.
+    assert.ok(h.svc.adjudicateCampaignRecommendation("root", { recommendationId: recorded.data!.id, disposition: "accepted", reason: "Published payload read back",
+      resultingWorkItemKey: `followup:${recorded.data!.id}`, resultingIssue: { repository: "team/api", number: 77 } }).ok);
+    const joined = await h.svc.proposeCampaignIssueScope("root", { requestId: "join", expectedRevision: h.db.getSession("root")!.orchestratorPolicy!.issueScope!.revision,
+      additions: [{ repository: "team/api", number: 77 }], removals: [], explanation: "The published follow-up", lineage: { kind: "follow_up", publicationOccurrenceId: admitted.data!.occurrenceId } });
+    assert.ok(joined.ok, joined.error ?? "join");
+    assert.equal(joined.data!.authority, "orchestrator", JSON.stringify(joined.data!.authorityEvaluation));
+    assert.deepEqual(inspections.at(-1), { runnerId: "r2", workspacePath: "/repos/api", issues: [77] });
+    assert.ok(h.approve(joined.data!).ok);
+    assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueScope!.issues, [{ repository: "team/api", number: 50 }, { repository: "team/api", number: 77 }, { repository: "team/repo", number: 100 }]);
+    assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100], "the launch repository's numbers are unchanged");
+  } finally { h.db.close(); }
+});
+
 test("a follow-up in another boundary repository is inspected through its Location, owned by the Orchestrator and recorded with both repositories; outside the boundary it waits for a repository addition (#4119)", async () => {
   const h = harness();
   try {

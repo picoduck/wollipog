@@ -3,6 +3,9 @@ import { isTerminal, mediaActiveStopIdentityBody, mediaReviewerAttestationBody, 
   supportsPacedVideoReviewPeer, type ClaudeMediaReviewerAttestation, type CreateSessionRequest, type MediaActiveStopIdentity,
   type MediaActiveStopRequest, type MediaNeverDispatchedFence, type MediaReviewDispatchReceipt, type MediaReviewFinished,
   type SessionView, type VideoReviewerInstallationGap, type WorkflowDecisionView } from "@wollipog/protocol";
+import { campaignBoundaryRepository } from "@wollipog/protocol";
+import { campaignClosureIssueHeld } from "./campaign-authority.js";
+import { campaignBoundaryRepositoryAt, campaignRepositoryPlaces } from "./campaign-repository-boundary.js";
 import { RUNNER_REPORTED_STOP, sessionStopRestorable, type ControlPlaneDb } from "./db.js";
 import { EvidenceReviewBudgetProvenance } from "./evidence-review-budget-provenance.js";
 import type { EvidenceReviewService, EvidenceReviewServiceAdapter, ResolvedVideoReviewRequest } from "./evidence-review-service.js";
@@ -207,19 +210,35 @@ export function mediaReviewerInstallationGaps(db: ControlPlaneDb) {
   });
 }
 
-/** The reviewer target for a campaign root: an attested installation on the root's own runner (a
- * managed worker must share it), under a provider the Human evidence authority disclosed. A proof
+/** The reviewer target for a campaign root: an attested installation on the root's own runner, or
+ * when it serves a child, on a Location of that child's own boundary repository (#4119), under a
+ * provider the Human evidence authority disclosed. A proof
  * certifies one exact installation, so one with a current proof is preferred; otherwise the first
  * candidate is returned so admission can name the missing proof. */
 export function rootReviewerTarget(db: ControlPlaneDb, root: SessionView,
-  proven: (target: EvidenceReviewerTarget) => boolean = () => false, agentId?: string): EvidenceReviewerTarget | null {
+  proven: (target: EvidenceReviewerTarget) => boolean = () => false, agentId?: string,
+  serving?: { child: SessionView; runnerId?: string }): EvidenceReviewerTarget | null {
   const control = root.orchestratorPolicy?.control;
   const authority = control?.mode === "full_control" ? control.boundary.evidenceAuthority : undefined;
   const provider = authority?.providers.find((p) => p.reviewers.some((r) => r.driver === "claude-code" && r.modelId === VIDEO_REVIEWER_MODEL));
   if (!provider) return null;
-  const targets = mediaReviewerInstallations(db, root.runnerId).filter((installation) => agentId === undefined ||
-    installation.agentId === agentId).map((installation) => installationReviewerTarget(installation, provider.providerId));
+  const runners = serving ? [...new Set(reviewerPlaces(db, root, serving.child).map((place) => place.runnerId))] : [root.runnerId];
+  const targets = runners.filter((runnerId) => serving?.runnerId === undefined || runnerId === serving.runnerId)
+    .flatMap((runnerId) => mediaReviewerInstallations(db, runnerId)).filter((installation) => agentId === undefined ||
+      installation.agentId === agentId).map((installation) => installationReviewerTarget(installation, provider.providerId));
   return targets.find(proven) ?? targets[0] ?? null;
+}
+
+/** Where a child's reviewer may run (#4119): a Location of the child's own boundary repository. For
+ * the launch repository that stays the root's own place. A child in no boundary repository has none. */
+export function reviewerPlaces(db: ControlPlaneDb, root: SessionView, child: SessionView): Array<{ runnerId: string; workspaceId: string }> {
+  const control = root.orchestratorPolicy?.control;
+  if (control?.mode !== "full_control") return [];
+  const repository = campaignBoundaryRepositoryAt(db, root, child);
+  if (!repository) return [];
+  if (repository === control.boundary.repository.toLowerCase()) return root.workspaceId ? [{ runnerId: root.runnerId, workspaceId: root.workspaceId }] : [];
+  const entry = campaignBoundaryRepository(control.boundary, repository);
+  return entry ? campaignRepositoryPlaces(db, root, entry) : [];
 }
 
 /** The exact reviewer target an attested installation presents under one disclosed provider. */
@@ -288,8 +307,13 @@ export class DelegatedVideoReviews {
   private proven(target: EvidenceReviewerTarget): boolean {
     return validVideoLiveProof(this.liveValidation.current(target), target, this.clock());
   }
-  private target(root: SessionView): EvidenceReviewerTarget | null {
-    return rootReviewerTarget(this.db, root, (target) => this.proven(target));
+  private target(root: SessionView, child?: SessionView): EvidenceReviewerTarget | null {
+    return rootReviewerTarget(this.db, root, (target) => this.proven(target), undefined, child ? { child } : undefined);
+  }
+
+  /** The exact place a child's reviewer is created in: one of its repository's on the target's runner. */
+  private reviewerRequestPlace(root: SessionView, child: SessionView, target: EvidenceReviewerTarget) {
+    return reviewerPlaces(this.db, root, child).find((place) => place.runnerId === target.runnerId) ?? null;
   }
 
   /** Connects the Human validation permits and the runtime that derives their manifests (#1321). */
@@ -439,10 +463,11 @@ export class DelegatedVideoReviews {
       const gate = this.attached?.sessions.delegatedVideoGate(subject.occurrenceId, ["pending"]);
       if (!gate || gate.root.id !== identity.rootSessionId || gate.child.id !== identity.childSessionId ||
         !videoItem(gate.decision, subject.evidenceId)) return null;
-      const target = this.target(gate.root);
+      const target = this.target(gate.root, gate.child);
       const context = this.admissionContext(gate.root, gate.child);
-      if (!target || !context || !gate.root.workspaceId) return null;
-      const request: CreateSessionRequest = { runnerId: gate.root.runnerId, workspaceId: gate.root.workspaceId, agentId: target.agentId,
+      const place = target ? this.reviewerRequestPlace(gate.root, gate.child, target) : null;
+      if (!target || !context || !place) return null;
+      const request: CreateSessionRequest = { runnerId: place.runnerId, workspaceId: place.workspaceId, agentId: target.agentId,
         title: "Video Evidence Review", prompt: reviewerPrompt(VIDEO_REVIEW_CRITERIA),
         config: { model: VIDEO_REVIEWER_MODEL, effort: VIDEO_REVIEWER_EFFORT, ...VIDEO_REVIEW_CEILINGS } };
       return { request, context, target, liveProof: this.liveValidation.current(target) };
@@ -457,23 +482,30 @@ export class DelegatedVideoReviews {
     const item = assignment && assignment.campaignSessionId === root.id ? this.db.raw()
       .prepare("SELECT issue_repository,issue_number FROM campaign_work_items WHERE id=?").get(assignment.workItemId) as
       { issue_repository: string | null; issue_number: number | null } | undefined : undefined;
-    const issue = item?.issue_number ?? (scope.issueNumbers.length === 1 ? scope.issueNumbers[0]! : null);
+    // #4119: the task is the child's own, in its own repository. Only a child in the launch repository
+    // can fall back to the campaign's one issue; another's must name its work.
+    const childRepository = campaignBoundaryRepositoryAt(this.db, root, child);
+    const launch = control.boundary.repository.toLowerCase();
+    const issue = item?.issue_number ?? (childRepository === launch && scope.issueNumbers.length === 1 ? scope.issueNumbers[0]! : null);
+    const repository = item?.issue_number ? (item.issue_repository ?? scope.repository).toLowerCase() : launch;
+    if (childRepository && childRepository !== repository) return null;
+    const held = issue !== null && campaignClosureIssueHeld(root.orchestratorPolicy, { repository, number: issue });
     const audience = this.db.sessionScope(root.id);
     const controllerRunner = this.db.getRunner(root.runnerId), childRunner = this.db.getRunner(child.runnerId);
     if (issue === null || !audience || !controllerRunner?.protocolVersion || !childRunner?.protocolVersion) return null;
     const authority = control.boundary.evidenceAuthority;
     const contract = (runner: typeof controllerRunner, agentId: string | null | undefined) =>
       runner.agents.find((agent) => agent.id === agentId)?.capabilities?.pacedVideoReviewContract;
-    return { mode: "full_control", rootSessionId: root.id, childSessionId: child.id, repository: scope.repository, issue,
+    return { mode: "full_control", rootSessionId: root.id, childSessionId: child.id, repository: repository === launch ? scope.repository : repository, issue,
       issueScopeRevision: scope.revision, policyRevision: control.boundary.revision, boundary: control.boundary,
-      evidenceAuthority: authority, uiEvidenceOwner, taskEvidenceVerified: scope.issueNumbers.includes(issue),
+      evidenceAuthority: authority, uiEvidenceOwner, taskEvidenceVerified: held,
       destinationConfigurationId: authority.destination.configurationId, organizationId: authority.destination.organizationId,
       audienceSha256: sha(audience), controllerProtocolVersion: controllerRunner.protocolVersion,
       childProtocolVersion: childRunner.protocolVersion,
       controllerPacedVideoReviewContract: contract(controllerRunner, root.agentId),
       childPacedVideoReviewContract: contract(childRunner, child.agentId),
       // SessionsService rechecks the boundary, disclosures and scope against these at materialization.
-      boundaryCurrent: true, scopeCurrent: scope.issueNumbers.includes(issue), destinationPrivateVerified: true };
+      boundaryCurrent: true, scopeCurrent: held, destinationPrivateVerified: true };
   }
 
   /** Every field recomputed from current records. The runtime compares it with the stored binding,
@@ -497,7 +529,8 @@ export class DelegatedVideoReviews {
     const record = this.prepared.get(identityFor(row, gate.decision.resourceDigest));
     // The review's own installation, which must still hold a current proof: revoking or expiring it
     // ends media access, verdicts and provenance even while another installation stays certified.
-    const target = record ? rootReviewerTarget(this.db, gate.root, () => false, record.command.spec.agentId ?? undefined) : null;
+    const target = record ? rootReviewerTarget(this.db, gate.root, () => false, record.command.spec.agentId ?? undefined,
+      { child: gate.child, runnerId: record.runnerId }) : null;
     const audience = this.db.sessionScope(gate.root.id);
     if (!record || record.sessionId !== row.reviewerSessionId || !target || !this.proven(target) || !audience) return null;
     // Media and verdicts need an open, live reviewer: Stop, archive or any terminal status ends them.
@@ -550,7 +583,7 @@ export class DelegatedVideoReviews {
       const binding = this.currentBinding(row, ["pending"]);
       const gate = this.attached?.sessions.delegatedVideoGate(request.occurrenceId, ["pending"]);
       const item = gate ? videoItem(gate.decision, request.evidenceId) : null;
-      const target = gate ? this.target(gate.root) : null;
+      const target = gate ? this.target(gate.root, gate.child) : null;
       const source = item?.artifactId ? this.db.workflowArtifactExportPreflight(item.artifactId)?.artifact : null;
       if (!binding || !item || !target) return null;
       return { binding, criteria: structuredClone([...VIDEO_REVIEW_CRITERIA]), target, mediaType: item.mediaType as "video/webm" | "video/mp4",
@@ -576,7 +609,7 @@ export class DelegatedVideoReviews {
   };
 
   readonly gateAccess: WorkflowVideoEvidenceAccess = {
-    available: (controller) => this.ready && this.readyFor(controller),
+    available: (controller, child) => this.ready && this.readyFor(controller, child),
     campaignReadiness: (controller) => {
       if (!this.ready) return { available: false, reason: "Wollipog's video review service is not attached yet." };
       const target = this.target(controller);
@@ -596,10 +629,10 @@ export class DelegatedVideoReviews {
     },
   };
 
-  /** A certified reviewer can run for this controller now: a target on its runner with a current
-   * Human-inspected live proof. Admission still rechecks everything at preparation. */
-  private readyFor(controller: SessionView): boolean {
-    const target = this.target(controller);
+  /** A certified reviewer can run for this child now: a target on a runner of one of its repository's
+   * Locations with a current Human-inspected live proof. Admission still rechecks everything at preparation. */
+  private readyFor(controller: SessionView, child: SessionView): boolean {
+    const target = this.target(controller, child);
     return Boolean(target && validVideoLiveProof(this.liveValidation.current(target), target, this.clock()));
   }
 
@@ -684,7 +717,7 @@ export class DelegatedVideoReviews {
     if (!binding) return false;
     const review = row.reviewId ? this.store.getReview(row.reviewId) : null;
     const gate = this.attached!.sessions.delegatedVideoGate(row.occurrenceId, ["pending"])!;
-    const target = this.target(gate.root);
+    const target = this.target(gate.root, gate.child);
     const grant = record.binding?.grant;
     return Boolean(review && review.status === "pending" && grant && target &&
       validVideoLiveProof(this.liveValidation.current(target), target, this.clock()) &&
@@ -801,8 +834,8 @@ export class DelegatedVideoReviews {
     if (!this.attached!.sessions.sessionPacedVideoPeer(root.id) || !this.attached!.sessions.sessionPacedVideoPeer(child.id)) {
       return this.refuse("mixed_peer", "The controller or child installation does not declare the paced video review contract.");
     }
-    const target = this.target(root);
-    if (!target) return this.refuse("reviewer_unavailable", "The controller's runner has no attested media-only Claude Code reviewer for the certified model.");
+    const target = this.target(root, child);
+    if (!target) return this.refuse("reviewer_unavailable", "No Location of the child's repository has an attested media-only Claude Code reviewer for the certified model.");
     if (!validVideoLiveProof(this.liveValidation.current(target), target, this.clock())) {
       return this.refuse("live_validation", "No current Human-inspected live validation proof covers this reviewer.");
     }
@@ -931,7 +964,7 @@ export class DelegatedVideoReviews {
       };
     }
     const gate = this.attached!.sessions.delegatedVideoGate(review.binding.occurrenceId, ["pending"])!;
-    const target = this.target(gate.root)!;
+    const target = this.target(gate.root, gate.child)!;
     const control = gate.root.orchestratorPolicy!.control as Extract<NonNullable<SessionView["orchestratorPolicy"]>["control"], { mode: "full_control" }>;
     return {
       grant: { reviewId: review.reviewId, reviewerSessionId: record.sessionId, childSessionId: record.childSessionId,
@@ -1010,17 +1043,18 @@ export class DelegatedVideoReviews {
   // reviews one Human-owned pending video gate under a one-shot permit the Human minted for its exact
   // server-derived scope. The routes authenticate the Human; nothing here accepts an agent.
 
-  /** The Human-owned gate, its evidence, the attested reviewer target on the root's runner and the
+  /** The Human-owned gate, its evidence, the attested reviewer target on a Location of the child's repository and the
    * exact request a validation reviewer is created with, all from current records. */
   private validationBasis(occurrenceId: string, evidenceId: string) {
     const gate = this.attached?.sessions.validationVideoGate(occurrenceId, ["pending"]);
     const item = gate ? videoItem(gate.decision, evidenceId) : null;
     const control = gate?.root.orchestratorPolicy?.control;
-    if (!gate || !item?.artifactId || !gate.root.workspaceId || control?.mode !== "full_control" || !control.boundary.evidenceAuthority) return null;
-    const target = rootReviewerTarget(this.db, gate.root);
+    if (!gate || !item?.artifactId || control?.mode !== "full_control" || !control.boundary.evidenceAuthority) return null;
+    const target = rootReviewerTarget(this.db, gate.root, undefined, undefined, { child: gate.child });
     const context = this.admissionContext(gate.root, gate.child, "human");
-    if (!target || !context) return null;
-    const request: CreateSessionRequest = { runnerId: gate.root.runnerId, workspaceId: gate.root.workspaceId, agentId: target.agentId,
+    const place = target ? this.reviewerRequestPlace(gate.root, gate.child, target) : null;
+    if (!target || !context || !place) return null;
+    const request: CreateSessionRequest = { runnerId: place.runnerId, workspaceId: place.workspaceId, agentId: target.agentId,
       title: "Video Validation Review", prompt: videoValidationPrompt(VIDEO_VALIDATION_CRITERIA),
       config: { model: VIDEO_REVIEWER_MODEL, effort: VIDEO_REVIEWER_EFFORT, ...VIDEO_REVIEW_CEILINGS } };
     return { gate, item: { ...item, artifactId: item.artifactId }, target, context, request, boundary: control.boundary };

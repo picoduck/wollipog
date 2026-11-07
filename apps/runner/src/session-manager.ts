@@ -20058,6 +20058,27 @@ export class SessionManager {
     options: { gh?: GhRunner; glab?: GlabRunner; agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
   ): Promise<CampaignForgeObserveResultMessage> {
     const base = { type: "campaign_forge_observe_result" as const, requestId: message.requestId, sessionId: message.sessionId };
+    if (message.location) {
+      // #4119: another campaign repository's pull requests, with this runner's own login, in the
+      // Location's path. The Orchestrator session lives on another runner; nothing here needs it.
+      const { location } = message;
+      const repository = typeof location.repository === "string" ? location.repository.toLowerCase() : "";
+      if (typeof location.workspacePath !== "string" || !location.workspacePath.trim() || location.workspacePath.includes("\0") || !repository ||
+          !Array.isArray(message.pullRequests) || message.pullRequests.some((ref) => ref?.repository?.toLowerCase() !== repository)) {
+        return { ...base, observedAt: Date.now(), ok: false, failure: "forge_unsupported" };
+      }
+      try {
+        const cwd = await realpath(location.workspacePath);
+        const context = { kind: "native" as const };
+        const outcome = await observeForgeStatus(message.pullRequests, options.gh ?? contextGhRunner(context, cwd),
+          message.gitlab === true ? { glab: options.glab ?? contextGlabRunner(context, cwd) } : {});
+        return outcome.ok
+          ? { ...base, observedAt: Date.now(), ok: true, results: outcome.results }
+          : { ...base, observedAt: Date.now(), ok: false, failure: outcome.failure };
+      } catch {
+        return { ...base, observedAt: Date.now(), ok: false, failure: "forge_error" };
+      }
+    }
     const meta = this.store.readMeta(message.sessionId);
     if (!meta?.orchestrator || !meta.repoPath || this.campaignHostTargetRefusal(meta)) {
       return { ...base, observedAt: Date.now(), ok: false, failure: "forge_unsupported" };
