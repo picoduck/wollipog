@@ -7546,6 +7546,8 @@ export class ControlPlaneDb {
       "resume_recalled_at INTEGER",
       // #4066: the occurrence that superseded this one.
       "superseded_by TEXT",
+      // #4301: approval survives supersession and later terminal transitions.
+      "closure_approval TEXT",
       // #4064: the root handed this Orchestrator-owned occurrence to the campaign's owner.
       "owner_handoff TEXT",
       // #4137: the installed or user-authored rule that kept this occurrence for a person.
@@ -23530,11 +23532,12 @@ export class ControlPlaneDb {
     this.db.exec("BEGIN");
     try {
       const supersede = this.stmt(
-        `UPDATE workflow_decisions SET status='superseded', resolved_at=?, superseded_by=?
+        `UPDATE workflow_decisions SET status='superseded',
+           resolved_at=CASE WHEN category='issue_closure' THEN COALESCE(resolved_at, ?) ELSE ? END, superseded_by=?
          WHERE occurrence_id=? AND status IN ('pending','approved')`,
       );
       for (const { occurrence_id: occurrenceId } of superseded) {
-        supersede.run(input.createdAt, input.occurrenceId, occurrenceId);
+        supersede.run(input.createdAt, input.createdAt, input.occurrenceId, occurrenceId);
         this.retireWorkflowDecisionResume(occurrenceId, input.createdAt);
       }
       this.stmt(
@@ -23738,16 +23741,19 @@ export class ControlPlaneDb {
     oweResume = false,
     delegatedVideoEvidence?: WorkflowDecisionView["delegatedVideoEvidence"],
     delegatedImageReview?: WorkflowDecisionView["delegatedImageReview"],
+    actor?: GovernanceActor,
   ): WorkflowDecisionView | null {
     const owed = oweResume ? ", resume_state='held', resume_command_id=NULL, resume_updated_at=?" : "";
     const result = this.stmt(
       `UPDATE workflow_decisions SET status=?, selected_option_id=?, evidence_reviewed=?,
-       rationale_digest=?, child_message=?, delegated_video_evidence=?, delegated_image_review=?, resolved_at=?${owed}
+       rationale_digest=?, child_message=?, delegated_video_evidence=?, delegated_image_review=?, resolved_at=?,
+       closure_approval=CASE WHEN category='issue_closure' AND ?='approved' THEN ? ELSE closure_approval END${owed}
        WHERE occurrence_id=? AND status='pending' AND authority=?`,
     ).run(
       outcome, selectedOptionId ?? null, evidenceReviewed ? JSON.stringify(evidenceReviewed) : null,
       rationaleDigest ?? null, childMessage ?? null, delegatedVideoEvidence ? JSON.stringify(delegatedVideoEvidence) : null,
-      delegatedImageReview ? JSON.stringify(delegatedImageReview) : null, now, ...(oweResume ? [now] : []), occurrenceId, expectedAuthority,
+      delegatedImageReview ? JSON.stringify(delegatedImageReview) : null, now,
+      outcome, actor ? JSON.stringify({ actor, at: now }) : null, ...(oweResume ? [now] : []), occurrenceId, expectedAuthority,
     );
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
@@ -35336,6 +35342,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     child_message?: string | null;
     withdrawal?: string | null;
     superseded_by?: string | null;
+    closure_approval?: string | null;
     owner_handoff?: string | null;
     owner_rule?: string | null;
     issue_closure_result?: string | null;
@@ -35407,6 +35414,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
       : {}),
     ...(row.child_message ? { childMessage: row.child_message } : {}),
     ...(row.withdrawal ? { withdrawal: parseJson<NonNullable<WorkflowDecisionView["withdrawal"]>>(row.withdrawal) ?? undefined } : {}),
+    ...(row.closure_approval ? { approval: parseJson<NonNullable<WorkflowDecisionView["approval"]>>(row.closure_approval) ?? undefined } : {}),
     ...(row.status === "superseded" && row.superseded_by ? { supersededBy: row.superseded_by } : {}),
     ...(row.owner_handoff ? { ownerHandoff: parseJson<NonNullable<WorkflowDecisionView["ownerHandoff"]>>(row.owner_handoff) ?? undefined } : {}),
     ...(row.owner_rule ? { ownerRule: parseJson<NonNullable<WorkflowDecisionView["ownerRule"]>>(row.owner_rule) ?? undefined } : {}),
