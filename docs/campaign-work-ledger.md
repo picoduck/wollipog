@@ -674,12 +674,12 @@ derivation, refresh) and `apps/runner/src/campaign-forge-status.ts` (the read).
 | Reason | Meaning |
 | --- | --- |
 | `not_observed` | The runner is reachable but this pull request has not been read yet. |
-| `runner_disconnected` | Nothing was ever read and the root's runner is disconnected. |
-| `runner_unsupported` | The root's runner predates `campaignForgeStatus` (protocol v198) and is never asked. |
+| `runner_disconnected` | Nothing was ever read and the runner that reads this repository is disconnected: the root's for the launch repository, or every Location's for another. |
+| `runner_unsupported` | That runner predates `campaignForgeStatus` (protocol v198), or for a Location `locationForgeObservation` (v326), and is never asked. |
 | `forge_cli_missing` | The runner has no `gh` executable. |
 | `forge_unauthenticated` | `gh` is not signed in to github.com, or GitHub refused its credentials. |
 | `forge_unreachable` | GitHub could not be reached (offline, DNS, proxy, or timeout). |
-| `forge_unsupported` | Not a GitHub repository, or the root's repository is not runner-local. |
+| `forge_unsupported` | Not a GitHub repository, or the reading checkout is not runner-local. |
 | `forge_not_found` | The repository or pull request does not exist, or the runner's `gh` login cannot see it. |
 | `forge_rate_limited` | GitHub's API rate limit for that login is exhausted. |
 | `forge_error` | Any other failure, or an answer that does not validate. |

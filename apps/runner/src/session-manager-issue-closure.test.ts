@@ -275,6 +275,71 @@ test("forge facts at a Location are read in its path with no session here, and o
   assert.equal(asked, 0);
 });
 
+test("a publication at a Location creates its issue in that path with no session here, once, and only in that Location's repository (#4119)", async (t) => {
+  const f = fixture(t);
+  const location = { workspaceId: "api", workspacePath: f.root, repository: "Example/Project" };
+  const action = { kind: "issue_publication" as const, repository: "example/project", title: "A Repair", body: "Exact body\n\n- Item", labels: ["bug"] };
+  const answers: Array<(args: string[]) => Awaited<ReturnType<GhRunner>>> = [];
+  const calls: string[][] = [];
+  const payloads: unknown[] = [];
+  const gh: GhRunner = async (args) => {
+    calls.push(args);
+    const input = args.indexOf("--input");
+    if (input >= 0) payloads.push(JSON.parse(readFileSync(args[input + 1]!, "utf8")));
+    return answers.shift()!(args);
+  };
+  const created = () => ({ stdout: JSON.stringify({ number: 77, html_url: "https://github.com/example/project/issues/77" }), stderr: "", code: null, timedOut: false });
+  const perform = (occurrenceId: string, at: typeof location | null = location, sent: typeof action | { kind: "issue_publication_observe"; repository: string; title: string; body: string } = action) =>
+    f.manager().forgeDecisionAction({ type: "forge_decision_action", requestId: "publish", sessionId: "s_on_another_runner", occurrenceId, action: sent, ...(at ? { location: at } : {}) }, { gh });
+
+  // It names no session of this runner's. The exact payload goes in a file, never on the command line.
+  answers.push(created);
+  const first = await perform("first");
+  assert.deepEqual([first.outcome, first.issue, first.refusal], ["published", 77, undefined]);
+  assert.deepEqual(calls[0]!.slice(0, 6), ["api", "--hostname", "github.com", "-X", "POST", "repos/example/project/issues"]);
+  assert.deepEqual(payloads, [{ title: action.title, body: action.body, labels: action.labels }]);
+  assert.equal(calls[0]!.some((arg) => arg.includes(action.body)), false);
+  assert.equal(existsSync(calls[0]!.at(-1)!), false, "the payload file is gone");
+
+  // A replay, even after a restart, can't create it twice: the attempt is durable.
+  const asked = calls.length;
+  assert.equal((await perform("first")).outcome, "uncertain");
+  assert.equal(calls.length, asked);
+
+  // Another repository's Location, no Location, and a missing path are refused before the forge is asked.
+  assert.equal((await perform("other", { ...location, repository: "example/other" })).refusal?.reason, "repository_mismatch");
+  assert.equal((await perform("none", null)).refusal?.reason, "repository_mismatch");
+  assert.equal((await perform("missing", { ...location, workspacePath: join(f.root, "missing") })).refusal?.reason, "repository_mismatch");
+  // So is a checkout whose origin is no longer the approved repository.
+  f.setOrigin("example/elsewhere");
+  assert.equal((await perform("moved")).refusal?.reason, "repository_mismatch");
+  f.setOrigin("example/project");
+  assert.equal(calls.length, asked, "nothing reached the forge");
+
+  // A refusal proving nothing was created gives the attempt back; an unclear failure doesn't.
+  answers.push(() => ({ stdout: "", stderr: "HTTP 403: Must have write access", code: 1, timedOut: false }), created);
+  assert.equal((await perform("retry")).refusal?.reason, "forge_refused");
+  assert.equal((await perform("retry")).outcome, "published");
+  answers.push(() => ({ stdout: "", stderr: "connection reset by peer", code: 1, timedOut: false }));
+  assert.equal((await perform("lost")).outcome, "uncertain");
+  const after = calls.length;
+  assert.equal((await perform("lost")).outcome, "uncertain");
+  assert.equal(calls.length, after, "the unclear one isn't repeated");
+  // An answer naming another repository's issue isn't proof either.
+  answers.push(() => ({ stdout: JSON.stringify({ number: 9, html_url: "https://github.com/example/other/issues/9" }), stderr: "", code: null, timedOut: false }));
+  assert.equal((await perform("elsewhere")).outcome, "uncertain");
+
+  // Looking never writes, finds only the exact issue, and otherwise stays uncertain.
+  const look = { kind: "issue_publication_observe" as const, repository: "example/project", title: action.title, body: action.body };
+  const row = (over: object) => ({ number: 5, title: action.title, body: action.body, html_url: "https://github.com/example/project/issues/5", ...over });
+  answers.push(() => ({ stdout: JSON.stringify([row({ body: "Another" }), row({ pull_request: {} }), row({ title: "Another" })]), stderr: "", code: null, timedOut: false }));
+  assert.equal((await perform("look", location, look)).outcome, "uncertain");
+  answers.push(() => ({ stdout: JSON.stringify([row({ number: 6, html_url: "https://github.com/example/project/issues/6" })]), stderr: "", code: null, timedOut: false }));
+  const found = await perform("look", location, look);
+  assert.deepEqual([found.outcome, found.issue], ["already_published", 6]);
+  assert.ok(calls.slice(after).filter((args) => args.includes("GET")).every((args) => !args.includes("POST") && !args.includes("--input")));
+});
+
 test("a Location's commit wait starts at its fence, so slow forge checks don't use it up (#4119)", async (t) => {
   const f = fixture(t);
   const location = { workspaceId: "api", workspacePath: f.root, repository: "example/project" };
