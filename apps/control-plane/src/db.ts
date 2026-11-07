@@ -6490,6 +6490,7 @@ export class ControlPlaneDb {
         return bound?.category === "campaign_follow_up_admission" ? this.bindCampaignFollowUp(campaignId, workItemId, bound.subject, content) : null;
       },
       forgePullRequests: (campaignId, refs, now) => this.campaignForgeObservations.facts(campaignId, refs, now),
+      sessionRepository: (campaignId, sessionId) => this.campaignSessionRepository(campaignId, sessionId),
     });
     return this.campaignWorkLedgerStore;
   }
@@ -17742,6 +17743,19 @@ export class ControlPlaneDb {
     if (this.campaignSharesRepositoryWorkspace(root, member)) return launch;
     if (!member.workspaceId || this.getAdHocWorkspacePath(member.id)) return null;
     return campaignLocationRepository(this, root, campaignScopeRepositories(root), member);
+  }
+
+  /** #4120: the campaign repository a session is placed in, by `campaignParticipantRepository`, read
+   * from rows: a session view embeds the campaign projection, which reads the ledger that asks this. */
+  campaignSessionRepository(campaignId: string, sessionId: string): string | null {
+    const read = (id: string) => this.stmt("SELECT id, runner_id, workspace_id, project_id, orchestrator_policy FROM sessions WHERE id=?").get(id) as
+      { id: string; runner_id: string; workspace_id: string | null; project_id: string | null; orchestrator_policy: string | null } | undefined;
+    const root = read(campaignId);
+    const member = read(sessionId);
+    if (!root || !member) return null;
+    const view = (row: NonNullable<typeof root>) => ({ id: row.id, runnerId: row.runner_id, workspaceId: row.workspace_id ?? undefined,
+      projectId: row.project_id ?? undefined, orchestratorPolicy: orchestratorCampaignPolicyFromJson(row.orchestrator_policy) ?? undefined });
+    return this.campaignParticipantRepository(view(root) as unknown as SessionView, view(member) as unknown as SessionView);
   }
 
   /** The newest Human decision on admitting this follow-up past the campaign's approval limit (#2940). */

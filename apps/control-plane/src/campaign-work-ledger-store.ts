@@ -74,6 +74,13 @@ import {
   type CampaignUsageAmount,
 } from "./campaign-work-accounting.js";
 import { campaignItemDurations, campaignItemTimelines } from "./campaign-work-times.js";
+import {
+  campaignItemRepository,
+  campaignMergeDependencyStatus,
+  campaignMergeDependencyView,
+  isCampaignMergeDependency,
+  type CampaignMergePrerequisite,
+} from "./campaign-merge-dependencies.js";
 
 /** Tables, in SCHEMA order. Child-session references are SET NULL so history survives a child's
  * deletion; the root campaign reference cascades, so deleting the root deletes its ledger. */
@@ -412,6 +419,9 @@ export interface CampaignWorkLedgerHooks {
    * only; the read routes narrow it for readers who may not see the observing runner. */
   forgePullRequests?(campaignId: string, refs: readonly CampaignPullRequestRef[], now: number):
     NonNullable<CampaignWorkItemDetail["observed"]["pullRequests"]>;
+  /** #4120: the campaign repository whose Location this session is placed in, lower-cased, or null.
+   * A server fact (#4119), never agent text. Reads rows only. */
+  sessionRepository?(campaignId: string, sessionId: string): string | null;
 }
 
 /** What `summary` derives from the ledger alone. Cached per campaign under the revision plus the
@@ -505,6 +515,11 @@ interface LedgerSnapshot {
   handoffs: Map<string, HandoffRow>;
   deliveries: Map<string, DeliveryRow[]>;
   derived: Map<string, CampaignWorkItemDerivedState>;
+  /** #4120: each item's repository, and its prerequisites in other repositories. */
+  repositories: Map<string, string | null>;
+  mergePrerequisites: Map<string, CampaignMergePrerequisite[]>;
+  /** An item's merge prerequisites as a dependent in `dependentRepository`. */
+  prerequisitesOf(itemId: string, dependentRepository: string | null): CampaignMergePrerequisite[];
   observations: Map<string, CampaignAttemptSessionObservation | null>;
   /** Usage attributed to each attempt (slice 6). */
   usage: Map<string, CampaignUsageAmount>;
@@ -550,6 +565,12 @@ function uniquePullRequests(refs: readonly CampaignPullRequestRef[]): CampaignPu
 /** The pull requests an item's reported stage names (slice 8 observes these). */
 function stagePullRequests(item: ItemRow): CampaignPullRequestRef[] {
   return uniquePullRequests(item.stage_pull_requests ? JSON.parse(item.stage_pull_requests) as CampaignPullRequestRef[] : []);
+}
+
+/** Every pull request an item names (#4120): its reported stage's, then its recorded deliveries'. */
+function namedPullRequests(item: ItemRow, deliveries: readonly DeliveryRow[] | undefined): CampaignPullRequestRef[] {
+  return uniquePullRequests([...stagePullRequests(item), ...(deliveries ?? []).flatMap((row) =>
+    (JSON.parse(row.pull_requests) as CampaignPullRequestRef[]).map((ref) => ({ repository: ref.repository, number: ref.number })))]);
 }
 
 function newId(prefix: string): string {
@@ -1905,6 +1926,34 @@ export class CampaignWorkLedgerStore {
     ).all(campaignId) as unknown as DeliveryRow[]) {
       deliveries.set(row.work_item_id, [...(deliveries.get(row.work_item_id) ?? []), row]);
     }
+    // #4120: where each item works, and which of its dependencies are in another repository.
+    const placements = new Map<string, string | null>();
+    const repositories = new Map(items.map((item) => {
+      const sessionId = attempts.get(item.id)?.at(-1)?.session_id ?? null;
+      if (sessionId && !placements.has(sessionId)) placements.set(sessionId, this.hooks.sessionRepository?.(campaignId, sessionId) ?? null);
+      return [item.id, campaignItemRepository({ placement: sessionId ? placements.get(sessionId)! : null,
+        pullRequests: namedPullRequests(item, deliveries.get(item.id)), issue: issueOf(item.issue_repository, item.issue_number) })];
+    }));
+    const byId = new Map(items.map((item) => [item.id, item]));
+    const now = Date.now();
+    const prerequisiteOf = new Map<string, CampaignMergePrerequisite | null>();
+    const prerequisite = (id: string): CampaignMergePrerequisite | null => {
+      if (prerequisiteOf.has(id)) return prerequisiteOf.get(id)!;
+      const row = byId.get(id);
+      const repository = repositories.get(id) ?? null;
+      const refs = row ? namedPullRequests(row, deliveries.get(id)) : [];
+      const record = row && repository ? { id, key: row.item_key, title: row.title, repository, commitment: row.commitment,
+        pullRequests: refs.length ? this.hooks.forgePullRequests?.(campaignId, refs, now) ??
+          refs.map((ref) => ({ ref, fact: { availability: "unavailable", reason: "not_collected" } as const })) : [] } : null;
+      prerequisiteOf.set(id, record);
+      return record;
+    };
+    const prerequisitesOf = (itemId: string, dependentRepository: string | null): CampaignMergePrerequisite[] =>
+      (dependencies.get(itemId) ?? []).flatMap((id) => {
+        const record = isCampaignMergeDependency(dependentRepository, repositories.get(id) ?? null) ? prerequisite(id) : null;
+        return record ? [record] : [];
+      });
+    const mergePrerequisites = new Map(items.map((item) => [item.id, prerequisitesOf(item.id, repositories.get(item.id) ?? null)]));
     const observations = new Map<string, CampaignAttemptSessionObservation | null>();
     const records = items.map((item) => {
       const latest = attempts.get(item.id)?.at(-1);
@@ -1925,6 +1974,7 @@ export class CampaignWorkLedgerStore {
         } : null,
         openAttemptSession: open?.session_id ? observations.get(open.session_id) ?? null : null,
         recordedDelivery: currentDelivery(deliveries.get(item.id), latest) !== null,
+        mergeDependencies: (mergePrerequisites.get(item.id) ?? []).map(campaignMergeDependencyStatus),
       };
     });
     return {
@@ -1938,6 +1988,9 @@ export class CampaignWorkLedgerStore {
       handoffs,
       deliveries,
       derived: deriveCampaignWorkItemStates(records),
+      repositories,
+      mergePrerequisites,
+      prerequisitesOf,
       observations,
       usage: this.accounting.attemptUsage(campaignId),
       accountingStartedAt: this.accounting.startedAt(),
@@ -2070,6 +2123,9 @@ export class CampaignWorkLedgerStore {
         recordedBySessionId: item.blocker_recorded_by,
       } : null,
       handoff: handoff ? handoffView(handoff) : null,
+      repository: snapshot.repositories.get(item.id) ?? null,
+      ...(snapshot.mergePrerequisites.get(item.id)?.length
+        ? { mergeDependencies: snapshot.mergePrerequisites.get(item.id)!.map(campaignMergeDependencyView) } : {}),
       createdAt: item.created_at,
       updatedAt: item.updated_at,
       activityAt: item.updated_at,
@@ -2358,11 +2414,21 @@ export class CampaignWorkLedgerStore {
     const unfinished = new Set<string>(CAMPAIGN_WORK_ITEM_UNFINISHED_STATES);
     return campaigns.map((campaignId) => {
       const snapshot = this.snapshot(campaignId);
-      const refs = uniquePullRequests(snapshot.items
-        .filter((item) => unfinished.has(snapshot.derived.get(item.id)?.state ?? "blocked"))
-        .flatMap(stagePullRequests));
+      const open = snapshot.items.filter((item) => unfinished.has(snapshot.derived.get(item.id)?.state ?? "blocked"));
+      // #4120: a delivered prerequisite is finished, but an unfinished dependent still waits for its
+      // pull requests to merge, so they keep being read (a merged or closed one is then skipped).
+      const refs = uniquePullRequests([...open.flatMap(stagePullRequests),
+        ...open.flatMap((item) => (snapshot.mergePrerequisites.get(item.id) ?? []).flatMap((prerequisite) => prerequisite.pullRequests.map(({ ref }) => ref)))]);
       return { campaignId, refs };
     }).filter((target) => target.refs.length > 0);
+  }
+
+  /** #4120: an item's prerequisites in other repositories than `dependentRepository` (the repository
+   * of the pull request it is merging; the item's own when omitted), with their stored forge facts. */
+  mergePrerequisites(campaignId: string, workItemId: string, dependentRepository?: string): CampaignMergePrerequisite[] {
+    const snapshot = this.snapshot(campaignId);
+    if (!snapshot.repositories.has(workItemId)) return [];
+    return snapshot.prerequisitesOf(workItemId, dependentRepository?.toLowerCase() ?? snapshot.repositories.get(workItemId) ?? null);
   }
 
   /** Observed facts of the latest attempt's session, open or closed: a delivered item still shows
