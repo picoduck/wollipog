@@ -19,6 +19,8 @@ import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js"
 import { gitlabMergePreflight } from "./gitlab-merge-preflight.js";
 import { githubMergePreflight } from "./github-merge-preflight.js";
 import { gitlabMergeClosures } from "./gitlab-merge-closures.js";
+import { dequeueMerge, readMergeClosures } from "./merge-closure-watch.js";
+import type { MergeClosureWatchMessage, MergeClosureWatchResultMessage } from "@wollipog/protocol";
 /**
  * Runner-side session orchestration. For each control-plane `start_session`:
  *  - optionally create an isolated git worktree,
@@ -20032,6 +20034,38 @@ export class SessionManager {
       return result.ok ? { ...base, ok: true, check: result.check } : { ...base, ok: false, refusal: result.refusal, reason: result.reason };
     } catch {
       return { ...base, ok: false, refusal: "unavailable", reason: "GitLab could not be checked." };
+    }
+  }
+
+  /** v330 (#4323): after a `pr_merge` decision is consumed, read what its pull request or merge
+   * request would close in any state, or take it out of the merge queue or train. Through the
+   * child session's own `gh` or `glab` login and context, from the filesystem root as forge
+   * actions run, so nothing the agent can write in its worktree is read on the way. A failure is a
+   * fixed sentence, never forge output. */
+  async mergeClosureWatch(
+    message: MergeClosureWatchMessage,
+    options: { gh?: GhRunner; glab?: GlabRunner; agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
+  ): Promise<MergeClosureWatchResultMessage> {
+    const operation = message.operation === "dequeue" ? "dequeue" as const : "read" as const;
+    const base = { type: "merge_closure_watch_result" as const, requestId: message.requestId, sessionId: message.sessionId, operation };
+    const meta = this.store.readMeta(message.sessionId);
+    if (!meta) return { ...base, ok: false, reason: "The session is not known to this runner." };
+    const target = { repository: message.repository, pullRequest: message.pullRequest, headSha: message.headSha };
+    try {
+      const agentEnv = options.agentEnv?.(meta) ?? {};
+      const neutral = meta.context?.kind === "wsl" ? "/" : parsePath(tmpdir()).root;
+      const forges = { gh: options.gh ?? contextGhRunner(meta.context, neutral, agentEnv),
+        glab: options.glab ?? contextGlabRunner(meta.context, neutral, agentEnv) };
+      if (operation === "dequeue") {
+        const result = await dequeueMerge(target, forges);
+        this.log(JSON.stringify({ event: "merge_closure_dequeue", sessionId: message.sessionId, repository: message.repository,
+          pullRequest: message.pullRequest, outcome: result.outcome }));
+        return { ...base, ok: true, outcome: result.outcome, ...(result.reason ? { reason: result.reason } : {}) };
+      }
+      const read = await readMergeClosures(target, forges);
+      return read.ok ? { ...base, ok: true, state: read.state, headSha: read.headSha, check: read.check } : { ...base, ok: false, reason: read.reason };
+    } catch {
+      return operation === "dequeue" ? { ...base, ok: true, outcome: "uncertain" } : { ...base, ok: false, reason: "The forge could not be checked." };
     }
   }
 
