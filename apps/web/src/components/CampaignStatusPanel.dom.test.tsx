@@ -192,7 +192,8 @@ function Harness({ initial, client, sessions, onState, onSession, socket }: {
 }
 
 /** Requests the panel lists, and every Requests selection it made; tests set these before mounting. */
-const harnessRequests: { descendants: DescendantRequestView[]; selected: (string | null)[] } = { descendants: [], selected: [] };
+const harnessRequests: { descendants: DescendantRequestView[]; selected: (string | null)[]; openedElsewhere: Array<[string, string]> } =
+  { descendants: [], selected: [], openedElsewhere: [] };
 
 function PanelWithAvailability({ session: current, onState, onOpen }: {
   session: SessionView;
@@ -217,6 +218,7 @@ function PanelWithAvailability({ session: current, onState, onOpen }: {
       onInsertSideChatDraft={() => {}}
       campaignAvailability={availability}
       onOpenSession={onOpen}
+      onOpenSessionRequest={(sessionId, requestId) => { harnessRequests.openedElsewhere.push([sessionId, requestId]); }}
       descendantRequests={harnessRequests.descendants}
       selectedRequestKey={selectedRequestKey}
       onSelectedRequestKeyChange={(key) => {
@@ -1601,6 +1603,40 @@ test("a decision an owner rule kept is waiting for you with the rule's source an
     assertNoDomNode(section.querySelector("b"), "markup in the quote is never rendered");
     assert.ok(section.querySelector("button[aria-label='Open Request: Merge picoduck/wollipog#9']"));
   } finally {
+    await panel.dispose();
+  }
+});
+
+test("a kept decision a nested Orchestrator controls opens at its own request in its session, never another of that session's (#4337)", async () => {
+  // The root lists another request of the same worker, but not the nested Orchestrator's decision.
+  harnessRequests.descendants = [pendingRequest("s_worker", "occ_other")];
+  harnessRequests.openedElsewhere = [];
+  const selectedBefore = harnessRequests.selected.length;
+  const { client } = fakeClient(() => ({ revision: 1, items: [], nextCursor: null }), {});
+  const root = session({
+    orchestratorCampaign: campaignProjection(workSummary(), {
+      status: "waiting_human",
+      ownerDecisions: { total: 2, items: [
+        { occurrenceId: "occ_nested", sessionId: "s_worker", category: "pr_merge", summary: "Merge picoduck/wollipog#11", handedOff: false,
+          ownerRule: { source: "~/.claude/skills/issue-workflow/SKILL.md", quote: "Merging requires per-PR user authorization." }, createdAt: NOW },
+        { occurrenceId: "occ_handed", sessionId: "s_worker", category: "pr_merge", summary: "Merge picoduck/wollipog#12", handedOff: true, createdAt: NOW },
+      ] },
+    }),
+  });
+  const panel = await mount({ initial: root, client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    const section = [...panel.container.querySelectorAll("section")]
+      .find((candidate) => candidate.querySelector("h3")?.textContent === "Waiting for You")!;
+    assert.ok(section, "Waiting for You is shown");
+    assert.deepEqual([...section.querySelectorAll("dt")].map((term) => term.textContent), ["Kept by Rule", "Rule Source", "Rule", "Handed to You"]);
+    await click(section.querySelector("button[aria-label='Open Request: Merge picoduck/wollipog#11']")!);
+    await click(section.querySelector("button[aria-label='Open Request: Merge picoduck/wollipog#12']")!);
+    assert.deepEqual(harnessRequests.openedElsewhere, [["s_worker", "occ_nested"], ["s_worker", "occ_handed"]]);
+    assert.equal(harnessRequests.selected.length, selectedBefore, "no other request of that session is selected");
+  } finally {
+    harnessRequests.openedElsewhere = [];
     await panel.dispose();
   }
 });
