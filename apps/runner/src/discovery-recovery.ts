@@ -10,7 +10,7 @@ export class DiscoveryRecovery {
   private attempt = 0;
   private passId = "";
   private entryPoint = "inventory";
-  private failed = new Set<string>();
+  private failed = new Map<string, string>();
 
   constructor(private readonly rediscover: () => void, private readonly log: (line: string) => void) {}
 
@@ -23,7 +23,7 @@ export class DiscoveryRecovery {
 
   complete(agents: readonly AgentDefinition[]): void {
     let retry = false;
-    const failed = new Set<string>();
+    const failed = new Map<string, string>();
     for (const agent of agents) {
       if (agent.driver !== "claude-code" || (agent.context?.kind ?? "native") !== "native" ||
           agent.installation?.selection === "other" || agent.harnessSelectionBlocked) continue;
@@ -35,11 +35,14 @@ export class DiscoveryRecovery {
       const auth = agent.providerAccountReadiness?.defaultAuthStatus ?? agent.authStatus;
       const reason = failure?.code ?? (auth === "unauthenticated" ? "unauthenticated" : "launch_not_ready");
       const retryable = failure?.retryable === true;
-      failed.add(agent.id);
+      failed.set(agent.id, reason);
       retry ||= retryable;
-      this.record(agent.id, reason, { retryable,
-        nextRetryInMs: retryable && this.attempt < DISCOVERY_RECOVERY_ATTEMPTS ? DISCOVERY_RECOVERY_DELAY_MS : null,
-        retriesRemaining: DISCOVERY_RECOVERY_ATTEMPTS - this.attempt });
+      // Keep each retry observable, but suppress unchanged definitive states between inventories.
+      if (retryable || this.failed.get(agent.id) !== reason) {
+        this.record(agent.id, reason, { retryable,
+          nextRetryInMs: retryable && this.attempt < DISCOVERY_RECOVERY_ATTEMPTS ? DISCOVERY_RECOVERY_DELAY_MS : null,
+          retriesRemaining: DISCOVERY_RECOVERY_ATTEMPTS - this.attempt });
+      }
     }
     this.failed = failed;
     if (!retry || this.attempt >= DISCOVERY_RECOVERY_ATTEMPTS) return;
@@ -60,5 +63,62 @@ export class DiscoveryRecovery {
   dispose(): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
+  }
+}
+
+/** The production discovery lifecycle: serialize passes, coalesce refreshes, and stop retries
+ * even if an in-flight inventory completes after shutdown. Every callback returns final,
+ * published metadata; only then may recovery observe it. */
+export class DiscoveryCoordinator {
+  private running = false;
+  private pending = false;
+  private refreshModels = false;
+  private refreshUsage = false;
+  private stopped = false;
+  private readonly recovery: DiscoveryRecovery;
+
+  constructor(
+    private readonly discover: (refreshModels: boolean, refreshUsage: boolean) => Promise<readonly AgentDefinition[]>,
+    log: (line: string) => void,
+    private readonly failed: (error: unknown) => void,
+  ) {
+    this.recovery = new DiscoveryRecovery(() => void this.execute(false, false, true), log);
+  }
+
+  run(refreshModels = false, refreshUsage = true): Promise<void> {
+    return this.execute(refreshModels, refreshUsage, false);
+  }
+
+  private async execute(refreshModels: boolean, refreshUsage: boolean, recovery: boolean): Promise<void> {
+    if (this.stopped) return;
+    if (this.running) {
+      this.pending = true;
+      this.refreshModels ||= refreshModels;
+      this.refreshUsage ||= refreshUsage;
+      return;
+    }
+    this.running = true;
+    this.recovery.begin(recovery);
+    try {
+      const agents = await this.discover(refreshModels, refreshUsage);
+      if (!this.stopped) this.recovery.complete(agents);
+    } catch (error) {
+      this.failed(error);
+    } finally {
+      this.running = false;
+      if (this.pending && !this.stopped) {
+        this.pending = false;
+        const models = this.refreshModels, usage = this.refreshUsage;
+        this.refreshModels = false;
+        this.refreshUsage = false;
+        void this.run(models, usage);
+      }
+    }
+  }
+
+  stop(): void {
+    this.stopped = true;
+    this.pending = false;
+    this.recovery.dispose();
   }
 }

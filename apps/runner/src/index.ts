@@ -8,7 +8,7 @@ import { ReviewWriterRegistry } from "./review-writers.js";
 import { ReviewSnapshotter } from "./review-snapshot.js";
 import { ReviewerSecurity } from "./reviewer-security.js";
 import { defaultReviewSessionDependencies, reviewLaunchArgs, reviewSessionDiscoveryReason, ReviewSessionLauncher } from "./review-sessions.js";
-import { DiscoveryRecovery } from "./discovery-recovery.js";
+import { DiscoveryCoordinator } from "./discovery-recovery.js";
 import { PullRequestWatcher } from "./pull-request-watches.js";
 import { removeConfiguredWorkspace, WorkspaceRemovals } from "./workspace-removals.js";
 import { contextGhRunner } from "./campaign-forge-status.js";
@@ -2135,11 +2135,6 @@ function queueSkillKeptAside(msg: SkillKeptAsideMessage): void {
   skillsReconcileQueue = skillsReconcileQueue.then(run, run);
 }
 
-let discovering = false;
-let rediscoverPending = false;
-let rediscoverRefreshModels = false;
-let rediscoverRefreshSubscriptionUsage = false;
-
 /** Inspect the same account a new native launch would select, under its own lease. Installation
  * discovery remains independent when this HOME is held by another runner. */
 async function authorizeDiscoveryLaunchHome(agent: AgentDefinition, env: Record<string, string>) {
@@ -2154,7 +2149,8 @@ async function authorizeDiscoveryLaunchHome(agent: AgentDefinition, env: Record<
 let discoveryDone = false;
 const DISCOVERY_REFRESH_MS = 5 * 60_000;
 let discoveryTimer: ReturnType<typeof setInterval> | null = null;
-const discoveryRecovery = new DiscoveryRecovery(() => void runDiscovery(false, false, true), log);
+const discoveryCoordinator = new DiscoveryCoordinator(discoverAndPublish, log,
+  (error) => log(`discovery failed: ${(error as Error).message}`));
 
 function publishSubscriptionUsageInventory(refreshCodex: boolean): void {
   if (!shouldPublishSubscriptionUsageInventory(discoveryDone, controlPlaneProtocolVersion)) return;
@@ -2179,143 +2175,124 @@ function publishSubscriptionUsageInventory(refreshCodex: boolean): void {
 /** Probe installed agents, merge into the advertised list, and push to the control
  * plane if already registered. Safe to call repeatedly (e.g. on a rediscover) — a
  * call made while a pass is in flight is coalesced into a single trailing rerun. */
-async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = true, recovery = false): Promise<void> {
-  if (shuttingDown) return;
-  if (discovering) {
-    rediscoverPending = true;
-    rediscoverRefreshModels ||= refreshModels;
-    rediscoverRefreshSubscriptionUsage ||= refreshSubscriptionUsage;
-    return;
-  }
-  discovering = true;
-  discoveryRecovery.begin(recovery);
-  try {
-    const registryPromise = config.features.acpRegistry
-      ? discoverRegistryAgents({
-          dataDir: config.dataDir,
-          allowedAgentIds: config.acpRegistryAgents,
-          refresh: refreshModels,
-          authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env),
-        }).catch((error) => {
-          log(`ACP Registry unavailable: ${(error as Error).message}`);
-          return [];
-        })
-      : Promise.resolve([]);
-    const [nativeAgents, registryAgents, configuredAcpAgents, editors] = await Promise.all([
-      discoverAgents({ authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env), authorizeLaunchHome: authorizeDiscoveryLaunchHome }),
-      registryPromise,
-      probeConfiguredAcpAgents(configAgents, (agentId) => {
-        const configured = config.agents.find((agent) => agent.id === agentId);
-        if (!configured) throw new Error("configured agent is unavailable");
-        return resolveAgentEnvironment(configured);
-      }, { authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env) }),
-      discoverEditors(),
-    ]);
-    const configuredPiAgents = await probeConfiguredPiAgents(configAgents, (agentId) => {
+function runDiscovery(refreshModels = false, refreshSubscriptionUsage = true): Promise<void> {
+  return discoveryCoordinator.run(refreshModels, refreshSubscriptionUsage);
+}
+
+async function discoverAndPublish(refreshModels: boolean, refreshSubscriptionUsage: boolean): Promise<readonly AgentDefinition[]> {
+  const registryPromise = config.features.acpRegistry
+    ? discoverRegistryAgents({
+        dataDir: config.dataDir,
+        allowedAgentIds: config.acpRegistryAgents,
+        refresh: refreshModels,
+        authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env),
+      }).catch((error) => {
+        log(`ACP Registry unavailable: ${(error as Error).message}`);
+        return [];
+      })
+    : Promise.resolve([]);
+  const [nativeAgents, registryAgents, configuredAcpAgents, editors] = await Promise.all([
+    discoverAgents({ authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env), authorizeLaunchHome: authorizeDiscoveryLaunchHome }),
+    registryPromise,
+    probeConfiguredAcpAgents(configAgents, (agentId) => {
       const configured = config.agents.find((agent) => agent.id === agentId);
       if (!configured) throw new Error("configured agent is unavailable");
       return resolveAgentEnvironment(configured);
-    }, { discovered: nativeAgents, authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env),
-      authorizeLaunchHome: authorizeDiscoveryLaunchHome });
-    const discovered = [...nativeAgents, ...registryAgents];
-    freshSafeWslLaunches.clear();
-    for (const agent of nativeAgents) {
-      if (agent.wslAgentControl?.safeLauncherProtocolVersion !== 1) continue;
-      const key = safeWslLaunchKey(agent);
-      if (key) freshSafeWslLaunches.add(key);
-    }
-    // Enrich the merged list with dynamic per-version/context models (live app-server model/list,
-    // labeled cache fallback, codex-exec cache, or Claude aliases), replacing the catalog list.
-    metadata.agents = applyClaudeHookCapability(
-      await enrichAgentModels(
-        mergeAgents(configAgents, discovered, [...configuredAcpAgents, ...configuredPiAgents],
-          new Set(config.agents.filter((agent) => Object.keys(agent.env ?? {}).length > 0).map((agent) => agent.id))), {
-        refresh: refreshModels,
-        authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env),
-        authorizeLaunchHome: authorizeDiscoveryLaunchHome,
-        resolveEnv: (agent) => {
-          const configured = config.agents.find((candidate) => candidate.id === agent.id);
-          return configured ? resolveRunnerLocalAgentEnvironment(configured, agent.env) : agent.env;
-        },
-      }),
-      claudeHookFeatureEnabled,
-      log,
-    );
-    metadata.agents = withOrchestratorAdditiveRole(
-      withOrchestratorPreset(metadata.agents, { isolationMode: config.executionIsolation.mode }),
-    );
-    // A definitive native discovery result is newer authoritative evidence than the process-local
-    // failure overlay. Drop only its status (preserving ACP capability state) so a terminal login
-    // followed by rediscovery cannot be overwritten by stale "unauthenticated" state.
-    for (const agent of metadata.agents) {
-      if ((agent.driver ?? "acp") === "acp" || agent.authStatus === undefined || agent.authStatus === "unknown") continue;
-      const runtime = acpAuthStatus.get(agent.id);
-      if (!runtime?.status) continue;
-      if (runtime.capabilities) acpAuthStatus.set(agent.id, { capabilities: runtime.capabilities });
-      else acpAuthStatus.delete(agent.id);
-    }
-    metadata.agents = overlayAcpAuthStatus(metadata.agents, acpAuthStatus);
-    metadata.editors = editors;
-    if (refreshModels && metadata.executionTargets) {
-      await Promise.all([containerTargets.refreshInstallations(), cloudTargets.refreshInstallations()]);
-      metadata.executionTargets = [...containerTargets.definitions(), ...cloudTargets.definitions()];
-    }
-    const accountStatus = await probeProviderAccountsForDiscovery({ accounts: config.providerAccounts, agents: metadata.agents,
-      usable: (account) => providerProfileGrants.usable(account),
-      environment: (agent) => runnerLocalAgentEnv(agent.id, agent.driver ?? "acp", agent.context ?? { kind: "native" }),
-      probe: (agent, env) => sessions.probeProviderAccountAuthentication(agent, env),
-      failed: (account) => log(`${account.provider} provider-account authentication probe failed`),
-    });
-    for (const [accountId, status] of accountStatus) providerAccountAuthStatus.set(accountId, status);
-    metadata.agents = projectProviderAccountDiscoveryReadiness(metadata.agents, config.providerAccounts, accountStatus,
-      (account) => providerProfileGrants.usable(account));
-    log(JSON.stringify({ event: "provider_discovery_completed", runnerId: config.runnerId,
-      nativeProbeHome: "isolated", agents: metadata.agents.length,
-      available: metadata.agents.filter((agent) => agent.available === true).length,
-      signInRequired: metadata.agents.filter((agent) => agent.authStatus === "unauthenticated").length }));
-    discoveryDone = true;
-    const extra = metadata.agents.length - configAgents.length;
-    log(
-      `discovery: ${nativeAgents.length} local + ${registryAgents.length} registry agent(s), ` +
-        `${extra} added (${metadata.agents.length} total), ` +
-        `${editors.length} editor(s)`,
-    );
-    // Always push the result. sendUp buffers in the outbox until the runner is
-    // registered, so a pass that finishes after the register frame is sent (but
-    // before the `registered` reply) still reaches the control plane via flush —
-    // it isn't lost to the stale agent list in the already-sent register.
-    const update: AgentsUpdatedMessage = {
-      type: "agents_updated",
-      runnerId: config.runnerId,
-      agents: agentsForControlPlane(),
-      providerAccounts: providerAccountsForControlPlane(),
-      editors,
-      ...(refreshModels && metadata.executionTargets ? { executionTargets: metadata.executionTargets } : {}),
-    };
-    sendUp(update);
-    if (!shuttingDown) discoveryRecovery.complete(metadata.agents);
-    // The agent list may have gained a Claude Code installation (or its reviewer key) since the
-    // last proof; a changed attestation republishes agents without waiting for a reconnect.
-    refreshMediaReviewers();
-    // Discovery may have changed the agent list, and harness skill dirs drift out of band: heal
-    // links against the last authoritative desired list (scan-only, no removals, before the first
-    // sync) and report fresh deployment + unmanaged state. Gated so a pre-v90 control plane never
-    // receives an unsolicited message type it cannot parse.
-    if (runnerSupportsProtocol(controlPlaneProtocolVersion, "agentSkills")) queueSkillsReconcile();
-    if (registered) publishSubscriptionUsageInventory(refreshSubscriptionUsage);
-  } catch (err) {
-    log(`discovery failed: ${(err as Error).message}`);
-  } finally {
-    discovering = false;
-    if (rediscoverPending) {
-      rediscoverPending = false;
-      const refresh = rediscoverRefreshModels;
-      const refreshUsage = rediscoverRefreshSubscriptionUsage;
-      rediscoverRefreshModels = false;
-      rediscoverRefreshSubscriptionUsage = false;
-      void runDiscovery(refresh, refreshUsage);
-    }
+    }, { authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env) }),
+    discoverEditors(),
+  ]);
+  const configuredPiAgents = await probeConfiguredPiAgents(configAgents, (agentId) => {
+    const configured = config.agents.find((agent) => agent.id === agentId);
+    if (!configured) throw new Error("configured agent is unavailable");
+    return resolveAgentEnvironment(configured);
+  }, { discovered: nativeAgents, authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env),
+    authorizeLaunchHome: authorizeDiscoveryLaunchHome });
+  const discovered = [...nativeAgents, ...registryAgents];
+  freshSafeWslLaunches.clear();
+  for (const agent of nativeAgents) {
+    if (agent.wslAgentControl?.safeLauncherProtocolVersion !== 1) continue;
+    const key = safeWslLaunchKey(agent);
+    if (key) freshSafeWslLaunches.add(key);
   }
+  // Enrich the merged list with dynamic per-version/context models (live app-server model/list,
+  // labeled cache fallback, codex-exec cache, or Claude aliases), replacing the catalog list.
+  metadata.agents = applyClaudeHookCapability(
+    await enrichAgentModels(
+      mergeAgents(configAgents, discovered, [...configuredAcpAgents, ...configuredPiAgents],
+        new Set(config.agents.filter((agent) => Object.keys(agent.env ?? {}).length > 0).map((agent) => agent.id))), {
+      refresh: refreshModels,
+      authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env),
+      authorizeLaunchHome: authorizeDiscoveryLaunchHome,
+      resolveEnv: (agent) => {
+        const configured = config.agents.find((candidate) => candidate.id === agent.id);
+        return configured ? resolveRunnerLocalAgentEnvironment(configured, agent.env) : agent.env;
+      },
+    }),
+    claudeHookFeatureEnabled,
+    log,
+  );
+  metadata.agents = withOrchestratorAdditiveRole(
+    withOrchestratorPreset(metadata.agents, { isolationMode: config.executionIsolation.mode }),
+  );
+  // A definitive native discovery result is newer authoritative evidence than the process-local
+  // failure overlay. Drop only its status (preserving ACP capability state) so a terminal login
+  // followed by rediscovery cannot be overwritten by stale "unauthenticated" state.
+  for (const agent of metadata.agents) {
+    if ((agent.driver ?? "acp") === "acp" || agent.authStatus === undefined || agent.authStatus === "unknown") continue;
+    const runtime = acpAuthStatus.get(agent.id);
+    if (!runtime?.status) continue;
+    if (runtime.capabilities) acpAuthStatus.set(agent.id, { capabilities: runtime.capabilities });
+    else acpAuthStatus.delete(agent.id);
+  }
+  metadata.agents = overlayAcpAuthStatus(metadata.agents, acpAuthStatus);
+  metadata.editors = editors;
+  if (refreshModels && metadata.executionTargets) {
+    await Promise.all([containerTargets.refreshInstallations(), cloudTargets.refreshInstallations()]);
+    metadata.executionTargets = [...containerTargets.definitions(), ...cloudTargets.definitions()];
+  }
+  const accountStatus = await probeProviderAccountsForDiscovery({ accounts: config.providerAccounts, agents: metadata.agents,
+    usable: (account) => providerProfileGrants.usable(account),
+    environment: (agent) => runnerLocalAgentEnv(agent.id, agent.driver ?? "acp", agent.context ?? { kind: "native" }),
+    probe: (agent, env) => sessions.probeProviderAccountAuthentication(agent, env),
+    failed: (account) => log(`${account.provider} provider-account authentication probe failed`),
+  });
+  for (const [accountId, status] of accountStatus) providerAccountAuthStatus.set(accountId, status);
+  metadata.agents = projectProviderAccountDiscoveryReadiness(metadata.agents, config.providerAccounts, accountStatus,
+    (account) => providerProfileGrants.usable(account));
+  log(JSON.stringify({ event: "provider_discovery_completed", runnerId: config.runnerId,
+    nativeProbeHome: "isolated", agents: metadata.agents.length,
+    available: metadata.agents.filter((agent) => agent.available === true).length,
+    signInRequired: metadata.agents.filter((agent) => agent.authStatus === "unauthenticated").length }));
+  discoveryDone = true;
+  const extra = metadata.agents.length - configAgents.length;
+  log(
+    `discovery: ${nativeAgents.length} local + ${registryAgents.length} registry agent(s), ` +
+      `${extra} added (${metadata.agents.length} total), ` +
+      `${editors.length} editor(s)`,
+  );
+  // Always push the result. sendUp buffers in the outbox until the runner is
+  // registered, so a pass that finishes after the register frame is sent (but
+  // before the `registered` reply) still reaches the control plane via flush —
+  // it isn't lost to the stale agent list in the already-sent register.
+  const update: AgentsUpdatedMessage = {
+    type: "agents_updated",
+    runnerId: config.runnerId,
+    agents: agentsForControlPlane(),
+    providerAccounts: providerAccountsForControlPlane(),
+    editors,
+    ...(refreshModels && metadata.executionTargets ? { executionTargets: metadata.executionTargets } : {}),
+  };
+  sendUp(update);
+  // The agent list may have gained a Claude Code installation (or its reviewer key) since the
+  // last proof; a changed attestation republishes agents without waiting for a reconnect.
+  refreshMediaReviewers();
+  // Discovery may have changed the agent list, and harness skill dirs drift out of band: heal
+  // links against the last authoritative desired list (scan-only, no removals, before the first
+  // sync) and report fresh deployment + unmanaged state. Gated so a pre-v90 control plane never
+  // receives an unsolicited message type it cannot parse.
+  if (runnerSupportsProtocol(controlPlaneProtocolVersion, "agentSkills")) queueSkillsReconcile();
+  if (registered) publishSubscriptionUsageInventory(refreshSubscriptionUsage);
+  return metadata.agents;
 }
 
 let backoff = INITIAL_BACKOFF_MS;
@@ -4557,7 +4534,7 @@ function shutdown(exitCode = 0): void {
     clearInterval(sessionCommandRecoveryTimer);
     clearInterval(credentialRegistrationRetryTimer);
     if (discoveryTimer) clearInterval(discoveryTimer);
-    discoveryRecovery.dispose();
+    discoveryCoordinator.stop();
     if (reconnectTimer) clearTimeout(reconnectTimer);
   });
   bestEffort("stop subscription usage", () => subscriptionUsage.shutdown());
