@@ -4066,13 +4066,46 @@ test("historical reconciliation falls back to the durable rollout after App Serv
 
     const proof = await h.driver.reconcileCompletedCommand?.("workflow-historical", command);
     assert.equal(proof?.providerItemId, "command-historical");
-    assert.deepEqual(fallback, [
+    assert.equal(typeof fallback?.[6], "function");
+    assert.deepEqual(fallback?.slice(0, 6), [
       { kind: "native" }, "/provider/home/.codex", "thread-restarted", "workflow-historical", command, undefined,
     ]);
   } finally {
     if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previousCodexHome;
   }
+});
+
+test("standalone CLI admissions reconcile in the active turn and preserve re-enqueue ordering", async () => {
+  const h = makeHarness({ resumeId: "thread-cli", context: { kind: "native" } });
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/4350 --squash --match-head-commit ${"a".repeat(40)}`;
+  const admission = (occurrenceId: string) => ({ id: `admission-${occurrenceId}`, type: "commandExecution",
+    command: `"$WOLLIPOG_CLI" decision consume ${occurrenceId} --snapshot '{"category":"pr_merge"}' --action '${JSON.stringify({
+      kind: "pr_merge_enqueue", command,
+    })}' --json`, status: "completed", exitCode: 0,
+    aggregatedOutput: `Warning: example\n${JSON.stringify({ decision: { occurrenceId, status: "approved", actionAdmission: {
+      kind: "pr_merge_enqueue", command, providerThreadId: "thread-cli", providerTurnId: "turn-cli",
+    } } })}\n` });
+  const enqueue = { id: "command-cli", type: "commandExecution", command, status: "completed", exitCode: 0 };
+  const turn = { id: "turn-cli", status: "inProgress", itemsView: "full", items: [admission("workflow-cli"), enqueue] };
+  (h.driver as any).threadId = "thread-cli";
+  (h.driver as any).peer = { request: async () => ({ thread: { id: "thread-cli", turns: [turn] } }) };
+  assert.equal((await h.driver.reconcileCompletedCommand("workflow-cli", command))?.providerItemId, "command-cli");
+  const firstAdmission = turn.items[0]!;
+  firstAdmission.command = `/usr/bin/zsh -lc '${firstAdmission.command.replaceAll("'", "'\\''")}'`;
+  assert.ok(await h.driver.reconcileCompletedCommand("workflow-cli", command), "provider shell rendering preserves CLI admission JSON");
+  turn.items.push({ ...enqueue, id: "neighbor", command: "gh pr view 4350 --json state" });
+  assert.ok(await h.driver.reconcileCompletedCommand("workflow-cli", command));
+  enqueue.exitCode = 1;
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-cli", command), null);
+  assert.match(h.driver.completedCommandReconciliationFailure(), /successful completion/u);
+  enqueue.exitCode = 0;
+  turn.items = [enqueue, admission("workflow-cli")];
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-cli", command), null);
+  assert.match(h.driver.completedCommandReconciliationFailure(), /action admission before/u);
+  turn.items = [admission("workflow-cli"), enqueue, admission("workflow-latest"), { ...enqueue, id: "latest" }];
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-cli", command), null);
+  assert.equal((await h.driver.reconcileCompletedCommand("workflow-latest", command))?.providerItemId, "latest");
 });
 
 test("historical CLI admission survives a live projection that retained only the successful command", async () => {
@@ -4246,6 +4279,19 @@ test("historical reconciliation searches the provider's inherited native CODEX_H
     if (previous === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previous;
   }
+});
+
+test("historical reconciliation reads only the exact runner-attested transcript bind", async () => {
+  const h = makeHarness({ resumeId: "thread-bind", context: { kind: "native" }, env: { CODEX_HOME: "/provider/home" },
+    isolation: { backend: "bwrap", command: "bwrap", args: [], network: "inherit", writableBinds: [
+      { source: "/runner/private/session/sessions", target: "/provider/home/sessions" },
+      { source: "/runner/other/sessions", target: "/other/home/sessions" },
+    ] } });
+  (h.driver as any).threadId = "thread-bind";
+  let home: unknown;
+  (h.driver as any).readRolloutProof = async (_context: unknown, codexHome: unknown) => { home = codexHome; return null; };
+  await h.driver.reconcileCompletedCommand("workflow-bind", "gh pr merge example");
+  assert.equal(home, "/runner/private/session");
 });
 
 test("historical reconciliation derives a POSIX Codex home for Direct WSL", async () => {

@@ -153,3 +153,45 @@ test("native rollout lookup recovers the historical child proof after process re
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+// Shape observed in Codex 0.154+ provider-owned item_completed records. These are fake
+// commands/responses; no test starts a provider or runs an enqueue.
+function cliItem(occurrence = OCCURRENCE, id = "admission-modern", extra: Record<string, unknown> = {}): string {
+  return commandItem(id, `"$WOLLIPOG_CLI" decision consume ${occurrence} --snapshot '${JSON.stringify({
+    category: "pr_merge",
+  })}' --action '${JSON.stringify({ kind: "pr_merge_enqueue", command: COMMAND })}' --json`,
+  "2026-11-06T23:00:00Z", "completed", { aggregated_output: `(node:123) Warning: example warning\n${JSON.stringify({
+    decision: { occurrenceId: occurrence, status: "approved", actionAdmission: {
+      kind: "pr_merge_enqueue", command: COMMAND, providerThreadId: THREAD, providerTurnId: TURN,
+    } },
+  })}\n`, ...extra });
+}
+
+test("modern CLI proof reads aggregated_output and ignores separate neighboring commands", () => {
+  const content = [line("session_meta", { id: THREAD }, ""), cliItem(),
+    commandItem("merge", COMMAND, ""), commandItem("other", "gh pr view 1146 --json state", ""), completedTurn()].join("\n");
+  assert.equal(parseCodexRolloutCompletedCommand(content, THREAD, OCCURRENCE, COMMAND)?.providerAdmissionItemId,
+    "admission-modern");
+  for (const broken of [
+    content.replace('"exit_code":0', '"exit_code":1'),
+    content.replace('"id":"merge","status":"completed"', '"id":"merge","status":"failed"'),
+    content.replace(`"-lc",${JSON.stringify(COMMAND)}],"exit_code":0`,
+      `"-lc",${JSON.stringify(COMMAND + " --delete-branch")}],"exit_code":0`),
+    content.replace('providerTurnId\\\":\\\"' + TURN, 'providerTurnId\\\":\\\"other-turn'),
+    [line("session_meta", { id: THREAD }, ""), commandItem("merge", COMMAND, ""), cliItem(), completedTurn()].join("\n"),
+  ]) assert.equal(parseCodexRolloutCompletedCommand(broken, THREAD, OCCURRENCE, COMMAND), null);
+});
+
+test("modern CLI re-enqueue belongs only to the latest admission before the last exact success", () => {
+  const content = [line("session_meta", { id: THREAD }, ""), cliItem(), commandItem("ejected", COMMAND, ""),
+    cliItem("workflow-latest", "admission-latest"), commandItem("landed", COMMAND, ""), completedTurn()].join("\n");
+  assert.equal(parseCodexRolloutCompletedCommand(content, THREAD, OCCURRENCE, COMMAND), null);
+  assert.equal(parseCodexRolloutCompletedCommand(content, THREAD, "workflow-latest", COMMAND)?.providerItemId, "landed");
+  assert.equal(parseCodexRolloutCompletedCommand(content + "\n" + commandItem("pending", COMMAND, "", "inProgress"),
+    THREAD, "workflow-latest", COMMAND), null, "an unfinished later exact command can still enqueue");
+  const interleaved = [line("session_meta", { id: THREAD }, ""), cliItem(),
+    line("event_msg", { type: "item_completed", item: { type: "McpToolCall", server: "wollipog",
+      tool: "consume_workflow_decision", arguments: { occurrenceId: "workflow-other", action: { command: COMMAND } } } }, ""),
+    commandItem("landed", COMMAND, ""), completedTurn()].join("\n");
+  assert.equal(parseCodexRolloutCompletedCommand(interleaved, THREAD, OCCURRENCE, COMMAND), null);
+});

@@ -336,6 +336,8 @@ export interface Driver {
     command: string,
     fence?: CompletedCommandReconciliationFence,
   ): Promise<CompletedCommandReconciliationProof | null>;
+  /** Content-safe reason from the last history proof attempt; never raw provider output. */
+  completedCommandReconciliationFailure?(): string;
 
   /** Incorporate input into the currently active provider turn when the transport can receipt it. */
   steer?(input: DriverSteerInput): Promise<DriverSteerResult>;

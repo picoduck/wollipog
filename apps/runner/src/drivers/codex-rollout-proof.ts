@@ -4,6 +4,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
 import { run } from "../discovery/resolve.js";
+import { codexCliAdmission } from "./codex-cli-admission.js";
 import type {
   CompletedCommandReconciliationFence,
   CompletedCommandReconciliationProof,
@@ -56,7 +57,8 @@ function completedCommandItem(payload: Json, threadId: string): {
     turnId: payload.turn_id,
     itemId: item.id,
     script,
-    stdout: typeof item.stdout === "string" ? item.stdout : "",
+    stdout: typeof item.aggregated_output === "string" ? item.aggregated_output :
+      typeof item.stdout === "string" ? item.stdout : "",
   };
 }
 
@@ -90,11 +92,14 @@ export function parseCodexRolloutCompletedCommand(
   occurrenceId: string,
   command: string,
   fence?: CompletedCommandReconciliationFence,
+  onFailure?: (reason: string) => void,
 ): CompletedCommandReconciliationProof | null {
   if (!boundedId(threadId) || !boundedId(occurrenceId) || !command || command.length > 2000) return null;
   let sessionIdentityMatches = false;
   const items: Array<ReturnType<typeof completedCommandItem> & { ordinal: number }> = [];
   const completedTurns = new Map<string, number[]>();
+  const mcpBoundaries: Array<{ ordinal: number; occurrenceId: unknown }> = [];
+  const exactCommandStatuses = new Map<string, unknown>();
   let ordinal = 0;
   for (const line of content.split("\n")) {
     const row = parseLine(line);
@@ -102,6 +107,16 @@ export function parseCodexRolloutCompletedCommand(
     const payload = object(row.payload);
     if (row.type === "session_meta" && payload?.id === threadId) sessionIdentityMatches = true;
     if (row.type !== "event_msg" || !payload) continue;
+    const nativeItem = object(payload.item);
+    if (nativeItem?.type === "CommandExecution" && boundedId(nativeItem.id) &&
+        shellScript(nativeItem.command) === command) exactCommandStatuses.set(nativeItem.id, nativeItem.status);
+    if (payload.type === "item_completed" && nativeItem?.type === "McpToolCall" &&
+        nativeItem.server === "wollipog" && nativeItem.tool === "consume_workflow_decision") {
+      const args = object(nativeItem.arguments);
+      if (!args || object(args.action)?.command === command) {
+        mcpBoundaries.push({ ordinal, occurrenceId: args?.occurrenceId });
+      }
+    }
     if (payload.type === "task_complete" && boundedId(payload.turn_id)) {
       const completions = completedTurns.get(payload.turn_id) ?? [];
       completions.push(ordinal);
@@ -112,12 +127,43 @@ export function parseCodexRolloutCompletedCommand(
     ordinal += 1;
   }
   if (!sessionIdentityMatches) return null;
+  if ([...exactCommandStatuses.values()].some((status) => !["completed", "failed", "interrupted"].includes(status as string))) {
+    onFailure?.("provider rollout contains an unfinished exact command");
+    return null;
+  }
   const commands = items.filter((item) => item.script === command);
-  if (commands.length !== 1) return null;
-  const completed = commands[0]!;
+  if (!commands.length) {
+    onFailure?.("provider rollout did not prove successful completion of the exact command");
+    return null;
+  }
+  const cliAdmissions = items.flatMap((item) => {
+    const cli = codexCliAdmission(item.script, item.stdout, threadId, item.turnId);
+    if (!cli && item.script.includes(" decision consume ")) {
+      mcpBoundaries.push({ ordinal: item.ordinal, occurrenceId: undefined });
+    }
+    return cli?.command === command ? [{ item, cli }] : [];
+  });
+  const ownCli = cliAdmissions.filter(({ cli }) => cli.occurrenceId === occurrenceId && cli.approved);
+  const own = ownCli.length === 1 ? ownCli[0] : undefined;
+  const next = own && cliAdmissions.find(({ item, cli }) => item.ordinal > own.item.ordinal &&
+    cli.occurrenceId !== occurrenceId);
+  const nextMcp = own && mcpBoundaries.sort((a, b) => a.ordinal - b.ordinal).find((boundary) => boundary.ordinal > own.item.ordinal &&
+    boundary.occurrenceId !== occurrenceId);
+  const window = own && commands.filter((item) => item.ordinal > own.item.ordinal &&
+    (!next || item.ordinal < next.item.ordinal) && (!nextMcp || item.ordinal < nextMcp.ordinal));
+  const completed = own ? window?.length === 1 && window[0] === commands.at(-1) ? window[0] : undefined :
+    commands.length === 1 ? commands[0] : undefined;
+  if (!completed || ownCli.length > 1) {
+    onFailure?.("provider rollout could not uniquely bind the successful command to its action admission");
+    return null;
+  }
   const turnCompletions = completedTurns.get(completed.turnId) ?? [];
-  if (turnCompletions.length !== 1 || turnCompletions[0]! <= completed.ordinal) return null;
+  if (turnCompletions.length !== 1 || turnCompletions[0]! <= completed.ordinal) {
+    onFailure?.("provider rollout did not prove completion of the command's turn");
+    return null;
+  }
   if (fence) {
+    if (commands.length !== 1) return null;
     if (fence.providerThreadId !== threadId || completed.turnId !== fence.providerTurnId ||
         completed.itemId !== fence.providerItemId) return null;
     return {
@@ -127,9 +173,22 @@ export function parseCodexRolloutCompletedCommand(
       providerItemId: completed.itemId,
     };
   }
+  if (own) {
+    if (own.item.turnId !== completed.turnId) return null;
+    return {
+      commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
+      providerThreadId: threadId,
+      providerTurnId: completed.turnId,
+      providerAdmissionItemId: own.item.itemId,
+      providerItemId: completed.itemId,
+    };
+  }
   const admissions = items.filter((item) => item.turnId === completed.turnId &&
     item.ordinal < completed.ordinal && legacyAdmission(item, occurrenceId));
-  if (admissions.length !== 1) return null;
+  if (admissions.length !== 1) {
+    onFailure?.("provider rollout did not prove the exact action admission before the successful command");
+    return null;
+  }
   return {
     commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
     providerThreadId: threadId,
@@ -197,10 +256,15 @@ export async function readCodexRolloutCompletedCommand(
   occurrenceId: string,
   command: string,
   fence?: CompletedCommandReconciliationFence,
+  onFailure?: (reason: string) => void,
 ): Promise<CompletedCommandReconciliationProof | null> {
   if (!boundedId(threadId)) return null;
   const content = context.kind === "wsl"
     ? await wslRollout(context.distro, threadId, codexHome)
     : nativeRollout(threadId, codexHome);
-  return content ? parseCodexRolloutCompletedCommand(content, threadId, occurrenceId, command, fence) : null;
+  if (!content) {
+    onFailure?.("provider rollout history was unavailable or ambiguous");
+    return null;
+  }
+  return parseCodexRolloutCompletedCommand(content, threadId, occurrenceId, command, fence, onFailure);
 }

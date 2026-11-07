@@ -2901,6 +2901,56 @@ function scopeImpactFixture(h: ReturnType<typeof harness>, delegateMerge = true)
 
 /** A Full Control campaign whose boundary gives the Orchestrator merges and scope, so a person's
  * scope approval re-mints it (#3915). */
+test("#4350 a CLI-armed Codex merge reconciles from fake provider history and verifies without stopping", async () => {
+  const { CodexAppServerDriver } = await import("../../runner/src/drivers/codex-app-server.js");
+  const h = harness(false);
+  try {
+    const f = scopeImpactFixture(h);
+    f.child("child", "issue:100");
+    h.hub.setSessionQueue("child", [], false, "runner-turn");
+    h.db.reconcileRunnerHistory("child", 0, 0);
+    const driver = new CodexAppServerDriver({ command: "unused-fake-provider", args: [], cwd: "/tmp",
+      env: {}, config: {}, context: { kind: "native" } }, { onEvent() {}, onExit() {}, onStderr() {} });
+    (driver as any).threadId = "thread-cli";
+    let items: unknown[] = [];
+    (driver as any).peer = { request: async () => ({ thread: { id: "thread-cli", turns: [
+      { id: "turn-cli", status: "completed", itemsView: "full", items },
+    ] } }) };
+    const runner = h.hub.requestFromRunner;
+    h.hub.requestFromRunner = async (r, requestId, message, timeout) => {
+      if (message.type === "record_workflow_action_admission") return {
+        type: "workflow_action_admission_recorded", requestId, sessionId: "child", occurrenceId: message.occurrenceId,
+        accepted: true, sessionTurnId: message.sessionTurnId, providerTurnId: "turn-cli", providerThreadId: "thread-cli",
+        historyEpoch: 0, eventSeq: 1,
+      };
+      if (message.type === "reconcile_workflow_action") {
+        const proof = await driver.reconcileCompletedCommand(message.occurrenceId, message.command);
+        return { type: "workflow_action_reconciliation_result", requestId, sessionId: "child", occurrenceId: message.occurrenceId,
+          accepted: !!proof, ...(proof ?? {}), forgeHeadSha: message.expectedHeadSha };
+      }
+      return runner(r, requestId, message, timeout);
+    };
+    const merge = await f.armedMerge("child", 4350);
+    const decision = h.db.workflowDecisionByOccurrence(merge.occurrenceId)!;
+    items = [{ type: "commandExecution", id: "admission-cli", status: "completed", exitCode: 0,
+      command: `"$WOLLIPOG_CLI" decision consume ${merge.occurrenceId} --snapshot '${JSON.stringify(merge.snapshot)}' --action '${JSON.stringify({
+        kind: "pr_merge_enqueue", command: merge.command,
+      })}' --json`, aggregatedOutput: `Warning: example\n${JSON.stringify({ decision })}\n` },
+    { type: "commandExecution", id: "enqueue-cli", status: "completed", exitCode: 0, command: merge.command }];
+    h.svc.onSessionStatus("child", "idle");
+    const report = h.db.appendEvent("child", { kind: "agent_message", text: "Delivered.", final: true }, Date.now()).seq;
+    const verify = () => h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: report,
+      followUpsAccounted: true, workItem: { id: h.item.id, outcome: "delivered" } });
+    assert.match(verify().error ?? "", /unresolved or unconsumed workflow decision/u);
+    const reconciled = await h.svc.reconcileWorkflowDecision("child", merge.occurrenceId, { resourceSnapshot: merge.snapshot });
+    assert.ok(reconciled.ok, reconciled.error ?? "reconcile");
+    assert.equal(reconciled.data?.status, "consumed");
+    const verified = verify();
+    assert.ok(verified.ok, verified.error ?? "verify");
+    assert.equal(h.db.getSession("child")?.status, "idle", "the child was never stopped");
+  } finally { h.db.close(); }
+});
+
 function fullControlMergeHarness() {
   const h = harness(false);
   const revision = h.db.getSession("root")!.parentControlPolicy!.revision;

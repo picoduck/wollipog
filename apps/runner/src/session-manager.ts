@@ -20762,7 +20762,8 @@ export class SessionManager {
     }
     if (!proof || proof.providerThreadId !== meta.agentSessionId ||
         proof.commandDigest !== commandDigest) {
-      return fail(occurrenceId, "provider history did not contain one exact successful command");
+      return fail(occurrenceId, active.client.completedCommandReconciliationFailure?.() ??
+        "provider history could not prove the exact successful command and its action admission");
     }
     const nativeAdmission = bounded(proof.providerAdmissionItemId, 512);
     const durableAdmission = durableReceipt && !proof.providerAdmissionItemId &&
