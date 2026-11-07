@@ -18,7 +18,11 @@ import {
 const provider = { mode: "provider" as const, network: "inherit" as const };
 const bwrap = { mode: "bwrap" as const, network: "deny" as const };
 
-test("a Location switch's reuse check refuses exactly the placements the managed launch refuses (#4138)", async () => {
+test("a Location switch's reuse check refuses exactly the placements the managed launch refuses (#4138)", {
+  // The modeled launch is the native Linux bubblewrap one, which takes POSIX paths; the admin
+  // directory it writes into is a real temporary directory, which is a drive path on Windows.
+  skip: process.platform === "win32" && "the managed bubblewrap launch takes POSIX paths only",
+}, async () => {
   // The launch reserves a real `config.worktree` in the worktree's admin directory; every other
   // path is answered by the runtime stubs as canonical and existing.
   const root = mkdtempSync(join(tmpdir(), "wollipog-reuse-launch-"));
