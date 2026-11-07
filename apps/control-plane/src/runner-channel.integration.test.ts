@@ -513,6 +513,7 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
 `);
   let runnerOnlineAt: number | undefined;
   let output = "";
+  let receiptDiagnostics = "";
   let reconciliationCompleted = false;
   const trace = new ReconciliationDiagnostics();
   const captureStdout = trace.capture();
@@ -531,7 +532,12 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
     reconciliationCompleted ||= output.includes("runner_reconciliation_completed");
     if (output.includes("runner online:")) runnerOnlineAt ??= performance.now();
   });
-  child.stderr?.on("data", (chunk) => { captureStderr(chunk); output = (output + String(chunk)).slice(-128_000); });
+  child.stderr?.on("data", (chunk) => {
+    captureStderr(chunk);
+    output = (output + String(chunk)).slice(-128_000);
+    // Keep pressure/receipt probes apart from high-volume HTTP stdout throughout the replay.
+    receiptDiagnostics = (receiptDiagnostics + String(chunk)).slice(-16_000);
+  });
   const sockets: StrictSocket[] = [];
   let read: DatabaseSync | undefined;
   t.after(async () => {
@@ -722,13 +728,13 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
     assert.equal(downstreamScopeCount, 60);
     assert.ok(downstreamSkillBytes >= 65536);
     if (receiptReplay) {
-      assert.match(output, /RECEIPT_COST=\{"count":4000,/);
-      assert.match(output, /INVOCATION_RECEIPTS=64/);
+      assert.match(receiptDiagnostics, /RECEIPT_COST=\{"count":4000,/);
+      assert.match(receiptDiagnostics, /INVOCATION_RECEIPTS=64/);
       assert.equal(read.prepare("SELECT COUNT(*) AS n FROM session_prompt_commands WHERE state='completed' AND revision=3").get()?.n,
         4000, "duplicate receipt replay preserves all terminal command revisions");
-      t.diagnostic(output.match(/RECEIPT_COST=.*/)![0]);
+      t.diagnostic(receiptDiagnostics.match(/RECEIPT_COST=.*/)![0]);
     }
-    assert.doesNotMatch(output, /BULK_PRESSURE=.*"paused":true/, "compatible replay must not pause receive");
+    assert.doesNotMatch(receiptReplay ? receiptDiagnostics : output, /BULK_PRESSURE=.*"paused":true/, "compatible replay must not pause receive");
     assert.ok(maxHealthMs < 2000);
     assert.ok(maxPongMs < 2000);
     assert.equal(reconciliationCompleted, true);
