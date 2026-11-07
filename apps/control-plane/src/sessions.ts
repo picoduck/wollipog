@@ -13631,22 +13631,23 @@ export class SessionsService {
     // acknowledges when it succeeds, and the only one a closure may be dispatched at (#3915).
     const synchronizedScopeRevision = this.db.getSession(sessionId)?.orchestratorPolicy?.issueScope?.revision;
     if (session.orchestratorPolicy?.issueScope && !await this.synchronizeCampaignIssueScope(sessionId)) return fail("Campaign scope synchronization is pending; reconnect every runner and retry.", 409);
+    // #4120: another repository's delivering pull requests are read again, uncached, through a Location
+    // of their own repository: each must still read MERGED at the head and merge commit approved. A
+    // merged pull request stays merged, so this read goes first and the excluded read stays the last.
+    const crossDelivery = decision.authority === "orchestrator" ? snapshot.crossRepositoryDelivery ?? [] : [];
+    if (crossDelivery.length) {
+      const refs = crossDelivery.map(({ repository, number }) => ({ repository, number }));
+      const read = this.campaignForgeReadNow ? await this.campaignForgeReadNow(sessionId, refs).catch(() => null) : null;
+      if (JSON.stringify(closureCrossRepositoryDelivery(refs, read)) !== JSON.stringify(crossDelivery)) {
+        return fail("A delivering pull request in another campaign repository could not be confirmed merged at its verified head; request a new exact closure", 409);
+      }
+    }
     // The uncached read is the last await: a pull request reopened during synchronization is seen,
     // and only synchronous rechecks of every current-state condition separate it from consumption.
     const synchronized = this.db.getSession(sessionId) ?? session;
     if (decision.authority === "orchestrator" &&
         !await this.excludedPullRequestsStillClosed(occurrenceId, synchronized, closureExcludedRefs(closureEvidence(this.db, synchronized, snapshot)))) {
       return fail("An excluded closed pull request could not be confirmed still closed and unmerged; request a new exact closure", 409);
-    }
-    // #4120: another repository's delivering pull requests are read again, uncached, through a Location
-    // of their own repository: each must still read MERGED at the head and merge commit approved.
-    const crossDelivery = decision.authority === "orchestrator" ? snapshot.crossRepositoryDelivery ?? [] : [];
-    if (crossDelivery.length) {
-      const refs = crossDelivery.map(({ repository, number }) => ({ repository, number }));
-      const read = this.campaignForgeReadNow ? await this.campaignForgeReadNow(synchronized.id, refs).catch(() => null) : null;
-      if (JSON.stringify(closureCrossRepositoryDelivery(refs, read)) !== JSON.stringify(crossDelivery)) {
-        return fail("A delivering pull request in another campaign repository could not be confirmed merged at its verified head; request a new exact closure", 409);
-      }
     }
     const freshSession = this.db.getSession(sessionId);
     if (!freshSession || isTerminal(freshSession.status) || !campaignClosureIssueHeld(freshSession.orchestratorPolicy, issueRef) ||

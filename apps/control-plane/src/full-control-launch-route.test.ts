@@ -5506,11 +5506,15 @@ test("an owner/repo issue delivered by merged pull requests in owner/repo and ot
       // Merged, but into a feature branch: not delivered.
       ["other/repo#22", { ...merged, baseRef: "feature" }]]);
     const reads: Array<{ runnerId: string; refs: string[] }> = [];
+    /** While set, a read of other/repo is held until released; `reached` resolves once one is. */
+    const hold: { gate: Promise<void> | null; reached: () => void } = { gate: null, reached: () => undefined };
     const send = f.hub.sendToRunner.bind(f.hub);
     f.hub.sendToRunner = (runnerId, message) => {
       if (message.type !== "campaign_forge_observe") return send(runnerId, message);
       reads.push({ runnerId, refs: message.pullRequests.map((ref) => `${ref.repository}#${ref.number}`) });
-      queueMicrotask(() => f.hub.resolveRunnerRequest({ type: "campaign_forge_observe_result", requestId: message.requestId, sessionId: message.sessionId, observedAt: Date.now(), ok: true,
+      const gate = hold.gate && message.pullRequests.some((ref) => ref.repository === "other/repo") ? hold.gate : null;
+      if (gate) hold.reached();
+      void Promise.resolve(gate).then(() => f.hub.resolveRunnerRequest({ type: "campaign_forge_observe_result", requestId: message.requestId, sessionId: message.sessionId, observedAt: Date.now(), ok: true,
         results: message.pullRequests.map((ref) => {
           const value = forge.get(`${ref.repository}#${ref.number}`);
           return value ? { ref, ok: true as const, observation: value } : { ref, ok: false as const, failure: "forge_not_found" as const };
@@ -5532,7 +5536,8 @@ test("an owner/repo issue delivered by merged pull requests in owner/repo and ot
       primaryState: "delivered", currentAttempt: null, attempts: [], stateCauses: [], commitment: "committed",
       verifications: [{ outcome: "delivered", report: { digest: "d".repeat(64) } }],
       observed: { pullRequests: f.db.campaignForgeObservations.facts(id, refs, Date.now()) } }) as unknown as CampaignWorkItemDetail;
-    const items = () => [item("app", [{ repository: "owner/repo", number: 10 }]), item("api", pulls)];
+    let appPulls = [{ repository: "owner/repo", number: 10 }];
+    const items = () => [item("app", appPulls), item("api", pulls)];
     const ledger = f.db.campaignWorkLedger;
     ledger.page = (() => ({ ok: true, data: { items: items() } })) as unknown as typeof ledger.page;
     ledger.detail = ((_campaign: string, itemId: string) => items().find((candidate) => candidate.id === itemId) ?? null) as unknown as typeof ledger.detail;
@@ -5610,6 +5615,30 @@ test("an owner/repo issue delivered by merged pull requests in owner/repo and ot
     const named = (unmerged.data!.decision!.resourceSnapshot as GithubIssueClosureSnapshot).deliveryGaps!;
     assert.deepEqual(named.map((gap) => [gap.code, gap.pullRequests, gap.repository]), [["unmerged_pull_request", [21], "other/repo"]]);
     assert.match(named[0]!.summary, /other\/repo#21/u);
+
+    // The excluded closed pull request is still read last: one reopened while the other repository's
+    // pull request is being read again before execution stops the closure.
+    const closedPull = { ...merged, state: "closed" as never, mergeCommitSha: null as never };
+    forge.set("owner/repo#11", closedPull);
+    appPulls = [{ repository: "owner/repo", number: 10 }, { repository: "owner/repo", number: 11 }];
+    pulls = [{ repository: "other/repo", number: 20 }];
+    await observer.readNow(id, [...appPulls, ...pulls]);
+    const raced = await request("close-7-race");
+    assert.equal(raced.data!.decision!.authority, "orchestrator", JSON.stringify(raced.data!.decision!.authorityEvaluation));
+    const racedDecision = raced.data!.decision!;
+    assert.equal(approve(racedDecision.occurrenceId).ok, true);
+    let release!: () => void;
+    const reached = new Promise<void>((resolve) => { hold.reached = resolve; });
+    hold.gate = new Promise<void>((resolve) => { release = () => { hold.gate = null; resolve(); }; });
+    const executes = closures.filter(({ message }) => message.operation === "execute").length;
+    const racing = f.sessions.executeGithubIssueClosure(id, racedDecision.occurrenceId, racedDecision.resourceDigest);
+    await reached;
+    forge.set("owner/repo#11", { ...closedPull, state: "open" as never });
+    release();
+    const stopped = await racing;
+    assert.equal(stopped.ok, false);
+    assert.match(stopped.error!, /excluded closed pull request could not be confirmed still closed/u);
+    assert.equal(closures.filter(({ message }) => message.operation === "execute").length, executes, "no closure was sent");
     observer.dispose();
   } finally { await server.close(); f.db.close(); }
 });
