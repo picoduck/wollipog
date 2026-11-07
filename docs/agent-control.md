@@ -1691,6 +1691,40 @@ retry rules are the GitHub ones above. A pre-v295 child runner is not asked, and
 refused rather than created: a current runner's GitLab decision always carries its check, which is
 what Full Control's ownership of it rests on (see campaign-issue-scope.md).
 
+Protocol v330 keeps checking after approval (#4323). The forge closes issues when the merge lands,
+from the description it has then, which in a merge queue or merge train is often much later than
+the last check. So once a `pr_merge` decision is consumed (or Wollipog performed its enqueue), the
+control plane sends `merge_closure_watch` to the child's runner about once a minute (every ten
+minutes after six hours) until the pull or merge request merges or closes. `read` runs the same
+inspection as `github_merge_preflight` and `gitlab_merge_closures`, from a neutral directory with the
+child's own login, but answers in any state with `open`, `merged` or `closed`; `dequeue` removes an
+open pull request at the approved head from the merge queue with `dequeuePullRequest` (and turns off
+auto-merge), or a merge request from its merge train by cancelling its auto-merge, and writes nothing
+in any other state. The decision records the result as `closureWatch`:
+
+- An unchanged pull request is only read; nothing is refused, dequeued or reported.
+- Open at the approved head with closures that differ from `intendedClosures`: the watch becomes
+  `invalidated` and never returns, an approved but unconsumed decision is revoked, the pull request
+  is dequeued and dequeued again whenever it is re-enqueued while it stays at that head, and the child
+  is told once. The decision no longer counts as a merge that proves delivery for issue closure. A
+  newer `pr_merge` for the same pull request takes over only once it is itself consumed.
+- Merged: each issue it closed that `intendedClosures` does not list makes the watch
+  `landed_unapproved`, and the campaign's owner gets an Owner Question on the campaign's root naming
+  the pull request and quoting the text that closed each issue as a single line. Wollipog reopens
+  nothing, and the decision no longer proves delivery. A merge with exactly the approved closures is
+  `verified`. A report is stored as owed (`reportPending`) in the same write as the state that owes
+  it, and retried every read interval until delivered, also after a restart or while the campaign's
+  root has ended; a retry finds the question it already asked.
+- An unreadable forge or an offline runner never counts as unchanged: after 30 minutes the owner is
+  told the merge cannot be checked, and after a day the watch ends `unverified`. Failing dequeues are
+  retried up to ten times, then reported to the owner.
+- A pull request closed without merging ends the watch. One moved to another head is still read,
+  because the decision never covered that head, and is reported if it lands with unapproved closures.
+
+A child runner below v330 is never sent `merge_closure_watch`; its merges keep the checks they had
+before, and their decisions read `not_watched`. Merges consumed before the control plane added the
+watch are marked `not_watched` once, so none of them is read or reported.
+
 GitLab closes an issue when a merge request lands on the default branch and its title, description
 or a commit message matches the instance's closing pattern, and scans the raw text, so code spans,
 code blocks and HTML comments hide nothing. The description matcher reads GitLab's documented default

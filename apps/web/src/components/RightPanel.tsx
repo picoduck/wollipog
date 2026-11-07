@@ -308,6 +308,7 @@ export function RightPanel({
   onRetryDescendantRequests,
   campaignAvailability = HIDDEN_CAMPAIGN,
   onOpenSession = () => undefined,
+  onOpenSessionRequest,
 }: {
   state: RightPanelState;
   session: SessionView;
@@ -370,6 +371,8 @@ export function RightPanel({
   campaignAvailability?: CampaignStatusAvailability;
   /** Opens another session from a panel link, keeping the panel and its mode. */
   onOpenSession?: (sessionId: string) => void;
+  /** Opens another session at one of its own requests (#4337); without it, the session alone opens. */
+  onOpenSessionRequest?: (sessionId: string, requestId: string) => void;
 }) {
   // The panels show ages that read the clock as they render (requests, decisions, background work),
   // and moved on with every paced upsert while the session view rendered for them (#2872).
@@ -811,6 +814,7 @@ export function RightPanel({
               onSelectedRequestKeyChange(requestKey);
               state.show("requests");
             }}
+            onOpenSessionRequest={onOpenSessionRequest ?? ((sessionId) => onOpenSession(sessionId))}
           />
         );
       case "review":
