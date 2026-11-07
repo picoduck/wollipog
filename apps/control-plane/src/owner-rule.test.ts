@@ -327,3 +327,97 @@ test("the Codex example: a kept merge reaches the owner typed, bound to its head
     assert.equal(approved.ownerRule?.source, RULE.source);
   } finally { h.db.close(); }
 });
+
+/** A nested Orchestrator under the root with a worker of its own, and a second campaign beside them (#4337). */
+function nestedCampaign() {
+  const h = harness();
+  const root = h.db.getSession("root")!;
+  const make = (id: string, extra: Record<string, unknown>) => {
+    h.db.createSession({ id, runnerId: "r", workspaceId: "w", agentId: "codex", title: id, useWorktree: false, driver: "claude-code",
+      now: 1, config: {}, ...extra });
+    h.db.updateSessionStatus(id, "running", 2);
+  };
+  make("nested", { role: "orchestrator", parentSessionId: "root", orchestratorPolicy: structuredClone(root.orchestratorPolicy!),
+    parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } } });
+  make("worker", { parentSessionId: "nested" });
+  make("other-root", { role: "orchestrator", orchestratorPolicy: structuredClone(root.orchestratorPolicy!),
+    parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } } });
+  make("other-child", { parentSessionId: "other-root" });
+  // After every occurrence the service records at the current time, so the order is fixed.
+  let at = Date.now() + 60_000;
+  // A stored occurrence with an exact controller: none of today's routes files an owner-kept one
+  // under a nested Orchestrator, but Waiting for You must not depend on that.
+  const stored = (id: string, sessionId: string, controllingSessionId: string,
+    extra: { ownerRule?: WorkflowDecisionOwnerRule; authority?: "human" | "orchestrator"; snapshot?: WorkflowDecisionView["resourceSnapshot"] } = {}) =>
+    h.db.createWorkflowDecision({ requestId: id, occurrenceId: `workflow_${id}`, sessionId, controllingSessionId,
+      category: extra.snapshot?.category ?? "pr_merge", resourceKey: id, resourceDigest: id, policyRevision: 1,
+      authority: extra.authority ?? "human", resourceSnapshot: extra.snapshot ?? h.snapshot(HEAD, 40 + at % 50),
+      ...(extra.ownerRule ? { ownerRule: extra.ownerRule } : {}), createdAt: at++ })!.decision;
+  const waiting = () => {
+    const owner = h.db.campaignProjection("root")!.ownerDecisions;
+    if (owner) assert.equal(owner.total, owner.items.length, "the count and the items read one predicate");
+    return owner?.items.map((item) => [item.occurrenceId, item.sessionId, item.handedOff, item.ownerRule ?? null]) ?? [];
+  };
+  return { ...h, stored, waiting };
+}
+
+test("Waiting for You lists the owner's decisions from a nested Orchestrator's members, which the root controls (#4337)", () => {
+  const h = nestedCampaign();
+  try {
+    // A worker under the nested Orchestrator, and the nested Orchestrator itself, file a ruled merge.
+    const fromWorker = h.merge("worker-merge", { sessionId: "worker", ownerRule: RULE });
+    assert.ok(fromWorker.ok && fromWorker.data, fromWorker.error ?? "requested");
+    const fromNested = h.merge("nested-merge", { sessionId: "nested", pullRequest: 8, ownerRule: RULE });
+    assert.ok(fromNested.ok && fromNested.data, fromNested.error ?? "requested");
+    // Both are gates of the campaign's root, which lists them and hands the owner each request.
+    assert.deepEqual([fromWorker.data.controllingSessionId, fromNested.data.controllingSessionId], ["root", "root"]);
+    assert.deepEqual(h.waiting(), [[fromWorker.data.occurrenceId, "worker", false, RULE], [fromNested.data.occurrenceId, "nested", false, RULE]]);
+    assert.deepEqual(h.svc.descendantRequests("root", () => true, "human").data?.requests.map((request) => request.occurrenceId).sort(),
+      [fromNested.data.occurrenceId, fromWorker.data.occurrenceId].sort());
+  } finally { h.db.close(); }
+});
+
+test("Waiting for You lists owner-kept decisions a nested Orchestrator controls, and only this campaign's (#4337)", () => {
+  const h = nestedCampaign();
+  try {
+    const rootRuled = h.merge("root-member-merge", { ownerRule: RULE });
+    assert.ok(rootRuled.ok && rootRuled.data, rootRuled.error ?? "requested");
+    // Controlled by the nested Orchestrator: its own ruled decision, a worker's ruled decision, and one handed to the owner.
+    const nestedRuled = h.stored("nested-ruled", "nested", "nested", { ownerRule: RULE });
+    const workerRuled = h.stored("worker-ruled", "worker", "nested", { ownerRule: RULE });
+    const handedOff = h.stored("worker-handed", "worker", "nested", { authority: "orchestrator" });
+    assert.ok(h.db.handWorkflowDecisionToOwner(handedOff.occurrenceId, { bySessionId: "nested", at: Date.now(), reason: "Kept by the owner" },
+      { owner: "human", basis: "human_required", reason: "owner_kept", operation: "pr_merge" }));
+    // Never listed: another campaign's ruled decisions, one a nested Orchestrator controls for a
+    // session outside this campaign, its Orchestrator-owned and unruled ones, and a nested scope
+    // proposal, which stays the root's own.
+    h.stored("other-ruled", "other-child", "other-root", { ownerRule: RULE });
+    h.stored("other-own-ruled", "other-root", "other-root", { ownerRule: RULE });
+    h.stored("outsider-ruled", "other-child", "nested", { ownerRule: RULE });
+    h.stored("nested-plain", "worker", "nested", { authority: "orchestrator" });
+    h.stored("nested-human-unruled", "worker", "nested");
+    h.stored("nested-scope", "nested", "nested", { snapshot: { category: "campaign_issue_scope", repository: "team/repo",
+      expectedRevision: 1, additions: [101], removals: [], explanation: "Asked in chat", ownerReview: { cause: "lineage_missing" } } as unknown as WorkflowDecisionView["resourceSnapshot"] });
+    assert.deepEqual(h.waiting(), [
+      [rootRuled.data.occurrenceId, "child", false, RULE],
+      [nestedRuled.occurrenceId, "nested", false, RULE],
+      [workerRuled.occurrenceId, "worker", false, RULE],
+      [handedOff.occurrenceId, "worker", true, null],
+    ]);
+    // The other campaign's own Waiting for You holds only its own decision.
+    assert.deepEqual(h.db.campaignOwnerDecisions("other-root")?.items.map((item) => item.occurrenceId), ["workflow_other-ruled", "workflow_other-own-ruled"]);
+    // The owner resolves one where it waits, through its own controller, as the requester's card
+    // does; an agent cannot, even the Orchestrator that controls it.
+    assert.equal(h.svc.resolveWorkflowDecision("nested", "worker", workerRuled.occurrenceId, { outcome: "approve" }, "orchestrator",
+      { kind: "agent", id: "nested" }, () => true).ok, false);
+    const resolved = h.svc.resolveWorkflowDecision("nested", "worker", workerRuled.occurrenceId, { outcome: "approve" }, "human", h.owner, () => true);
+    assert.ok(resolved.ok, resolved.error ?? "resolved");
+    assert.equal(h.db.workflowDecisionByOccurrence(workerRuled.occurrenceId)!.status, "approved");
+    assert.equal(h.waiting().some(([occurrenceId]) => occurrenceId === workerRuled.occurrenceId), false, "an answered decision no longer waits");
+    assert.deepEqual(h.waiting().map(([occurrenceId]) => occurrenceId),
+      [rootRuled.data.occurrenceId, nestedRuled.occurrenceId, handedOff.occurrenceId]);
+    // A nested Orchestrator that leaves the campaign takes its decisions out of Waiting for You.
+    h.db.raw().prepare("UPDATE sessions SET parent_session_id=NULL WHERE id='nested'").run();
+    assert.deepEqual(h.waiting(), [[rootRuled.data.occurrenceId, "child", false, RULE]]);
+  } finally { h.db.close(); }
+});
