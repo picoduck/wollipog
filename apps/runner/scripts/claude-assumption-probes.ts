@@ -420,11 +420,10 @@ async function controlCase(context: Context, answer: "allow" | "deny", subagent:
   const result = await session(context, {
     prepare: (paths) => mkdirSync(join(paths.work, "build")),
     conversations: conversations,
-    // The driver's own interactive argument set for `default` and its stream-json prompt shape. The
-    // mode is named explicitly so the envelope is measured even on a release whose flagless default
-    // differs; whether the flagless launch starts in `default` is its own assumption below.
+    // The driver's own interactive argument set for `default` (which names the mode explicitly) and its
+    // stream-json prompt shape.
     args: () => ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--session-id", randomUUID(),
-      "--model", MODEL, ...claudePermissionArgs("default").args, "--permission-mode", "default"],
+      "--model", MODEL, ...claudePermissionArgs("default").args],
     stdin: () => [JSON.stringify(buildClaudeUserMessage(marker, []))],
     onEvent: (event, write, closeStdin) => {
       if (event.type === "control_request") {
@@ -469,22 +468,25 @@ async function controlCase(context: Context, answer: "allow" | "deny", subagent:
 }
 
 async function probeControl(context: Context): Promise<void> {
-  // claudePermissionArgs("default") passes no --permission-mode: the driver relies on the CLI's own
-  // default being `default`. Measured on 2.1.296: with an auto-capable model it starts in `auto`.
-  await measure("the driver's flagless `default` launch starts the CLI in default mode", `${DRIVERS} (2.6 Approvals mapping)`, async () => {
+  // Left without --permission-mode, 2.1.296 starts an auto-capable model in `auto` (#3849), so the driver
+  // names `default` explicitly. This measures the driver's own argument set, whatever it is.
+  await measure("the driver's `default` launch starts the CLI in default mode", `${DRIVERS} (2.6 Approvals mapping)`, async () => {
+    const perm = claudePermissionArgs("default").args;
+    const named = perm.includes("--permission-mode") ? perm[perm.indexOf("--permission-mode") + 1] : "(none)";
+    expect(named === "default", `the driver's default launch passes --permission-mode ${named}`);
     const marker = `PROBE-${randomUUID().slice(0, 8)}`;
     const result = await session(context, {
       conversations: [{ marker, steps: [] }],
       args: () => ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--session-id", randomUUID(),
-        "--model", MODEL, ...claudePermissionArgs("default").args],
+        "--model", MODEL, ...perm],
       stdin: () => [JSON.stringify(buildClaudeUserMessage(marker, []))],
       onEvent: (event, _write, closeStdin) => { if (event.type === "result") closeStdin(); },
     });
     completed(result);
     const mode = result.init?.permissionMode;
     if (typeof mode !== "string") throw new CouldNotRun("the init event reports no permission mode");
-    expect(mode === "default", `with ${MODEL} and no --permission-mode the CLI started in ${mode}`);
-    return `started in default with ${MODEL}`;
+    expect(mode === "default", `with ${MODEL} and --permission-mode default the CLI started in ${mode}`);
+    return `started in default with ${MODEL} and --permission-mode default`;
   });
   for (const [answer, subagent] of [["allow", false], ["deny", false], ["allow", true]] as const) {
     await measure(`can_use_tool envelope matches ${FIXTURE.split("/").pop()} (default, ${subagent ? "subagent" : "top-level"}, ${answer})`,
@@ -677,8 +679,8 @@ async function probeDiscovery(context: Context): Promise<void> {
 /** The release the media reviewer accepts; the suite compares the measured release with it. */
 export const REVIEWER_PIN = CLAUDE_MEDIA_REVIEWER_CLI_VERSION;
 /** Measured on 2.1.296 with this probe (2026-10-30): under `--bare` the CLI emits this before its
- * startup init. ClaudeMediaReviewerStream requires init first, so this is recorded as the pin's
- * baseline and reported separately rather than hidden (see docs/claude-assumption-probes.md). */
+ * startup init. ClaudeMediaReviewerStream accepts exactly this one notice before init (#3849); a
+ * release that emits anything else first is reported as changed (see docs/claude-assumption-probes.md). */
 export const REVIEWER_PIN_PRE_INIT_EVENTS: readonly string[] = ["system/ui_invalidate"];
 
 async function probeReviewer(context: Context): Promise<void> {
@@ -737,11 +739,11 @@ async function probeReviewer(context: Context): Promise<void> {
     const initIndex = events.findIndex((e) => e.type === "system" && e.subtype === "init");
     if (initIndex < 0) throw new CouldNotRun("no startup init event");
     expect(events[initIndex]!.claude_code_version === context.version, `init reports ${String(events[initIndex]!.claude_code_version)}, not ${context.version}`);
-    // Two deliberate substitutions, both measured separately: the pre-init events (above) are not fed
-    // to the parser, and the version equality, which is the pin itself, is checked as the pin.
+    // The whole stream, pre-init events included, goes to the production parser. One deliberate
+    // substitution: the version equality, which is the pin itself, is checked as the pin.
     const stream = new ClaudeMediaReviewerStream({ model: MODEL });
     let refusal: string | null = null;
-    for (const event of events.slice(initIndex)) {
+    for (const event of events) {
       const checked = event.type === "system" && event.subtype === "init" ? { ...event, claude_code_version: REVIEWER_PIN } : event;
       refusal ??= stream.push(JSON.stringify(checked) + "\n");
     }

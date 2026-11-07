@@ -290,7 +290,8 @@ const ORCHESTRATOR_REPOSITORY_OVERRIDE_ENV = ["GH_REPO", "GH_HOST"] as const;
 
 /**
  * Map a Claude permission mode to CLI flags. Exported for tests.
- * - "default": ask before every tool (stdio control protocol -> Allow/Reject UI).
+ * - "default": ask before every tool (stdio control protocol -> Allow/Reject UI). The mode is
+ *   always passed as --permission-mode default rather than left to the CLI's own starting mode.
  * - "auto": the classifier model reviews each action — it auto-approves safe ones and
  *   blocks risky ones inline (the agent is told and adapts). We keep the stdio control
  *   channel open so the headless turn streams and settles gracefully on a block rather
@@ -314,7 +315,13 @@ export function claudePermissionArgs(
   routineControlChannel = false,
 ): { interactive: boolean; streamInput: boolean; args: string[] } {
   if (mode === "default") {
-    return { interactive: true, streamInput: true, args: ["--input-format", "stream-json", "--permission-prompt-tool", "stdio"] };
+    // Named explicitly: the CLI's own starting mode is not `default` on every release. 2.1.296
+    // starts an auto-capable model in `auto` when no mode is passed (#3849).
+    return {
+      interactive: true,
+      streamInput: true,
+      args: ["--input-format", "stream-json", "--permission-prompt-tool", "stdio", "--permission-mode", "default"],
+    };
   }
   if (mode === "auto") {
     return {

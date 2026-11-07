@@ -99,6 +99,20 @@ For epics, assess the full epic criteria as well as the child requirements. Reus
 code assessments and inspect unresolved pieces in merged code, including cross-child behavior.
 Closed checkboxes, merged commit subjects and child closure alone cannot certify epic delivery.
 
+**Check that delivered changes survived.** For each delivering PR, inspect its key production,
+regression-test, fixture and documentation additions against the pinned baseline. Follow later
+edits and relevant callers to distinguish equivalent replacements from removed behavior; literal
+line survival alone proves neither delivery nor a regression.
+
+Also scan recent first-parent commits for one PR removing lines another recently merged PR added,
+including files outside the removing PR's stated topic. Record the commit window and coverage.
+Investigate candidates against current code and explicit replacement intent before reporting them;
+same-series rework, generated files, dependency churn and equivalent generalizations are not
+automatically regressions. Cross-topic removals merit checking even when their originating issue
+was already audited. The 2026-11-06 sweep found #3854 undoing #3853's permission/reviewer fix and
+#4253 deleting #4233's regression tests; closure-by-closure review missed both. Preserve confirmed
+findings and unresolved candidates in the run's verdicts for the next sweep.
+
 **Repository hygiene.** Check for the residue of the issue workflow:
 
 - merged or deleted remote branches still present locally — `git branch -vv | grep ': gone]'`.
@@ -120,6 +134,10 @@ Closed checkboxes, merged commit subjects and child closure alone cannot certify
 
 - An acceptance criterion is unmet only when you can show the specific behavior is absent from the
   merged code. Reading the PR description is not sufficient; check the code.
+- An implementer's or Orchestrator's disclosure of a narrowed requirement is not owner approval.
+  Classify it as an approved deviation only with evidence that the owner accepted that specific
+  change. Otherwise record the verified behavior gap separately from its unverified approval;
+  do not infer acceptance from a delivery comment, a closed checkbox or a merge alone.
 - Distinguish absent code behavior from process evidence. For screenshots or approval criteria,
   inspect the issue and PR comments and the originating Wollipog session's evidence and approval
   record when available. Screenshots absent from the PR body do not prove they were never captured

@@ -216,7 +216,7 @@ test("Accept Edits and Ask Every Time with a managed worktree are the ordinary f
   const ask = launch(provision(dir, "ask-1", "default", { protections: PROTECTIONS }), "default", PROTECTIONS);
   t.after(() => { accept.driver.dispose(); ask.driver.dispose(); });
   assert.deepEqual(permissionArgv(accept.argv), ["--permission-mode", "acceptEdits"]);
-  assert.deepEqual(permissionArgv(ask.argv), ["--permission-prompt-tool", "stdio"]);
+  assert.deepEqual(permissionArgv(ask.argv), ["--permission-prompt-tool", "stdio", "--permission-mode", "default"]);
 });
 
 test("with the guard active, the driver answers no permission request on the user's behalf", async (t) => {
@@ -300,8 +300,8 @@ test("without a provisionable guard the launch falls back to EXACTLY today's med
 
   const run = launch(spec.args, "auto", PROTECTIONS);
   t.after(() => run.driver.dispose());
-  assert.deepEqual(permissionArgv(run.argv), ["--permission-prompt-tool", "stdio"],
-    "the mediated launch is interactive default, with no --permission-mode");
+  assert.deepEqual(permissionArgv(run.argv), ["--permission-prompt-tool", "stdio", "--permission-mode", "default"],
+    "the mediated launch is interactive default, named explicitly");
   assert.deepEqual(run.stderr, [
     "Claude automatic permission review is routed through Wollipog while runner-owned worktrees are linked so destructive retirement can be refused; use discard_worktree for cleanup.",
   ]);
@@ -310,7 +310,7 @@ test("without a provisionable guard the launch falls back to EXACTLY today's med
 test("the mediated fallback still emulates the fixed-rule modes", async (t) => {
   const run = launch([], "bypassPermissions", PROTECTIONS);
   t.after(() => run.driver.dispose());
-  assert.deepEqual(permissionArgv(run.argv), ["--permission-prompt-tool", "stdio"]);
+  assert.deepEqual(permissionArgv(run.argv), ["--permission-prompt-tool", "stdio", "--permission-mode", "default"]);
   run.child.stdout.write(JSON.stringify({
     type: "control_request",
     request_id: "emulated",
@@ -439,7 +439,7 @@ test("a rewritten file-form hook command falls back to mediation and reports the
   const run = launch(args, "auto", PROTECTIONS);
   t.after(() => run.driver.dispose());
   assert.equal(run.argv.includes(settings), false, "the altered settings document is not launched");
-  assert.deepEqual(permissionArgv(run.argv), ["--permission-prompt-tool", "stdio"],
+  assert.deepEqual(permissionArgv(run.argv), ["--permission-prompt-tool", "stdio", "--permission-mode", "default"],
     "the driver restores the mediated launch");
   assert.ok(run.stderr.some((line) => line.includes(
     "Claude managed-worktree guard inactive: the file-form guard settings documents were modified after provisioning",
@@ -473,7 +473,7 @@ test("an open circuit with no guard-only copy drops back to the mediated launch"
   const run = launch(args, "acceptEdits", PROTECTIONS);
   t.after(() => run.driver.dispose());
   assert.equal(run.argv.includes(settings), false);
-  assert.deepEqual(permissionArgv(run.argv), ["--permission-prompt-tool", "stdio"],
+  assert.deepEqual(permissionArgv(run.argv), ["--permission-prompt-tool", "stdio", "--permission-mode", "default"],
     "an unguarded launch is never native: it falls back to mediation");
 });
 
