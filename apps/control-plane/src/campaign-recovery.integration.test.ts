@@ -1857,3 +1857,19 @@ test("a merged item whose prerequisite failed, and whose latest read failed, is 
     assert.equal(h.completion(), "complete");
   } finally { h.db.close(); }
 });
+
+test("a verified item held on a merge dependency still admits an independently eligible failed-check repair of its own pull request (#4120)", () => {
+  const h = heldDeliveryFixture();
+  try {
+    // Its own picoduck/wollipog#3068 is open again with failing checks; its prerequisite hasn't merged.
+    const checks = { state: "failing" as const, failing: 1, passing: 0, pending: 0 };
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref,
+      observation: { ...h.observation, state: "open", mergeCommitSha: null, checks, requiredChecks: checks } }], h.now);
+    assert.deepEqual([h.detail().primaryState, h.detail().stateCauses], ["waiting", ["dependency_unmerged"]]);
+    h.recovery.maintain(h.now);
+    const completion = h.db.campaignRecoveryCompletion("root", h.now);
+    assert.equal(completion.state, "recovery_ready");
+    assert.equal(completion.recoveryIds.length, 1);
+    assert.equal(h.db.campaignRecovery.activeRecords("root").find((record) => record.id === completion.recoveryIds[0])!.action, "repair_checks");
+  } finally { h.db.close(); }
+});

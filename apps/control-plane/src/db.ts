@@ -6372,8 +6372,9 @@ export class ControlPlaneDb {
         if (verification?.outcome === "incomplete") unfinished = true;
         // #4120: a verified item still listed unfinished, with no attempt open, is held by a merge
         // dependency: its own pull requests haven't all merged. It stays unfinished until the ledger
-        // reads it delivered, whatever this loop could prove from one repository's merges.
-        if (verification?.outcome === "delivered" && !item.currentAttempt) { unfinished = true; continue; }
+        // reads it delivered, whatever this loop could prove from one repository's merges; its pull
+        // requests still go through the loop below, so a repair they're eligible for is found.
+        if (verification?.outcome === "delivered" && !item.currentAttempt) unfinished = true;
         // A stale grant cannot establish delivery or admit a forge/review repair.
         // Only completion truth is retained; the existing admission still fences all effects.
         if (!boundaryCurrent) continue;
