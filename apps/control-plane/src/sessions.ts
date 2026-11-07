@@ -354,6 +354,7 @@ import {
 import {
   DELEGATED_IMAGE_REVIEWER_ERROR,
   DELEGATED_IMAGE_REVIEW_COST_BUDGET_USD,
+  DELEGATED_IMAGE_REVIEW_MAX_DURATION_MS,
   delegatedImageReviewPrompt,
   delegatedImageVerdictSha256,
   type DelegatedImageReviewRecord,
@@ -2321,6 +2322,7 @@ function queueHoldReleaseRefusal(reason: ReleaseQueueHoldRefusal | undefined): s
   }
 }
 
+const DELEGATED_IMAGE_REVIEW = Symbol("server-created image reviewer");
 const PREPARED_MEDIA_CAPTURE = Symbol("private prepared media Session capture");
 type PreparedMediaCapture = { identity: PreparedMediaIdentity; subject: PreparedMediaSubject; decision: WorkflowDecisionView; operatorValidation?: OperatorVideoValidationPurpose; command: Extract<DurableSessionCommand, { type: "start_session" }> | null };
 
@@ -4673,17 +4675,21 @@ export class SessionsService {
       /** Internal only (#3368): this session is a review of the requester's pull request. */
       review?: { policy: ReviewLaunchPolicy };
       /** Internal only (#4074): this session is the delegated image reviewer of one decision. */
-      delegatedImageReview?: NewDelegatedImageReview;
+      [DELEGATED_IMAGE_REVIEW]?: NewDelegatedImageReview;
     },
   ): ServiceResult<SessionView> {
     // Attribution is supplied only by the authenticated route, never by the request payload.
     const capture = creationContext?.[PREPARED_MEDIA_CAPTURE];
     if (capture && (!this.preparedMediaCaptures.has(capture) || delivery || !this.db.raw().isTransaction)) return fail("Private media preparation capability is unavailable.", 409);
+    const imageReview = creationContext?.[DELEGATED_IMAGE_REVIEW];
     const spawnRequest = req;
     const configInputError = sessionGuardrailConfigError(req.config);
     if (configInputError) return fail(configInputError, 400);
     const parentSessionId = creationContext?.parentSessionId;
+    // Only prepareDescendantImageEvidenceReview holds this module-private symbol. Request JSON
+    // cannot opt into the exemption. Keep all cost/tool guards and campaign budget admission.
     if (parentSessionId) {
+      if (this.db.delegatedImageReviews.isReviewer(parentSessionId)) return fail(DELEGATED_IMAGE_REVIEWER_ERROR, 409);
       const reviewRefusal = this.reviewSessionRefusal(parentSessionId, "creates no sessions");
       if (reviewRefusal) return fail(reviewRefusal, 409);
     }
@@ -4731,7 +4737,7 @@ export class SessionsService {
         ...this.childCeilingsOf(parent),
         costUsd: (parent.costUsd ?? 0) + allocated.costBudgetUsd,
         toolCallCount: (parent.toolCallCount ?? 0) + allocated.maxToolCalls,
-      }, req.config, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - allocated.liveCount,
+      }, req.config, imageReview ? 1 : (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - allocated.liveCount,
       parent.projectId ? this.db.projectChildSessionDefaults(parent.projectId) : null);
       if ("error" in guarded) return fail(guarded.error, 409);
       req = { ...req, config: guarded.config };
@@ -4801,7 +4807,7 @@ export class SessionsService {
       context: launch.context,
     });
     const controllerPolicy = campaignController?.orchestratorPolicy;
-    if (controllerPolicy && !childHarnessAdmits(controllerPolicy, launchHarness)) {
+    if (!imageReview && controllerPolicy && !childHarnessAdmits(controllerPolicy, launchHarness)) {
       return fail(childHarnessRefusal(controllerPolicy), 409);
     }
     // An ad-hoc directory chosen via the remote browser overrides the preconfigured workspace.
@@ -4821,10 +4827,10 @@ export class SessionsService {
         return campaignRefusalFail(preflight.requirement ?? preflight.reason ?? "campaign authority boundary is stale");
       }
       // The paced-video reviewer the root launches for a child, and a review its requester asked for.
-      const misplaced = this.campaignPlacementRefusal(campaignController, parentSession, req,
+      const misplaced = !imageReview && this.campaignPlacementRefusal(campaignController, parentSession, req,
         creationContext?.[PREPARED_MEDIA_CAPTURE]?.decision.sessionId ?? creationContext?.review?.policy.requesterSessionId);
       if (misplaced) return fail(misplaced, 409);
-    } else if (campaignController) {
+    } else if (campaignController && !imageReview) {
       const misplaced = this.campaignPlacementRefusal(campaignController, parentSession, req);
       if (misplaced) return fail(misplaced, 409);
     }
@@ -5040,7 +5046,7 @@ export class SessionsService {
       snapshotSpec?.capabilities ?? runner.agents.find((agent) => agent.id === req.agentId)?.capabilities;
     const requestedConfig = { ...(snapshotSpec?.config ?? req.config ?? {}) };
     if (!snapshotSpec) {
-      const campaignBehavior = campaignController?.orchestratorPolicy?.behavior;
+      const campaignBehavior = imageReview ? undefined : campaignController?.orchestratorPolicy?.behavior;
       if (campaignBehavior) {
         if (campaignBehavior.childModel !== null && requestedConfig.model !== undefined &&
             requestedConfig.model !== campaignBehavior.childModel) {
@@ -5455,7 +5461,7 @@ export class SessionsService {
     let text = requestedText;
     // A delegated image reviewer receives only its server-pinned review prompt, never a campaign
     // assignment: it does no campaign work and holds no campaign authority (#4074).
-    if (!snapshotCommand && !creationContext?.delegatedImageReview && campaignController?.orchestratorPolicy &&
+    if (!snapshotCommand && !imageReview && campaignController?.orchestratorPolicy &&
         (requestedText || images.length > 0)) {
       const campaign = this.db.campaignProjection(campaignController.id);
       if (campaign) text = this.campaignAssignment(campaignController, campaign, text);
@@ -5479,7 +5485,7 @@ export class SessionsService {
       try {
         // Its review record is not written yet, so say whether this session is a reviewer (#3618).
         const allocation = this.db.campaignBudgets.prepare(budgetRoot, id, campaignBudgetUserLimits,
-          Boolean(creationContext?.review || creationContext?.delegatedImageReview));
+          Boolean(creationContext?.review || imageReview));
         if (allocation.costUsd !== undefined) config.costBudgetUsd = allocation.costUsd;
         if (allocation.toolCalls !== undefined) config.maxToolCalls = allocation.toolCalls;
       } catch (error) { return fail((error as Error).message, 409); }
@@ -5639,8 +5645,8 @@ export class SessionsService {
       } } : {}),
       acpSessionContext,
       ...(creationContext?.review ? { review: creationContext.review.policy } : {}),
-      ...(creationContext?.delegatedImageReview
-        ? { uiEvidenceReviewer: { reviewId: creationContext.delegatedImageReview.reviewId } } : {}),
+      ...(imageReview
+        ? { uiEvidenceReviewer: { reviewId: imageReview.reviewId } } : {}),
     };
     const command: DurableSessionCommand = snapshotCommand ?? {
       type: "start_session",
@@ -5728,8 +5734,8 @@ export class SessionsService {
     };
     const insert = () => {
       const policy = creationContext?.review?.policy;
-      if (creationContext?.delegatedImageReview) {
-        return this.db.createDelegatedImageReviewSession(sessionInput, creationContext.delegatedImageReview);
+      if (imageReview) {
+        return this.db.createDelegatedImageReviewSession(sessionInput, imageReview);
       }
       return policy ? this.db.createReviewSession(sessionInput, {
         requesterSessionId: policy.requesterSessionId, pullRequest: policy.pullRequest,
@@ -16611,8 +16617,9 @@ export class SessionsService {
     }
     // Delegation never widens evidence access: the reviewer may see exactly what the Orchestrator
     // could inspect itself right now, on the same provider and model.
-    if (this.directWorkflowDecisionAuthority(parent, policy, childSessionId, snapshot).effectiveOwner !== "orchestrator") {
-      return fail("The Orchestrator cannot inspect this evidence itself, so it cannot hand it to a reviewer either. Ask the child for screenshots attached as Session artifacts, or deny the claim as unproven.", 409);
+    const evidenceAuthority = this.directWorkflowDecisionAuthority(parent, policy, childSessionId, snapshot);
+    if (evidenceAuthority.effectiveOwner !== "orchestrator") {
+      return fail(`The Orchestrator cannot inspect this evidence itself: ${evidenceAuthority.fallback?.reason ?? "artifact image delivery is unavailable"}. ${direct}`, 409);
     }
     const runner = this.db.getRunner(parent.runnerId);
     if (!runnerSupportsProtocol(runner?.protocolVersion, "delegatedImageEvidenceReview")) {
@@ -16621,8 +16628,11 @@ export class SessionsService {
     }
     // The reviewer launch restricts the harness to its two review tools, which only Claude Code
     // supports today. Other Orchestrators keep direct review.
-    if (parent.driver !== "claude-code" || !parent.agentId) {
-      return fail(`This Orchestrator's harness cannot host a delegated image reviewer. ${direct}`, 409);
+    const reviewerLaunch = runner?.agents.find((agent) => agent.id === parent.agentId && agent.available);
+    if (parent.driver !== "claude-code" || !parent.agentId || reviewerLaunch?.driver !== "claude-code" ||
+        (reviewerLaunch.context?.kind ?? "native") !== "native" ||
+        parent.executionTarget && parent.executionTarget.adapter !== "host") {
+      return fail(`Delegated image review requires the Orchestrator to use a native Claude Code harness; its restricted two-tool reviewer is unavailable on this harness. ${direct}`, 409);
     }
     if (!this.hub.isRunnerOnline(parent.runnerId)) {
       return fail(`The Orchestrator's runner is offline, so no image reviewer can start. ${direct}`, 409);
@@ -16653,18 +16663,26 @@ export class SessionsService {
       evidence,
       briefSha256: createHash("sha256").update(brief).digest("hex"),
     };
-    const workspacePath = this.db.getAdHocWorkspacePath(parent.id) ?? undefined;
+    for (const active of this.db.delegatedImageReviews.activeForRoot(parent.id)) {
+      // A stalled reviewer must not hold the separate slot indefinitely. Stopping is idempotent;
+      // no replacement is admitted until the runner reports it stopped (no overlapping workers).
+      if (now - active.createdAt >= DELEGATED_IMAGE_REVIEW_MAX_DURATION_MS) this.stop(active.reviewerSessionId);
+      return fail(`This Orchestrator already has one active image reviewer (the separate review limit is 1). Wait for it or stop that reviewer Session. ${direct}`, 409);
+    }
+    const workspacePath = parent.workspaceId ? undefined : this.db.getAdHocWorkspacePath(parent.id) ?? undefined;
     const created = this.createSession({
       runnerId: parent.runnerId,
       workspaceId: parent.workspaceId ?? "",
       ...(workspacePath ? { workspacePath } : {}),
       agentId: parent.agentId,
+      ...(parent.executionTarget ? { executionTargetId: parent.executionTarget.id } : {}),
       title: `UI Evidence Review of ${child.title}`.slice(0, 120),
       prompt: delegatedImageReviewPrompt(evidence.map((item) => item.evidenceId), brief),
       useWorktree: false,
       // No permission mode: the runner's reviewer launch replaces the provider policy with its own
       // (no built-in tools, only the two review tools, never asking), whatever the installation offers.
       config: {
+        maxChildSessions: 0,
         ...(parent.model ? { model: parent.model } : {}),
         ...(parent.effort ? { effort: parent.effort } : {}),
         // A bounded review: one delivery per image, one verdict, and a little room to retry.
@@ -16672,7 +16690,7 @@ export class SessionsService {
         maxToolCalls: evidence.length * 2 + 8,
       },
     }, undefined, this.db.sessionScope(parent.id) ?? undefined, true, false, true,
-    { parentSessionId: parent.id, delegatedImageReview: review });
+    { parentSessionId: parent.id, [DELEGATED_IMAGE_REVIEW]: review });
     if (!created.ok || !created.data) {
       return { ...failAs<DelegatedImageReviewView>(created),
         error: `The image reviewer could not be started: ${created.error ?? "unknown reason"}. ${direct}` };
@@ -16704,6 +16722,10 @@ export class SessionsService {
   private settleDelegatedImageReview(review: DelegatedImageReviewRecord, now: number): DelegatedImageReviewRecord {
     let reason: string | null = null;
     if (review.state === "running") {
+      if (now - review.createdAt >= DELEGATED_IMAGE_REVIEW_MAX_DURATION_MS) {
+        this.stop(review.reviewerSessionId);
+        reason = "reviewer_deadline_expired";
+      }
       // A reviewer whose turn or Session ended without a verdict will never submit one.
       const reviewer = this.db.getSession(review.reviewerSessionId);
       if (!reviewer || isTerminal(reviewer.status) || reviewer.status === "idle") reason = "reviewer_finished_without_verdict";
@@ -16795,8 +16817,9 @@ export class SessionsService {
     review: DelegatedImageReviewRecord;
     decision: WorkflowDecisionView & { resourceSnapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "ui_evidence_approval" }> };
   }> {
-    const review = this.db.delegatedImageReviews.byReviewer(reviewerSessionId);
-    if (!review) return fail("this session is not a delegated image reviewer", 403);
+    const stored = this.db.delegatedImageReviews.byReviewer(reviewerSessionId);
+    if (!stored) return fail("this session is not a delegated image reviewer", 403);
+    const review = this.settleDelegatedImageReview(stored, Date.now());
     if (review.state !== "running") {
       return fail(review.state === "verdict" ? "this review's verdict is already recorded"
         : `this image review is no longer active${review.endedReason ? ` (${review.endedReason})` : ""}`, 409);

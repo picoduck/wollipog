@@ -47,6 +47,7 @@ const LIVE = "('running','verdict')";
 /** A reviewer's own ceiling, also what its campaign allowance reserves for it. The media-only video
  * reviewer uses the same bound. */
 export const DELEGATED_IMAGE_REVIEW_COST_BUDGET_USD = 10;
+export const DELEGATED_IMAGE_REVIEW_MAX_DURATION_MS = 15 * 60_000;
 
 export const DELEGATED_IMAGE_REVIEWER_ERROR =
   "This delegated image reviewer Session runs only its one evidence review: it takes no prompts, configuration, restarts or children.";
@@ -183,6 +184,17 @@ export class DelegatedImageReviews {
 
   isReviewer(sessionId: string): boolean {
     return Boolean(this.stmt("SELECT 1 FROM delegated_image_reviews WHERE reviewer_session_id=?").get(sessionId));
+  }
+
+  /** Separate from implementation capacity: at most one active provider turn per root, even if
+   * its occurrence ended. Idle/terminal reviewers cannot do more work and need no worker slot. */
+  activeForRoot(rootSessionId: string): DelegatedImageReviewRecord[] {
+    return (this.stmt(`SELECT review.* FROM delegated_image_reviews review JOIN sessions session
+      ON session.id=review.reviewer_session_id WHERE review.root_session_id=? AND (
+        session.status IN ('queued','starting','running','input_required')
+        OR EXISTS (SELECT 1 FROM session_stop_intents WHERE session_id=session.id)
+        OR (session.status='stopped' AND session.stop_confirmation IS NULL))`).all(rootSessionId) as unknown as Row[])
+      .map((row) => this.parse(row)!);
   }
 
   liveForOccurrence(occurrenceId: string): DelegatedImageReviewRecord | null {
