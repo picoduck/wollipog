@@ -13723,7 +13723,7 @@ export class SessionsService {
         resourceKey,
         resourceSnapshot: snapshot,
       }, canAccess, { trustedIssueClosure: true });
-      if (!created.ok) return failAs(created);
+      if (!created.ok) return { ...failAs(created), ...(created.errorDetails ? { errorDetails: created.errorDetails } : {}) };
       const decided = created.data!.resourceSnapshot;
       // Say so beside the decision, so the root sees a person now decides and what it can fix (#4058).
       const proofGaps = created.data!.authorityEvaluation?.reason === "closure_proof_incomplete" && decided.category === "issue_closure" &&
@@ -13803,7 +13803,10 @@ export class SessionsService {
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline; no closure was attempted", 409);
     if (!this.closureTarget(session, snapshot.repository)) return fail(`No Location of ${snapshot.repository} is online on a runner that can close its issues; no closure was attempted. Retry once one is.`, 409);
     if (decision.authority === "orchestrator") await this.refreshClosureForge(sessionId, snapshot.issue, snapshot.repository);
-    if (decision.authority === "orchestrator" && (!snapshot.issueAdmission || issueEvidenceDigest(closureEvidence(this.db, session, snapshot)) !== snapshot.issueAdmission.evidenceDigest)) return fail("Verified closure delivery or disposition changed; request a new exact closure", 409);
+    if (decision.authority === "orchestrator" && (!snapshot.issueAdmission || issueEvidenceDigest(closureEvidence(this.db, session, snapshot)) !== snapshot.issueAdmission.evidenceDigest)) {
+      this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+      return fail("Verified closure delivery or disposition changed; approval retired; request a new exact closure", 409);
+    }
     // Guardrails and governance remain authoritative even though execution is provider-neutral.
     if (this.pendingPolicyAsk(session) || pendingRequests(session.pendingApproval).some((request) => request.kind !== "workflow_decision") ||
         this.db.listOpenPolicyHookApprovals(sessionId).length || this.gateOnPolicy(sessionId, now)) {
@@ -13821,7 +13824,8 @@ export class SessionsService {
       const refs = crossDelivery.map(({ repository, number }) => ({ repository, number }));
       const read = this.campaignForgeReadNow ? await this.campaignForgeReadNow(sessionId, refs).catch(() => null) : null;
       if (JSON.stringify(closureCrossRepositoryDelivery(refs, read)) !== JSON.stringify(crossDelivery)) {
-        return fail("A delivering pull request in another campaign repository could not be confirmed merged at its verified head; request a new exact closure", 409);
+        this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+        return fail("Approval retired. A delivering pull request in another campaign repository could not be confirmed merged at its verified head; request a new exact closure", 409);
       }
     }
     // The uncached read is the last await: a pull request reopened during synchronization is seen,
@@ -13829,14 +13833,22 @@ export class SessionsService {
     const synchronized = this.db.getSession(sessionId) ?? session;
     if (decision.authority === "orchestrator" &&
         !await this.excludedPullRequestsStillClosed(occurrenceId, synchronized, closureExcludedRefs(closureEvidence(this.db, synchronized, snapshot)))) {
-      return fail("An excluded closed pull request could not be confirmed still closed and unmerged; request a new exact closure", 409);
+      this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+      return fail("Approval retired. An excluded closed pull request could not be confirmed still closed and unmerged; request a new exact closure", 409);
     }
     const freshSession = this.db.getSession(sessionId);
     if (!freshSession || isTerminal(freshSession.status) || !campaignClosureIssueHeld(freshSession.orchestratorPolicy, issueRef) ||
-        freshSession.orchestratorPolicy?.issueScope?.revision !== synchronizedScopeRevision || !this.closureScopeCurrent(freshSession, snapshot) ||
+        !this.closureScopeCurrent(freshSession, snapshot) ||
         !this.workflowDecisionAuthorityCurrent(freshSession, freshSession.parentControlPolicy!, decision) ||
         auditDigest(issueClosureActiveChildren(this.db, sessionId, { repository: snapshot.repository, number: snapshot.issue })) !== auditDigest(snapshot.activeChildren) ||
-        decision.authority === "orchestrator" && (scopeCompatibility(this.db, freshSession) || issueEvidenceDigest(closureEvidence(this.db, freshSession, snapshot)) !== snapshot.issueAdmission?.evidenceDigest)) return fail("Campaign authority, work or delivery changed during synchronization; request renewed exact review.", 409);
+        decision.authority === "orchestrator" && (scopeCompatibility(this.db, freshSession) || issueEvidenceDigest(closureEvidence(this.db, freshSession, snapshot)) !== snapshot.issueAdmission?.evidenceDigest)) {
+      this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+      return fail("Campaign authority, work or delivery changed during synchronization; approval retired; request renewed exact review.", 409);
+    }
+    // An unrelated scope addition only needs another synchronization, not renewed approval.
+    if (freshSession.orchestratorPolicy?.issueScope?.revision !== synchronizedScopeRevision) {
+      return fail("Campaign scope changed during synchronization; retry this exact approved closure once synchronization settles.", 409);
+    }
     const settled = Date.now();
     // Read again as the last step before consumption: the Location must still be one of the repository's.
     const target = this.closureTarget(freshSession, snapshot.repository);
@@ -14184,6 +14196,17 @@ export class SessionsService {
         internal?.trustedPublication && normalized.data.issueAdmission ? internal.requestedResourceKey ?? request.resourceKey : null);
       if ("refusal" in guarded) return guarded.refusal;
       retired = guarded.retire;
+    }
+    // #4301: like the publication guard, preserve a live approval and name exactly how to use it.
+    // Pending closures remain replaceable when newer delivery proof becomes available (#4058).
+    if (category === "issue_closure" && !this.db.workflowDecisionByRequestId(sessionId, request.requestId)) {
+      const held = this.db.unconsumedWorkflowDecisionsForSession(sessionId).find((decision) =>
+        decision.category === "issue_closure" && decision.status === "approved" && decision.resourceKey === request.resourceKey);
+      if (held) return { ok: false, status: 409, errorDetails: { code: "issue_closure_approval_open",
+        occurrenceId: held.occurrenceId, resourceDigest: held.resourceDigest },
+        error: `Issue closure decision ${held.occurrenceId} is approved and was preserved; nothing was created or replaced. ` +
+          `Execute close_github_issue with occurrenceId ${held.occurrenceId} and resourceDigest ${held.resourceDigest}. ` +
+          `Execution still checks the approved snapshot. If it is stale, execution retires that approval explicitly; then request a new closure.` };
     }
     const now = Date.now();
     const resourceDigest = workflowDecisionResourceDigest(normalized.data);
@@ -15090,6 +15113,7 @@ export class SessionsService {
       oweResume,
       normalizedResolution.delegatedVideoEvidence,
       delegatedImage,
+      actor,
     );
     let resolved: WorkflowDecisionView | null;
     try {

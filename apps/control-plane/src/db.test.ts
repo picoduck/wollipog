@@ -3162,6 +3162,38 @@ test("typed workflow decisions preserve their exact approval snapshot across a d
   }
 });
 
+test("#4301 superseded closure approvals retain their actor and approval time across restart", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-closure-approval-"));
+  const file = join(root, "control-plane.db");
+  try {
+    const db = ControlPlaneDb.open(file);
+    db.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    db.createSession(newSession({ id: "parent" }));
+    const snapshot: WorkflowDecisionView["resourceSnapshot"] = { category: "issue_closure", repository: "team/repo", issue: 100,
+      title: "Task", url: "https://github.com/team/repo/issues/100", forgeDigest: "a".repeat(64), openPullRequests: [],
+      reason: "completed", explanation: "Delivered", evidence: ["Merged"], activeChildren: [], excludedChildren: [] };
+    const create = (n: number) => db.createWorkflowDecision({ requestId: `closure-${n}`, occurrenceId: `closure-${n}`,
+      sessionId: "parent", controllingSessionId: "parent", category: "issue_closure", resourceKey: "issue_closure:team/repo#100",
+      resourceSnapshot: snapshot, resourceDigest: "b".repeat(64), policyRevision: 1, authority: "human", createdAt: n * 1000 });
+    assert.ok(create(1));
+    const actor = { kind: "human" as const, id: "owner" };
+    assert.ok(db.resolveWorkflowDecision("closure-1", "human", "approved", 1500,
+      undefined, undefined, undefined, undefined, false, undefined, undefined, actor));
+    // Exercise the storage supersession path directly, including legacy/internal callers. The
+    // public service refuses an approved re-request instead of reaching this path.
+    assert.ok(create(2));
+    db.close();
+    const reopened = ControlPlaneDb.open(file);
+    try {
+      const old = reopened.workflowDecisionByOccurrence("closure-1")!;
+      assert.equal(old.status, "superseded");
+      assert.equal(old.supersededBy, "closure-2");
+      assert.equal(old.resolvedAt, 1500);
+      assert.deepEqual(old.approval, { actor, at: 1500 });
+    } finally { reopened.close(); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("resolving a decision records its resume as owed in the same write only when asked (#1759)", () => {
   const db = ControlPlaneDb.open(":memory:");
   try {

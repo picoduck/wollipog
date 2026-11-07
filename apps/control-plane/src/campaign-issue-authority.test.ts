@@ -1852,7 +1852,7 @@ test("#2940 work assigned while the excluded-pull-request read is pending is nev
     assert.equal(executed.ok, false);
     assert.equal(executed.status, 409);
     assert.equal(h.state.executes, 0, "no execute dispatch");
-    assert.equal(h.db.workflowDecisionByOccurrence(d.occurrenceId)?.status, "approved", "the approval stays unconsumed");
+    assert.equal(h.db.workflowDecisionByOccurrence(d.occurrenceId)?.status, "revoked", "stale approval is retired so a fresh request is possible");
   } finally { h.db.close(); }
 });
 
@@ -2171,7 +2171,7 @@ test("#2940 an excluded pull request reopened during scope synchronization is ne
     assert.equal(executed.status, 409);
     assert.deepEqual(forgeReads.slice(before), [[9]], "the uncached read follows synchronization");
     assert.equal(h.state.executes, 0, "no execute dispatch");
-    assert.equal(h.db.workflowDecisionByOccurrence(d.occurrenceId)?.status, "approved", "the approval stays unconsumed");
+    assert.equal(h.db.workflowDecisionByOccurrence(d.occurrenceId)?.status, "revoked", "stale approval is retired so a fresh request is possible");
   } finally { h.db.close(); }
 });
 
@@ -3199,6 +3199,53 @@ test("#4058 a closure awaiting the child's verification names the item and the v
     assert.equal(again.data!.proofGaps, undefined);
     assert.equal(closureSnapshot(again.data!.decision!).deliveryGaps, undefined);
     assert.equal(h.db.workflowDecisionByOccurrence(pending.occurrenceId)!.status, "superseded");
+  } finally { h.db.close(); }
+});
+
+test("#4301 a delegated approval is preserved on re-request and stale delivery can renew without inheriting approval", async () => {
+  const { h, observe, close } = delivery({ gate: "consumed", stage: [{ number: 10 }] });
+  try {
+    observe(10, "merged");
+    const first = await close("delivered");
+    assert.ok(first.ok, first.error ?? "closure");
+    const held = first.data!.decision!;
+    assert.equal(held.authority, "orchestrator");
+    assert.ok(h.approve(held).ok);
+    assert.equal((await close("redundant")).errorDetails?.occurrenceId, held.occurrenceId);
+    observe(10, "open");
+    const stale = await h.svc.executeGithubIssueClosure("root", held.occurrenceId, held.resourceDigest);
+    assert.equal(stale.status, 409);
+    assert.match(stale.error!, /approval retired/u);
+    assert.equal(h.state.executes, 0);
+    const retired = h.svc.workflowDecision("root", held.occurrenceId).data!;
+    assert.equal(retired.status, "revoked");
+    assert.ok(retired.approval, "retirement keeps the approver and time");
+    const next = await close("renewed");
+    assert.ok(next.ok, next.error ?? "renewal");
+    assert.equal(next.data!.decision!.status, "pending");
+    assert.notEqual(next.data!.decision!.occurrenceId, held.occurrenceId);
+  } finally { h.db.close(); }
+});
+
+test("#4301 an owner approval survives a re-request even when repaired proof would delegate the new closure", async () => {
+  const { h, observe, close } = delivery({ stage: [{ number: 10 }], verify: false });
+  try {
+    observe(10, "merged");
+    h.svc.onSessionStatus("child", "idle");
+    const report = h.db.appendEvent("child", { kind: "agent_message", text: "Delivered.", final: true }, Date.now()).seq;
+    const first = await close("before-verification");
+    assert.ok(first.ok, first.error ?? "closure");
+    const held = first.data!.decision!;
+    assert.equal(held.authorityEvaluation?.reason, "closure_proof_incomplete");
+    assert.ok(personResolves(h, "root", held.occurrenceId).ok);
+    const approved = h.svc.workflowDecision("root", held.occurrenceId).data!;
+    assert.ok(h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: report, followUpsAccounted: true,
+      workItem: { id: h.item.id, outcome: "delivered" } }).ok);
+    const again = await close("after-verification");
+    assert.equal(again.status, 409);
+    assert.deepEqual(again.errorDetails, { code: "issue_closure_approval_open", occurrenceId: held.occurrenceId, resourceDigest: held.resourceDigest });
+    assert.deepEqual(h.svc.workflowDecision("root", held.occurrenceId).data, approved);
+    assert.equal(h.db.workflowDecisionByRequestId("root", "after-verification"), null);
   } finally { h.db.close(); }
 });
 

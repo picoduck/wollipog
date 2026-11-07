@@ -1040,7 +1040,9 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      action: that runner creates the issue with its own forge login, with no session of its own,
 //      and answers the issue number. Consuming such a decision is refused, and a runner below v327
 //      is never sent one, so the requester's login is never used instead.
-export const PROTOCOL_VERSION = 327;
+// 328: Issue-closure decisions expose durable approval provenance (#4301). Approved re-requests
+//      are refused with the executable occurrence and digest; older readers may ignore provenance.
+export const PROTOCOL_VERSION = 328;
 
 export * from "./campaign-authority.js";
 export * from "./decision-questions.js";
@@ -6210,6 +6212,8 @@ export interface WorkflowDecisionView {
   delegatedImageReview?: import("./delegated-image-review.js").DelegatedImageReviewReference;
   createdAt: number;
   resolvedAt?: number;
+  /** v328 (#4301): durable issue-closure approval provenance; informational, never a grant. */
+  approval?: { actor: GovernanceActor; at: number };
   consumedAt?: number;
   actionAdmission?: WorkflowDecisionActionAdmission;
   /** v284 (#4067): what Wollipog did when it performed this approved forge action itself. */
