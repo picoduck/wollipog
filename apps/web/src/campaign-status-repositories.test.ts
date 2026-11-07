@@ -10,6 +10,7 @@ import {
   groupCampaignWorkByRepository,
   heldOnPullRequest,
   mergeDependencyLabel,
+  mergeDependencyLine,
   repositoryCountsLabel,
   stateCauseText,
 } from "./campaign-status.js";
@@ -68,4 +69,17 @@ test("a held item names its prerequisite and the pull request it waits on", () =
   assert.equal(heldOnPullRequest({ stateCauses: ["dependency_unmerged"], mergeDependencies: [{ ...dependency, pullRequests: [] }] }), "owner/api: Add Account Field");
   assert.equal(heldOnPullRequest({ stateCauses: ["attempt_awaiting_verification"], mergeDependencies: [dependency] }), null);
   assert.equal(stateCauseText("dependency_unmerged"), "Its merge waits until a prerequisite in another repository is merged.");
+});
+
+test("a Depends On line says when a prerequisite will not merge, when its merge is unknown, and when its repository is", () => {
+  const dependency = { id: "api", key: "api:field", title: "Add Account Field", repository: "owner/api", status: "unmerged" as const,
+    pullRequests: [{ ref: { repository: "owner/api", number: 7 }, state: "open" as const }] };
+  assert.deepEqual(mergeDependencyLine(dependency), { label: "owner/api: Add Account Field", status: "Not Merged" });
+  assert.deepEqual(mergeDependencyLine({ ...dependency, status: "merged" }), { label: "owner/api: Add Account Field", status: "Merged" });
+  assert.deepEqual(mergeDependencyLine({ ...dependency, status: "failed" }), { label: "owner/api: Add Account Field", status: "Will Not Merge" });
+  assert.deepEqual(mergeDependencyLine({ ...dependency, status: "unknown" }), { label: "owner/api: Add Account Field", status: "Merge Unknown" });
+  assert.deepEqual(mergeDependencyLine({ ...dependency, repository: null, title: null }), { label: "Unknown Repository: api:field", status: "Not Merged" });
+  // A held item waiting on one whose repository is unknown, and which names no pull request yet, says so too.
+  assert.equal(heldOnPullRequest({ stateCauses: ["dependency_unmerged"], mergeDependencies: [{ ...dependency, repository: null, pullRequests: [] }] }),
+    "Unknown Repository: Add Account Field");
 });

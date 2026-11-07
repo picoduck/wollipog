@@ -188,16 +188,18 @@ waiting on dependencies or approvals stays unfinished.
 
 Forges have no atomic cross-repository merge, so a change that needs another repository's change
 must land after it. `dependsOn` may name items in any of the campaign's repositories. An item works
-in every repository it is known to touch: its child's placement, each pull request it names, and its
-issue's (`campaignItemRepositories`). A dependency is a **merge dependency** when any repository the
-prerequisite works in differs from any its dependent works in, and it fails closed
-(`isCampaignMergeDependency`). At the merge gate the dependent's only repository is that of the pull
-request being merged, so there it is any prerequisite working outside that repository.
-
-- In a campaign of several repositories, an item whose repository is not yet known might work in any
-  of them, so a dependency on or from it is a merge dependency.
-- In a campaign of one repository, an item whose repository is unknown works in it.
-- A campaign that records no repository (from before #4117) keeps its dependencies display-only.
+in every repository it is known to touch: its child's placement and each pull request it names
+(`campaignItemRepositories`). Its issue's repository counts only when neither is known, since a
+feature issue in one repository is often delivered by work in another: two items placed in owner/api
+under an owner/app issue are in one repository. Only a campaign of several repositories has merge
+dependencies. A campaign of one repository, or one that records none (from before #4117), keeps every
+dependency display-only, as before, whatever repository an item names; adding a second repository to
+its boundary makes them merge dependencies. In a campaign of several, a dependency is a **merge
+dependency** when any repository the prerequisite works in differs from any its dependent works in,
+and it fails closed (`isCampaignMergeDependency`): an item whose repository is not yet known might
+work in any of them, so a dependency on or from it is a merge dependency. At the merge gate the
+dependent's only repository is that of the pull request being merged, so there it is any prerequisite
+working outside that repository.
 
 A merge dependency is met only when every pull request the prerequisite names, by its reported stage
 and its recorded deliveries, is freshly observed MERGED on its forge.
@@ -265,6 +267,17 @@ possible later work.
   (`dependency_blocked`), its merge is refused, and the Orchestrator reports it as blocked work. A
   replacement pull request named on the prerequisite's stage replaces the closed one and lifts the
   failure; that is accepted, since the replacement must itself be observed MERGED.
+- **Verified but unmerged.** A delivered verification is the Orchestrator's check of a report, not a
+  merge. While a dependent with merge dependencies has its own pull requests unmerged, a verified
+  report doesn't make it delivered: it reads **waiting** with `dependency_unmerged` while a
+  prerequisite has yet to merge, and **blocked** with `dependency_blocked` once one can never merge.
+  Either way it stays unfinished, so campaign completion and its dependents wait for it. Once every
+  pull request it names is observed MERGED, it is delivered whatever its prerequisites do, as is an
+  item with a recorded delivery (#4070), which is itself a merge.
+- **An armed merge held for good.** An armed `pr_merge` can't be withdrawn, since its command may
+  already have run; one whose prerequisite can never merge keeps the session's command tools denied
+  at Claude's policy hook. A new `pr_merge` request for the same pull request supersedes it, which
+  restores them; the new request is decided like any other.
 - **Display.** Each item lists its merge dependencies (`mergeDependencies`) with their repository
   (null when unknown, shown as Unknown Repository), status (`merged`, `unmerged`, `failed`) and pull
   requests. A merge already observed stays merged as its observation ages, since a forge never
