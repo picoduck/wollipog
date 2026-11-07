@@ -52,9 +52,13 @@ operation naming the campaign session and the granted numbers. The runner sets t
 launch policy, which the Claude Code routine-write classifier reads on each ask, and on the stored
 launch metadata, which its issue-closure checks read, so neither needs a relaunch. A provider still
 launching adopts them before it starts, including a restart (of a stopped session, too) whose spec
-predates the grant: the runner remembers each grant it applied and re-applies it wherever a launch
-rebuilds its metadata, but only to a policy holding no issue numbers and no issue scope. The next
-launch carries the same numbers from the control plane. Only Claude Code classifies issue writes this way; other harnesses ask for each write.
+predates the grant: the runner remembers a grant only for the launch that was already under way when
+it arrived, and only that launch re-applies it when it rebuilds its metadata, and only to a policy
+holding no issue numbers, no issue scope and no Full Control. The runner forgets it once that launch
+has taken it, when a new launch begins, on any scope synchronization, and when the session stops or
+is deleted. Every later launch takes its issue numbers from its own spec: a newer spec without them
+(numbers narrowed or revoked, Full Control taking over) is never overridden by an earlier grant.
+Only Claude Code classifies issue writes this way; other harnesses ask for each write.
 
 The delivery can only fill an empty grant with numbers this control plane already granted:
 
@@ -62,7 +66,8 @@ The delivery can only fill an empty grant with numbers this control plane alread
   holds exactly the granted numbers and no `issueScope`, and never to a stopped, failed, completed or
   archived session, to a member, or to another campaign's session.
 - The runner refuses it again (`grantRefusal`) for a session already holding other issue numbers or
-  any `issueScope`, one with no live or launching provider, a grant naming another campaign than the
+  any `issueScope`, a session under Full Control (`issue_scope_held`: its numbers come only from its
+  scope), one with no live or launching provider, a grant naming another campaign than the
   addressed session, or malformed numbers. A delivery of the numbers the session already holds is a
   no-op (`unchanged`).
 - It names no repository, revision, scope or operation, so it can't widen a scope, raise a ceiling,

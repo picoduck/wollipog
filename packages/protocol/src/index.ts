@@ -5834,7 +5834,8 @@ export type CampaignIssueNumberGrantRefusal =
   | "not_live"
   /** The session already holds other issue numbers. */
   | "issue_numbers_held"
-  /** The session already holds an authorized issue scope. */
+  /** The session already holds an authorized issue scope, or runs under Full Control, whose issue
+   * numbers come only from its scope. */
   | "issue_scope_held";
 
 export interface CampaignIssueScopeResultMessage {
