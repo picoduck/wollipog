@@ -10,7 +10,10 @@ import { claudeProjectPathKey } from "./claude-background-work.js";
 import type { DriverCallbacks } from "./drivers/driver.js";
 import { LOCATION_SWITCH_FAILURES, moveClaudeTranscriptToCwd, originNamesRepository } from "./location-switch.js";
 import { bindPullRequestScope } from "./review-snapshot.js";
-import { SessionManager } from "./session-manager.js";
+import { buildCodexTurnParams } from "./drivers/codex-app-server.js";
+import { managedWorktreeLaunchRefusal } from "./execution-isolation.js";
+import { commandTargetsManagedWorktree } from "./managed-worktree-protection.js";
+import { reusedWorktreeNotice, SessionManager } from "./session-manager.js";
 import { SessionStore } from "./session-store.js";
 import { nativePathSpelling, parseWorktreePorcelain, recoveredBranchPlacement, sameWorktreePath } from "./worktree.js";
 
@@ -205,6 +208,34 @@ test("a Codex session switches too: the same thread resumes in the new working d
   }, { driver: "codex-app-server" });
 });
 
+test("a Codex session continuing in a reused worktree can commit there, and the guard and veto protect it", async () => {
+  await withSession("codex-reuse", async (h) => {
+    await establishConversation(h);
+    const busy = busyWorktree(h);
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.fake.prompts.length === 2, "the Codex session did not continue in the reused worktree");
+    const meta = h.store.readMeta(h.sessionId)!;
+    assert.equal(meta.worktreePath, busy);
+    assert.equal(h.fake.resumed[1], "provider-session-id");
+    // The reused worktree is one of the session's managed worktrees, for the sandbox and the guard.
+    const protections = h.manager.managedWorktreeProtections(meta);
+    assert.deepEqual(protections.map((protection) => protection.worktreePath), [busy]);
+    assert.deepEqual(h.manager.managedWorktreeGuardProtections(meta).map((protection) => protection.worktreePath), [busy]);
+    // Codex gets the worktree's own Git administration as writable roots, so `git add` and
+    // `git commit` work without an escalation, and full access narrows so the veto stays enforceable.
+    const params = buildCodexTurnParams({ permissionMode: "danger-full-access" } as never, "thread", busy, [], undefined,
+      protections) as { approvalPolicy: string; sandboxPolicy: { type: string; writableRoots?: string[] } };
+    const admin = git(busy, "rev-parse", "--absolute-git-dir");
+    assert.equal(params.sandboxPolicy.type, "workspaceWrite");
+    assert.equal(params.approvalPolicy, "on-request");
+    assert.ok(params.sandboxPolicy.writableRoots?.includes(busy));
+    assert.ok(params.sandboxPolicy.writableRoots?.includes(admin), JSON.stringify(params.sandboxPolicy));
+    // The driver's veto refuses removing the person's worktree.
+    assert.notEqual(commandTargetsManagedWorktree(`git worktree remove --force ${busy}`, busy, protections), null);
+    assert.notEqual(commandTargetsManagedWorktree(`rm -rf ${busy}`, h.docs, protections), null);
+  }, { driver: "codex-app-server" });
+});
+
 test("a runner that stops between the move and the relaunch shows it on the session and keeps the continuation owed", async () => {
   await withSession("interrupted", async (h) => {
     await establishConversation(h);
@@ -316,7 +347,11 @@ test("an existing worktree nothing holds is reused in place: its uncommitted wor
     assert.equal(meta.worktreePath, busy, "the session continues in the worktree that already had the branch");
     assert.deepEqual(meta.worktrees?.map((worktree) => [worktree.path, worktree.branch, worktree.source, worktree.reusedInPlace]),
       [[busy, "fix/install-link", "attached", true]]);
-    assert.deepEqual(h.fake.prompts[1], { cwd: busy, text: "Continue the docs fix here." });
+    // What the agent reads first says it is in an existing worktree whose changes are not its own.
+    assert.deepEqual(h.fake.prompts[1], { cwd: busy,
+      text: `${reusedWorktreeNotice(busy, "fix/install-link", 3)}\n\nContinue the docs fix here.` });
+    assert.match(h.fake.prompts[1]!.text, /It holds 3 uncommitted changes that this session did not make\./u);
+    assert.match(h.fake.prompts[1]!.text, /never discard them \(git reset --hard/u);
     // The switch's claim ends once the session's own record holds the worktree.
     await waitFor(() => (h.manager as unknown as { reusedWorktreeClaims: Map<string, string> }).reusedWorktreeClaims.size === 0,
       "the claim outlived the move");
@@ -343,6 +378,12 @@ test("an existing worktree nothing holds is reused in place: its uncommitted wor
     // An attached worktree without the runner's mark stays outside hosted review.
     await assert.rejects(review({ ...meta, worktrees: meta.worktrees!.map((worktree) => ({ ...worktree, reusedInPlace: undefined })) }),
       /the session's own native managed worktree/u);
+    // The registration is proven again at review time: once the worktree is on another branch, the
+    // runner's record of it no longer admits the branch's pull request.
+    git(busy, "switch", "--quiet", "-c", "elsewhere");
+    await assert.rejects(review(meta), /no longer registered on this session's expected branch/u);
+    git(busy, "switch", "--quiet", "fix/install-link");
+    git(h.docs, "branch", "-D", "elsewhere");
 
     // Deleting the session leaves the person's worktree, and everything in it, where it was.
     h.manager.stop(h.sessionId);
@@ -469,6 +510,118 @@ test("a worktree whose files no longer belong to the target Location's repositor
     assert.equal(h.fake.launches(), 1, "the provider was never retired");
     assert.deepEqual(files(busy), before);
   });
+});
+
+test("a switch deferred after choosing a clean existing worktree gives nothing back: the worktree stays on disk", async () => {
+  await withSession("reuse-deferred", async (h) => {
+    await establishConversation(h);
+    // Clean, so `git worktree remove` would succeed on it if the switch tried to give it back.
+    const clean = join(h.docs, "..", "docs-clean");
+    git(h.docs, "worktree", "add", "--quiet", clean, "fix/install-link");
+    const path = realpathSync(clean);
+    const before = files(path);
+    // A Stop lands while the switch has the worktree chosen and claimed, before anything moves.
+    const runner = h.manager as unknown as {
+      worktreeRebindCanProceed: (sessionId: string, entry: unknown) => boolean;
+      reusedWorktreeClaims: Map<string, string>;
+    };
+    const canProceed = runner.worktreeRebindCanProceed.bind(h.manager);
+    let stopped = false;
+    runner.worktreeRebindCanProceed = (sessionId, entry) => {
+      if (!stopped && runner.reusedWorktreeClaims.has(path)) {
+        stopped = true;
+        h.manager.stop(h.sessionId);
+      }
+      return canProceed(sessionId, entry);
+    };
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => stopped, "the switch never chose the existing worktree");
+    await waitFor(() => runner.reusedWorktreeClaims.size === 0, "the deferred switch kept its claim");
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    assert.equal(h.store.readMeta(h.sessionId)?.repoPath, h.app, "nothing moved");
+    assert.equal(h.fake.launches(), 1);
+    assert.ok(existsSync(path), "the person's worktree was removed");
+    assert.deepEqual(files(path), before);
+    assert.match(git(h.docs, "worktree", "list", "--porcelain"), new RegExp(`worktree ${path}\\n`, "u"));
+  });
+});
+
+test("a reused worktree and its mark survive a runner restart, and the session keeps working there", async () => {
+  await withSession("reuse-restart", async (h) => {
+    await establishConversation(h);
+    const busy = busyWorktree(h);
+    const before = files(busy);
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.fake.prompts.length === 2 && h.store.readMeta(h.sessionId)?.status === "idle",
+      "the session did not continue in the reused worktree");
+    const restarted = h.restartRunner();
+    restarted.manager.recoverAllOrphanedWork();
+    const meta = restarted.store.readMeta(h.sessionId)!;
+    assert.equal(meta.worktreePath, busy);
+    assert.deepEqual(meta.worktrees?.map((worktree) => [worktree.path, worktree.source, worktree.reusedInPlace]),
+      [[busy, "attached", true]]);
+    // The restarted runner still protects it as the session's own, sandboxes it as one it created,
+    // and admits the branch's pull request to hosted review.
+    assert.deepEqual(restarted.manager.managedWorktreeProtections(meta).map((protection) => protection.worktreePath), [busy]);
+    const sandbox = restarted.manager as unknown as { requiresManagedWorktreeBwrap: (meta: unknown) => boolean };
+    assert.equal(sandbox.requiresManagedWorktreeBwrap(meta), process.platform === "linux");
+    const head = git(busy, "rev-parse", "HEAD");
+    const bound = await bindPullRequestScope({
+      meta, request: { repository: "acme/docs", number: 12, headSha: head }, tools: { git: "git", gh: "gh" }, env: process.env,
+      exec: async (command, args, options) => execFileSync(command, args, { encoding: "utf8", env: options?.env }),
+      pullRequest: async () => ({ state: "open", baseRepository: "acme/docs", headRepository: "acme/docs",
+        headRef: "fix/install-link", headSha: head, baseSha: head }),
+    });
+    assert.equal(bound.branch, "fix/install-link");
+    // Deleting the session through the restarted runner still leaves the person's worktree alone.
+    restarted.manager.stop(h.sessionId);
+    await restarted.manager.delete(h.sessionId);
+    await new Promise<void>((resolve) => setTimeout(resolve, 200));
+    assert.deepEqual(files(busy), before);
+    assert.equal(git(busy, "rev-parse", "--abbrev-ref", "HEAD"), "fix/install-link");
+  });
+});
+
+test("a worktree directly in the temporary directory is refused before the provider is retired or anything moves",
+  { skip: process.platform !== "linux" && "the managed bubblewrap boundary applies on native Linux only" }, async () => {
+  await withSession("reuse-tmp", async (h) => {
+    await establishConversation(h);
+    const temporary = realpathSync(tmpdir());
+    const placed = join(temporary, `wollipog-location-reuse-${process.pid}-${Date.now()}`);
+    git(h.docs, "worktree", "add", "--quiet", placed, "fix/install-link");
+    try {
+      writeFileSync(join(placed, "notes.txt"), "kept\n");
+      const before = files(placed);
+      assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+      await waitFor(() => h.store.readMeta(h.sessionId)?.locationSwitchFailure !== undefined, "the refusal was not recorded");
+      const meta = h.store.readMeta(h.sessionId)!;
+      assert.equal(meta.locationSwitchFailure!.reason, "the target worktree could not be prepared: branch fix/install-link is " +
+        `checked out in worktree ${placed}, which this session cannot continue in: it sits directly in the temporary directory ` +
+        `${temporary}, where the session's sandbox cannot protect it; move that worktree (git worktree move) or switch it to ` +
+        "another branch, then ask again");
+      assert.equal(meta.repoPath, h.app, "nothing moved");
+      assert.equal(h.fake.launches(), 1, "the provider was never retired");
+      assert.equal((h.manager as unknown as { reusedWorktreeClaims: Map<string, string> }).reusedWorktreeClaims.size, 0);
+      assert.deepEqual(files(placed), before);
+    } finally {
+      git(h.docs, "worktree", "remove", "--force", placed);
+    }
+  });
+});
+
+test("the reuse check refuses exactly the placements the managed boundary's launch refuses", () => {
+  const tmp = ["/tmp"];
+  assert.match(managedWorktreeLaunchRefusal("/tmp/docs-wt", "/src/docs/.git", [], tmp)!, /directly in the temporary directory \/tmp/u);
+  assert.equal(managedWorktreeLaunchRefusal("/tmp/work/docs-wt", "/src/docs/.git", [], tmp), null);
+  // As at launch, a shared writable directory may sit beside the worktree, be the worktree itself
+  // (already its working directory) or be exactly its parent, but nothing wider and never inside the
+  // worktree or around its Git directory. execution-isolation.test.ts checks these against the launch.
+  assert.equal(managedWorktreeLaunchRefusal("/work/docs-wt", "/src/docs/.git", ["/work/cache"], tmp), null);
+  assert.equal(managedWorktreeLaunchRefusal("/work/docs-wt", "/src/docs/.git", ["/work/docs-wt"], tmp), null);
+  assert.equal(managedWorktreeLaunchRefusal("/work/docs-wt", "/src/docs/.git", ["/work"], tmp), null);
+  assert.match(managedWorktreeLaunchRefusal("/work/docs-wt", "/src/docs/.git", ["/"], tmp)!, /overlaps the shared writable directory \/,/u);
+  assert.match(managedWorktreeLaunchRefusal("/work/docs-wt", "/src/docs/.git", ["/work/docs-wt/out"], tmp)!, /overlaps/u);
+  assert.match(managedWorktreeLaunchRefusal("/work/docs-wt", "/src/docs/.git", ["/src/docs/.git/objects"], tmp)!, /overlaps/u);
 });
 
 test("on Direct WSL, where a recovered branch continues is decided on the distro's own paths", async () => {

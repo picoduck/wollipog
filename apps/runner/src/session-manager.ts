@@ -201,6 +201,7 @@ import type { ContainerTargetRegistry } from "./container-target.js";
 import type { CloudTargetRegistry } from "./cloud-target.js";
 import {
   cloneExecutionIsolationState,
+  managedWorktreeLaunchRefusal,
   migrateExecutionIsolationState,
   providerStateKey,
   removeExecutionIsolationState,
@@ -1231,6 +1232,26 @@ const CHECKPOINT_REF_MAINTENANCE_CONCURRENCY = 4;
 const ORPHAN_RECOVERY_RETRY_MS = 30_000;
 /** (#4138) Why a moved session waits: the runner restarted between the move and its relaunch. */
 const INTERRUPTED_MOVE_REASON = "The session moved there, but the runner restarted before it continued the task.";
+
+/** What the agent reads first after a Location switch continued in an existing worktree (#4138):
+ * the runner's own facts, framed as Wollipog's, so a routine reset or clean does not discard work
+ * that was there before the session arrived. Exported for tests. */
+export function reusedWorktreeNotice(path: string, branch: string, uncommittedChanges: number | undefined): string {
+  const changes = uncommittedChanges === undefined
+    ? "It may hold uncommitted changes: Git could not count them."
+    : uncommittedChanges === 0
+    ? "It had no uncommitted changes when you arrived."
+    : `It holds ${uncommittedChanges} uncommitted change${uncommittedChanges === 1 ? "" : "s"} that this session did not make.`;
+  return [
+    "[Wollipog Existing Worktree]",
+    `You are continuing in an existing worktree, ${JSON.stringify(path)}, on branch ${JSON.stringify(branch)}, exactly as it was. ` +
+      changes,
+    "Changes already in this worktree are someone else's work. Look at them (git status, git diff) before changing anything, " +
+      "and never discard them (git reset --hard, git checkout or restore of their files, git clean, git stash drop, or deleting " +
+      "files) unless your person asks you to.",
+    "[End Wollipog Existing Worktree]",
+  ].join("\n");
+}
 const ORPHAN_RECOVERY_SCAN_DEBOUNCE_MS = 30_000;
 const ORPHAN_RECOVERY_PROMPT =
   "Continue after runner restart: consume queued background-task notifications, reconcile every orphaned task, and resume or report unfinished work without waiting for another user message.";
@@ -2818,7 +2839,11 @@ export class SessionManager {
   }
 
   /** Every runner-created identity remains protected even while a sibling is selected or its
-   * cleanup is pending. Attached operator worktrees deliberately stay outside this boundary.
+   * cleanup is pending. Attached operator worktrees deliberately stay outside this boundary, except
+   * one a Location switch reused in place (#4138): the session works there as in one it created, so
+   * it gets the same Git write roots, read-only registration, command guard and driver veto. Every
+   * consumer of this list only restricts or grants Git access; none removes or reconfigures a
+   * worktree, so including it changes nothing about who may remove it.
    * Public because launch provisioning needs the same set the driver's veto uses.
    *
    * The session's own default worktree is also pinned to its branch (#1650): its identity is
@@ -2826,7 +2851,7 @@ export class SessionManager {
    * worktree recovery. A worktree the session created or attached for another branch is not. */
   managedWorktreeProtections(meta: SessionMeta): ManagedWorktreeProtection[] {
     return this.attributedWorktrees(meta)
-      .filter((worktree) => worktree.source !== "attached")
+      .filter((worktree) => worktree.source !== "attached" || worktree.reusedInPlace === true)
       .map((worktree) => ({
         worktreePath: worktree.path,
         repoPath: meta.repoPath,
@@ -10207,14 +10232,7 @@ export class SessionManager {
     const isolationPolicy = protectedWorktree
       ? { mode: "bwrap" as const, network: this.executionIsolation.network }
       : this.executionIsolation;
-    const projectSharedWritableRoots = purpose === "provider" && !this.strictProjectIsolation(meta)
-      ? projectSharedDirectories(this.sharedDirectoryWorkspaces, meta, [
-          this.stateDir, join(homedir(), ".config/wollipog"), join(homedir(), ".ssh"),
-          ...this.sharedDirectoryForbiddenRoots,
-          join(homedir(), ".aws"), join(homedir(), ".codex"), join(homedir(), ".claude"),
-          ...[meta.providerCredentialHome, meta.pendingProviderCredentialHome].filter((path): path is string => !!path),
-        ])
-      : [];
+    const projectSharedWritableRoots = purpose === "provider" ? this.providerSharedWritableRoots(meta) : [];
     if (projectSharedWritableRoots.length && (isolationPolicy.mode !== "bwrap" || process.platform !== "linux")) {
       throw new Error("project shared writable directories require native Linux bubblewrap isolation");
     }
@@ -10298,6 +10316,19 @@ export class SessionManager {
         : {}),
       ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
     }));
+  }
+
+  /** The Project shared directories a provider launch binds writable for this session, with the
+   * runner's protected roots excluded. One derivation for the launch and for a Location switch's
+   * check before it moves the session (#4138). */
+  private providerSharedWritableRoots(meta: SessionMeta): string[] {
+    if (this.strictProjectIsolation(meta)) return [];
+    return projectSharedDirectories(this.sharedDirectoryWorkspaces, meta, [
+      this.stateDir, join(homedir(), ".config/wollipog"), join(homedir(), ".ssh"),
+      ...this.sharedDirectoryForbiddenRoots,
+      join(homedir(), ".aws"), join(homedir(), ".codex"), join(homedir(), ".claude"),
+      ...[meta.providerCredentialHome, meta.pendingProviderCredentialHome].filter((path): path is string => !!path),
+    ]);
   }
 
   private requiresManagedWorktreeBwrap(meta: SessionMeta): boolean {
@@ -14732,6 +14763,19 @@ export class SessionManager {
         }
         this.reusedWorktreeClaims.set(created.path, sessionId);
         claim.path = created.path;
+        // On native Linux the provider relaunches inside the managed bubblewrap boundary, whose
+        // launch refuses some worktree placements. Refuse those now, while nothing has moved:
+        // after the move each retry would retire the provider and fail the launch again.
+        if (process.platform === "linux") {
+          const temporary = tmpdir();
+          const refusal = managedWorktreeLaunchRefusal(created.path, realpathSync.native(join(repoPath, ".git")),
+            this.providerSharedWritableRoots({ ...meta, workspaceId: pending.workspaceId, repoPath }),
+            [...new Set([temporary, realpathSync.native(temporary)])]);
+          if (refusal) {
+            throw new Error(`branch ${created.branch} is checked out in worktree ${created.path}, which this session cannot ` +
+              `continue in: ${refusal}; move that worktree (git worktree move) or switch it to another branch, then ask again`);
+          }
+        }
       }
       const defaultBranch = await readRepositoryDefaultBranch(repoPath, options);
       worktree = reused
@@ -14800,7 +14844,12 @@ export class SessionManager {
           locationSwitchFailure: undefined,
           // Owed in the same write as the move, so a runner that stops before the relaunch still
           // continues the task in the new Location when it recovers.
-          pendingLocationContinuation: { occurrenceId: pending.occurrenceId, text: pending.continuation, path: worktree.path,
+          // A reused worktree's uncommitted changes are someone else's work, so the turn opens with
+          // the runner's own account of them, ahead of the control plane's continuation.
+          pendingLocationContinuation: { occurrenceId: pending.occurrenceId,
+            text: reused ? `${reusedWorktreeNotice(worktree.path, worktree.branch, reused.uncommittedChanges)}\n\n${pending.continuation}`
+              : pending.continuation,
+            path: worktree.path,
             branch: worktree.branch, locationName: pending.locationName, repository: pending.repository },
         });
         if (moved) this.store.flush(sessionId);

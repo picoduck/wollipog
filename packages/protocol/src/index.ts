@@ -8609,8 +8609,11 @@ export interface SessionWorktreeView {
   /** (#4138) An `attached` worktree that a Location switch found already holding the approved
    * branch, verified as the target Location's repository and held by nothing else on the runner,
    * and continued in place. Only the runner sets it. Like any attached worktree it is never set up,
-   * torn down or removed with the session; unlike one, it keeps the managed sandbox and is the
-   * session's own worktree for hosted review. */
+   * torn down or removed with the session. Unlike one, it gets the protections of a runner-created
+   * worktree: on native Linux the managed bubblewrap boundary, and wherever the runner derives them
+   * from its managed worktrees, the Git write roots, read-only Git registration, command guard and
+   * driver veto. It is also the session's own
+   * worktree for hosted review, which proves its registration again first. */
   reusedInPlace?: boolean;
   /** Protocol v141: repository-owned setup lifecycle. Environment values and copied contents are
    * deliberately runner-private; only names, timing, and bounded outcomes cross the wire. */
