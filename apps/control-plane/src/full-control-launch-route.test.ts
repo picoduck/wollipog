@@ -5569,6 +5569,17 @@ test("a forge fact is shown only to viewers of the runner whose login supplied i
     await observer.readNow(id, [pull]);
     const after = await fact();
     assert.deepEqual([after.reason, after.lastValue?.headSha], ["forge_not_found", "b".repeat(40)]);
+
+    // Who may see a fact follows its supplier, so a new supplier notifies readers even when the fact
+    // reads the same: a viewer with this item open and hidden must learn it can now see it.
+    const store = f.db.campaignForgeObservations, ref = { repository: "other/repo", number: 11 };
+    const changed = (runnerId: string, result: { observation: typeof value } | { failure: "forge_not_found" }) => store.record(id, runnerId, [{ ref, ...result }], Date.now());
+    assert.equal(changed("r2", { observation: value }), true, "first value");
+    assert.equal(changed("r2", { observation: value }), false, "the same value from the same runner changes nothing");
+    assert.equal(changed("r3", { observation: value }), true, "the same value from a new supplier");
+    assert.equal(changed("r3", { failure: "forge_not_found" }), true, "a failure");
+    assert.equal(changed("r3", { failure: "forge_not_found" }), false, "the same failure from the same runner changes nothing");
+    assert.equal(changed("r2", { failure: "forge_not_found" }), true, "the same failure from a new supplier, with no value left");
     observer.dispose();
     await status.close();
   } finally { await server.close(); f.db.close(); }

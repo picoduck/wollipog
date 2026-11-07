@@ -161,7 +161,8 @@ export class CampaignForgeObservationStore {
              runner_id=excluded.runner_id, value_json=excluded.value_json, observed_at=excluded.observed_at,
              failure_reason=NULL, failed_at=NULL`,
         ).run(campaignId, key, result.ref.number, runnerId, json, at);
-        if (!before || before.value_json !== json || before.failure_reason !== null) changed = true;
+        // The supplier decides who may see a fact, so a new one changes what some readers get.
+        if (!before || before.value_json !== json || before.failure_reason !== null || before.runner_id !== runnerId) changed = true;
       } else if (result.failure && FAILURES.has(result.failure)) {
         // A failure keeps the last value only when it came from the same runner: a row names one
         // supplier, and another runner's login must not vouch for, or expose, this one's value (#4119).
@@ -174,7 +175,7 @@ export class CampaignForgeObservationStore {
              observed_at=CASE WHEN runner_id=excluded.runner_id THEN observed_at END,
              runner_id=excluded.runner_id, failure_reason=excluded.failure_reason, failed_at=excluded.failed_at`,
         ).run(campaignId, key, result.ref.number, runnerId, result.failure, at);
-        if (!before || before.failure_reason !== result.failure || (before.runner_id !== runnerId && before.value_json !== null)) changed = true;
+        if (!before || before.failure_reason !== result.failure || before.runner_id !== runnerId) changed = true;
       }
     }
     return changed;
