@@ -8237,6 +8237,13 @@ function SessionDetailLoaded({
           descendantRequestStatus={descendantRequestStatus}
           campaignAvailability={campaignAvailability}
           onOpenSession={(id) => navigate({ name: "session", id })}
+          onOpenSessionRequest={(id, requestId) => {
+            // As Open Request on a child's request: that session opens at it, or opens alone while
+            // its row is not loaded yet, since a request is found only within the session's epoch.
+            rightPanel.close();
+            const target = getSession(id);
+            navigate(target ? { name: "session", id, attention: { eventEpoch: target.eventEpoch ?? 0, requestId } } : { name: "session", id });
+          }}
           selectedRequestKey={selectedRequestKey}
           onSelectedRequestKeyChange={setSelectedRequestKey}
           onDescendantsUpdate={refreshDescendantRequestsAfterResolution}

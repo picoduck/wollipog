@@ -32,7 +32,7 @@ import { applyCampaignBehavior, campaignBehaviorProjection, changedCampaignBehav
 import type { OrchestratorCampaignBehavior, OrchestratorCampaignBehaviorKey } from "@wollipog/protocol";
 import { ReviewSessions, type NewReviewSession } from "./review-sessions.js";
 import { DelegatedImageReviews, type NewDelegatedImageReview } from "./delegated-image-reviews.js";
-import { PullRequestWatches } from "./pull-request-watches.js";
+import { PREREQUISITE_MERGE_WATCH_RUNNER, PullRequestWatches } from "./pull-request-watches.js";
 import { SessionWaits } from "./session-waits.js";
 import { ReviewSettingsStore, type ReviewPolicyCapture } from "./review-settings.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
@@ -231,6 +231,7 @@ import {
   type WorkflowDecisionAuthority,
   type WorkflowDecisionStatus,
   type WorkflowDecisionView,
+  type MergeClosureWatch,
   type WorkflowDecisionResourceSnapshot,
   type PromptImageReference,
   type PromptSessionMessage,
@@ -6372,6 +6373,9 @@ export class ControlPlaneDb {
         // A stale grant cannot establish delivery or admit a forge/review repair.
         // Only completion truth is retained; the existing admission still fences all effects.
         if (!boundaryCurrent) continue;
+        // Only items without a delivered verification reach here: a verified-delivered item is already
+        // finished, whichever campaign repository its pull request is in (#4120). An unverified item
+        // is finished only by a merge in its issue's own repository, never by another one's (#4119).
         const itemRepository = item.issue.repository.toLowerCase();
         const refs = item.stage?.pullRequests.filter(ref => ref.repository.toLowerCase() === itemRepository) ?? [];
         if (refs.length === 0) { unfinished = true; continue; }
@@ -6495,11 +6499,17 @@ export class ControlPlaneDb {
       armedMerge: (sessionId) => this.stmt(`SELECT 1 FROM workflow_decisions WHERE session_id=? AND category='pr_merge'
         AND status='approved' AND action_kind='pr_merge_enqueue' AND action_armed_at IS NOT NULL LIMIT 1`).get(sessionId) !== undefined,
       // Controlled by the root or one of its nested Orchestrators; the controller index keeps it cheap.
-      armedMergeSessions: (campaignId) => (this.stmt(`SELECT DISTINCT session_id FROM workflow_decisions
+      armedMerges: (campaignId) => (this.stmt(`SELECT occurrence_id, session_id, resource_snapshot FROM workflow_decisions
         WHERE controlling_session_id IN (SELECT value FROM json_each(?)) AND status='approved' AND category='pr_merge'
           AND action_kind='pr_merge_enqueue' AND action_armed_at IS NOT NULL`)
-        .all(JSON.stringify([campaignId, ...this.campaignDescendantIds(campaignId)])) as Array<{ session_id: string }>)
-        .map((row) => row.session_id).filter((sessionId) => this.campaignRootForMember(sessionId) === campaignId),
+        .all(JSON.stringify([campaignId, ...this.campaignDescendantIds(campaignId)])) as Array<{ occurrence_id: string; session_id: string; resource_snapshot: string }>)
+        .filter((row) => this.campaignRootForMember(row.session_id) === campaignId)
+        .flatMap((row) => {
+          const snapshot = parseJson<WorkflowDecisionResourceSnapshot>(row.resource_snapshot);
+          return snapshot?.category === "pr_merge" ? [{ occurrenceId: row.occurrence_id, sessionId: row.session_id,
+            pullRequest: { repository: snapshot.repository, number: snapshot.pullRequest } }] : [];
+        }),
+      campaignRepositories: (campaignId) => this.campaignRepositoriesOf(campaignId),
     });
     return this.campaignWorkLedgerStore;
   }
@@ -7563,6 +7573,21 @@ export class ControlPlaneDb {
     ]) {
       try { db.exec(`ALTER TABLE workflow_decisions ADD COLUMN ${column}`); } catch { /* already present */ }
     }
+    // #4323: a consumed merge's closure watch. Merges consumed before it existed are not watched:
+    // marked once, when the column is added, so none of them is read or reported afterwards.
+    let closureWatchAdded = false;
+    try { db.exec("ALTER TABLE workflow_decisions ADD COLUMN closure_watch TEXT"); closureWatchAdded = true; } catch { /* already present */ }
+    if (closureWatchAdded) {
+      const at = Date.now();
+      db.prepare(`UPDATE workflow_decisions SET closure_watch=? WHERE category='pr_merge' AND closure_watch IS NULL
+        AND (status='consumed' OR forge_action IS NOT NULL)`).run(JSON.stringify({ state: "not_watched", since: at, updatedAt: at,
+        endReason: "Consumed before merges were watched until they land." } satisfies MergeClosureWatch));
+    }
+    // Live watches and those still owing their owner a report.
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_closure_watch
+      ON workflow_decisions(created_at) WHERE category='pr_merge' AND
+        (closure_watch IS NULL OR json_extract(closure_watch, '$.state') IN ('watching','invalidated')
+          OR json_extract(closure_watch, '$.reportPending') IS NOT NULL)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_held_resume
       ON workflow_decisions(session_id, resolved_at) WHERE resume_state='held'`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_resume_command
@@ -8591,6 +8616,11 @@ export class ControlPlaneDb {
              VALUES (?, ?, ?, ?, ?, 'online', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(meta.runnerId, meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, now, editors, runtime, containerTargets, providerAccounts, providerLogins);
+      }
+      // A runner that cannot prove provider retirement now serves its sessions' live generations,
+      // so their slots stay held whatever it, or a later runner, attests for them (#3788).
+      if (!runnerSupportsProtocol(protocolVersion, "campaignProviderRetirementProof")) {
+        this.campaignBudgets.noteRunnerRetirementUnprovable(meta.runnerId);
       }
 
       const ownerKind = scope.owner.kind;
@@ -17759,6 +17789,14 @@ export class ControlPlaneDb {
     return campaignLocationRepository(this, root, campaignScopeRepositories(root), member);
   }
 
+  /** #4120: the campaign's repositories, lower-cased, launch repository first (`campaignScopeRepositories`),
+   * read from the root's row: a session view embeds the campaign projection, which reads the ledger. */
+  campaignRepositoriesOf(campaignId: string): string[] {
+    const row = this.stmt("SELECT orchestrator_policy FROM sessions WHERE id=?").get(campaignId) as { orchestrator_policy: string | null } | undefined;
+    const policy = orchestratorCampaignPolicyFromJson(row?.orchestrator_policy ?? null) ?? undefined;
+    return policy ? campaignScopeRepositories({ orchestratorPolicy: policy } as Pick<SessionView, "orchestratorPolicy">).map((entry) => entry.repository) : [];
+  }
+
   /** #4120: the campaign repository a session is placed in, by `campaignParticipantRepository`, read
    * from rows: a session view embeds the campaign projection, which reads the ledger that asks this. */
   campaignSessionRepository(campaignId: string, sessionId: string): string | null {
@@ -23021,6 +23059,29 @@ export class ControlPlaneDb {
 
   /** For the forge observer's background pass (#4067): each live campaign's merged pull requests
    * whose branch is pending, so a branch deleted by anyone is eventually seen gone. */
+  /** What the campaign forge observer reads in the background (slice 8 of #2417): unfinished items'
+   * pull requests, merged campaign pull requests whose branch is pending (#4067), and the
+   * prerequisites held merges are parked on (#4120). */
+  campaignForgeBackgroundTargets(include: (campaignId: string) => boolean): Array<{ campaignId: string; refs: CampaignPullRequestRef[] }> {
+    return [...this.campaignWorkLedger.forgeBackgroundTargets(include), ...this.campaignMergedBranchTargets(include),
+      ...this.campaignPrerequisiteWatchTargets(include)];
+  }
+
+  /** #4120: the prerequisite pull requests held merges are parked on, per campaign. They are read in
+   * the background whatever the state of the items involved: a merge of a finished item's pull request
+   * is held too, and only a read can fire its wake. */
+  campaignPrerequisiteWatchTargets(include: (campaignId: string) => boolean = () => true): Array<{ campaignId: string; refs: CampaignPullRequestRef[] }> {
+    const targets = new Map<string, Map<string, CampaignPullRequestRef>>();
+    for (const watch of this.pullRequestWatches.watchingOn(PREREQUISITE_MERGE_WATCH_RUNNER)) {
+      const campaignId = this.campaignRootForMember(watch.sessionId);
+      if (!campaignId || !include(campaignId)) continue;
+      const refs = targets.get(campaignId) ?? new Map<string, CampaignPullRequestRef>();
+      refs.set(`${watch.repository.toLowerCase()}#${watch.number}`, { repository: watch.repository, number: watch.number });
+      targets.set(campaignId, refs);
+    }
+    return [...targets].map(([campaignId, refs]) => ({ campaignId, refs: [...refs.values()] }));
+  }
+
   campaignMergedBranchTargets(include: (campaignId: string) => boolean = () => true): Array<{ campaignId: string; refs: CampaignPullRequestRef[] }> {
     const roots = (this.stmt("SELECT id FROM sessions WHERE archived=0 AND orchestrator_policy IS NOT NULL AND parent_session_id IS NULL")
       .all() as Array<{ id: string }>).map((row) => row.id).filter(include);
@@ -23694,16 +23755,66 @@ export class ControlPlaneDb {
     this.stmt("DELETE FROM automation_expiration_effects WHERE occurrence_id=?").run(occurrenceId);
   }
 
-  /** Consumed pull-request merge gates these sessions passed: completed-closure delivery candidates (#2940). */
+  /** Consumed pull-request merge gates these sessions passed: completed-closure delivery candidates
+   * (#2940). A merge whose closures changed after approval, or that landed closing an issue it did
+   * not approve, is not one: its decision does not cover what happened (#4323). */
   consumedPullRequestMerges(sessionIds: readonly string[]): WorkflowDecisionView[] {
     if (!sessionIds.length) return [];
     return (this.stmt(
       `SELECT * FROM workflow_decisions WHERE category='pr_merge' AND status='consumed'
+         AND json_extract(closure_watch, '$.invalidatedAt') IS NULL
+         AND COALESCE(json_extract(closure_watch, '$.state'), '')<>'landed_unapproved'
          AND session_id IN (SELECT value FROM json_each(?))
        ORDER BY created_at ASC, occurrence_id ASC`,
     ).all(JSON.stringify([...new Set(sessionIds)])) as unknown[]).map(workflowDecisionFromRow).filter(
       (decision): decision is WorkflowDecisionView => decision !== null,
     );
+  }
+
+  /** #4323: consumed merges (or merges whose enqueue Wollipog performed) not watched yet, those still
+   * watched, and those still owing their owner a report. Unstarted ones first, then the least
+   * recently updated, so every watch reaches the front however many there are: each read, quiet or
+   * not, moves its watch to the back. Read through their partial index. */
+  mergeClosureWatchTargets(limit = 2_000): WorkflowDecisionView[] {
+    return (this.stmt(
+      `SELECT * FROM workflow_decisions WHERE category='pr_merge'
+         AND (closure_watch IS NULL OR json_extract(closure_watch, '$.state') IN ('watching','invalidated')
+           OR json_extract(closure_watch, '$.reportPending') IS NOT NULL)
+         AND (closure_watch IS NOT NULL OR status='consumed' OR
+           (forge_action IS NOT NULL AND json_extract(forge_action, '$.outcome') NOT IN ('refused','in_progress')))
+       ORDER BY closure_watch IS NOT NULL, COALESCE(json_extract(closure_watch, '$.updatedAt'), 0) ASC, created_at ASC, occurrence_id ASC
+       LIMIT ?`,
+    ).all(limit) as unknown[]).map(workflowDecisionFromRow).filter(
+      (decision): decision is WorkflowDecisionView => decision !== null,
+    );
+  }
+
+  /** Store a merge's closure watch if it is still `previous` (compare-and-set). */
+  saveMergeClosureWatch(occurrenceId: string, previous: MergeClosureWatch | undefined, next: MergeClosureWatch): boolean {
+    const result = previous === undefined
+      ? this.stmt(`UPDATE workflow_decisions SET closure_watch=? WHERE occurrence_id=? AND category='pr_merge' AND closure_watch IS NULL`)
+        .run(JSON.stringify(next), occurrenceId)
+      : this.stmt(`UPDATE workflow_decisions SET closure_watch=? WHERE occurrence_id=? AND category='pr_merge' AND closure_watch=?`)
+        .run(JSON.stringify(next), occurrenceId, JSON.stringify(previous));
+    return Number(result.changes) === 1;
+  }
+
+  /** Whether a later `pr_merge` for the same pull request, at any head, was consumed or enqueued by
+   * Wollipog: approved and checked itself, so it carries its own watch (#4323). One still pending or
+   * approved does not count, nor one from another session or controller, nor one whose own watch will
+   * not check the landing (an older runner's, or one that ended). */
+  newerMergeDecision(decision: WorkflowDecisionView): boolean {
+    const snapshot = decision.resourceSnapshot;
+    if (snapshot.category !== "pr_merge") return false;
+    return this.stmt(
+      `SELECT 1 FROM workflow_decisions WHERE category='pr_merge' AND occurrence_id<>?
+         AND session_id=? AND controlling_session_id=?
+         AND (created_at>? OR (created_at=? AND occurrence_id>?))
+         AND (status='consumed' OR (forge_action IS NOT NULL AND json_extract(forge_action, '$.outcome') NOT IN ('refused','in_progress')))
+         AND (closure_watch IS NULL OR json_extract(closure_watch, '$.state') NOT IN ('not_watched','ended'))
+         AND lower(json_extract(resource_snapshot, '$.repository'))=? AND json_extract(resource_snapshot, '$.pullRequest')=? LIMIT 1`,
+    ).get(decision.occurrenceId, decision.sessionId, decision.controllingSessionId, decision.createdAt, decision.createdAt,
+      decision.occurrenceId, snapshot.repository.toLowerCase(), snapshot.pullRequest) !== undefined;
   }
 
   unconsumedWorkflowDecisionsForController(controllingSessionId: string): WorkflowDecisionView[] {
@@ -23869,16 +23980,42 @@ export class ControlPlaneDb {
   /** The pending decisions a campaign's owner kept (#4064), oldest first, for Campaign Status: the
    * root's owner decisions, the occurrences it handed over, those an owner rule kept (#4137), and
    * the Orchestrator's scope proposals that wait for the owner for want of lineage (#4267), and its
-   * requests to add a repository, which are always the owner's (#4117). */
+   * requests to add a repository, which are always the owner's (#4117).
+   * Owner decisions, handoffs and owner rules count wherever the campaign controls them (#4337): by
+   * the root for itself or a member, or by an Orchestrator nested in its membership for one of that
+   * Orchestrator's own descendants, the one shape the owner can resolve there (resolveWorkflowDecision
+   * admits a nested controller only through isSessionDescendant). The scope and repository requests
+   * stay the root's own. The count and the items read one predicate. */
   campaignOwnerDecisions(controllingSessionId: string): NonNullable<OrchestratorCampaignProjection["ownerDecisions"]> | null {
-    const where = `controlling_session_id=? AND status='pending' AND authority='human'
-      AND (category='owner_decision' OR category='campaign_repository_addition' OR owner_handoff IS NOT NULL OR owner_rule IS NOT NULL
-        OR category='campaign_issue_scope' AND session_id=controlling_session_id AND json_type(resource_snapshot, '$.ownerReview')='object')`;
+    const descendants = this.campaignDescendantIds(controllingSessionId);
+    // Each [controller, requester] pair the campaign controls: the root over itself and every member,
+    // and each nested Orchestrator over its own descendants, never over itself.
+    const pairs: Array<[string, string]> = [controllingSessionId, ...descendants].map((id) => [controllingSessionId, id]);
+    const controllers = [controllingSessionId];
+    if (descendants.length) {
+      const nested = (this.stmt(
+        `SELECT id, session_role, permission_mode FROM sessions WHERE id IN (SELECT value FROM json_each(?))`,
+      ).all(JSON.stringify(descendants)) as unknown as Array<{ id: string; session_role: string | null; permission_mode: string | null }>)
+        // Only an Orchestrator controls gates; a descendant of any other role never names a controller here.
+        .filter((row) => sessionRole({ role: row.session_role as SessionRole | null, permissionMode: row.permission_mode }) === "orchestrator");
+      for (const { id } of nested) {
+        controllers.push(id);
+        for (const member of this.campaignDescendantIds(id)) pairs.push([id, member]);
+      }
+    }
+    // Narrowed to the campaign's controllers first, so the controller index still serves the read.
+    const where = `controlling_session_id IN (SELECT value FROM json_each(?)) AND status='pending' AND authority='human'
+      AND ((category='owner_decision' OR owner_handoff IS NOT NULL OR owner_rule IS NOT NULL)
+          AND EXISTS (SELECT 1 FROM json_each(?) pair WHERE json_extract(pair.value, '$[0]')=controlling_session_id
+            AND json_extract(pair.value, '$[1]')=session_id)
+        OR controlling_session_id=? AND (category='campaign_repository_addition'
+          OR category='campaign_issue_scope' AND session_id=controlling_session_id AND json_type(resource_snapshot, '$.ownerReview')='object'))`;
+    const params = [JSON.stringify(controllers), JSON.stringify(pairs), controllingSessionId];
     const total = Number((this.stmt(`SELECT COUNT(*) AS count FROM workflow_decisions WHERE ${where}`)
-      .get(controllingSessionId) as { count: number }).count);
+      .get(...params) as { count: number }).count);
     if (!total) return null;
     const items = (this.stmt(`SELECT * FROM workflow_decisions WHERE ${where}
-      ORDER BY created_at ASC, occurrence_id ASC LIMIT ${CAMPAIGN_OWNER_DECISIONS_LIMIT}`).all(controllingSessionId) as unknown[])
+      ORDER BY created_at ASC, occurrence_id ASC LIMIT ${CAMPAIGN_OWNER_DECISIONS_LIMIT}`).all(...params) as unknown[])
       .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null)
       .map((decision) => ({ occurrenceId: decision.occurrenceId, sessionId: decision.sessionId, category: decision.category,
         summary: ownerDecisionSummary(decision.resourceSnapshot), handedOff: decision.ownerHandoff !== undefined,
@@ -35351,6 +35488,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     campaign_repository_addition_result?: string | null;
     closing_reference_check?: string | null;
     forge_action?: string | null;
+    closure_watch?: string | null;
   } | undefined;
   if (!row?.request_id || !row.occurrence_id || !row.session_id || !row.controlling_session_id ||
       !row.category || !row.resource_key || !row.resource_snapshot || !row.resource_digest ||
@@ -35387,6 +35525,10 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
       JSON.parse(row.campaign_repository_addition_result) as NonNullable<WorkflowDecisionView["campaignRepositoryAdditionResult"]> } : {}),
     ...(closingReferenceCheck ? { closingReferenceCheck } : {}),
     ...(forgeAction ? { forgeAction } : {}),
+    ...(row.closure_watch ? (() => {
+      const closureWatch = parseJson<NonNullable<WorkflowDecisionView["closureWatch"]>>(row.closure_watch);
+      return closureWatch ? { closureWatch } : {};
+    })() : {}),
     ...(row.selected_option_id ? { selectedOptionId: row.selected_option_id } : {}),
     ...(evidenceReviewed ? { evidenceReviewed } : {}),
     ...(delegatedVideoEvidence ? { delegatedVideoEvidence } : {}),

@@ -49,6 +49,7 @@ export * from "./pull-request-watch.js";
 export * from "./session-waits.js";
 export * from "./workspace-removal.js";
 export * from "./forge-decision-action.js";
+export * from "./merge-closure-watch.js";
 export * from "./campaign-activity.js";
 export * from "./review-retirement.js";
 export * from "./video-review-settings.js";
@@ -422,6 +423,11 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * of being refused, so the control plane may fence its standing dismissal permanently (#2940). */
   durableAuthDismissal: 230,
   campaignBudgetAdmission: 218,
+  /** The runner attests a campaign worker's final checkpoint, and omits it from a reconnect
+   * inventory, only once it has proven every provider process tree of that generation gone
+   * (#3788, #4257, #4256). 307 is the first protocol on main that carries all three. An older
+   * runner's checkpoint or absence never frees the generation's concurrency slot. */
+  campaignProviderRetirementProof: 307,
   workflowDecisionActionAdmission: 151,
   workflowDecisionActionReconciliation: 153,
   /** v269 control plane withdraws a pending or approved, unconsumed workflow decision (#3917). */
@@ -630,6 +636,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   locationForgeObservation: 326,
   /** v327 creates an approved follow-up issue in a named Location's repository (#4119). */
   locationIssuePublication: 327,
+  /** v330 reads a consumed merge's closures in any state and dequeues it (#4323). */
+  mergeClosureWatch: 330,
   /** v317 asks for and carries out a campaign repository addition (#4117). */
   campaignRepositoryAddition: 317,
   /** v318 reads a Location's issue facts for a repository-qualified scope proposal (#4118). */
@@ -5199,6 +5207,8 @@ export interface WorkflowDecisionView {
   actionAdmission?: WorkflowDecisionActionAdmission;
   /** v284 (#4067): what Wollipog did when it performed this approved forge action itself. */
   forgeAction?: import("./forge-decision-action.js").WorkflowDecisionForgeAction;
+  /** v330 (#4323): a consumed merge's watch, from approval until it lands. */
+  closureWatch?: import("./merge-closure-watch.js").MergeClosureWatch;
   issueClosureResult?: GithubIssueClosureResult;
   automationCreationResult?: AutomationCreationResult;
   /** (#4138) Where an approved Location switch continued the task. */
@@ -10428,6 +10438,7 @@ export type RunnerToControlPlane =
   | GithubMergePreflightResultMessage
   | GitLabMergeClosuresResultMessage
   | import("./forge-decision-action.js").ForgeDecisionActionResultMessage
+  | import("./merge-closure-watch.js").MergeClosureWatchResultMessage
   | WorkflowActionReconciliationResultMessage
   | GithubIssueClosureResultMessage
   | CampaignIssueScopeResultMessage
@@ -12549,6 +12560,7 @@ export type ControlPlaneToRunner =
   | GithubMergePreflightMessage
   | GitLabMergeClosuresMessage
   | import("./forge-decision-action.js").ForgeDecisionActionMessage
+  | import("./merge-closure-watch.js").MergeClosureWatchMessage
   | ReconcileWorkflowActionMessage
   | GithubIssueClosureMessage
   | CampaignIssueScopeMessage

@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { PROTOCOL_VERSION, SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET, SESSION_EVENT_WIRE_PROJECTION_VARIANTS,
-  type RunnerToControlPlane } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET,
+  SESSION_EVENT_WIRE_PROJECTION_VARIANTS, type RunnerToControlPlane } from "@wollipog/protocol";
 import { ControlPlaneDb } from "../../control-plane/src/db.js";
 import { Hub } from "../../control-plane/src/hub.js";
 import { SessionsService } from "../../control-plane/src/sessions.js";
@@ -34,10 +34,12 @@ const wireEpoch = (localEpoch: number) => SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET
 
 type DriverCallbacks = { onEvent(payload: unknown): void; onExit(code: number | null): void };
 
-function harness() {
+function harness(protocol = PROTOCOL_VERSION) {
   const dir = mkdtempSync(join(tmpdir(), "campaign-slot-proof-"));
   const db = ControlPlaneDb.open(":memory:");
-  db.registerRunner({ runnerId: "r", hostname: "test", os: "linux", version: "test", workspaces: [], agents: [] }, 1, PROTOCOL_VERSION);
+  const register = (version: number) =>
+    db.registerRunner({ runnerId: "r", hostname: "test", os: "linux", version: "test", workspaces: [], agents: [] }, 1, version);
+  register(protocol);
   const child = (id: string) => {
     db.createSession({ id, runnerId: "r", workspaceId: null, agentId: "claude", title: id, useWorktree: false, driver: "claude-code",
       config: {}, now: 1, ...(id === "root" ? {} : { parentSessionId: "root" }) });
@@ -111,7 +113,7 @@ function harness() {
   };
   const settlements = () => db.raw().prepare("SELECT cost FROM campaign_budget_settlements WHERE session_id='worker'")
     .all().map((row) => ({ ...row }));
-  return { dir, db, svc, statuses, provider, manager, reconnect, launch, occupied, refused, child, hydrate, settlements,
+  return { dir, db, svc, statuses, provider, manager, reconnect, launch, occupied, refused, child, hydrate, settlements, register, hub,
     cleanup: () => { db.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
 
@@ -722,4 +724,47 @@ test("a provider that exits by itself with code 0 or by a signal gets an accurat
       } finally { runner.shutdownAll(); h.cleanup(); }
     }
   }
+});
+
+test("a runner too old to prove retirement keeps its campaign slot whatever it or an upgraded runner later attests (#3788)", async () => {
+  const h = harness(RUNNER_CAPABILITY_MIN_PROTOCOL.campaignProviderRetirementProof - 1);
+  const runner = h.manager();
+  let restarted: SessionManager | undefined;
+  try {
+    const provider = await h.launch(runner);
+    provider.callbacks.onEvent({ kind: "token_usage", model: "claude-opus-5-5", inputTokens: 1, costUsd: 0.4 });
+    assert.equal(h.occupied(), 1);
+    const reserved = h.db.campaignBudgets.view("root")!.outstanding;
+
+    // The runner attests a final checkpoint, but its protocol cannot carry retirement proof.
+    provider.callbacks.onExit(3);
+    provider.treeGone(true);
+    await new Promise((resolve) => setImmediate(resolve));
+    const checkpoint = h.statuses.at(-1)!.campaignBudgetCheckpoint;
+    assert.ok(checkpoint, "the runner attests its final usage");
+    assert.equal(h.occupied(), 1, "an attestation from a runner that cannot prove retirement keeps the slot");
+    h.refused("so no replacement runs beside a provider that may still run");
+    let view = h.hydrate(checkpoint.historyEpoch, checkpoint.throughSeq);
+    assert.equal(view.occupied, 1, "history that covers the checkpoint settles nothing");
+    assert.equal(h.db.campaignBudgets.active("worker"), true);
+    assert.deepEqual(h.settlements(), []);
+    assert.deepEqual(view.outstanding, reserved, "the reservation stays outstanding");
+
+    // The runner restarts upgraded and relays the stored checkpoint, then reconnects without the child.
+    assert.equal(runner.shutdownAll(), true);
+    runner.recordShutdownRetirementCheckpoints(true);
+    // Timelines are not fetched here: this fake runner never answers a history request.
+    h.hub.isRunnerOnline = () => false;
+    restarted = h.manager();
+    h.register(PROTOCOL_VERSION);
+    await h.reconnect(restarted);
+    h.svc.reconcileRunnerSessions("r", ["root"]);
+    assert.equal((h.db.raw().prepare("SELECT absent_generation AS g FROM campaign_budget_members WHERE session_id='worker'").get() as { g: string }).g,
+      checkpoint.generation, "the absence was recorded for that generation");
+    view = h.hydrate(checkpoint.historyEpoch, checkpoint.throughSeq);
+    assert.equal(view.occupied, 1, "an upgraded runner cannot vouch for the generation an older runner served");
+    h.refused("and a replacement is still refused");
+    assert.deepEqual(h.settlements(), [], "nothing settles or is counted twice");
+    assert.deepEqual(view.outstanding, reserved);
+  } finally { runner.shutdownAll(); restarted?.shutdownAll(); h.cleanup(); }
 });

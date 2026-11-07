@@ -1337,6 +1337,14 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   //      are refused with the executable occurrence and digest; older readers may ignore provenance.
   329,
   // v330 slot
+  // 330: a consumed `pr_merge` is watched until it lands (#4323). `merge_closure_watch` asks the
+  //      child's runner what the pull request or merge request would close, in any state, or to take
+  //      it out of the merge queue or train. While it is open at the approved head, closures that no
+  //      longer match `intendedClosures` dequeue it and the decision stops covering it; a landed merge
+  //      that closed an issue nobody approved is reported to the campaign's owner. A runner below v330
+  //      is never sent one, and its merges keep the checks they had before. (This change first claimed
+  //      328, which no released version uses.)
+  330,
   // v331 slot
   // v332 slot
   // v333 slot

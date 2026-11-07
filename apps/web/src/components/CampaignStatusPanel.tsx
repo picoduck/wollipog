@@ -125,6 +125,7 @@ export function CampaignStatusPanel({
   onOpenSession,
   findRequest,
   onOpenRequest,
+  onOpenSessionRequest,
 }: {
   session: SessionView;
   availability: Exclude<CampaignStatusAvailability, { kind: "hidden" }>;
@@ -132,6 +133,8 @@ export function CampaignStatusPanel({
   /** The Requests key of the item's request when this session lists it, else null. */
   findRequest: (target: CampaignRequestTarget) => string | null;
   onOpenRequest: (requestKey: string) => void;
+  /** Opens another session at one of its own requests (#4337), for a decision this session does not list. */
+  onOpenSessionRequest?: (sessionId: string, requestId: string) => void;
 }) {
   if (availability.kind === "unavailable") {
     return (
@@ -150,6 +153,7 @@ export function CampaignStatusPanel({
       onOpenSession={onOpenSession}
       findRequest={findRequest}
       onOpenRequest={onOpenRequest}
+      onOpenSessionRequest={onOpenSessionRequest}
     />
   );
 }
@@ -160,12 +164,14 @@ function AvailableCampaignStatus({
   onOpenSession,
   findRequest,
   onOpenRequest,
+  onOpenSessionRequest,
 }: {
   session: SessionView;
   availability: AvailableCampaign;
   onOpenSession: (sessionId: string) => void;
   findRequest: (target: CampaignRequestTarget) => string | null;
   onOpenRequest: (requestKey: string) => void;
+  onOpenSessionRequest?: (sessionId: string, requestId: string) => void;
 }) {
   const [memory, setMemoryState] = useState<CampaignListMemory>(() => listMemory.get(session.id) ?? {
     filters: DEFAULT_CAMPAIGN_WORK_FILTERS,
@@ -268,10 +274,12 @@ function AvailableCampaignStatus({
               <CampaignSummarySection data={data} now={now} />
               {data.summary.campaign?.ownerDecisions && (
                 <CampaignOwnerDecisions
+                  sessionId={session.id}
                   ownerDecisions={data.summary.campaign.ownerDecisions}
                   now={now}
                   findRequest={findRequest}
                   onOpenRequest={onOpenRequest}
+                  onOpenSessionRequest={onOpenSessionRequest}
                 />
               )}
               <CampaignDecisionModelChecks
@@ -373,11 +381,13 @@ function CampaignRecoveryAutomation({ campaign }: { campaign: CampaignStatusData
 
 /** Decisions the campaign's owner kept (#4064), which wait for that person while the campaign keeps
  * working: the Orchestrator's questions for them and the decisions it handed to them. */
-function CampaignOwnerDecisions({ ownerDecisions, now, findRequest, onOpenRequest }: {
+function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, onOpenRequest, onOpenSessionRequest }: {
+  sessionId: string;
   ownerDecisions: NonNullable<NonNullable<CampaignStatusData["summary"]["campaign"]>["ownerDecisions"]>;
   now: number;
   findRequest: (target: CampaignRequestTarget) => string | null;
   onOpenRequest: (requestKey: string) => void;
+  onOpenSessionRequest?: (sessionId: string, requestId: string) => void;
 }) {
   const headingId = useId();
   const hidden = ownerDecisions.total - ownerDecisions.items.length;
@@ -397,7 +407,13 @@ function CampaignOwnerDecisions({ ownerDecisions, now, findRequest, onOpenReques
       </p>
       <ul className="campaign-detail-list">
         {ownerDecisions.items.map((item) => {
-          const requestKey = findRequest({ occurrenceId: item.occurrenceId, sessionId: item.sessionId });
+          // The exact occurrence wherever this session lists it. Another session's decision this
+          // session does not list (a nested Orchestrator controls it, #4337) opens in its own
+          // session at that request, never at another request of the same session.
+          const requestKey = findRequest({ occurrenceId: item.occurrenceId, sessionId: item.sessionId === sessionId ? item.sessionId : null });
+          const openElsewhere = !requestKey && item.sessionId !== sessionId && onOpenSessionRequest
+            ? () => onOpenSessionRequest(item.sessionId, item.occurrenceId) : null;
+          const open = requestKey ? () => onOpenRequest(requestKey) : openElsewhere;
           return (
             <li key={item.occurrenceId}>
               <dl className="facts">
@@ -415,8 +431,8 @@ function CampaignOwnerDecisions({ ownerDecisions, now, findRequest, onOpenReques
                 </div>
                 {item.ownerRule && <OwnerRuleFactRows rule={item.ownerRule} />}
               </dl>
-              {requestKey && <button type="button" className="btn sm" aria-label={`Open Request: ${item.summary}`}
-                onClick={() => onOpenRequest(requestKey)}>Open Request</button>}
+              {open && <button type="button" className="btn sm" aria-label={`Open Request: ${item.summary}`}
+                onClick={open}>Open Request</button>}
             </li>
           );
         })}

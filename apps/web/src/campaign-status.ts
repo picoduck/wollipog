@@ -748,7 +748,7 @@ export const WAITING_FOR_PREREQUISITE_MERGE = "Waiting for Prerequisite Merge";
 
 /** #4120: how a merge dependency reads in a row, for example "owner/api: Add Account Field". */
 export function mergeDependencyLabel(dependency: CampaignMergeDependencyView): string {
-  return `${dependency.repository}: ${dependency.title ?? dependency.key}`;
+  return `${dependency.repository ?? "Unknown Repository"}: ${dependency.title ?? dependency.key}`;
 }
 
 /** #4120: the prerequisite pull request an item waits on, for the Waiting for Prerequisite Merge cause. */
@@ -757,7 +757,7 @@ export function heldOnPullRequest(item: Pick<CampaignWorkItemSummary, "stateCaus
   for (const dependency of item.mergeDependencies ?? []) {
     if (dependency.status === "merged") continue;
     const waiting = dependency.pullRequests.find((entry) => entry.state !== "merged") ?? null;
-    return waiting ? `${waiting.ref.repository}#${waiting.ref.number}` : `${dependency.repository}: ${dependency.title ?? dependency.key}`;
+    return waiting ? `${waiting.ref.repository}#${waiting.ref.number}` : mergeDependencyLabel(dependency);
   }
   return null;
 }
