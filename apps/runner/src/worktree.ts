@@ -4,7 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { worktreeDirtyPaths } from "@wollipog/protocol";
 import { homedir } from "node:os";
 import { performance } from "node:perf_hooks";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, posix, resolve, sep, win32 } from "node:path";
 import { mkdir, rm, rmdir, statfs } from "node:fs/promises";
 import {
   closeSync,
@@ -1025,6 +1025,13 @@ export async function createRecoveredBranchWorktree(
   return { path, branch, baseRef: branch, baseCommit: head, attached: false, created: true };
 }
 
+/** One spelling of a native absolute path, without touching the filesystem: Git for Windows lists
+ * worktrees as `C:/repos/docs` where the real path reads `C:\repos\docs`, and Windows paths compare
+ * case-insensitively. Exported for tests, which pass the platform. */
+export function nativePathSpelling(value: string, platform: NodeJS.Platform = process.platform): string {
+  return platform === "win32" ? win32.resolve(value).replace(/\\/gu, "/").toLowerCase() : posix.resolve(value);
+}
+
 /** Prove an existing worktree that has the recovered branch checked out, and hand it back as it is.
  * Read-only: Git is asked only questions, and the status read takes no optional lock, so not even
  * the worktree's index is rewritten. */
@@ -1041,13 +1048,15 @@ async function reuseRecoveredBranchWorktree(
   // link could otherwise pass every check below in one directory and hand the session another (the
   // primary checkout, or a worktree someone else holds under its real name).
   if (context.kind === "native") {
-    let canonical: string;
+    let real: string | null;
     try {
-      canonical = lstatSync(path).isSymbolicLink() ? "" : realpathSync.native(path);
+      real = lstatSync(path).isSymbolicLink() ? null : realpathSync.native(path);
     } catch (error) {
       throw unverified((error as Error).message);
     }
-    if (canonical !== path) throw unverified("its registered path is not its real path");
+    if (real === null || nativePathSpelling(real) !== nativePathSpelling(path)) {
+      throw unverified("its registered path is not its real path");
+    }
   }
   let verified: SessionWorktreeHandle;
   try {

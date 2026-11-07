@@ -12,7 +12,7 @@ import { LOCATION_SWITCH_FAILURES, moveClaudeTranscriptToCwd, originNamesReposit
 import { bindPullRequestScope } from "./review-snapshot.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore } from "./session-store.js";
-import { parseWorktreePorcelain, recoveredBranchPlacement, sameWorktreePath } from "./worktree.js";
+import { nativePathSpelling, parseWorktreePorcelain, recoveredBranchPlacement, sameWorktreePath } from "./worktree.js";
 
 // #4138: an approved Location switch moves a live session into another repository's Location on
 // the same runner at its next turn boundary, keeping its conversation, and continues the task.
@@ -496,6 +496,12 @@ test("on Direct WSL, where a recovered branch continues is decided on the distro
     "its pull request stay with it" });
   assert.match((recoveredBranchPlacement(wsl, listed, "main", slot("main"), nobody) as { reason: string }).reason, /primary checkout \(\/home\/me\/docs\)/u);
   assert.match((recoveredBranchPlacement(wsl, listed, "fix/locked", slot("fix/locked"), nobody) as { reason: string }).reason, /which is locked/u);
+
+  // A native Windows worktree as Git for Windows lists it matches its real path; a POSIX path keeps its case.
+  assert.equal(nativePathSpelling("C:/Repos/docs-wt", "win32"), nativePathSpelling("c:\\repos\\docs-wt\\", "win32"));
+  assert.notEqual(nativePathSpelling("C:/repos/docs-wt", "win32"), nativePathSpelling("C:\\repos\\docs-link", "win32"));
+  assert.equal(nativePathSpelling("/srv/docs-wt/", "linux"), "/srv/docs-wt");
+  assert.notEqual(nativePathSpelling("/srv/Docs-wt", "linux"), nativePathSpelling("/srv/docs-wt", "linux"));
 
   // The runner's own records are compared the same way.
   await withSession("wsl-holder", async (h) => {
