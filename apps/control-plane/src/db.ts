@@ -8590,6 +8590,11 @@ export class ControlPlaneDb {
           )
           .run(meta.runnerId, meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, now, editors, runtime, containerTargets, providerAccounts, providerLogins);
       }
+      // A runner that cannot prove provider retirement now serves its sessions' live generations,
+      // so their slots stay held whatever it, or a later runner, attests for them (#3788).
+      if (!runnerSupportsProtocol(protocolVersion, "campaignProviderRetirementProof")) {
+        this.campaignBudgets.noteRunnerRetirementUnprovable(meta.runnerId);
+      }
 
       const ownerKind = scope.owner.kind;
       const ownerId = ownerKind === "organization"

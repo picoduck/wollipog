@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
-import { SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET, SESSION_EVENT_WIRE_PROJECTION_VARIANTS, validCampaignBudgetAuthority,
+import { RUNNER_CAPABILITY_MIN_PROTOCOL, SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET, SESSION_EVENT_WIRE_PROJECTION_VARIANTS, validCampaignBudgetAuthority,
   type CampaignBudgetAllocation, type CampaignBudgetAuthority, type CampaignBudgetView,
   type CampaignFollowUpSubject, type CampaignIssueRef } from "@wollipog/protocol";
 
@@ -22,12 +22,15 @@ const LIVE_COST = "CASE WHEN s.live_settling=0 AND s.live_cost_usd>0 THEN s.live
  * confirmation). Until then, and while a stop is pending or provisional, the session keeps its
  * slot. A member without a session row, a native review job or a deleted session whose runner may
  * not have removed it yet, holds one until its usage settles. Reviewer sessions never hold one.
+ * A generation that a runner too old to prove retirement served (`unprovable_generation`, #3788)
+ * keeps its slot whatever checkpoint or absence arrives: none of them is proof for it.
  * Every comparison is NULL-safe, and an indeterminate result still holds the slot. */
 const OCCUPYING = `(m.active=1 AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=m.session_id)
   AND NOT EXISTS (SELECT 1 FROM delegated_image_reviews WHERE reviewer_session_id=m.session_id) AND CASE
     WHEN s.id IS NULL THEN 1
     ELSE COALESCE(NOT (s.status IN ('completed','failed','stopped')
       AND NOT EXISTS (SELECT 1 FROM session_stop_intents WHERE session_id=m.session_id)
+      AND m.unprovable_generation IS NOT m.generation
       AND (s.status IS NOT 'stopped' OR s.stop_confirmation IS NOT NULL)
       AND (s.stop_confirmation IS 'runner_absent' OR m.absent_generation IS m.generation
         OR EXISTS (SELECT 1 FROM campaign_budget_checkpoints c
@@ -149,6 +152,17 @@ export class CampaignBudgetLedger {
     // generation's slot; a relaunch's new generation needs its own proof.
     if (!(sql.prepare("PRAGMA table_info(campaign_budget_members)").all() as Array<{name:string}>).some((c) => c.name === "absent_generation")) {
       sql.exec("ALTER TABLE campaign_budget_members ADD COLUMN absent_generation TEXT");
+    }
+    // The generation a runner too old to prove provider retirement served (#3788). Its checkpoint
+    // and reconnect absence are attestations, not proof, so they free neither its slot nor its
+    // reservation. Members live when this column first appears were last served by the runner
+    // version recorded for their session's runner, so an older or unknown one marks them now.
+    if (!(sql.prepare("PRAGMA table_info(campaign_budget_members)").all() as Array<{name:string}>).some((c) => c.name === "unprovable_generation")) {
+      sql.exec("ALTER TABLE campaign_budget_members ADD COLUMN unprovable_generation TEXT");
+      sql.prepare(`UPDATE campaign_budget_members SET unprovable_generation=generation WHERE active=1 AND session_id IN
+        (SELECT s.id FROM sessions s LEFT JOIN runners r ON r.runner_id=s.runner_id
+          WHERE r.protocol_version IS NULL OR r.protocol_version < ?)`)
+        .run(RUNNER_CAPABILITY_MIN_PROTOCOL.campaignProviderRetirementProof);
     }
     // Cost availability outlives the usage rows that showed it: deleting an unpriced member drops
     // its usage state, but its cost stays unknown. The marker is set once and never cleared (#2940).
@@ -544,6 +558,33 @@ export class CampaignBudgetLedger {
       .run(dispatch.generation, sessionId, dispatch.generation);
   }
 
+  /** Record that `runnerId`, the session's owner, served the member's current generation. When
+   * that runner is too old to prove provider retirement (#3788), or its protocol is unknown, the
+   * generation's checkpoint and reconnect absence then free neither its slot nor its reservation,
+   * even when a later runner relays them. Only a new generation, which needs its own proof, ends
+   * the mark. Only an authenticated runner path may call it. */
+  noteServingRunner(sessionId: string, runnerId: string): void {
+    this.sql.prepare(`UPDATE campaign_budget_members SET unprovable_generation=generation
+      WHERE session_id=? AND active=1 AND generation<>'' AND unprovable_generation IS NOT generation
+        AND EXISTS (SELECT 1 FROM sessions s LEFT JOIN runners r ON r.runner_id=s.runner_id
+          WHERE s.id=campaign_budget_members.session_id AND s.runner_id=?
+            AND (r.protocol_version IS NULL OR r.protocol_version < ?))`)
+      .run(sessionId, runnerId, RUNNER_CAPABILITY_MIN_PROTOCOL.campaignProviderRetirementProof);
+  }
+
+  /** `noteServingRunner` for every live member a registering runner too old to prove retirement owns. */
+  noteRunnerRetirementUnprovable(runnerId: string): void {
+    this.sql.prepare(`UPDATE campaign_budget_members SET unprovable_generation=generation
+      WHERE active=1 AND generation<>'' AND unprovable_generation IS NOT generation
+        AND session_id IN (SELECT id FROM sessions WHERE runner_id=?)`).run(runnerId);
+  }
+
+  /** Whether the member's current generation was served by a runner that cannot prove retirement. */
+  retirementUnprovable(sessionId: string): boolean {
+    return this.sql.prepare("SELECT 1 FROM campaign_budget_members WHERE session_id=? AND active=1 AND unprovable_generation IS generation")
+      .get(sessionId) !== undefined;
+  }
+
   /** Only the authenticated owning runner may supply a checkpoint. Do not accept agent JSON. */
   recordCheckpoint(sessionId: string, checkpoint: import("@wollipog/protocol").CampaignBudgetUsageCheckpoint): void {
     if (!this.root(sessionId) || !checkpoint || !Number.isSafeInteger(checkpoint.historyEpoch) || checkpoint.historyEpoch < 0 ||
@@ -558,6 +599,8 @@ export class CampaignBudgetLedger {
     return this.atomic(() => {
       const record = this.sql.prepare("SELECT checkpoint FROM campaign_budget_checkpoints WHERE session_id=?").get(sessionId) as { checkpoint: string } | undefined;
       if (!record || this.sql.prepare("SELECT 1 FROM session_stop_intents WHERE session_id=?").get(sessionId)) return false;
+      // Settling ends the member and with it the slot; an unprovable retirement keeps both (#3788).
+      if (this.retirementUnprovable(sessionId)) return false;
       const checkpoint = JSON.parse(record.checkpoint) as import("@wollipog/protocol").CampaignBudgetUsageCheckpoint;
       if (checkpoint.generation !== this.dispatch(sessionId)?.generation) return false;
       const session = this.sql.prepare("SELECT status FROM sessions WHERE id=?").get(sessionId) as { status: string } | undefined;

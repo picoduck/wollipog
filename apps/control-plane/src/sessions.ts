@@ -20968,6 +20968,9 @@ export class SessionsService {
       this.log.warn(`ignoring session_status for ${sessionId} from ${fromRunnerId} (owned by ${session.runnerId})`);
       return;
     }
+    // A runner too old to prove provider retirement serves this generation: neither its checkpoint
+    // nor anything a later runner relays for it frees the slot (#3788).
+    if (fromRunnerId) this.db.campaignBudgets.noteServingRunner(sessionId, fromRunnerId);
     if (fromRunnerId && isTerminal(status) && budgetCheckpoint) {
       this.db.campaignBudgets.recordCheckpoint(sessionId, budgetCheckpoint);
       // History can arrive after terminal status. Its durable hydration completes settlement.
@@ -22290,7 +22293,9 @@ export class SessionsService {
     for (const s of this.db.listSessions({ includeArchived: true })) {
       if (s.runnerId !== runnerId) continue;
       if (this.dedicatedMediaLifecycle(s)) continue;
-      // No provider of an absent session runs, so its campaign slot is free (#2940).
+      // No provider of an absent session runs, so its campaign slot is free (#2940), unless the
+      // runner is too old to prove that, which keeps it held (#3788).
+      this.db.campaignBudgets.noteServingRunner(s.id, runnerId);
       if (!liveSet.has(s.id)) this.db.campaignBudgets.noteProviderAbsent(s.id);
       if (this.db.hasSessionStopIntent(s.id)) {
         if (liveSet.has(s.id)) {
@@ -22522,7 +22527,10 @@ export class SessionsService {
       const chunk = snapshots.slice(offset, offset + 32);
       for(const snap of chunk) {
         const owner=this.db.getSession(snap.id);
-        if(owner?.runnerId===runnerId && isTerminal(snap.status) && snap.campaignBudgetCheckpoint) this.db.campaignBudgets.recordCheckpoint(snap.id,snap.campaignBudgetCheckpoint);
+        if(owner?.runnerId!==runnerId) continue;
+        // A runner too old to prove provider retirement keeps the generation's slot held (#3788).
+        this.db.campaignBudgets.noteServingRunner(snap.id,runnerId);
+        if(isTerminal(snap.status) && snap.campaignBudgetCheckpoint) this.db.campaignBudgets.recordCheckpoint(snap.id,snap.campaignBudgetCheckpoint);
       }
       const unsupportedCostSessions = new Set(chunk.filter((snap) =>
         this.unsupportedCostReconciliation(runnerId, snap)).map((snap) => snap.id));
@@ -22708,7 +22716,9 @@ export class SessionsService {
       if (s.runnerId === runnerId && !byId.has(s.id)) {
         if (this.dedicatedMediaLifecycle(s)) continue;
         campaignBefore(s);
-        // An inventory without the session holds no provider of it, so its campaign slot is free (#2940).
+        // An inventory without the session holds no provider of it, so its campaign slot is free (#2940),
+        // unless the runner is too old to prove that, which keeps it held (#3788).
+        this.db.campaignBudgets.noteServingRunner(s.id, runnerId);
         this.db.campaignBudgets.noteProviderAbsent(s.id);
         if (this.db.hasSessionStopIntent(s.id)) this.settleStopIntent(s.id, now, "runner_absent");
         if (isTerminal(s.status)) this.revokeUnconsumedWorkflowDecisionsForSession(s.id, "provider-session-absent");
@@ -22789,6 +22799,8 @@ export class SessionsService {
   applySessionRuntimeUpdate(runnerId: string, snapshot: SessionSnapshot, batch?: RunnerAttentionBatch): void {
     const existing = this.db.getSession(snapshot.id);
     if (!existing || existing.runnerId !== runnerId || this.db.isTombstoned(snapshot.id)) return;
+    // A runner too old to prove provider retirement keeps the generation's slot held (#3788).
+    this.db.campaignBudgets.noteServingRunner(snapshot.id, runnerId);
     if(isTerminal(snapshot.status) && snapshot.campaignBudgetCheckpoint) this.db.campaignBudgets.recordCheckpoint(snapshot.id,snapshot.campaignBudgetCheckpoint);
     if (this.pendingMediaLifecycle(existing)) snapshot = { ...snapshot, status: existing.status };
     const unsupportedCost = this.unsupportedCostReconciliation(runnerId, snapshot);
@@ -22907,6 +22919,7 @@ export class SessionsService {
       campaignBefore: this.runtimeCampaignBefore(existing, runtimeSnapshot, batch),
       // The single-snapshot path's writes before its update, in its order; none publishes.
       before: () => {
+        this.db.campaignBudgets.noteServingRunner(sessionId, runnerId);
         if (terminal && snapshot.campaignBudgetCheckpoint) {
           this.db.campaignBudgets.recordCheckpoint(sessionId, snapshot.campaignBudgetCheckpoint);
         }
