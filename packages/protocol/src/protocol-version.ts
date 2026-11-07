@@ -1333,6 +1333,9 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   327,
   // v328 slot
   // v329 slot
+  // 329: Issue-closure decisions expose durable approval provenance (#4301). Approved re-requests
+  //      are refused with the executable occurrence and digest; older readers may ignore provenance.
+  329,
   // v330 slot
   // v331 slot
   // v332 slot

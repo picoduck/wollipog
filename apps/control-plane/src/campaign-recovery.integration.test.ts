@@ -802,6 +802,15 @@ test("uncertain steering keeps its original occurrence and requests reconciliati
     const admissionLogs = h.logs.filter(message => JSON.parse(message).event === "campaign_recovery_admission");
     assert.equal(admissionLogs.length, 1, "unchanged admission emits no repeated sweep log");
     assert.ok(h.logs.every(message => !message.includes("private prompt")));
+    // A durable event caused by the provider's exact replay retires existing recovery.
+    h.db.recordSteeringResult("r", { type: "steer_session_result", requestId: "steer-1",
+      sessionId: "child", submissionId: "original-submission", turnId: "original-turn",
+      disposition: "uncertain", reason: "transport_uncertain" }, 203);
+    assert.equal(h.db.resolveSteeringAttemptFromUserMessage("child", "original-submission", "original-turn", 203), true);
+    h.recovery.maintain(204);
+    assert.equal(h.db.listSteeringAttempts("child")[0]!.state, "accepted");
+    assert.equal(h.db.campaignProjection("root")!.recovery!.records.some(item =>
+      item.resource.kind === "steering" && item.state !== "resolved"), false);
   } finally { h.db.close(); }
 });
 

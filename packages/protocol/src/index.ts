@@ -5193,6 +5193,8 @@ export interface WorkflowDecisionView {
   delegatedImageReview?: import("./delegated-image-review.js").DelegatedImageReviewReference;
   createdAt: number;
   resolvedAt?: number;
+  /** v329 (#4301): durable issue-closure approval provenance; informational, never a grant. */
+  approval?: { actor: GovernanceActor; at: number };
   consumedAt?: number;
   actionAdmission?: WorkflowDecisionActionAdmission;
   /** v284 (#4067): what Wollipog did when it performed this approved forge action itself. */
