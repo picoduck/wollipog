@@ -200,9 +200,10 @@ request being merged, so there it is any prerequisite working outside that repos
 - A campaign that records no repository (from before #4117) keeps its dependencies display-only.
 
 A merge dependency is met only when every pull request the prerequisite names, by its reported stage
-and its recorded deliveries, is freshly observed MERGED on its forge. `delivered` doesn't meet it
-(delivery is the Orchestrator's verification), nor does an enqueued pull request (a merge queue can
-still eject it), a stale or unavailable fact, a prerequisite that names no pull request yet, or a
+and its recorded deliveries, is observed MERGED on its forge, freshly when the gate reads it.
+`delivered` doesn't meet it (delivery is the Orchestrator's verification), nor does an enqueued pull
+request (a merge queue can still eject it), an unavailable fact, a prerequisite that names no pull
+request yet, or a
 pull request in a repository outside the campaign's repositories (state `outside`: no Location of
 the campaign can observe it, and a fact read through the root's login never stands in for one). A
 dependency within one repository keeps its earlier, display-only meaning; holding those too is
@@ -225,6 +226,10 @@ possible later work.
   with nothing awaited, immediately before arming and before Wollipog dispatches an enqueue, so a
   dependency added or a prerequisite cancelled during the merge's own forge reads still holds it; an
   enqueue stopped that late records its attempt as refused with `merge_held`, and the approval stands.
+  Checks from what is stored (these, and the permission and policy-hook checks below) count a stored
+  MERGED as met as it ages, since a forge never un-merges a pull request; the authoritative read is
+  what demands a fresh one. A fact whose latest read failed holds the merge and is read again in the
+  background, so the hold lifts by itself once a Location answers.
 - **The armed window.** A provider may run an armed enqueue without asking the control plane again,
   so while a `pr_merge` is armed and unconsumed the ledger refuses (409), and rolls back, any change
   that would alter what holds that merge: a new dependency, a new item naming the pull request, a

@@ -101,9 +101,11 @@ export function campaignMergeDependencyView(prerequisite: CampaignMergePrerequis
   };
 }
 
-/** Why a merge is held on this prerequisite, or null when it is met. Only a FRESH observation of
- * MERGED meets it: a stale or unavailable fact, an open or enqueued pull request, or a prerequisite
- * that names none holds the merge. A closed one or a cancelled prerequisite holds it for good. */
+/** Why a merge is held on this prerequisite, or null when it is met. Only an observation of MERGED
+ * meets it, and the gate reads one fresh before arming and enqueueing (a read that fails holds the
+ * merge whatever is stored); a stored MERGED stays met as it ages. An unavailable fact, a stale
+ * fact of another state, an open or enqueued pull request, or a prerequisite that names none holds
+ * the merge. A closed one or a cancelled prerequisite holds it for good. */
 export interface CampaignMergeHold {
   prerequisite: { id: string; key: string; title: string | null; repository: string | null };
   pullRequest: CampaignPullRequestRef | null;
@@ -122,7 +124,10 @@ export function campaignMergeHold(prerequisite: CampaignMergePrerequisite): Camp
   if (outside) return { prerequisite: identity, pullRequest: outside.ref, state: "outside", headSha: null };
   const closed = prerequisite.pullRequests.find(({ fact }) => fact.availability === "fresh" && fact.value.state === "closed");
   if (closed) return { prerequisite: identity, pullRequest: closed.ref, state: "closed", headSha: closed.fact.availability === "fresh" ? closed.fact.value.headSha : null };
-  const waiting = prerequisite.pullRequests.find(({ fact }) => fact.availability !== "fresh" || fact.value.state !== "merged");
+  // A stored MERGED meets it as it ages, since a forge never un-merges a pull request: the gate's
+  // own authoritative read at arming and enqueue is what makes it fresh (`campaignMergeHold` in
+  // sessions.ts), and later checks from what is stored must not hold a merge that already passed.
+  const waiting = prerequisite.pullRequests.find(({ fact }) => fact.availability === "unavailable" || fact.value.state !== "merged");
   if (!waiting) return null;
   const { fact } = waiting;
   const head = fact.availability === "unavailable" ? fact.lastValue?.headSha ?? null : fact.value.headSha;

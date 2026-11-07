@@ -873,3 +873,32 @@ test("while a session's armed merge is held, Claude's policy hook denies its she
     assert.equal(hook("bash-3", "Bash").data?.decision, "defer");
   } finally { h.observer.dispose(); h.db.close(); }
 });
+
+test("an armed merge's prerequisite observed MERGED stays met as its observation ages, so nothing is blocked (#4120)", async () => {
+  const h = await fixture();
+  try {
+    // Merged, and its head branch deleted, so the background pass reads it no more.
+    const merged = pull("merged", { headBranch: { name: "api-field", tipSha: null } } as Partial<CampaignForgePullRequestObservation>);
+    h.forge.set("owner/api#7", merged);
+    const merge = h.approvedMerge("app", "owner/app", 5);
+    assert.equal((await merge.arm()).ok, true);
+    const ref = { repository: "owner/api", number: 7 };
+    // The observation ages past the freshness window.
+    h.db.campaignForgeObservations.record("root", "r2", [{ ref, observation: merged }], Date.now() - 11 * 60_000);
+    assert.equal(h.db.campaignForgeObservations.facts("root", [ref], Date.now())[0]!.fact.availability, "stale");
+    assert.equal(h.db.campaignForgeObservations.readState("root", [ref], true).get("owner/api#7")!.finished, true,
+      "finished: the background pass won't read it again");
+    // The policy hook lets the session's shell commands through...
+    const hook = h.svc.evaluatePolicyHook("app", { hookEventName: "PreToolUse", providerSessionId: "provider-app",
+      permissionMode: "bypassPermissions", toolUseId: "bash-stale", context: { toolName: "Bash" } });
+    assert.equal(hook.data?.decision, "defer");
+    assert.equal(h.db.pullRequestWatches.visibleFor("app"), undefined, "nothing parked");
+    // ...and the armed command's permission request is admitted as usual.
+    h.sent.length = 0;
+    h.svc.onSessionEvent("app", { kind: "permission_request", requestId: "enqueue-stale", occurrenceId: "enqueue-stale",
+      requestSource: "provider_tool", title: "Enqueue PR", context: { toolName: "Bash", input: canonicalPrMergeEnqueueCommand(merge.snapshot) },
+      options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }] });
+    assert.deepEqual(h.sent.filter((message) => message.type === "resolve_permission").map((message) => (message as { optionId: string | null }).optionId), ["once"]);
+    assert.equal(h.db.workflowDecisionByOccurrence(merge.occurrenceId)!.status, "consumed");
+  } finally { h.observer.dispose(); h.db.close(); }
+});
