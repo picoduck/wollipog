@@ -12,6 +12,8 @@ import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { SessionStore } from "./session-store.js";
 import { RUNNER_WINDOW_FRAMES } from "./processing-window.js";
 import { acquireRunnerDataDirLease } from "./runner-data-dir.js";
+import { DurableCommandStore, durableCommandPayloadDigest } from "./durable-command-store.js";
+import { SessionCommandReceiptStore, sessionCommandInvocationPayloadDigest } from "./session-command-receipt-store.js";
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 
 async function stopChild(child: ChildProcess): Promise<void> {
@@ -24,12 +26,15 @@ test("real runner dispatches processing ACKs, cancels republish on reconnect and
   const rows: string[][] = [];
   const queues: string[][] = [];
   const barriers: number[][] = [];
+  const receipts: string[][] = [];
   const cp = await startFakeControlPlane({ pongAfterPingCount: 1,
     protocolVersion: (connection) => connection < 2 ? PROTOCOL_VERSION : 269,
     onMessage: (_socket, message, connection) => {
       if (message.type === "session_runtime_updated") (rows[connection] ??= []).push(message.snapshot!.id);
       if (message.type === "session_queue") (queues[connection] ??= []).push(message.sessionId!);
       if (message.type === "runner_processing_barrier") (barriers[connection] ??= []).push(message.barrierId!);
+      if (message.type === "durable_session_command_update" || message.type === "session_command_invocation_update")
+        (receipts[connection] ??= []).push(message.type);
     },
   });
   const temp = mkdtempSync(join(tmpdir(), "wollipog-republish-wiring-"));
@@ -53,6 +58,20 @@ ProcessingWindow.prototype.close = function() {
     repoPath: temp, worktreePath: null, driver: "claude-code", command: "synthetic", args: [], env: {},
     context: { kind: "native" }, agentSessionId: null, status: "completed", title: "Synthetic", config: {}, tokensIn: 0,
     tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null, seq: 0, createdAt: 1000 + i, updatedAt: 1000 + i });
+  const durable = new DurableCommandStore(join(temp, "runner-data", "command-receipts"), { now: () => Date.now() });
+  const command = { type: "prompt_session" as const, sessionId: ids[0]!, text: "Synthetic" };
+  const claimed = durable.claim({ type: "durable_session_command", requestId: "request", commandId: "command",
+    executionId: "execution", command, payloadDigest: durableCommandPayloadDigest(command), expiresAt: Date.now() + 600_000 });
+  assert.equal(claimed.kind, "new");
+  if (claimed.kind === "new") claimed.handle.completed();
+  const invocations = new SessionCommandReceiptStore(join(temp, "runner-data", "session-command-receipts"), { now: () => Date.now() });
+  const envelope = { type: "invoke_session_command" as const, requestId: "request", invocationId: "invocation",
+    submissionId: "submission", sessionId: ids[0]!, providerCommandId: "provider", catalogRevision: "catalog",
+    expectedExecutionMode: "passthrough" as const, argumentText: "", expiresAt: Date.now() + 600_000, payloadDigest: "" };
+  envelope.payloadDigest = sessionCommandInvocationPayloadDigest(envelope);
+  const invoked = invocations.claim(envelope);
+  assert.equal(invoked.kind, "new");
+  if (invoked.kind === "new") invoked.handle.completed();
   let output = "";
   const child = spawn(process.execPath, ["--import", "tsx", "--import", observer, "apps/runner/src/cli.ts"], {
     cwd: REPO_ROOT, env: { ...transportRunnerEnvironment(temp), RUNNER_ID: "runner-republish-wiring",
@@ -79,6 +98,7 @@ ProcessingWindow.prototype.close = function() {
   await until(() => barriers[0]?.length === 1, "first processing barrier never arrived");
   assert.equal(rows[0]?.length, RUNNER_WINDOW_FRAMES);
   assert.equal(queues[0]?.length ?? 0, 0, "queue inventory must share credits rather than publish ahead of runtime processing");
+  assert.equal(receipts[0]?.length ?? 0, 0, "receipt replay must share processing credits");
   first.send(JSON.stringify({ type: "runner_processing_ack", barrierId: 999 }));
   await delay(100);
   assert.equal(rows[0]?.length, RUNNER_WINDOW_FRAMES, "an unrelated ACK must not advance the producer");
@@ -89,6 +109,7 @@ ProcessingWindow.prototype.close = function() {
   first.send(JSON.stringify({ type: "runner_processing_ack", barrierId: barriers[0]![1] }));
   await until(() => queues[0]?.length === ids.length, "the queue inventory did not use the actual ACK dispatcher");
   await until(() => barriers[0]?.length === 3, "final queue processing barrier never arrived");
+  assert.deepEqual(receipts[0], ["durable_session_command_update", "session_command_invocation_update"]);
   first.send(JSON.stringify({ type: "runner_processing_ack", barrierId: barriers[0]![2] }));
   assert.deepEqual(queues[0], ids);
   assert.deepEqual(rows[0], ids);
@@ -98,6 +119,7 @@ ProcessingWindow.prototype.close = function() {
   await until(() => barriers[1]?.length === 1, "replacement did not begin a fresh inventory");
   assert.deepEqual(rows[1], ids.slice(0, RUNNER_WINDOW_FRAMES));
   assert.equal(queues[1]?.length ?? 0, 0);
+  assert.equal(receipts[1]?.length ?? 0, 0, "a replacement regenerates unsent receipts without an outbox burst");
   second.close(); // an outstanding barrier must not leave its producer running on a new socket
 
   await cp.waitForConnection(2, 10_000, () => output);
@@ -105,6 +127,8 @@ ProcessingWindow.prototype.close = function() {
   assert.deepEqual(rows[2], ids);
   await until(() => queues[2]?.length === ids.length, "legacy queue inventory was lost");
   assert.deepEqual(queues[2], ids);
+  await until(() => receipts[2]?.length === 2, "legacy immediate receipt replay was lost");
+  assert.deepEqual(receipts[2], ["durable_session_command_update", "session_command_invocation_update"]);
   assert.equal(barriers[2]?.length ?? 0, 0, "an old peer must never receive processing barriers");
   await until(() => output.includes("TEST_PENDING_REPUBLISH_CLOSED"),
     "the real daemon never closed the producer with an outstanding processing barrier");

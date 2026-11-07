@@ -247,6 +247,21 @@ export class DurableCommandStore {
     return updates.sort((a, b) => a.commandId.localeCompare(b.commandId));
   }
 
+  /** Capture identities only; reconnect frames must read the current receipt after each ACK. */
+  recentUpdateIds(now = this.now()): string[] {
+    const ids: string[] = [];
+    for (const file of this.recordFiles()) {
+      const record = this.readFile(file);
+      if (record && record.expiresAt >= now) ids.push(record.commandId);
+    }
+    return ids.sort((a, b) => a.localeCompare(b));
+  }
+
+  recentUpdate(commandId: string, now = this.now()): DurableCommandReceipt | null {
+    const record = this.read(commandId);
+    return record && record.expiresAt >= now ? receipt(record, true) : null;
+  }
+
   prune(now = this.now()): number {
     let removed = 0;
     for (const file of this.recordFiles()) {
