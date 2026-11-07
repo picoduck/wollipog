@@ -20406,7 +20406,8 @@ export class SessionManager {
     } catch {
       return unusable("The Location's path could not be read on this runner; nothing was published.");
     }
-    const forge = gh ?? contextGhRunner({ kind: "native" }, cwd);
+    // Every `gh` call names its repository, so it runs from the filesystem root and reads nothing of the checkout.
+    const forge = gh ?? contextGhRunner({ kind: "native" }, parsePath(tmpdir()).root);
     const directory = "location-issue-publications";
     const digest = createHash("sha256").update(JSON.stringify(action)).digest("hex");
     try {
