@@ -742,8 +742,8 @@ function forgeActionFallback(occurrenceId: string, resourceDigest: unknown, kind
 
 /** One sentence naming the decision, what Wollipog did, and what to do next. */
 function forgeActionSummary(decision: unknown): string {
-  const view = decision as { occurrenceId?: string; status?: string; forgeAction?: {
-    kind?: string; outcome?: string; refusal?: { reason?: string; summary?: string } } } | null;
+  const view = decision as { occurrenceId?: string; status?: string; resourceSnapshot?: { repository?: string }; forgeAction?: {
+    kind?: string; outcome?: string; publishedIssue?: number; performedByRunnerId?: string; refusal?: { reason?: string; summary?: string } } } | null;
   const action = view?.forgeAction;
   const name = `Decision ${view?.occurrenceId ?? "(unknown)"}`;
   if (!action) return `${name}: no forge action was recorded; read get_workflow_decision.`;
@@ -753,9 +753,14 @@ function forgeActionSummary(decision: unknown): string {
     case "enqueued": return `${name}: Wollipog enqueued the approved head. Park on the pull request until it merges.`;
     case "already_queued": return `${name}: the approved head was already in the merge queue. Park on the pull request until it merges.`;
     case "already_merged": return `${name}: the approved head was already merged.`;
+    case "published":
+    case "already_published": return `${name}: a Location of ${view?.resourceSnapshot?.repository ?? "the repository"} on runner ${action.performedByRunnerId ?? "(unknown)"} ` +
+      `${action.outcome === "published" ? "created" : "had already created"} issue #${action.publishedIssue ?? "(unknown)"} with that runner's login. Read it back and record it on the recommendation.`;
     case "uncertain": return action.kind === "pr_merge_enqueue"
       ? `${name}: the enqueue may have run. Do not replay it; reconcile_workflow_decision once the pull request reads MERGED, or report it to your Orchestrator.`
-      : `${name}: the deletion may have run. Call execute_workflow_decision again; a compare-and-delete is safe to repeat.`;
+      : action.kind === "issue_publication"
+        ? `${name}: the issue may have been created. Do not create it yourself. Call execute_workflow_decision again, which only looks for it and never creates a second one; if it stays uncertain, report it to your Orchestrator.`
+        : `${name}: the deletion may have run. Call execute_workflow_decision again; a compare-and-delete is safe to repeat.`;
     default: return view?.status === "revoked"
       ? `${name}: refused (${action.refusal?.reason ?? "unspecified"}): ${action.refusal?.summary ?? ""} The approval was revoked; request a new decision with fresh evidence, or report the branch to your Orchestrator.`
       : `${name}: refused (${action.refusal?.reason ?? "unspecified"}): ${action.refusal?.summary ?? ""} Nothing changed and the approval still stands; fix the cause and call execute_workflow_decision again, or report it to your Orchestrator.`;
