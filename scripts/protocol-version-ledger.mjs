@@ -39,7 +39,7 @@ const VERSION = /^ {2}(\d+),$/u;
 
 /** Parse the ledger file. Every problem names the file line it concerns. */
 export function parseLedger(text) {
-  const lines = text.split("\n");
+  const lines = text.split(/\r?\n/u);
   const problems = [];
   const start = lines.indexOf(ARRAY_OPEN);
   const end = start < 0 ? -1 : lines.indexOf("];", start);
@@ -86,7 +86,7 @@ export function parseLedger(text) {
         problems.push(`${LEDGER_PATH}:${at}: version ${version} must sit directly below its own \`// v${version} slot\` anchor.`);
       }
       if (slot) slot.filled = true;
-      entries.push({ version, line: at, text: (open?.comment ?? []).join("\n") });
+      entries.push({ version, line: at, anchored: slot !== null, text: (open?.comment ?? []).join("\n") });
       open = null;
     } else {
       problems.push(`${LEDGER_PATH}:${at}: unexpected line ${JSON.stringify(line.slice(0, 80))}; the ledger holds only entries and slot anchors.`);
@@ -100,13 +100,24 @@ export function parseLedger(text) {
     }
   }
   if (entries.length === 0) problems.push(`${LEDGER_PATH}: the ledger has no entries.`);
+  if (slots.length === 0) {
+    problems.push(`${LEDGER_PATH}: the ledger has no \`// vN slot\` anchors; add them with --extend.`);
+  } else {
+    // History above the first anchor predates the anchors. Anything from the first anchor's version
+    // up is a claim, and a claim outside its anchor would bring back the shared insertion point.
+    for (const entry of entries) {
+      if (!entry.anchored && entry.version >= slots[0]) {
+        problems.push(`${LEDGER_PATH}:${entry.line}: version ${entry.version} must sit directly below its own \`// v${entry.version} slot\` anchor, not above the anchors.`);
+      }
+    }
+  }
   const version = entries.length > 0 ? Math.max(...entries.map((entry) => entry.version)) : null;
   return { entries, slots, problems, version };
 }
 
 /** Read a tree from before #975, whose history comment and literal constant lived in index.ts. */
 export function parseLegacyIndex(text) {
-  const literal = /^export const PROTOCOL_VERSION = (\d+);$/mu.exec(text);
+  const literal = /^export const PROTOCOL_VERSION = (\d+);\r?$/mu.exec(text);
   if (!literal) return null;
   const history = text.slice(0, literal.index);
   const entries = [...history.matchAll(/^\/\/ (\d+): /gmu)].map((match) => ({ version: Number(match[1]) }));
@@ -159,7 +170,7 @@ export function compareWithBase({ head, mergeBase, base, baseName }) {
 export function extendSlots(text, count) {
   const ledger = parseLedger(text);
   if (ledger.problems.length > 0) throw new Error(ledger.problems.join("\n"));
-  const lines = text.split("\n");
+  const lines = text.split(/\r?\n/u);
   const end = lines.indexOf("];", lines.indexOf(ARRAY_OPEN));
   const from = (ledger.slots.at(-1) ?? ledger.version) + 1;
   const anchors = Array.from({ length: count }, (_, offset) => `  // v${from + offset} slot`);

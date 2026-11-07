@@ -5,7 +5,7 @@ import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL } from "./index.js";
 import { PROTOCOL_VERSION as LEDGER_PROTOCOL_VERSION } from "./protocol-version.js";
 
 const ledger = readFileSync(new URL("./protocol-version.ts", import.meta.url), "utf8");
-const versions = [...ledger.matchAll(/^ {2}(\d+),$/gmu)].map((match) => Number(match[1]));
+const versions = [...ledger.matchAll(/^ {2}(\d+),\r?$/gmu)].map((match) => Number(match[1]));
 const headers = [...ledger.matchAll(/^ {2}\/\/ (\d+): /gmu)].map((match) => Number(match[1]));
 
 test("PROTOCOL_VERSION is the ledger's highest entry, exported unchanged through index.ts", () => {

@@ -48,6 +48,24 @@ test("an entry must sit directly below its own anchor", () => {
   assert.ok(parseLedger(ledger(doubled)).problems.some((problem) => /version 8 must sit directly below/u.test(problem)));
 });
 
+test("a claim above the first anchor is refused, while the migrated history there is accepted", () => {
+  const committed = readFileSync(join(repo, LEDGER_PATH), "utf8");
+  const first = parseLedger(committed).slots[0];
+  const unanchored = committed.replace(`  // v${first} slot`, `  // ${first}: unanchored claim.\n  ${first},\n  // v${first} slot`);
+  const problems = parseLedger(unanchored).problems;
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], new RegExp(`version ${first} must sit directly below its own \`// v${first} slot\` anchor, not above the anchors`, "u"));
+  assert.match(parseLedger(ledger(["  // 4: a.", "  4,"])).problems[0], /has no `\/\/ vN slot` anchors/u);
+});
+
+test("a checkout with CRLF line endings parses the same", () => {
+  const committed = readFileSync(join(repo, LEDGER_PATH), "utf8");
+  const crlf = parseLedger(committed.replaceAll("\n", "\r\n"));
+  assert.deepEqual(crlf.problems, []);
+  assert.equal(crlf.version, parseLedger(committed).version);
+  assert.equal(parseLegacyIndex("// 4: a.\r\nexport const PROTOCOL_VERSION = 4;\r\n").version, 4);
+});
+
 test("missing numbers, missing entries, decreasing versions and a literal export are refused", () => {
   assert.match(parseLedger(ledger(["  // 4: no number.", "  // v5 slot"])).problems[0], /has no `4,` line/u);
   assert.match(parseLedger(ledger(["  4,", "  // v5 slot"])).problems[0], /version 4 has no `\/\/ 4: ` history entry/u);
