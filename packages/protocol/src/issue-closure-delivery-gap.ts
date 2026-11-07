@@ -319,7 +319,7 @@ export function issueClosureProofGapNotice(gaps: readonly IssueClosureDeliveryGa
     gaps: gaps.map((gap) => ({ ...gap })),
     summary: "This issue is in the campaign's scope, but its closure failed delegated proof, so a person decides this request. " +
       (fixable
-        ? "Fix every gap below and request the closure again: a request that passes the proof is Orchestrator-owned and supersedes this one."
+        ? "Fix every gap below and request the closure again: a request that passes the proof is Orchestrator-owned and supersedes this one while it is pending. An approved closure is preserved; execute it with its occurrenceId and resourceDigest instead."
         : "At least one gap below is one only a person can resolve; leave this request for the person rather than requesting it again."),
   };
 }

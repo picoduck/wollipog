@@ -2212,6 +2212,15 @@ The reviewer follows the video reviewer's provenance pattern, but for images:
   bounded at $10 and two tool calls per image plus eight. Under a campaign allowance it is a budget
   member like any child, so its cost is reserved against the allowance and shows in campaign
   accounting. Like a review session, it holds no concurrency slot.
+- **Separate admission for evidence review (#4245).** Only this server-created reviewer of an exact
+  pending Orchestrator-owned decision bypasses implementation child harness/model/effort, placement
+  and capacity rules. It stays on the root's disclosed provider/model and runner; ordinary session
+  requests cannot select this exemption. At most one active image reviewer per root is admitted,
+  independently of implementation slots, and at most one live review per occurrence. On a review
+  read or preparation after 15 minutes, a stalled reviewer is stopped; a replacement waits for
+  confirmed retirement. Idle reviewers cannot receive more work. Reviewers remain subject to all
+  parent and campaign cost/tool ceilings, unpriced-stop admission and accounting, and are excluded
+  from implementation child verification, occupancy and Stop and Archive completion.
 - **Two tools only.** The runner launches it as a native Claude Code session with no built-in
   tools, no slash commands, no user or project settings, and only the runner's management MCP
   server. That server exposes exactly `review_evidence_image` and `submit_evidence_verdict`. The
