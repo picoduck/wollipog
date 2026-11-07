@@ -59,7 +59,8 @@ test("a claim above the first anchor is refused, while the migrated history ther
 });
 
 test("a checkout with CRLF line endings parses the same", () => {
-  const committed = readFileSync(join(repo, LEDGER_PATH), "utf8");
+  // Normalize first: on a Windows checkout the file already has CRLF endings.
+  const committed = readFileSync(join(repo, LEDGER_PATH), "utf8").replaceAll("\r\n", "\n");
   const crlf = parseLedger(committed.replaceAll("\n", "\r\n"));
   assert.deepEqual(crlf.problems, []);
   assert.equal(crlf.version, parseLedger(committed).version);
