@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 import { campaignBoundaryRepository, campaignPublicationSafe, campaignPublicationTitle, campaignScopeIssues, type CampaignPublicationAdmissionFailure, type SessionView, type GithubIssueClosureSnapshot,
   type WorkflowDecisionResourceSnapshot, type CampaignWorkItemDetail, type CampaignPullRequestRef, type CampaignRecommendation,
   ISSUE_CLOSURE_DELIVERY_GAPS_MAX, issueClosureDeliveryGap, type IssueClosureDeliveryGap, type IssueClosureDeliveryGapCode,
-  type IssueClosureEpicMembers } from "@wollipog/protocol";
+  type IssueClosureEpicMembers, type CampaignForgeChangeRequestObservation } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
-import { campaignBoundaryCurrent, campaignClosureIssueHeld, campaignIssueInScope } from "./campaign-authority.js";
+import { campaignBoundaryCurrent, campaignClosureIssueHeld, campaignIssueInScope, campaignScopeRepositories } from "./campaign-authority.js";
 import { forgeRefKey, type ForgeFactEntry } from "./campaign-forge-observations.js";
 
 export const issueEvidenceDigest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -238,6 +238,13 @@ export function reservedPublicationSlots(db: ControlPlaneDb, root: SessionView, 
 
 type DeliveryCandidate = ForgeFactEntry & { approvedHeads: string[] };
 
+/** #4120: the repositories whose merged pull requests may prove a closure in `repository`: that
+ * repository and every other one in the campaign's boundary. Pull requests anywhere else stay
+ * `pull_request_outside_repository`. */
+function proofRepositories(root: SessionView, repository: string | undefined): Set<string> {
+  return new Set([...(repository ? [repository.toLowerCase()] : []), ...campaignScopeRepositories(root).map((entry) => entry.repository.toLowerCase())]);
+}
+
 /** The pull requests that may prove one item's delivery (#2940): every consumed `pr_merge` gate a
  * verified-delivered attempt's session passed inside that attempt (server-recorded at an exact
  * head), and every pull request the item's reported stage names. Each is only a candidate; its
@@ -256,9 +263,10 @@ function deliveryCandidates(db: ControlPlaneDb, root: SessionView, item: Campaig
       ? [{ sessionId: attempt.sessionId, from: attempt.startedAt, until }] : [];
   });
   const gated = new Map<string, { ref: CampaignPullRequestRef; heads: string[] }>();
+  const proof = proofRepositories(root, repository);
   for (const decision of db.consumedPullRequestMerges(windows.map((w) => w.sessionId))) {
     const gate = decision.resourceSnapshot;
-    if (gate.category !== "pr_merge" || gate.repository.toLowerCase() !== repository ||
+    if (gate.category !== "pr_merge" || !proof.has(gate.repository.toLowerCase()) ||
         !windows.some((w) => w.sessionId === decision.sessionId && decision.createdAt >= w.from && decision.createdAt <= w.until) ||
         gate.intendedClosures?.length && !gate.intendedClosures.some((closure) =>
           closure.toLowerCase() === issue || closure.toLowerCase() === target)) continue;
@@ -291,11 +299,44 @@ export function closureDeliveryPullRequests(db: ControlPlaneDb, root: SessionVie
   repository: string | undefined = root.orchestratorPolicy?.issueScope?.repository) {
   const delivery = new Map<number, { number: number; headSha: string; mergeCommitSha: string }>();
   for (const item of issueWork(db, root, issue, repository)) for (const { ref, fact } of deliveryCandidates(db, root, item, issue, repository)) {
-    if (fact.availability === "fresh" && fact.value.state === "merged" && fact.value.mergeCommitSha) {
+    // The closure repository's runner verifies only its own repository's pull requests (#4120).
+    if (ref.repository.toLowerCase() === repository?.toLowerCase() &&
+        fact.availability === "fresh" && fact.value.state === "merged" && fact.value.mergeCommitSha) {
       delivery.set(ref.number, { number: ref.number, headSha: fact.value.headSha, mergeCommitSha: fact.value.mergeCommitSha });
     }
   }
   return [...delivery.values()];
+}
+
+/** #4120: the candidates in the campaign's other repositories freshly observed merged, for an
+ * authoritative read through a Location of each one's own repository. */
+export function closureCrossRepositoryPullRequests(db: ControlPlaneDb, root: SessionView, issue: number,
+  repository: string | undefined = root.orchestratorPolicy?.issueScope?.repository): CampaignPullRequestRef[] {
+  const proof = proofRepositories(root, repository);
+  const own = repository?.toLowerCase();
+  const refs = new Map<string, CampaignPullRequestRef>();
+  for (const item of issueWork(db, root, issue, repository)) for (const { ref, fact } of deliveryCandidates(db, root, item, issue, repository)) {
+    const named = ref.repository.toLowerCase();
+    if (named !== own && proof.has(named) && fact.availability === "fresh" && fact.value.state === "merged" && fact.value.mergeCommitSha) {
+      refs.set(forgeRefKey(ref), { repository: ref.repository, number: ref.number });
+    }
+  }
+  return [...refs.values()];
+}
+
+/** #4120: an authoritative read's answer as the snapshot's cross-repository delivery: each pull
+ * request read MERGED, with its head and merge commit, in the order asked. Undefined when the read
+ * did not answer for every one, which proves none of them. */
+export function closureCrossRepositoryDelivery(refs: readonly CampaignPullRequestRef[],
+  results: ReadonlyArray<{ ref: CampaignPullRequestRef; observation?: CampaignForgeChangeRequestObservation }> | null): GithubIssueClosureSnapshot["crossRepositoryDelivery"] {
+  if (!refs.length || !results || results.length !== refs.length) return undefined;
+  // Merged into that repository's default branch, as a recorded delivery requires (#4070): the forge
+  // must name its default branch (a GitLab merge request, or an older runner's read, names none and
+  // proves nothing) and the pull request's base must be it.
+  const delivered = results.flatMap(({ ref, observation }) => observation && observation.forge === undefined && observation.state === "merged" &&
+    observation.mergeCommitSha && observation.defaultBranch && observation.baseRef === observation.defaultBranch
+    ? [{ repository: ref.repository.toLowerCase(), number: ref.number, headSha: observation.headSha, mergeCommitSha: observation.mergeCommitSha }] : []);
+  return delivered.length ? delivered : undefined;
 }
 
 /** Delivery is an independently verified report plus observed forge merges. Stage prose alone,
@@ -324,22 +365,34 @@ export function closureEvidence(db: ControlPlaneDb, root: SessionView, snapshot:
   const excluded = new Set<string>();
   if (!items.length || items.some((item) => !itemDelivered(db, root, item, snapshot, excluded))) return null;
   return { items: items.map((item) => ({ id: item.id, verifications: item.verifications })), delivery: snapshot.delivery,
+    ...(snapshot.crossRepositoryDelivery ? { crossRepositoryDelivery: snapshot.crossRepositoryDelivery } : {}),
     ...(excluded.size ? { excluded: [...excluded].sort() } : {}) };
 }
 
+/** Whether a merged pull request's merge was verified for this snapshot: by the closure repository's
+ * runner at its exact head, or, for another campaign repository's (#4120), by an authoritative read
+ * through a Location of that repository just before the request. */
+function deliveryVerified(snapshot: GithubIssueClosureSnapshot, ref: CampaignPullRequestRef, headSha: string, mergeCommitSha: string): boolean {
+  const repository = ref.repository.toLowerCase();
+  const verified = repository === snapshot.repository.toLowerCase() ? snapshot.delivery
+    : snapshot.crossRepositoryDelivery?.filter((delivered) => delivered.repository.toLowerCase() === repository);
+  return Boolean(verified?.some((delivered) => delivered.number === ref.number && delivered.headSha === headSha && delivered.mergeCommitSha === mergeCommitSha));
+}
+
 /** One item's delivery proof: a delivered verification with an exact report digest, no open
- * attempt, and at least one fresh merge the runner verified, at an approved head when gated. */
+ * attempt, and at least one fresh merge verified for it, at an approved head when gated. A pull
+ * request in another of the campaign's repositories counts (#4120); one anywhere else disproves it. */
 function itemDelivered(db: ControlPlaneDb, root: SessionView, item: CampaignWorkItemDetail, snapshot: GithubIssueClosureSnapshot,
   excluded: Set<string>): boolean {
   if (item.primaryState !== "delivered" || item.currentAttempt || !item.verifications.some((v) => v.outcome === "delivered" && v.report.digest)) return false;
+  const proof = proofRepositories(root, snapshot.repository);
   let merged = 0;
   for (const { ref, fact, approvedHeads } of deliveryCandidates(db, root, item, snapshot.issue, snapshot.repository)) {
-    if (ref.repository.toLowerCase() !== snapshot.repository.toLowerCase() || fact.availability !== "fresh") return false;
+    if (!proof.has(ref.repository.toLowerCase()) || fact.availability !== "fresh") return false;
     if (fact.value.state === "closed") { excluded.add(forgeRefKey(ref)); continue; }
     const value = fact.value;
     if (value.state !== "merged" || !value.mergeCommitSha || approvedHeads.length && !approvedHeads.includes(value.headSha) ||
-        !snapshot.delivery?.some((delivered) => delivered.number === ref.number && delivered.headSha === value.headSha &&
-          delivered.mergeCommitSha === value.mergeCommitSha)) return false;
+        !deliveryVerified(snapshot, ref, value.headSha, value.mergeCommitSha)) return false;
     merged++;
   }
   return merged > 0;
@@ -376,6 +429,7 @@ function epicMemberEvidence(db: ControlPlaneDb, root: SessionView, snapshot: Git
   if (items.some((item) => !itemDelivered(db, root, item, snapshot, excluded))) return null;
   return { source: "epic_members" as const, members: read.members.map((member) => ({ ...member })), placeholders,
     items: items.map((item) => ({ id: item.id, verifications: item.verifications })), delivery: snapshot.delivery,
+    ...(snapshot.crossRepositoryDelivery ? { crossRepositoryDelivery: snapshot.crossRepositoryDelivery } : {}),
     ...(excluded.size ? { excluded: [...excluded].sort() } : {}) };
 }
 
@@ -406,7 +460,7 @@ export function closureDeliveryGaps(db: ControlPlaneDb, root: SessionView, snaps
   return gaps;
 }
 
-type AddGap = (code: IssueClosureDeliveryGapCode, details?: { verificationFailure?: GithubIssueClosureSnapshot["deliveryVerificationFailure"]; workItemId?: string; pullRequests?: number[]; members?: number[] }) => void;
+type AddGap = (code: IssueClosureDeliveryGapCode, details?: { verificationFailure?: GithubIssueClosureSnapshot["deliveryVerificationFailure"]; workItemId?: string; pullRequests?: number[]; members?: number[]; repository?: string }) => void;
 
 function deliveryGapsInto(db: ControlPlaneDb, root: SessionView, snapshot: GithubIssueClosureSnapshot, add: AddGap, count: () => number): void {
   // Open related PRs block every reason. A PR whose title and body no longer mention the issue still
@@ -467,7 +521,7 @@ function itemGapsInto(db: ControlPlaneDb, root: SessionView, snapshot: GithubIss
   add: AddGap, count: () => number): void {
   // The runner confirms merges only once everything else holds, so an unconfirmed merge is a gap of
   // its own only when nothing else is: otherwise the runner was never asked.
-  const unconfirmed: Array<{ workItemId: string; pullRequests: number[] }> = [];
+  const unconfirmed: Array<{ workItemId: string; pullRequests: number[]; repository?: string }> = [];
   for (const item of items) {
     if (item.currentAttempt) {
       add(item.stateCauses.includes("attempt_awaiting_verification") ? "attempt_awaiting_verification" : "attempt_open", { workItemId: item.id });
@@ -476,24 +530,37 @@ function itemGapsInto(db: ControlPlaneDb, root: SessionView, snapshot: GithubIss
     if (!item.verifications.some((v) => v.outcome === "delivered" && v.report.digest)) { add("no_delivered_verification", { workItemId: item.id }); continue; }
     if (item.primaryState !== "delivered") { add("work_item_not_delivered", { workItemId: item.id }); continue; }
     const before = count();
-    const outside: number[] = [], stale: number[] = [], open: number[] = [], wrongHead: number[] = [], unverified: number[] = [];
+    const own = snapshot.repository.toLowerCase();
+    const proof = proofRepositories(root, own);
+    const outside: number[] = [];
+    // #4120: per repository, the closure's own first, so another repository's pull requests are named by it.
+    const byRepository = new Map<string, { stale: number[]; open: number[]; wrongHead: number[]; unverified: number[] }>([[own, { stale: [], open: [], wrongHead: [], unverified: [] }]]);
     let merged = 0;
     for (const { ref, fact, approvedHeads } of deliveryCandidates(db, root, item, snapshot.issue, snapshot.repository)) {
-      if (ref.repository.toLowerCase() !== snapshot.repository.toLowerCase()) outside.push(ref.number);
-      else if (fact.availability !== "fresh") stale.push(ref.number);
+      const repository = ref.repository.toLowerCase();
+      if (!proof.has(repository)) { outside.push(ref.number); continue; }
+      if (!byRepository.has(repository)) byRepository.set(repository, { stale: [], open: [], wrongHead: [], unverified: [] });
+      const lists = byRepository.get(repository)!;
+      if (fact.availability !== "fresh") lists.stale.push(ref.number);
       else if (fact.value.state === "closed") continue;
-      else if (fact.value.state !== "merged" || !fact.value.mergeCommitSha) open.push(ref.number);
-      else if (approvedHeads.length && !approvedHeads.includes(fact.value.headSha)) wrongHead.push(ref.number);
-      else if (!snapshot.delivery?.some((delivered) => delivered.number === ref.number && delivered.headSha === fact.value.headSha &&
-          delivered.mergeCommitSha === fact.value.mergeCommitSha)) unverified.push(ref.number);
+      else if (fact.value.state !== "merged" || !fact.value.mergeCommitSha) lists.open.push(ref.number);
+      else if (approvedHeads.length && !approvedHeads.includes(fact.value.headSha)) lists.wrongHead.push(ref.number);
+      else if (!deliveryVerified(snapshot, ref, fact.value.headSha, fact.value.mergeCommitSha)) lists.unverified.push(ref.number);
       else merged++;
     }
     if (outside.length) add("pull_request_outside_repository", { workItemId: item.id, pullRequests: outside });
-    if (stale.length) add("stale_pull_request", { workItemId: item.id, pullRequests: stale });
-    if (open.length) add("unmerged_pull_request", { workItemId: item.id, pullRequests: open });
-    if (wrongHead.length) add("delivery_not_verified_at_exact_head", { workItemId: item.id, pullRequests: wrongHead });
-    if (unverified.length) unconfirmed.push({ workItemId: item.id, pullRequests: unverified });
-    else if (!merged && count() === before) add("no_merged_delivery_pull_request", { workItemId: item.id });
+    let unverifiedAny = false;
+    for (const [repository, lists] of byRepository) {
+      const named = repository === own ? {} : { repository };
+      if (lists.stale.length) add("stale_pull_request", { workItemId: item.id, pullRequests: lists.stale, ...named });
+      if (lists.open.length) add("unmerged_pull_request", { workItemId: item.id, pullRequests: lists.open, ...named });
+      if (lists.wrongHead.length) add("delivery_not_verified_at_exact_head", { workItemId: item.id, pullRequests: lists.wrongHead, ...named });
+      if (lists.unverified.length) {
+        unverifiedAny = true;
+        unconfirmed.push({ workItemId: item.id, pullRequests: lists.unverified, ...named });
+      }
+    }
+    if (!unverifiedAny && !merged && count() === before) add("no_merged_delivery_pull_request", { workItemId: item.id });
   }
   if (!count()) for (const gap of unconfirmed) add("delivery_merge_unconfirmed", { ...gap, verificationFailure: snapshot.deliveryVerificationFailure });
 }

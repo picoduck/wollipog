@@ -539,6 +539,32 @@ launch identity after forge inspection. A change refuses the close before record
 `campaign_issue_closure_authority_changed` identifies the request, occurrence and revisions without
 logging the issue payload or authority contents.
 
+### Closure Proof Across Repositories (#4120)
+
+When an issue's work items cite pull requests in the campaign's other boundary repositories, those
+pull requests count toward its delivery proof. Each must be freshly observed MERGED, at an approved
+head when its merge was gated, exactly as the issue's own repository's must:
+
+- Merge gates a delivered attempt passed in any boundary repository are candidates, as the issue's
+  own repository's are.
+- The issue repository's runner verifies only that repository's pull requests (`delivery`), as
+  before; it can't read another repository.
+- Another boundary repository's pull requests are read again at request time, uncached, through a
+  Location of their own repository (#4119). Only what that read returns MERGED into the
+  repository's default branch, as a recorded delivery requires (#4070), is bound into the snapshot
+  as `crossRepositoryDelivery`, with its head and merge commit, and into the evidence digest. A
+  read that names no default branch (a GitLab merge request, an older runner) proves nothing, and a
+  read that can't answer for every one binds none of them. The issue repository's runner also
+  checks that each merge commit is contained in the default branch; that check isn't available
+  for another repository here.
+- Before execution they are read again the same way. Each must still read MERGED at the bound head
+  and merge commit, or nothing is executed.
+- A pull request in a repository outside the boundary still produces
+  `pull_request_outside_repository`. A gap about another boundary repository's pull requests
+  names that `repository`, and its summary and compact line write them as `owner/repo#n`.
+
+Every other proof condition is unchanged. Single-repository campaigns read and bind exactly as before.
+
 ### Closure Proof Gaps
 
 A completed or not-planned closure of an in-scope issue that the boundary delegates, but that fails

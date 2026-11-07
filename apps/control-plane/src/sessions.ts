@@ -63,7 +63,7 @@ import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compat
   everyOutstandingScopeDecision, campaignAwaitsInitialScope, campaignScopeIsProposed, participantScope, participantScopeRefusal, repositoryOutsideBoundary, scopeRequestOutsideBoundary } from "./campaign-issue-scope.js";
 import { boundedDecisionString, issueClosureRequestInvalid, issueClosureRequestInvalidFields, issueClosureScopeRefusal } from "./issue-closure-request-refusal.js";
 import { needsCampaignIssueScopeSeed } from "./campaign-issue-scope-seed.js";
-import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, heldCampaignIssues, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
+import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, heldCampaignIssues, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureCrossRepositoryDelivery, closureCrossRepositoryPullRequests, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, githubIssueClosureRefusal, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure,
   CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, CAMPAIGN_PUBLICATION_CORRECTABLE_FAILURES, type CampaignPullRequestRef } from "@wollipog/protocol";
 import type { ForgeReadResult } from "./campaign-forge-observations.js";
@@ -13369,7 +13369,7 @@ export class SessionsService {
     const members = read && normalizeIssueClosureEpicMembers(read.epicMembers);
     if (!read || !members?.readable) return null;
     if (!members.members.length) return false;
-    const { state: _state, delivery: _delivery, ...inspection } = read;
+    const { state: _state, delivery: _delivery, crossRepositoryDelivery: _runnerCross, ...inspection } = read as typeof read & { crossRepositoryDelivery?: unknown };
     const { delivery: _ordinary, deliveryVerificationFailure: _ordinaryFailure, ...rest } = base;
     let snapshot: GithubIssueClosureSnapshot = { ...rest, ...inspection, epicMembers: members };
     const delivery = closureDeliveryPullRequests(this.db, this.db.getSession(sessionId)!, base.issue, base.repository);
@@ -13447,7 +13447,8 @@ export class SessionsService {
       if (inspectedGitlab) return capabilityFail(inspectedGitlab);
       if (inspected.inspection.state === "CLOSED") return ok({ outcome: "already_closed", url: inspected.inspection.url });
       if (inspected.inspection.state !== "OPEN") return fail("runner returned invalid issue state", 409);
-      const { state: _state, ...inspection } = inspected.inspection;
+      // #4120: `crossRepositoryDelivery` is the server's own read, never the runner's answer.
+      const { state: _state, crossRepositoryDelivery: _runnerCross, ...inspection } = inspected.inspection as typeof inspected.inspection & { crossRepositoryDelivery?: unknown };
       const children = issueClosureChildren(this.db, sessionId, { repository: inspection.repository, number: request.issue });
       let snapshot: GithubIssueClosureSnapshot = { ...inspection, category: "issue_closure", reason: request.reason,
         ...(session.orchestratorPolicy.issueScope ? { scopeRevision: session.orchestratorPolicy.issueScope.revision } : {}),
@@ -13464,6 +13465,15 @@ export class SessionsService {
         // reason must retain the existing human route, never become a rejected human request.
         if (request.reason === "completed") {
           await this.refreshClosureForge(sessionId, request.issue, snapshot.repository);
+          // #4120: delivering pull requests in the campaign's other repositories are read again now,
+          // authoritatively, through a Location of each one's repository; only what that read
+          // returns MERGED is bound into the snapshot. The closure repository's own stay with its runner.
+          const crossRefs = closureCrossRepositoryPullRequests(this.db, this.db.getSession(sessionId)!, request.issue, snapshot.repository);
+          if (crossRefs.length) {
+            const read = this.campaignForgeReadNow ? await this.campaignForgeReadNow(sessionId, crossRefs).catch(() => null) : null;
+            const crossRepositoryDelivery = closureCrossRepositoryDelivery(crossRefs, read);
+            if (crossRepositoryDelivery) snapshot.crossRepositoryDelivery = crossRepositoryDelivery;
+          }
           const delivery = closureDeliveryPullRequests(this.db, this.db.getSession(sessionId)!, request.issue, snapshot.repository);
           if (delivery.length && closureEvidence(this.db, this.db.getSession(sessionId)!, { ...snapshot, delivery })) {
             const verificationId = `issue_closure_delivery_${randomUUID()}`;
@@ -13627,6 +13637,16 @@ export class SessionsService {
     if (decision.authority === "orchestrator" &&
         !await this.excludedPullRequestsStillClosed(occurrenceId, synchronized, closureExcludedRefs(closureEvidence(this.db, synchronized, snapshot)))) {
       return fail("An excluded closed pull request could not be confirmed still closed and unmerged; request a new exact closure", 409);
+    }
+    // #4120: another repository's delivering pull requests are read again, uncached, through a Location
+    // of their own repository: each must still read MERGED at the head and merge commit approved.
+    const crossDelivery = decision.authority === "orchestrator" ? snapshot.crossRepositoryDelivery ?? [] : [];
+    if (crossDelivery.length) {
+      const refs = crossDelivery.map(({ repository, number }) => ({ repository, number }));
+      const read = this.campaignForgeReadNow ? await this.campaignForgeReadNow(synchronized.id, refs).catch(() => null) : null;
+      if (JSON.stringify(closureCrossRepositoryDelivery(refs, read)) !== JSON.stringify(crossDelivery)) {
+        return fail("A delivering pull request in another campaign repository could not be confirmed merged at its verified head; request a new exact closure", 409);
+      }
     }
     const freshSession = this.db.getSession(sessionId);
     if (!freshSession || isTerminal(freshSession.status) || !campaignClosureIssueHeld(freshSession.orchestratorPolicy, issueRef) ||

@@ -77,6 +77,17 @@ export function normalizeIssueClosureSnapshot(value: Record<string, unknown>): G
   if (value.delivery !== undefined && (!Array.isArray(value.delivery) || value.delivery.length > 100 || value.delivery.some((p) =>
       !record(p) || !Number.isSafeInteger(p.number) || (p.number as number) < 1 || typeof p.headSha !== "string" || !/^[0-9a-f]{40}$/u.test(p.headSha) ||
       typeof p.mergeCommitSha !== "string" || !/^[0-9a-f]{40}$/u.test(p.mergeCommitSha)))) return null;
+  // #4120: another campaign repository's delivering pull requests, each named by its repository.
+  let crossRepositoryDelivery: GithubIssueClosureSnapshot["crossRepositoryDelivery"];
+  if (value.crossRepositoryDelivery !== undefined) {
+    if (!Array.isArray(value.crossRepositoryDelivery) || !value.crossRepositoryDelivery.length || value.crossRepositoryDelivery.length > 100) return null;
+    crossRepositoryDelivery = [];
+    for (const p of value.crossRepositoryDelivery) {
+      if (!record(p) || !bounded(p.repository, 256) || !campaignRepositoryLocation(p.repository) || !Number.isSafeInteger(p.number) || (p.number as number) < 1 ||
+          typeof p.headSha !== "string" || !/^[0-9a-f]{40}$/u.test(p.headSha) || typeof p.mergeCommitSha !== "string" || !/^[0-9a-f]{40}$/u.test(p.mergeCommitSha)) return null;
+      crossRepositoryDelivery.push({ repository: p.repository, number: p.number as number, headSha: p.headSha, mergeCommitSha: p.mergeCommitSha });
+    }
+  }
   // A github.com `owner/name`, or a host-qualified GitLab project (#3539) whose issue address is
   // `http(s)://<host>/<project>/-/issues/<n>`.
   if (!bounded(value.repository, 256) || !campaignRepositoryLocation(value.repository) ||
@@ -114,6 +125,7 @@ export function normalizeIssueClosureSnapshot(value: Record<string, unknown>): G
     ...(value.deliveryFailure === undefined ? {} : { deliveryFailure: value.deliveryFailure as string }),
     ...(deliveryGaps === undefined ? {} : { deliveryGaps }),
     ...(value.delivery === undefined ? {} : { delivery: structuredClone(value.delivery) as GithubIssueClosureSnapshot["delivery"] }),
+    ...(crossRepositoryDelivery === undefined ? {} : { crossRepositoryDelivery }),
     ...(epicMembers === undefined ? {} : { epicMembers }),
     ...(value.dispositionRecommendationId === undefined ? {} : { dispositionRecommendationId: value.dispositionRecommendationId as string }),
     ...(value.issueAdmission === undefined ? {} : { issueAdmission: structuredClone(value.issueAdmission) as GithubIssueClosureSnapshot["issueAdmission"] }),

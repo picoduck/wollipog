@@ -5493,6 +5493,127 @@ test("a closure's delivery facts are read by a Location of the pull request's re
   } finally { await server.close(); f.db.close(); }
 });
 
+test("an owner/repo issue delivered by merged pull requests in owner/repo and other/repo gets an Orchestrator-owned closure proof (#4120)", async () => {
+  const { f, server, id } = await multiRepositoryCampaign();
+  try {
+    f.db.updateSessionStatus(id, "running", Date.now());
+    const { closures } = closureRunners(f);
+    const head = "b".repeat(40), mergeCommit = "c".repeat(40);
+    const rollup = { state: "passing" as const, passing: 1, failing: 0, pending: 0 };
+    const merged = { state: "merged" as const, draft: false, headSha: head, baseRef: "main", reviewDecision: "approved" as const, checks: rollup, requiredChecks: rollup, mergeQueue: null,
+      mergeCommitSha: mergeCommit, defaultBranch: "main" };
+    const forge = new Map<string, typeof merged | null>([["owner/repo#10", merged], ["other/repo#20", merged], ["third/repo#30", merged],
+      // Merged, but into a feature branch: not delivered.
+      ["other/repo#22", { ...merged, baseRef: "feature" }]]);
+    const reads: Array<{ runnerId: string; refs: string[] }> = [];
+    const send = f.hub.sendToRunner.bind(f.hub);
+    f.hub.sendToRunner = (runnerId, message) => {
+      if (message.type !== "campaign_forge_observe") return send(runnerId, message);
+      reads.push({ runnerId, refs: message.pullRequests.map((ref) => `${ref.repository}#${ref.number}`) });
+      queueMicrotask(() => f.hub.resolveRunnerRequest({ type: "campaign_forge_observe_result", requestId: message.requestId, sessionId: message.sessionId, observedAt: Date.now(), ok: true,
+        results: message.pullRequests.map((ref) => {
+          const value = forge.get(`${ref.repository}#${ref.number}`);
+          return value ? { ref, ok: true as const, observation: value } : { ref, ok: false as const, failure: "forge_not_found" as const };
+        }) }, runnerId));
+      return true;
+    };
+    let count = 0;
+    const observer = new CampaignForgeObserver({
+      observingRunner: (campaignId, repository) => f.db.campaignForgeObservingRunner(campaignId, repository, (runnerId) => f.hub.isRunnerOnline(runnerId)),
+      requestFromRunner: (runnerId, requestId, message, timeout) => f.hub.requestFromRunner(runnerId, requestId, message, timeout),
+      store: f.db.campaignForgeObservations, backgroundTargets: () => [], changed: () => undefined, warn: () => undefined, newRequestId: () => `forge_${++count}`,
+    });
+    f.sessions.campaignForgeRefresh = (campaignId, refs) => observer.refresh(campaignId, refs);
+    f.sessions.campaignForgeReadNow = (campaignId, refs) => observer.readNow(campaignId, refs);
+
+    // owner/repo#7 is delivered by two items: one merged in owner/repo, one (the API part) in other/repo.
+    let pulls: Array<{ repository: string; number: number }> = [];
+    const item = (itemId: string, refs: Array<{ repository: string; number: number }>) => ({ id: itemId, key: itemId, issue: { repository: "owner/repo", number: 7 },
+      primaryState: "delivered", currentAttempt: null, attempts: [], stateCauses: [], commitment: "committed",
+      verifications: [{ outcome: "delivered", report: { digest: "d".repeat(64) } }],
+      observed: { pullRequests: f.db.campaignForgeObservations.facts(id, refs, Date.now()) } }) as unknown as CampaignWorkItemDetail;
+    const items = () => [item("app", [{ repository: "owner/repo", number: 10 }]), item("api", pulls)];
+    const ledger = f.db.campaignWorkLedger;
+    ledger.page = (() => ({ ok: true, data: { items: items() } })) as unknown as typeof ledger.page;
+    ledger.detail = ((_campaign: string, itemId: string) => items().find((candidate) => candidate.id === itemId) ?? null) as unknown as typeof ledger.detail;
+    const request = (requestId: string) => f.sessions.requestGithubIssueClosure(id, { requestId, issue: 7, reason: "completed", explanation: "Delivered", evidence: ["Merged in both repositories"] });
+
+    // other/repo#20 counts toward the proof: read through other/repo's Location, never the root's runner.
+    pulls = [{ repository: "other/repo", number: 20 }];
+    const proven = await request("close-7");
+    assert.equal(proven.ok, true, proven.error ?? "");
+    const decision = proven.data!.decision!;
+    assert.equal(decision.authority, "orchestrator", JSON.stringify(decision.authorityEvaluation));
+    const snapshot = decision.resourceSnapshot as GithubIssueClosureSnapshot;
+    assert.deepEqual(snapshot.crossRepositoryDelivery, [{ repository: "other/repo", number: 20, headSha: head, mergeCommitSha: mergeCommit }]);
+    // The launch repository's runner verifies only its own pull request.
+    assert.deepEqual(snapshot.delivery, [{ number: 10, headSha: head, mergeCommitSha: mergeCommit }]);
+    assert.deepEqual(closures.filter(({ message }) => message.operation === "inspect" && message.deliveryPullRequests)
+      .map(({ runnerId, message }) => [runnerId, message.operation === "inspect" ? message.deliveryPullRequests : null]), [["r", [{ number: 10, headSha: head }]]]);
+    assert.ok(reads.some((read) => read.runnerId === "r2" && read.refs.includes("other/repo#20")));
+    assert.ok(!reads.some((read) => read.runnerId === "r" && read.refs.includes("other/repo#20")), "the root's login never reads other/repo");
+
+    // Execution reads other/repo#20 again through its Location; once that read can't be made, nothing runs.
+    const approve = (occurrenceId: string) => f.sessions.resolveWorkflowDecision(id, id, occurrenceId, { outcome: "approve" }, "orchestrator", { kind: "agent", id }, () => true);
+    assert.equal(approve(decision.occurrenceId).ok, true);
+    const online = f.hub.isRunnerOnline;
+    f.hub.isRunnerOnline = (runnerId) => runnerId !== "r2" && online(runnerId);
+    const refused = await f.sessions.executeGithubIssueClosure(id, decision.occurrenceId, decision.resourceDigest);
+    assert.equal(refused.ok, false);
+    assert.match(refused.error!, /another campaign repository could not be confirmed merged/u);
+    assert.deepEqual(closures.filter(({ message }) => message.operation !== "inspect"), [], "no closure was sent");
+    f.hub.isRunnerOnline = online;
+    reads.length = 0;
+    const executed = await f.sessions.executeGithubIssueClosure(id, decision.occurrenceId, decision.resourceDigest);
+    assert.equal(executed.ok, true, executed.error ?? "");
+    assert.ok(reads.some((read) => read.runnerId === "r2" && read.refs.includes("other/repo#20")), "read again before execution");
+    assert.deepEqual(closures.filter(({ message }) => message.operation === "execute").map(({ runnerId }) => runnerId), ["r"]);
+
+    // A pull request in a repository outside the boundary is a gap, and the closure stays a person's.
+    pulls = [{ repository: "other/repo", number: 20 }, { repository: "third/repo", number: 30 }];
+    const outside = await request("close-7-outside");
+    assert.equal(outside.ok, true, outside.error ?? "");
+    assert.equal(outside.data!.decision!.authority, "human");
+    const gaps = (outside.data!.decision!.resourceSnapshot as GithubIssueClosureSnapshot).deliveryGaps;
+    assert.deepEqual(gaps?.map((gap) => [gap.code, gap.workItemId, gap.pullRequests, gap.repository]), [["pull_request_outside_repository", "api", [30], undefined]]);
+
+    // Another repository's pull request merged into a branch other than its default proves nothing,
+    // even when the issue repository's runner answers with a delivery of its own for it.
+    pulls = [{ repository: "other/repo", number: 22 }];
+    const sendClosure = f.hub.sendToRunner;
+    f.hub.sendToRunner = (runnerId, message) => {
+      if (message.type !== "github_issue_closure" || message.operation !== "inspect") return sendClosure(runnerId, message);
+      const resolve = f.hub.resolveRunnerRequest.bind(f.hub);
+      f.hub.resolveRunnerRequest = (answer, from) => {
+        f.hub.resolveRunnerRequest = resolve;
+        const inspection = (answer as { inspection?: object }).inspection;
+        return resolve(inspection ? { ...answer, inspection: { ...inspection,
+          crossRepositoryDelivery: [{ repository: "other/repo", number: 22, headSha: head, mergeCommitSha: mergeCommit }] } } as typeof answer : answer, from);
+      };
+      return sendClosure(runnerId, message);
+    };
+    const feature = await request("close-7-feature");
+    f.hub.sendToRunner = sendClosure;
+    assert.equal(feature.data!.decision!.authority, "human");
+    const featureSnapshot = feature.data!.decision!.resourceSnapshot as GithubIssueClosureSnapshot;
+    assert.equal(featureSnapshot.crossRepositoryDelivery, undefined);
+    // The launch repository's runner is asked only once everything else holds, so its merge is unconfirmed too.
+    assert.deepEqual(featureSnapshot.deliveryGaps?.map((gap) => [gap.code, gap.pullRequests, gap.repository]),
+      [["delivery_merge_unconfirmed", [10], undefined], ["delivery_merge_unconfirmed", [22], "other/repo"]]);
+
+    // Another boundary repository's unmerged pull request is a gap named by its repository.
+    forge.set("other/repo#21", { ...merged, state: "open" as never, mergeCommitSha: null as never });
+    pulls = [{ repository: "other/repo", number: 21 }];
+    await observer.readNow(id, pulls);
+    const unmerged = await request("close-7-unmerged");
+    assert.equal(unmerged.data!.decision!.authority, "human");
+    const named = (unmerged.data!.decision!.resourceSnapshot as GithubIssueClosureSnapshot).deliveryGaps!;
+    assert.deepEqual(named.map((gap) => [gap.code, gap.pullRequests, gap.repository]), [["unmerged_pull_request", [21], "other/repo"]]);
+    assert.match(named[0]!.summary, /other\/repo#21/u);
+    observer.dispose();
+  } finally { await server.close(); f.db.close(); }
+});
+
 test("a forge fact is shown only to viewers of the runner whose login supplied it, whichever Location would read next (#4119)", async () => {
   const { f, p, server, id, propose, approve } = await multiRepositoryCampaign();
   try {
