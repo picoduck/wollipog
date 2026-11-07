@@ -6493,6 +6493,12 @@ export class ControlPlaneDb {
       sessionRepository: (campaignId, sessionId) => this.campaignSessionRepository(campaignId, sessionId),
       armedMerge: (sessionId) => this.stmt(`SELECT 1 FROM workflow_decisions WHERE session_id=? AND category='pr_merge'
         AND status='approved' AND action_kind='pr_merge_enqueue' AND action_armed_at IS NOT NULL LIMIT 1`).get(sessionId) !== undefined,
+      // Controlled by the root or one of its nested Orchestrators; the controller index keeps it cheap.
+      armedMergeSessions: (campaignId) => (this.stmt(`SELECT DISTINCT session_id FROM workflow_decisions
+        WHERE controlling_session_id IN (SELECT value FROM json_each(?)) AND status='approved' AND category='pr_merge'
+          AND action_kind='pr_merge_enqueue' AND action_armed_at IS NOT NULL`)
+        .all(JSON.stringify([campaignId, ...this.campaignDescendantIds(campaignId)])) as Array<{ session_id: string }>)
+        .map((row) => row.session_id).filter((sessionId) => this.campaignRootForMember(sessionId) === campaignId),
     });
     return this.campaignWorkLedgerStore;
   }

@@ -457,6 +457,14 @@ test("once a merge is armed, no ledger change may move its prerequisite into ano
     assert.equal(moved.status, 409);
     // A change that keeps it in owner/app is fine.
     assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: id("api-field"), stage: { stage: "in_review", pullRequests: [{ repository: "owner/app", number: 9 }] } }).ok);
+    // Nor may the armed child be moved onto another item that waits for owner/api.
+    const waiting = h.svc.recordCampaignPlan("root", { planComplete: true, items: [
+      { key: "app-other", title: "Show Account Badge", issue: { repository: "owner/app", number: 1 }, dependsOnKeys: ["api"] }] });
+    assert.ok(waiting.ok, waiting.error ?? "plan refused");
+    const moved2 = h.svc.assignCampaignWorkItem("root", { workItemId: waiting.data!.items[0]!.workItemId, childSessionId: "app" });
+    assert.equal(moved2.status, 409);
+    assert.match(moved2.error!, /^This change would give work item app-other a prerequisite in another repository \(api\)/u);
+    assert.equal(h.db.campaignWorkLedger.currentAssignment("app")?.workItemId, id("app-field"), "rolled back");
   } finally { h.observer.dispose(); h.db.close(); }
 });
 

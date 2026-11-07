@@ -426,6 +426,8 @@ export interface CampaignWorkLedgerHooks {
    * consumed. Its provider may run that command without asking the control plane again, so a
    * dependency added now could not hold it. */
   armedMerge?(sessionId: string): boolean;
+  /** #4120: every session of this campaign that holds such an armed merge. */
+  armedMergeSessions?(campaignId: string): string[];
 }
 
 /** What `summary` derives from the ledger alone. Cached per campaign under the revision plus the
@@ -724,14 +726,17 @@ export class CampaignWorkLedgerStore {
 
   /** #4120: for each item whose open attempt's child holds an armed, unconsumed merge (optionally
    * only these items), the ids of its merge prerequisites. One indexed read when nothing is armed. */
-  private armedMergePrerequisites(campaignId: string, only?: readonly string[]): Map<string, Set<string>> {
-    if (!this.hooks.armedMerge) return new Map();
-    const armed = (this.stmt(`SELECT work_item_id, session_id FROM campaign_work_attempts
+  private armedMergePrerequisites(campaignId: string, sessions = this.hooks.armedMergeSessions?.(campaignId) ?? []):
+    Map<string, { itemId: string | null; prerequisites: Set<string> }> {
+    if (!sessions.length) return new Map();
+    const open = new Map((this.stmt(`SELECT work_item_id, session_id FROM campaign_work_attempts
       WHERE campaign_session_id=? AND ended_at IS NULL AND session_id IS NOT NULL`).all(campaignId) as Array<{ work_item_id: string; session_id: string }>)
-      .filter((row) => (!only || only.includes(row.work_item_id)) && this.hooks.armedMerge!(row.session_id));
-    if (!armed.length) return new Map();
+      .map((row) => [row.session_id, row.work_item_id]));
     const snapshot = this.snapshot(campaignId);
-    return new Map(armed.map((row) => [row.work_item_id, new Set((snapshot.mergePrerequisites.get(row.work_item_id) ?? []).map((prerequisite) => prerequisite.id))]));
+    return new Map(sessions.map((sessionId) => {
+      const itemId = open.get(sessionId) ?? null;
+      return [sessionId, { itemId, prerequisites: new Set((itemId ? snapshot.mergePrerequisites.get(itemId) ?? [] : []).map((prerequisite) => prerequisite.id)) }];
+    }));
   }
 
   private itemKey(itemId: string): string {
@@ -748,12 +753,15 @@ export class CampaignWorkLedgerStore {
         // #4120: a merge already armed can't be held any more, so no mutation may give its item a merge
         // prerequisite it did not have: a new dependency, or a prerequisite whose repository changed
         // (its child's placement, its pull requests or its issue). The whole mutation is refused.
+        // Keyed by the armed child, so reassigning it to another item is covered too. Arming never
+        // happens inside a ledger mutation, so the armed children are the same afterwards.
         if (armed.size) {
           const after = this.armedMergePrerequisites(campaignId, [...armed.keys()]);
-          for (const [itemId, before] of armed) {
-            const gained = [...after.get(itemId) ?? []].find((id) => !before.has(id));
-            if (gained) {
-              throw new LedgerRefusal(`This change would give work item ${this.itemKey(itemId)} a prerequisite in another repository ` +
+          for (const [sessionId, now] of after) {
+            const before = armed.get(sessionId)!.prerequisites;
+            const gained = [...now.prerequisites].find((id) => !before.has(id));
+            if (gained && now.itemId) {
+              throw new LedgerRefusal(`This change would give work item ${this.itemKey(now.itemId)} a prerequisite in another repository ` +
                 `(${this.itemKey(gained)}), but its child has already armed its approved merge, which nothing could hold now. ` +
                 "Make the change after that merge settles.", 409);
             }
