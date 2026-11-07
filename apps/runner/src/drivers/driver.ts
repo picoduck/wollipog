@@ -74,6 +74,8 @@ export interface DriverSteerInput {
   images?: PromptImage[];
   /** Absolute deadline for the whole steering submission, computed once at admission. */
   deadlineAt: number;
+  /** Exact provider receipt, including after the initial result; never a stdin write receipt. */
+  onLateAccepted?: (providerTurnId: string) => void;
 }
 
 /** Preserve the provider-delivery boundary: only a confirmed response is accepted, while a
