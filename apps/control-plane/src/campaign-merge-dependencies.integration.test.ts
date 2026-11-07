@@ -431,6 +431,35 @@ test("a reader who can't reach the prerequisite's reading runner sees its merge 
   } finally { h.observer.dispose(); h.db.close(); }
 });
 
+test("once a merge is armed, no ledger change may move its prerequisite into another repository (#4120)", async () => {
+  const h = await fixture({ dependency: null });
+  try {
+    // Both items track the owner/app issue, so the dependency is within one repository: no hold.
+    const plan = h.svc.recordCampaignPlan("root", { planComplete: true, items: [
+      { key: "api-field", title: "Add Account Field", issue: { repository: "owner/app", number: 1 } },
+      { key: "app-field", title: "Show Account Field", issue: { repository: "owner/app", number: 1 }, dependsOnKeys: ["api-field"] },
+    ] });
+    assert.ok(plan.ok, plan.error ?? "plan refused");
+    const id = (key: string) => plan.data!.items.find((entry) => entry.key === key)!.workItemId;
+    assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: id("app-field"), childSessionId: "app" }).ok);
+    assert.equal((await h.approvedMerge("app", "owner/app", 5).arm()).ok, true);
+    const refusal = /^This change would give work item app-field a prerequisite in another repository \(api-field\), but its child has already armed its approved merge/u;
+    // Placing the prerequisite's child in the owner/api Location would make it a merge dependency.
+    const assigned = h.svc.assignCampaignWorkItem("root", { workItemId: id("api-field"), childSessionId: "api" });
+    assert.equal(assigned.status, 409);
+    assert.match(assigned.error!, refusal);
+    assert.equal(h.db.campaignWorkLedger.detail("root", id("api-field"), Date.now())!.attemptCount, 0, "rolled back");
+    // So would naming an owner/api pull request on its stage, or moving its issue there.
+    const staged = h.svc.updateCampaignWorkItem("root", { workItemId: id("api-field"), stage: { stage: "in_review", pullRequests: [{ repository: "owner/api", number: 9 }] } });
+    assert.equal(staged.status, 409);
+    assert.match(staged.error!, refusal);
+    const moved = h.svc.updateCampaignWorkItem("root", { workItemId: id("api-field"), issue: { repository: "owner/api", number: 2 } });
+    assert.equal(moved.status, 409);
+    // A change that keeps it in owner/app is fine.
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: id("api-field"), stage: { stage: "in_review", pullRequests: [{ repository: "owner/app", number: 9 }] } }).ok);
+  } finally { h.observer.dispose(); h.db.close(); }
+});
+
 test("a dependency can't be added once the merge is armed, and Wollipog's enqueue still holds on one that is there (#4120)", async () => {
   const h = await fixture({ dependency: null });
   try {

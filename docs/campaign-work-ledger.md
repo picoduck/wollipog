@@ -212,6 +212,10 @@ display-only meaning; holding those too is possible later work.
 - **No dependency after arming.** A child's provider may run an armed enqueue without asking the
   control plane again, so a new dependency can't be added to an item whose child holds an armed,
   unconsumed `pr_merge`: the ledger refuses it (409) rather than record a hold it couldn't keep.
+  More generally, every ledger mutation is refused, and rolled back, if it would give such an item
+  a merge prerequisite it did not have, including by moving an existing prerequisite into another
+  repository (assigning it to a child in another Location, naming another repository's pull
+  request on its stage, or changing its issue).
   Wollipog-performed enqueues still check holds, for a dependency already in the ledger.
 - **Wake.** A refusal while the prerequisite is still to merge parks the child on that pull request
   with #4071's watch, which the control plane keeps itself (`PREREQUISITE_MERGE_WATCH_RUNNER`): the

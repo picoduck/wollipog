@@ -722,12 +722,43 @@ export class CampaignWorkLedgerStore {
     return statement;
   }
 
+  /** #4120: for each item whose open attempt's child holds an armed, unconsumed merge (optionally
+   * only these items), the ids of its merge prerequisites. One indexed read when nothing is armed. */
+  private armedMergePrerequisites(campaignId: string, only?: readonly string[]): Map<string, Set<string>> {
+    if (!this.hooks.armedMerge) return new Map();
+    const armed = (this.stmt(`SELECT work_item_id, session_id FROM campaign_work_attempts
+      WHERE campaign_session_id=? AND ended_at IS NULL AND session_id IS NOT NULL`).all(campaignId) as Array<{ work_item_id: string; session_id: string }>)
+      .filter((row) => (!only || only.includes(row.work_item_id)) && this.hooks.armedMerge!(row.session_id));
+    if (!armed.length) return new Map();
+    const snapshot = this.snapshot(campaignId);
+    return new Map(armed.map((row) => [row.work_item_id, new Set((snapshot.mergePrerequisites.get(row.work_item_id) ?? []).map((prerequisite) => prerequisite.id))]));
+  }
+
+  private itemKey(itemId: string): string {
+    return (this.stmt("SELECT item_key FROM campaign_work_items WHERE id=?").get(itemId) as { item_key: string } | undefined)?.item_key ?? itemId;
+  }
+
   /** Run one ledger mutation atomically. A refusal, returned or thrown, rolls back every write. */
-  private transact<T>(work: () => LedgerResult<T>): LedgerResult<T> {
+  private transact<T>(campaignId: string, work: () => LedgerResult<T>): LedgerResult<T> {
     try {
       return this.hooks.atomic(() => {
+        const armed = this.armedMergePrerequisites(campaignId);
         const result = work();
         if (!result.ok) throw new LedgerRefusal(result.error, result.status, result.details);
+        // #4120: a merge already armed can't be held any more, so no mutation may give its item a merge
+        // prerequisite it did not have: a new dependency, or a prerequisite whose repository changed
+        // (its child's placement, its pull requests or its issue). The whole mutation is refused.
+        if (armed.size) {
+          const after = this.armedMergePrerequisites(campaignId, [...armed.keys()]);
+          for (const [itemId, before] of armed) {
+            const gained = [...after.get(itemId) ?? []].find((id) => !before.has(id));
+            if (gained) {
+              throw new LedgerRefusal(`This change would give work item ${this.itemKey(itemId)} a prerequisite in another repository ` +
+                `(${this.itemKey(gained)}), but its child has already armed its approved merge, which nothing could hold now. ` +
+                "Make the change after that merge settles.", 409);
+            }
+          }
+        }
         return result;
       });
     } catch (error) {
@@ -1068,7 +1099,7 @@ export class CampaignWorkLedgerStore {
         return fail(`${at}.dependsOnKeys must list at most ${L.dependsOn} keys`);
       }
     }
-    return this.transact(() => {
+    return this.transact(campaignId, () => {
       const existingCount = Number((this.stmt(
         "SELECT COUNT(*) AS count FROM campaign_work_items WHERE campaign_session_id=?",
       ).get(campaignId) as { count: number }).count);
@@ -1259,7 +1290,7 @@ export class CampaignWorkLedgerStore {
         (endAttempt.note !== undefined && !boundedText(endAttempt.note, L.textLength)))) {
       return fail("endAttempt.reason must be abandoned or failed");
     }
-    return this.transact(() => {
+    return this.transact(campaignId, () => {
       const item = this.item(campaignId, request.workItemId);
       if (!item) return fail<{ revision: number; itemId: string }>("work item not found in this campaign", 404);
       const sets: string[] = [];
@@ -1390,7 +1421,7 @@ export class CampaignWorkLedgerStore {
     closedAttempts: Array<{ id: string; workItemId: string; endReason: CampaignAttemptEndReason }>;
     created: boolean;
   }> {
-    return this.transact(() => {
+    return this.transact(campaignId, () => {
       const assignable = this.assignableItem(campaignId, workItemId);
       if (!assignable.ok) return assignable;
       const item = this.item(campaignId, workItemId)!;
@@ -1488,7 +1519,7 @@ export class CampaignWorkLedgerStore {
     },
     now: number,
   ): LedgerResult<{ revision: number; verification: CampaignWorkItemVerification }> {
-    return this.transact(() => {
+    return this.transact(campaignId, () => {
       const target = this.verificationTarget(campaignId, input.workItemId, input.childSessionId, input.outcome,
         input.report);
       if (!target.ok) return target;
@@ -1551,7 +1582,7 @@ export class CampaignWorkLedgerStore {
     evidence: CampaignDeliveryEvidence,
     now: number,
   ): LedgerResult<{ revision: number; deliveryId: string; itemId: string }> {
-    return this.transact(() => {
+    return this.transact(campaignId, () => {
       const item = this.item(campaignId, evidence.workItemId);
       if (!item) return fail<{ revision: number; deliveryId: string; itemId: string }>("work item not found in this campaign", 404);
       if (item.commitment !== "committed") {
@@ -1718,7 +1749,7 @@ export class CampaignWorkLedgerStore {
     if ((request.disposition === "rejected" || request.disposition === "deferred") && request.resultingWorkItemKey !== undefined) {
       return fail("a rejected or deferred recommendation has no resulting work item");
     }
-    return this.transact(() => {
+    return this.transact(campaignId, () => {
       const recommendation = this.stmt(
         "SELECT id, title, duplicate_of FROM orchestrator_campaign_follow_ups WHERE id=? AND campaign_session_id=?",
       ).get(request.recommendationId, campaignId) as { id: string; title: string; duplicate_of: string | null } | undefined;
