@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import type { RunnerToControlPlane, SessionLaunchSpec, SessionLocationSwitchMessage } from "@wollipog/protocol";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync,
+  writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -316,6 +317,9 @@ test("an existing worktree nothing holds is reused in place: its uncommitted wor
     assert.deepEqual(meta.worktrees?.map((worktree) => [worktree.path, worktree.branch, worktree.source, worktree.reusedInPlace]),
       [[busy, "fix/install-link", "attached", true]]);
     assert.deepEqual(h.fake.prompts[1], { cwd: busy, text: "Continue the docs fix here." });
+    // The switch's claim ends once the session's own record holds the worktree.
+    await waitFor(() => (h.manager as unknown as { reusedWorktreeClaims: Map<string, string> }).reusedWorktreeClaims.size === 0,
+      "the claim outlived the move");
     // Nothing in it moved: the same files, bytes, branch, commit and uncommitted state.
     assert.deepEqual(files(busy), before);
     assert.equal(git(busy, "rev-parse", "--abbrev-ref", "HEAD"), "fix/install-link");
@@ -372,9 +376,79 @@ test("a worktree another session holds is refused with that session named, and n
     h.store.patchMeta(holder, { status: "stopped" });
     h.store.flush(holder);
     assert.match(await failure("occurrence-2"), new RegExp(`worktree ${busy}, which session ${holder} still owns although it is not running`, "u"));
+    // Another switch that chose the worktree and has not recorded it yet holds it too.
+    h.store.remove(holder);
+    const claims = (h.manager as unknown as { reusedWorktreeClaims: Map<string, string> }).reusedWorktreeClaims;
+    claims.set(busy, "s_location_racing");
+    assert.match(await failure("occurrence-3"), new RegExp(`worktree ${busy}, which session s_location_racing is using`, "u"));
+    claims.clear();
     const meta = h.store.readMeta(h.sessionId)!;
     assert.equal(meta.repoPath, h.app, "the session stays where it was");
     assert.deepEqual(files(busy), before);
+  });
+});
+
+test("two switches racing for one worktree: the one that claims it first wins, and the other is refused naming it", async () => {
+  await withSession("race", async (h) => {
+    await establishConversation(h);
+    const busy = busyWorktree(h);
+    const before = files(busy);
+    // This switch passes its first holder check; while it is still verifying the worktree, another
+    // session's switch gets there first and claims it (as its own final check would).
+    const runner = h.manager as unknown as {
+      worktreeHolder: (sessionId: string, context: unknown, path: string) => unknown;
+      reusedWorktreeClaims: Map<string, string>;
+    };
+    const holder = runner.worktreeHolder.bind(h.manager);
+    let raced = false;
+    runner.worktreeHolder = (sessionId, context, path) => {
+      const found = holder(sessionId, context, path);
+      if (!raced) {
+        raced = true;
+        setImmediate(() => runner.reusedWorktreeClaims.set(busy, "s_location_winner"));
+      }
+      return found;
+    };
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.store.readMeta(h.sessionId)?.locationSwitchFailure !== undefined, "the losing switch was not refused");
+    const meta = h.store.readMeta(h.sessionId)!;
+    assert.equal(raced, true);
+    assert.match(meta.locationSwitchFailure!.reason!, new RegExp(`worktree ${busy}, which session s_location_winner took while it was ` +
+      "being verified; continue the task in that session instead", "u"));
+    assert.equal(meta.repoPath, h.app, "the loser stays where it was");
+    assert.equal(h.fake.launches(), 1, "the loser's provider was never retired");
+    assert.equal(runner.reusedWorktreeClaims.get(busy), "s_location_winner", "the loser never releases the winner's claim");
+    assert.deepEqual(files(busy), before);
+  });
+});
+
+test("a registered worktree reached through a symbolic link, or whose .git names another worktree, is refused", async () => {
+  await withSession("redirected", async (h) => {
+    await establishConversation(h);
+    const busy = busyWorktree(h);
+    const failure = async (occurrenceId: string) => {
+      assert.deepEqual(await h.manager.requestLocationSwitch(h.message({ occurrenceId })), { ok: true });
+      await waitFor(() => !h.store.readMeta(h.sessionId)?.pendingLocationSwitch && !!h.store.readMeta(h.sessionId)?.locationSwitchFailure,
+        "the refusal was not recorded");
+      return h.store.readMeta(h.sessionId)!.locationSwitchFailure!.reason!;
+    };
+    // The registered path is now a link to the real directory: what was checked must be what is used.
+    renameSync(busy, `${busy}-real`);
+    symlinkSync(`${busy}-real`, busy);
+    assert.match(await failure("occurrence-1"), /which could not be verified as this Location's repository: its registered path is not its real path/u);
+    rmSync(busy);
+    renameSync(`${busy}-real`, busy);
+    // Its .git link names another worktree's admin directory of the same repository: the Git
+    // directory is shared, but the branch and index are someone else's.
+    const other = join(h.docs, "..", "docs-other");
+    git(h.docs, "worktree", "add", "--quiet", "-b", "other-work", other);
+    const before = files(busy);
+    const otherGitDir = git(other, "rev-parse", "--absolute-git-dir");
+    writeFileSync(join(busy, ".git"), `gitdir: ${otherGitDir}\n`);
+    assert.match(await failure("occurrence-2"), /the directory does not have that branch checked out as its own worktree/u);
+    assert.equal(h.store.readMeta(h.sessionId)!.repoPath, h.app);
+    assert.equal(h.fake.launches(), 1, "the provider was never retired");
+    assert.deepEqual(Object.keys(files(busy)).sort(), Object.keys(before).sort());
   });
 });
 

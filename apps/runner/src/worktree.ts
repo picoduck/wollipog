@@ -1035,19 +1035,47 @@ async function reuseRecoveredBranchWorktree(
   options: WorktreeOptions,
 ): Promise<RecoveredBranchWorktree> {
   const context = options.context ?? nativeContext;
+  const unverified = (reason: string) => new Error(`branch ${branch} is checked out in worktree ${path}, which could not be ` +
+    `verified as this Location's repository: ${reason}`);
+  // The path that was checked is the path that is used. A registered path reached through a symbolic
+  // link could otherwise pass every check below in one directory and hand the session another (the
+  // primary checkout, or a worktree someone else holds under its real name).
+  if (context.kind === "native") {
+    let canonical: string;
+    try {
+      canonical = lstatSync(path).isSymbolicLink() ? "" : realpathSync.native(path);
+    } catch (error) {
+      throw unverified((error as Error).message);
+    }
+    if (canonical !== path) throw unverified("its registered path is not its real path");
+  }
   let verified: SessionWorktreeHandle;
   try {
     verified = await registeredSessionWorktree(repoPath, path, options);
   } catch (error) {
-    throw new Error(`branch ${branch} is checked out in worktree ${path}, which could not be verified as this Location's ` +
-      `repository: ${(error as Error).message}`);
+    throw unverified((error as Error).message);
   }
   if (verified.branch !== branch) {
     throw new Error(`worktree ${path} moved off branch ${branch} while it was being verified; ask again`);
   }
-  // A native path is kept canonical, as the runner's own worktrees are: the managed sandbox binds
-  // the worktree's `.git` link only at its real path.
-  if (context.kind === "native") verified = { ...verified, path: realpathSync.native(verified.path) };
+  // Registration describes the repository's record of the worktree; the directory itself must agree.
+  // Its `.git` link could name another worktree's admin directory of the same repository, which
+  // shares the Git directory checked above but has a different branch and index.
+  const [toplevel, gitDir, head] = (await command(context, path,
+    ["rev-parse", "--path-format=absolute", "--show-toplevel", "--absolute-git-dir", "--symbolic-full-name", "HEAD"]))
+    .trim().split("\n");
+  if (!toplevel || !sameWorktreePath(context, toplevel, path) || head !== `refs/heads/${branch}`) {
+    throw unverified("the directory does not have that branch checked out as its own worktree");
+  }
+  if (context.kind === "native") {
+    let backPointer = "";
+    try {
+      backPointer = readFileSync(join(gitDir!, "gitdir"), "utf8").replace(/\r?\n$/u, "");
+    } catch { /* a missing back-pointer is refused below */ }
+    if (!backPointer || !sameWorktreePath(context, resolve(gitDir!, backPointer), join(path, ".git"))) {
+      throw unverified("its Git admin directory belongs to another worktree");
+    }
+  }
   let uncommittedChanges: number | undefined;
   try {
     const porcelain = await command(context, verified.path,

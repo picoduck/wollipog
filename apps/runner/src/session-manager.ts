@@ -1986,6 +1986,9 @@ export class SessionManager {
   }>();
 
   private sharedDirectoryWorkspaces: readonly RunnerConfigWorkspace[] = [];
+  /** (#4138) Existing worktrees a Location switch has chosen to continue in, by path, until its
+   * metadata records them: the window between the holder check and the move. */
+  private readonly reusedWorktreeClaims = new Map<string, string>();
   private sharedDirectoryForbiddenRoots: readonly string[] = [];
 
   /** Called by the host bootstrap, and again after a configured Workspace is removed (#4123). */
@@ -14686,6 +14689,16 @@ export class SessionManager {
    * a half-updated session.
    */
   private async performLocationSwitch(sessionId: string, entry: ActiveSession): Promise<void> {
+    const claim: { path?: string } = {};
+    try {
+      await this.performLocationSwitchOnce(sessionId, entry, claim);
+    } finally {
+      // Once the move's metadata names the worktree, the session's own record holds it.
+      if (claim.path && this.reusedWorktreeClaims.get(claim.path) === sessionId) this.reusedWorktreeClaims.delete(claim.path);
+    }
+  }
+
+  private async performLocationSwitchOnce(sessionId: string, entry: ActiveSession, claim: { path?: string }): Promise<void> {
     const meta = this.store.readMeta(sessionId);
     const pending = meta?.pendingLocationSwitch;
     if (!meta || !pending || entry.pendingLocationSwitch !== pending.occurrenceId) {
@@ -14707,8 +14720,20 @@ export class SessionManager {
           { ...options, holderOf: (path) => this.worktreeHolder(sessionId, meta.context, path) })
         : await createRequestedWorktree(repoPath, sessionId,
           { baseRef: (await fetchRemoteDefaultBase(repoPath, options)).ref, branch: `agent/${sessionId}` }, options);
-      const defaultBranch = await readRepositoryDefaultBranch(repoPath, options);
       reused = created.reusedInPlace;
+      if (reused) {
+        // Checked again and claimed with no await in between, so two switches never both take one
+        // worktree while each is still verifying it.
+        const holder = this.worktreeHolder(sessionId, meta.context, created.path);
+        if (holder) {
+          throw new Error(`branch ${created.branch} is checked out in worktree ${created.path}, which session ` +
+            `${holder.sessionId} took while it was being verified; continue the task in that session instead, so the work ` +
+            "and its pull request stay with it");
+        }
+        this.reusedWorktreeClaims.set(created.path, sessionId);
+        claim.path = created.path;
+      }
+      const defaultBranch = await readRepositoryDefaultBranch(repoPath, options);
       worktree = reused
         // An existing worktree is continued as it is and stays its owner's: attached, so nothing
         // ever sets it up, tears it down or removes it with this session.
@@ -14818,6 +14843,9 @@ export class SessionManager {
    * later, under whoever then works in it. */
   private worktreeHolder(sessionId: string, context: AgentContext, path: string): WorktreeHolder | undefined {
     const same = (candidate: string | null | undefined) => !!candidate && sameWorktreePath(context, candidate, path);
+    for (const [claimed, owner] of this.reusedWorktreeClaims) {
+      if (same(claimed)) return { sessionId: owner, ...(owner === sessionId ? { self: true } : {}), live: true };
+    }
     const removal = this.cleanupJournal.list().find((record) => same(record.worktreePath));
     if (removal) return { sessionId: removal.sessionId, removalPending: true };
     for (const meta of this.store.listSessions()) {
