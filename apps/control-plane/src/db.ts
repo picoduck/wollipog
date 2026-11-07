@@ -27520,7 +27520,7 @@ export class ControlPlaneDb {
     ).run(now, now).changes);
   }
 
-  /** A durable accepted user message is stronger evidence than a CP-local timeout. This also
+  /** A durable accepted user message is stronger evidence than a timeout receipt. This also
    * removes the recovery action if the correlated result was lost after history committed. */
   resolveSteeringAttemptFromUserMessage(
     sessionId: string,
@@ -27533,7 +27533,8 @@ export class ControlPlaneDb {
        terminal_at=?
        WHERE session_id=? AND submission_id=? AND turn_id=?
          AND compacted_at IS NULL
-         AND (disposition='pending' OR (disposition='uncertain' AND receipt_json IS NULL))`,
+         AND resolved_at IS NULL AND resolution_action IS NULL
+         AND disposition IN ('pending','uncertain')`,
     ).run(now, now, sessionId, submissionId, turnId);
     if (updated.changes) {
       const request = this.findSteeringAttemptBySubmission(sessionId, submissionId);

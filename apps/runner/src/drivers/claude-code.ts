@@ -159,6 +159,7 @@ interface PendingClaudeSteer {
 }
 
 interface UnacknowledgedClaudeSteer {
+  onLateAccepted?: (providerTurnId: string) => void;
   turnId: number;
   generation: number;
 }
@@ -1192,7 +1193,7 @@ export class ClaudeCodeDriver implements Driver {
     this.turnFailureCategory = null;
   }
 
-  async steer({ submissionId, text, images = [], deadlineAt }: DriverSteerInput): Promise<DriverSteerResult> {
+  async steer({ submissionId, text, images = [], deadlineAt, onLateAccepted }: DriverSteerInput): Promise<DriverSteerResult> {
     if (!text && images.length === 0) return { outcome: "rejected", reason: "steering input is empty" };
     if (this.opts.capabilities?.supportsSteering !== true) {
       return { outcome: "rejected", reason: "Claude steering was not verified for this installation" };
@@ -1231,7 +1232,7 @@ export class ClaudeCodeDriver implements Driver {
       };
       this.pendingSteersByMessage.set(providerMessageId, pending);
       this.pendingSteerSubmissions.add(submissionId);
-      this.unacknowledgedSteerMessages.set(providerMessageId, { turnId: turn.id, generation });
+      this.unacknowledgedSteerMessages.set(providerMessageId, { turnId: turn.id, generation, onLateAccepted });
 
       try {
         child.stdin.write(JSON.stringify(buildClaudeUserMessage(text, images, providerMessageId)) + "\n", (error?: Error | null) => {
@@ -1884,8 +1885,9 @@ export class ClaudeCodeDriver implements Driver {
       return true;
     }
     this.unacknowledgedSteerMessages.delete(msg.uuid);
-    // A replay after Wollipog's deadline proves provider receipt but cannot retroactively replace
-    // the already-published Uncertain result. It does make retaining this transport safe.
+    unacknowledged.onLateAccepted?.(this.sessionId!);
+    // Only the exact replay UUID, session and live generation prove receipt. The deadline
+    // bounded the initial response, not the lifetime of this evidence. Never write again.
     if (!pending) return true;
     this.settleClaudeSteer(pending, {
       outcome: "accepted",
