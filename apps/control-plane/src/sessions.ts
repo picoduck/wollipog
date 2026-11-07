@@ -2383,7 +2383,7 @@ export class SessionsService {
    * an earlier answer. Without it an excluded pull request cannot be re-proven (#2940). */
   campaignForgeReadNow: ((campaignId: string, refs: readonly CampaignPullRequestRef[]) => Promise<ForgeReadResult[] | null>) | null = null;
   /** One in-flight excluded-pull-request read per closure occurrence; concurrent executes share it. */
-  private readonly excludedClosureReads = new Map<string, Promise<boolean>>();
+  private readonly excludedClosureReads = new Map<string, Promise<boolean | null>>();
   /** The Decision Model runtime (#4101) the Full Control screens use (#4104). The server shares
    * its own; tests replace it with a fake harness. */
   private decisionRuntime: DecisionRuntime;
@@ -13513,14 +13513,15 @@ export class SessionsService {
   /** The runner's authoritative read of every excluded pull request, past the observer's cache and
    * rate limit: a pull request reopened since its last read must not stay excluded. Concurrent
    * executes of one occurrence share a read in flight, and a settled answer is never reused. A
-   * read that cannot answer for every ref proves nothing. */
-  private excludedPullRequestsStillClosed(occurrenceId: string, root: SessionView, refs: CampaignPullRequestRef[]): Promise<boolean> {
+   * read that cannot answer for every ref returns null: it proves nothing and preserves approval. */
+  private excludedPullRequestsStillClosed(occurrenceId: string, root: SessionView, refs: CampaignPullRequestRef[]): Promise<boolean | null> {
     if (!refs.length) return Promise.resolve(true);
     const shared = this.excludedClosureReads.get(occurrenceId);
     if (shared) return shared;
     const read = (async () => {
       const results = this.campaignForgeReadNow ? await this.campaignForgeReadNow(root.id, refs).catch(() => null) : null;
-      return Boolean(results && results.length === refs.length && results.every((result) => result.observation?.state === "closed"));
+      if (!results || results.length !== refs.length || results.some((result) => !result.observation)) return null;
+      return results.every((result) => result.observation?.state === "closed");
     })().finally(() => this.excludedClosureReads.delete(occurrenceId));
     this.excludedClosureReads.set(occurrenceId, read);
     return read;
@@ -13823,6 +13824,9 @@ export class SessionsService {
     if (crossDelivery.length) {
       const refs = crossDelivery.map(({ repository, number }) => ({ repository, number }));
       const read = this.campaignForgeReadNow ? await this.campaignForgeReadNow(sessionId, refs).catch(() => null) : null;
+      if (!read || read.length !== refs.length || read.some((result) => !result.observation)) {
+        return fail("Delivering pull requests could not be read; approval preserved. Retry this exact approved closure when the forge is available.", 409);
+      }
       if (JSON.stringify(closureCrossRepositoryDelivery(refs, read)) !== JSON.stringify(crossDelivery)) {
         this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
         return fail("Approval retired. A delivering pull request in another campaign repository could not be confirmed merged at its verified head; request a new exact closure", 409);
@@ -13831,8 +13835,12 @@ export class SessionsService {
     // The uncached read is the last await: a pull request reopened during synchronization is seen,
     // and only synchronous rechecks of every current-state condition separate it from consumption.
     const synchronized = this.db.getSession(sessionId) ?? session;
-    if (decision.authority === "orchestrator" &&
-        !await this.excludedPullRequestsStillClosed(occurrenceId, synchronized, closureExcludedRefs(closureEvidence(this.db, synchronized, snapshot)))) {
+    const excludedClosed = decision.authority === "orchestrator"
+      ? await this.excludedPullRequestsStillClosed(occurrenceId, synchronized, closureExcludedRefs(closureEvidence(this.db, synchronized, snapshot))) : true;
+    if (excludedClosed === null) {
+      return fail("Excluded pull requests could not be read; approval preserved. Retry this exact approved closure when the forge is available.", 409);
+    }
+    if (!excludedClosed) {
       this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
       return fail("Approval retired. An excluded closed pull request could not be confirmed still closed and unmerged; request a new exact closure", 409);
     }

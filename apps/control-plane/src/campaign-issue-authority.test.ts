@@ -2122,6 +2122,34 @@ test("#3877 a prompt steered after the wall clock steps back between approval an
   } finally { Date.now = now; h.db.close(); }
 });
 
+test("#4301 a temporary excluded-PR read failure preserves approval and a retry executes it", async () => {
+  for (const mode of ["reject", "missing", "incomplete"] as const) {
+    const { h, setForge, close, useObserver } = delivery({ gate: "consumed", stage: [{ number: 9 }] });
+    try {
+      setForge(9, "closed"); setForge(10, "merged");
+      useObserver();
+      const requested = await close(`temporary-${mode}`);
+      const decision = requested.data!.decision!;
+      assert.equal(decision.authority, "orchestrator");
+      assert.ok(h.approve(decision).ok);
+      const original = h.svc.campaignForgeReadNow;
+      h.svc.campaignForgeReadNow = async () => {
+        if (mode === "reject") throw new Error("temporary forge failure");
+        return mode === "missing" ? null : [];
+      };
+      const deferred = await h.svc.executeGithubIssueClosure("root", decision.occurrenceId, decision.resourceDigest);
+      assert.equal(deferred.status, 409);
+      assert.match(deferred.error!, /approval preserved/u);
+      assert.equal(h.state.executes, 0);
+      assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "approved");
+      h.svc.campaignForgeReadNow = original;
+      const retry = await h.svc.executeGithubIssueClosure("root", decision.occurrenceId, decision.resourceDigest);
+      assert.ok(retry.ok, retry.error ?? "retry");
+      assert.equal(h.state.executes, 1);
+    } finally { h.db.close(); }
+  }
+});
+
 test("#2940 concurrent executes of one closure share one uncached read (CR-2.3)", async () => {
   const { h, setForge, forgeReads, reads, close, useObserver, settle } = delivery({ gate: "consumed", stage: [{ number: 9 }] });
   try {
