@@ -3604,11 +3604,12 @@ test("Full Control children run in any boundary repository's Location, and each 
     }
     // A child's own children stay in its repository.
     f.db.updateSessionStatus(api.data!.id, "running", Date.now());
-    assert.equal(child(api.data!.id, { workspaceId: "b" }).error, refusal);
+    const ownRepository = "This session works for its parent in other/repo, so it must use a Location of other/repo, not owner/repo.";
+    assert.equal(child(api.data!.id, { workspaceId: "b" }).error, ownRepository);
     // Runs follow the same placement rule as one child.
     const run = (parentSessionId: string, workspaceId: string, runnerId = "r2") => f.sessions.createRun({ runnerId, workspaceId, agentIds: ["claude"],
       task: "Deliver the work", config: { model: "claude-opus-5-5" } }, { parentSessionId });
-    assert.equal(run(api.data!.id, "b").error, refusal, "a run in another repository's Location");
+    assert.equal(run(api.data!.id, "b").error, ownRepository, "a run in another repository's Location");
     assert.equal(run(rootId, f.db.getProjectLocation(p.plain.id)!.workspaceId, "r").error, refusal, "a run in a Project Location outside the boundary");
     const sameRepository = run(api.data!.id, "a");
     assert.equal(sameRepository.ok, true, sameRepository.error ?? "created");
@@ -5553,7 +5554,14 @@ test("a worker the root launches for a child must share that child's repository,
 
     // Creating a review for that child in another repository's Location is refused outright, and in its own is not.
     const review = { review: { policy: { requesterSessionId: childId, pullRequest: { repository: "other/repo", number: 7 }, headSha: "d".repeat(40), harness: "codex" } as never } };
-    assert.equal(launch("Misplaced Review", "b", review).error, "Full Control children must use a Location of a repository in the campaign's boundary");
+    assert.equal(launch("Misplaced Review", "b", review).error, "This session works for a campaign child in other/repo, so it must use a Location of other/repo, not owner/repo.");
+    // A session the child itself launches stays in its repository too, and the refusal names its parent's repository.
+    const nested = f.sessions.createSession({ runnerId: "r2", workspaceId: "b", agentId: "claude", title: "Misplaced Worker", prompt: "Work", useWorktree: false,
+      config: { model: "claude-opus-5-5" } }, undefined, f.scope, false, false, false, { parentSessionId: childId });
+    assert.equal(nested.error, "This session works for its parent in other/repo, so it must use a Location of other/repo, not owner/repo.");
+    const outside = f.sessions.createSession({ runnerId: "r2", workspaceId: "c", agentId: "claude", title: "Outside Worker", prompt: "Work", useWorktree: false,
+      config: { model: "claude-opus-5-5" } }, undefined, f.scope, false, false, false, { parentSessionId: childId });
+    assert.equal(outside.error, "Full Control children must use a Location of a repository in the campaign's boundary", "outside the boundary, the boundary is named");
     const placed = launch("Placed Review", "a", review);
     assert.equal(placed.ok, true, placed.error ?? "created");
 
@@ -5921,6 +5929,19 @@ test("an owner/repo issue's closure proof reads the real ledger, and another rep
     assert.deepEqual(gaps?.map((gap) => [gap.code, gap.workItemId, gap.pullRequests, gap.repository]),
       [["delivery_not_verified_at_exact_head", item("api"), [20], "other/repo"]]);
     assert.ok(!reads.some((read) => read.runnerId === "r" && read.refs.includes("other/repo#20")), "the root's login never reads other/repo");
+
+    // (c) The API item also cites a pull request in a repository outside the boundary: through the
+    // real ledger, that is a gap, and the closure stays a person's.
+    forge.set("other/repo#20", merged);
+    await observer.readNow(id, [{ repository: "other/repo", number: 20 }]);
+    const cited = f.sessions.updateCampaignWorkItem(id, { workItemId: item("api"), stage: { stage: "merged",
+      pullRequests: [{ repository: "other/repo", number: 20 }, { repository: "third/repo", number: 30 }] } });
+    assert.equal(cited.ok, true, cited.error ?? "");
+    const outside = await request("close-7-outside");
+    assert.equal(outside.ok, true, outside.error ?? "");
+    assert.equal(outside.data!.decision!.authority, "human", JSON.stringify(outside.data!.decision!.authorityEvaluation));
+    const outsideGaps = (outside.data!.decision!.resourceSnapshot as GithubIssueClosureSnapshot).deliveryGaps;
+    assert.deepEqual(outsideGaps?.map((gap) => [gap.code, gap.workItemId, gap.pullRequests]), [["pull_request_outside_repository", item("api"), [30]]]);
     observer.dispose();
   } finally { await server.close(); f.db.close(); }
 });

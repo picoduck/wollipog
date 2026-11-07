@@ -10578,8 +10578,13 @@ export class SessionsService {
     if (repository && campaignRepositoryOutsideLimit(root.orchestratorPolicy, repository)) {
       return `The owner's first message limited this campaign to ${campaignRepositoryLimits(root.orchestratorPolicy).join(", ")}, so a child can't work in ${repository}. Place it in a Location of one of those repositories.`;
     }
-    return repository && parentRepository === repository ? null
-      : "Full Control children must use a Location of a repository in the campaign's boundary";
+    if (repository && parentRepository === repository) return null;
+    // Inside the boundary, but not in the repository of the session it works for: say so.
+    if (repository && parentRepository) {
+      return `This session works for ${served === parent ? "its parent" : "a campaign child"} in ${parentRepository}, so it must use a Location of ` +
+        `${parentRepository}, not ${repository}.`;
+    }
+    return "Full Control children must use a Location of a repository in the campaign's boundary";
   }
 
   /** A campaign participant runs in a Location of a boundary repository, and in the same one as the

@@ -77,6 +77,27 @@ for (const width of [1440, 390]) {
   });
 }
 
+for (const width of [1440, 390]) {
+  test(`work verified while its own pull request is open waits on its prerequisite, or is blocked when that can never merge, at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&workRepositories=1&verifiedHolds=1");
+    const app = groups(page).nth(0);
+    const waiting = app.locator(".campaign-work-row", { hasText: "Show Account Badge" });
+    await expect(waiting).toContainText("Waiting");
+    await expect(waiting.locator(".campaign-work-row-dependency")).toHaveText("Depends Onpicoduck/account-api: Add Account FieldNot Merged");
+    await expect(waiting.locator(".campaign-work-row-held")).toHaveText("Waiting for Prerequisite Mergepicoduck/account-api#88");
+    const blocked = app.locator(".campaign-work-row", { hasText: "Show Account Avatar" });
+    await expect(blocked).toContainText("Blocked");
+    await expect(blocked.locator(".campaign-work-row-dependency")).toHaveText("Depends Onpicoduck/account-api: Add Avatar FieldWill Not Merge");
+    await expect(blocked.locator(".campaign-work-row-held")).toHaveCount(0);
+    await assertNoHorizontalOverflow(page, ".campaign-status");
+    if (evidenceDir) {
+      await blocked.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: join(evidenceDir, `campaign-status-verified-holds-${width}.png`), fullPage: false });
+    }
+  });
+}
+
 test("a single-repository campaign's list stays ungrouped, with no Repository filter", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/campaign-status-e2e.html?scenario=campaign");

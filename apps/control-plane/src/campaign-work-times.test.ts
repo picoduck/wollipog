@@ -131,3 +131,15 @@ test("a held, failed, archived, or deleted attempt session counts as waiting, an
     active: { availability: "known", value: 30 },
   });
 });
+
+test("a verified item's merge hold counts as waiting from its last attempt's verification only (#4120)", () => {
+  const attempt = (ordinal: number, startedAt: number, deliveredAt: number) => ({ ordinal, startedAt, endedAt: deliveredAt, deliveredAt,
+    statuses: [{ at: startedAt, status: "running" as const, archived: false }] });
+  // Delivered at 10, reassigned at 100, delivered again at 110 and held on its prerequisite since.
+  const item: CampaignItemTimelineInput = { id: "a", createdAt: 0, transitions: [{ at: 0, ...planned }], dependsOn: [],
+    heldAfterDelivery: "unmerged", attempts: [attempt(1, 0, 10), attempt(2, 100, 110)] };
+  assert.deepEqual(durations([item], "a", 120).waiting, { availability: "known", value: 10 }, "not the span between the first delivery and reassignment");
+  assert.deepEqual(durations([{ ...item, heldAfterDelivery: "failed" }], "a", 120).waiting, { availability: "known", value: 10 });
+  // Without a hold, both delivered spans stay delivered.
+  assert.deepEqual(durations([{ ...item, heldAfterDelivery: undefined }], "a", 120).waiting, { availability: "known", value: 0 });
+});

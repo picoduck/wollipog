@@ -105,8 +105,18 @@ test("a merge dependency holds an idle child as waiting and blocks once it can n
     { state: "blocked", causes: ["dependency_blocked"] });
   assert.deepEqual(deriveCampaignWorkItemState(item({ dispatchState: "queued", mergeDependencies: ["failed"] }), ["delivered"]),
     { state: "blocked", causes: ["dependency_blocked"] });
-  // Delivery still wins, and an undispatched item's other rules are unchanged.
-  assert.equal(deriveCampaignWorkItemState(item({ latestAttempt: { open: false, delivered: true }, mergeDependencies: ["failed"] }), []).state, "delivered");
+  // A verified report whose own pull request hasn't merged still waits on its prerequisite, and is
+  // blocked once that can never merge; once its own pull request merged, it is delivered whatever the
+  // prerequisite does, and a recorded delivery (a merge) always is.
+  const verified = { latestAttempt: { open: false, delivered: true } };
+  assert.deepEqual(deriveCampaignWorkItemState(item({ ...verified, mergeDependencies: ["failed"] }), []), { state: "blocked", causes: ["dependency_blocked"] });
+  assert.deepEqual(deriveCampaignWorkItemState(item({ ...verified, mergeDependencies: ["merged", "unmerged"] }), []), { state: "waiting", causes: ["dependency_unmerged"] });
+  assert.deepEqual(deriveCampaignWorkItemState(item({ ...verified, mergeDependencies: ["merged"] }), []), { state: "delivered", causes: [] });
+  for (const status of ["failed", "unmerged"] as const) {
+    assert.deepEqual(deriveCampaignWorkItemState(item({ ...verified, mergeDependencies: [status], ownPullRequestsMerged: true }), []), { state: "delivered", causes: [] });
+    assert.deepEqual(deriveCampaignWorkItemState(item({ recordedDelivery: true, mergeDependencies: [status] }), []), { state: "delivered", causes: [] });
+  }
+  // An undispatched item's other rules are unchanged.
   assert.deepEqual(deriveCampaignWorkItemState(item({ dispatchState: "queued", mergeDependencies: ["unmerged"] }), ["delivered"]), { state: "queued", causes: [] });
 });
 

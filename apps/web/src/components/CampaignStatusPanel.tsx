@@ -39,9 +39,8 @@ import {
   campaignRepositoryFilterOptions,
   groupCampaignWorkByRepository,
   heldOnPullRequest,
-  mergeDependencyLabel,
+  mergeDependencyLine,
   repositoryCountsLabel,
-  MERGE_DEPENDENCY_STATUS_LABELS,
   WAITING_FOR_PREREQUISITE_MERGE,
   type CampaignWorkRepositoryGroup,
   issueRefHref,
@@ -795,13 +794,16 @@ function CampaignWorkRow({
         </span>
       </span>
       {/* #4120: prerequisites in other repositories, and the merge an item is held on. */}
-      {item.mergeDependencies?.map((dependency) => (
-        <span key={dependency.id} className="campaign-work-row-line campaign-work-row-dependency">
-          <span className="campaign-work-row-dependency-label">Depends On</span>
-          <span>{mergeDependencyLabel(dependency)}</span>
-          <span className="campaign-status-meta">{MERGE_DEPENDENCY_STATUS_LABELS[dependency.status]}</span>
-        </span>
-      ))}
+      {item.mergeDependencies?.map((dependency) => {
+        const line = mergeDependencyLine(dependency);
+        return (
+          <span key={dependency.id} className="campaign-work-row-line campaign-work-row-dependency">
+            <span className="campaign-work-row-dependency-label">Depends On</span>
+            <span>{line.label}</span>
+            <span className="campaign-status-meta">{line.status}</span>
+          </span>
+        );
+      })}
       {held && (
         <span className="campaign-work-row-line campaign-work-row-held">
           <span className="campaign-work-row-dependency-label">{WAITING_FOR_PREREQUISITE_MERGE}</span>
@@ -1096,11 +1098,12 @@ function CampaignWorkItemDetailView({
                   {detail.dependsOn.map((dependency) => {
                     // #4120: a prerequisite in another repository names it, and whether it merged.
                     const merge = detail.mergeDependencies?.find((candidate) => candidate.id === dependency.id);
+                    const line = merge ? mergeDependencyLine(merge) : null;
                     return (
                       <li key={dependency.id}>
-                        {merge ? mergeDependencyLabel(merge) : workItemTitle(dependency)}
+                        {line ? line.label : workItemTitle(dependency)}
                         <span className="campaign-status-meta">{CAMPAIGN_WORK_STATE_LABELS[dependency.primaryState]}</span>
-                        {merge && <span className="campaign-status-meta">{MERGE_DEPENDENCY_STATUS_LABELS[merge.status]}</span>}
+                        {line && <span className="campaign-status-meta">{line.status}</span>}
                       </li>
                     );
                   })}

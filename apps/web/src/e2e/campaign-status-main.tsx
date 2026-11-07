@@ -180,6 +180,29 @@ if (workRepositories) {
   );
 }
 
+// `verifiedHolds=1` (#4120, with `workRepositories=1`): two items whose reports were verified while
+// their own pull requests are still open. One waits for its prerequisite's merge; the other's
+// prerequisite closed without merging, so it is blocked and never merged.
+if (workRepositories && params.get("verifiedHolds") === "1") {
+  const verified = { currentAttempt: null, attemptCount: 1, elapsed: { startedAt: NOW - 3 * HOUR, endedAt: null }, cost: knownCost(0.9), activityAt: NOW - 30 * MINUTE };
+  items.push(
+    itemSummary("cwi_12", NOW, {
+      ...verified, title: "Show Account Badge", key: "app:account-badge", issue: { repository: "picoduck/wollipog", number: 4120 }, repository: "picoduck/wollipog",
+      queuePosition: 10, primaryState: "waiting", stateCauses: ["dependency_unmerged"],
+      stage: { stage: "in_review", note: null, pullRequests: [{ repository: "picoduck/wollipog", number: 4400 }], sourceSessionId: "s_root", reportedAt: NOW - 30 * MINUTE },
+      mergeDependencies: [{ id: "cwi_10", key: "api:account-field", title: "Add Account Field", repository: "picoduck/account-api", status: "unmerged",
+        pullRequests: [{ ref: { repository: "picoduck/account-api", number: 88 }, state: "open" }] }],
+    }),
+    itemSummary("cwi_13", NOW, {
+      ...verified, title: "Show Account Avatar", key: "app:account-avatar", issue: { repository: "picoduck/wollipog", number: 4121 }, repository: "picoduck/wollipog",
+      queuePosition: 11, primaryState: "blocked", stateCauses: ["dependency_blocked"],
+      stage: { stage: "in_review", note: null, pullRequests: [{ repository: "picoduck/wollipog", number: 4401 }], sourceSessionId: "s_root", reportedAt: NOW - 30 * MINUTE },
+      mergeDependencies: [{ id: "cwi_14", key: "api:avatar-field", title: "Add Avatar Field", repository: "picoduck/account-api", status: "failed",
+        pullRequests: [{ ref: { repository: "picoduck/account-api", number: 87 }, state: "closed" }] }],
+    }),
+  );
+}
+
 /** The control plane's per-repository counts over every recorded item (#4120). */
 function fixtureRepositoryCounts(all: readonly CampaignWorkItemSummary[]) {
   const counts = new Map<string | null, { repository: string | null; total: number; byState: Record<string, number> }>();

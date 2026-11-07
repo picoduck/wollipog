@@ -31,33 +31,34 @@ export function campaignItemRepository(input: {
   return repository ? repository.toLowerCase() : null;
 }
 
-/** Every repository an item may work in, lower-cased and without repeats: its child's placement, each
- * pull request it names, and its issue's. A pull request's own repository counts even when the child
- * is placed elsewhere. Empty when none is known. */
+/** Every repository an item works in, lower-cased and without repeats: its child's placement and each
+ * pull request it names. A pull request's own repository counts even when the child is placed
+ * elsewhere. Its issue's repository counts only when neither is known, since a feature issue in one
+ * repository is often delivered by work in another. Empty when none is known. */
 export function campaignItemRepositories(input: {
   placement: string | null;
   pullRequests: readonly CampaignPullRequestRef[];
   issue: CampaignIssueRef | null;
 }): string[] {
-  return [...new Set([input.placement, ...input.pullRequests.map((ref) => ref.repository), input.issue?.repository ?? null]
+  const worked = [input.placement, ...input.pullRequests.map((ref) => ref.repository)];
+  return [...new Set((worked.some(Boolean) ? worked : [input.issue?.repository ?? null])
     .flatMap((repository) => repository ? [repository.toLowerCase()] : []))];
 }
 
 /**
- * Whether a dependency is a merge dependency (#4120). It fails closed:
- * - in a campaign of one repository (`campaignRepositories` lists one), an item whose repository is
- *   unknown works in it, so a dependency is a merge dependency only when a named repository differs;
- * - in a campaign of several, an item whose repository is unknown might work in any of them, so a
- *   dependency on or from one is a merge dependency;
+ * Whether a dependency is a merge dependency (#4120). Only a campaign of several repositories has
+ * them; one of a single repository, or one that records none (from before #4117), keeps every
+ * dependency display-only, as before. In a campaign of several it fails closed:
+ * - an item whose repository is unknown might work in any of them, so a dependency on or from one is
+ *   a merge dependency;
  * - otherwise it is one when any repository the prerequisite works in differs from any the dependent
  *   works in.
- * A campaign that records no repository (from before #4117) keeps its dependencies display-only.
  */
 export function isCampaignMergeDependency(dependentRepositories: readonly string[], prerequisiteRepositories: readonly string[],
   campaignRepositories: readonly string[]): boolean {
-  if (!campaignRepositories.length) return false;
-  const resolve = (repositories: readonly string[]) => repositories.length ? repositories.map((repository) => repository.toLowerCase())
-    : campaignRepositories.length === 1 ? [campaignRepositories[0]!.toLowerCase()] : null;
+  // A campaign of one repository behaves as before #4120, whatever repository an item names.
+  if (campaignRepositories.length < 2) return false;
+  const resolve = (repositories: readonly string[]) => repositories.length ? repositories.map((repository) => repository.toLowerCase()) : null;
   const dependent = resolve(dependentRepositories), prerequisite = resolve(prerequisiteRepositories);
   if (!dependent || !prerequisite) return true;
   return prerequisite.some((repository) => dependent.some((other) => other !== repository));
