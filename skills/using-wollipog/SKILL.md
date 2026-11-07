@@ -629,7 +629,10 @@ on that pull request, so it ends its turn; Wollipog wakes it on the merge, and i
 approval again. If a permission request for an armed merge command is rejected, the merge gained a
 hold after arming: end the turn and wait for the wake the same way. A prerequisite closed without
 merging, cancelled or removed holds the merge: the work item is blocked, and the child reports that
-to its Orchestrator. Never merge any pull request except through its armed `pr_merge`.
+to its Orchestrator. An armed merge held that way can't be withdrawn and keeps your command tools
+blocked; request a new `pr_merge` for the same pull request with the `request_workflow_decision`
+tool (not the CLI, which needs the shell), which replaces it. Never merge any pull request except
+through its armed `pr_merge`.
 
 ## Private Session Artifacts
 
