@@ -86,6 +86,7 @@ import { normalizeAutomationCreationSnapshot } from "./automation-creation-snaps
 import { normalizeLocationSwitchSnapshot } from "./location-switch-snapshot.js";
 import { normalizeCampaignRepositoryAdditionSnapshot } from "./campaign-repository-addition-snapshot.js";
 import { INTENDED_CLOSURES_LIMIT, normalizeIntendedClosures, prMergeClosureMismatch, unscopedClosureRefusal, validClosingReferenceCheck } from "./pr-merge-closures.js";
+import { mergeClosureChangedPrompt, mergeClosureOwnerReport, type MergeClosureReportKind, type MergeClosureWatcherDeps, type WatchedMerge } from "./merge-closure-watch.js";
 import { allReportedChecksRefusal, validPullRequestChecksRead } from "./merge-checks-basis.js";
 import { observeReconciliationSnapshot, reconciliationSnapshotAvailable, correctionFrame, latestReconciliationRepair, normalizeReconciledSnapshot, reconciliationRevision } from "./claude-cost-reconciliation.js";
 import type { GithubIssueClosureLocation, GithubIssueClosureRequest, GithubIssueClosureResult, GithubIssueClosureSnapshot, IssueClosureProofGapNotice } from "@wollipog/protocol";
@@ -295,6 +296,7 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type WorkflowDecisionCategory,
   type WorkflowDecisionResourceSnapshot,
   type WorkflowDecisionView,
+  type MergeClosureWatch,
   type WorkflowDecisionRevocation,
   type WorkflowDecisionRevocationReason,
   type CreateWorkflowDecisionRequest,
@@ -13985,6 +13987,71 @@ export class SessionsService {
       if (refused) return { ok: false, ...refused };
     }
     return { ok: true, check };
+  }
+
+  /** #4323: what the merge closure watcher needs from the service. The control plane owns it, so it
+   * outlives runner restarts; it reads through the child's runner, as `mergeClosures` does. */
+  mergeClosureWatcherDeps(): Omit<MergeClosureWatcherDeps, "requestFromRunner" | "newRequestId" | "warn"> {
+    return {
+      targets: () => this.db.mergeClosureWatchTargets().filter((decision): decision is WatchedMerge =>
+        decision.resourceSnapshot.category === "pr_merge"),
+      childRunner: (sessionId) => {
+        const session = this.db.getSession(sessionId);
+        const runner = session ? this.db.getRunner(session.runnerId) : null;
+        return session && runner ? { runnerId: runner.runnerId, protocolVersion: runner.protocolVersion, online: this.hub.isRunnerOnline(runner.runnerId) } : null;
+      },
+      save: (occurrenceId, previous, next) => this.db.saveMergeClosureWatch(occurrenceId, previous, next),
+      newerDecision: (decision) => this.db.newerMergeDecision(decision),
+      revokeApproved: (decision) => {
+        const latest = this.db.workflowDecisionByOccurrence(decision.occurrenceId);
+        if (latest?.status === "approved") this.revokeWorkflowDecision(latest, { reason: "consume_refused_stale", triggeredBy: { kind: "system", id: "merge_closure_watch" } });
+      },
+      notifyChild: (decision, watch) => this.notifyMergeClosureChange(decision, watch),
+      reportOwner: (decision, watch, kind) => this.reportMergeClosureToOwner(decision, watch, kind),
+      changed: (decision) => this.hub.sessionChangedById(decision.sessionId),
+      log: (event) => this.log.info(JSON.stringify(event)),
+    };
+  }
+
+  /** Tell the child its merge decision no longer covers the merge (#4323). True once queued. */
+  private notifyMergeClosureChange(decision: WatchedMerge, watch: MergeClosureWatch): boolean {
+    const child = this.db.getSession(decision.sessionId);
+    // Nobody is left to tell; the decision itself records why.
+    if (!child || isTerminal(child.status)) return true;
+    if (!this.hub.isRunnerOnline(child.runnerId)) return false;
+    const result = this.prompt(decision.sessionId, mergeClosureChangedPrompt(decision, watch));
+    if (!result.ok) this.log.warn(`merge closure notice for ${decision.sessionId} was not sent: ${result.error}`);
+    return result.ok;
+  }
+
+  /** Tell the campaign's owner about a merge whose closures nobody approved, or that could not be
+   * checked (#4323): an Owner Question on the campaign's root, which only that person answers and
+   * which grants nothing. Without a root that can carry one, the root Orchestrator is told instead
+   * and the report records why. */
+  private reportMergeClosureToOwner(decision: WatchedMerge, watch: MergeClosureWatch, kind: MergeClosureReportKind): NonNullable<MergeClosureWatch["report"]> {
+    const reportedAt = Date.now();
+    const text = mergeClosureOwnerReport(decision, watch, kind);
+    const rootId = this.db.campaignRootForMember(decision.sessionId) ?? this.db.campaignRootForMember(decision.controllingSessionId) ??
+      (this.db.getSession(decision.controllingSessionId)?.orchestratorPolicy ? decision.controllingSessionId : null);
+    const root = rootId ? this.db.getSession(rootId) : null;
+    if (!root || isTerminal(root.status)) {
+      this.log.warn(`merge closure report for ${decision.occurrenceId} has no live campaign root: ${text.question}`);
+      return { reportedAt, unreported: "The campaign's root Orchestrator has ended." };
+    }
+    if (runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "ownerQuestions")) {
+      const created = this.createWorkflowDecision(root.id, {
+        requestId: `merge_closure_${kind}_${decision.occurrenceId}`,
+        resourceKey: `merge_closure:${decision.resourceSnapshot.repository.toLowerCase()}#${decision.resourceSnapshot.pullRequest}`,
+        resourceSnapshot: { category: "owner_decision", kind: "question", question: text.question, material: text.material, options: text.options },
+      }, () => true, { trustedOwnerDecision: true });
+      if (created.ok && created.data) return { occurrenceId: created.data.occurrenceId, reportedAt };
+      this.log.warn(`merge closure owner question for ${decision.occurrenceId} was refused: ${created.error}`);
+    }
+    // An older root, or a refused question: the root Orchestrator is told, and the record says so.
+    const told = this.prompt(root.id, `${text.question}\n\n${text.material}\n\nReport this to the campaign's owner.`);
+    return { reportedAt, unreported: told.ok
+      ? "The campaign's root cannot carry an owner question, so its Orchestrator was told instead."
+      : `Neither the owner nor the root Orchestrator could be told: ${told.error ?? "the message was refused"}` };
   }
 
   createWorkflowDecision(

@@ -231,6 +231,7 @@ import {
   type WorkflowDecisionAuthority,
   type WorkflowDecisionStatus,
   type WorkflowDecisionView,
+  type MergeClosureWatch,
   type WorkflowDecisionResourceSnapshot,
   type PromptImageReference,
   type PromptSessionMessage,
@@ -7561,6 +7562,19 @@ export class ControlPlaneDb {
     ]) {
       try { db.exec(`ALTER TABLE workflow_decisions ADD COLUMN ${column}`); } catch { /* already present */ }
     }
+    // #4323: a consumed merge's closure watch. Merges consumed before it existed are not watched:
+    // marked once, when the column is added, so none of them is read or reported afterwards.
+    let closureWatchAdded = false;
+    try { db.exec("ALTER TABLE workflow_decisions ADD COLUMN closure_watch TEXT"); closureWatchAdded = true; } catch { /* already present */ }
+    if (closureWatchAdded) {
+      const at = Date.now();
+      db.prepare(`UPDATE workflow_decisions SET closure_watch=? WHERE category='pr_merge' AND closure_watch IS NULL
+        AND (status='consumed' OR forge_action IS NOT NULL)`).run(JSON.stringify({ state: "not_watched", since: at, updatedAt: at,
+        endReason: "Consumed before merges were watched until they land." } satisfies MergeClosureWatch));
+    }
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_closure_watch
+      ON workflow_decisions(created_at) WHERE category='pr_merge' AND
+        (closure_watch IS NULL OR json_extract(closure_watch, '$.state') IN ('watching','invalidated'))`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_held_resume
       ON workflow_decisions(session_id, resolved_at) WHERE resume_state='held'`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_resume_command
@@ -23687,16 +23701,55 @@ export class ControlPlaneDb {
     this.stmt("DELETE FROM automation_expiration_effects WHERE occurrence_id=?").run(occurrenceId);
   }
 
-  /** Consumed pull-request merge gates these sessions passed: completed-closure delivery candidates (#2940). */
+  /** Consumed pull-request merge gates these sessions passed: completed-closure delivery candidates
+   * (#2940). A merge whose closures changed after approval is not one: its decision no longer
+   * covers it (#4323). */
   consumedPullRequestMerges(sessionIds: readonly string[]): WorkflowDecisionView[] {
     if (!sessionIds.length) return [];
     return (this.stmt(
       `SELECT * FROM workflow_decisions WHERE category='pr_merge' AND status='consumed'
+         AND json_extract(closure_watch, '$.invalidatedAt') IS NULL
          AND session_id IN (SELECT value FROM json_each(?))
        ORDER BY created_at ASC, occurrence_id ASC`,
     ).all(JSON.stringify([...new Set(sessionIds)])) as unknown[]).map(workflowDecisionFromRow).filter(
       (decision): decision is WorkflowDecisionView => decision !== null,
     );
+  }
+
+  /** #4323: consumed merges (or merges whose enqueue Wollipog performed) not watched yet, and those
+   * still watched, oldest first. Read through their partial index. */
+  mergeClosureWatchTargets(limit = 500): WorkflowDecisionView[] {
+    return (this.stmt(
+      `SELECT * FROM workflow_decisions WHERE category='pr_merge'
+         AND (closure_watch IS NULL OR json_extract(closure_watch, '$.state') IN ('watching','invalidated'))
+         AND (closure_watch IS NOT NULL OR status='consumed' OR
+           (forge_action IS NOT NULL AND json_extract(forge_action, '$.outcome') NOT IN ('refused','in_progress')))
+       ORDER BY created_at ASC, occurrence_id ASC LIMIT ?`,
+    ).all(limit) as unknown[]).map(workflowDecisionFromRow).filter(
+      (decision): decision is WorkflowDecisionView => decision !== null,
+    );
+  }
+
+  /** Store a merge's closure watch if it is still `previous` (compare-and-set). */
+  saveMergeClosureWatch(occurrenceId: string, previous: MergeClosureWatch | undefined, next: MergeClosureWatch): boolean {
+    const result = previous === undefined
+      ? this.stmt(`UPDATE workflow_decisions SET closure_watch=? WHERE occurrence_id=? AND category='pr_merge' AND closure_watch IS NULL`)
+        .run(JSON.stringify(next), occurrenceId)
+      : this.stmt(`UPDATE workflow_decisions SET closure_watch=? WHERE occurrence_id=? AND category='pr_merge' AND closure_watch=?`)
+        .run(JSON.stringify(next), occurrenceId, JSON.stringify(previous));
+    return Number(result.changes) === 1;
+  }
+
+  /** Whether a later `pr_merge` for the same pull request and head is pending, approved or consumed. */
+  newerMergeDecision(decision: WorkflowDecisionView): boolean {
+    const snapshot = decision.resourceSnapshot;
+    if (snapshot.category !== "pr_merge") return false;
+    return this.stmt(
+      `SELECT 1 FROM workflow_decisions WHERE category='pr_merge' AND occurrence_id<>? AND created_at>=?
+         AND status IN ('pending','approved','consumed')
+         AND lower(json_extract(resource_snapshot, '$.repository'))=? AND json_extract(resource_snapshot, '$.pullRequest')=?
+         AND json_extract(resource_snapshot, '$.headSha')=? LIMIT 1`,
+    ).get(decision.occurrenceId, decision.createdAt, snapshot.repository.toLowerCase(), snapshot.pullRequest, snapshot.headSha) !== undefined;
   }
 
   unconsumedWorkflowDecisionsForController(controllingSessionId: string): WorkflowDecisionView[] {
@@ -35315,6 +35368,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     campaign_repository_addition_result?: string | null;
     closing_reference_check?: string | null;
     forge_action?: string | null;
+    closure_watch?: string | null;
   } | undefined;
   if (!row?.request_id || !row.occurrence_id || !row.session_id || !row.controlling_session_id ||
       !row.category || !row.resource_key || !row.resource_snapshot || !row.resource_digest ||
@@ -35351,6 +35405,10 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
       JSON.parse(row.campaign_repository_addition_result) as NonNullable<WorkflowDecisionView["campaignRepositoryAdditionResult"]> } : {}),
     ...(closingReferenceCheck ? { closingReferenceCheck } : {}),
     ...(forgeAction ? { forgeAction } : {}),
+    ...(row.closure_watch ? (() => {
+      const closureWatch = parseJson<NonNullable<WorkflowDecisionView["closureWatch"]>>(row.closure_watch);
+      return closureWatch ? { closureWatch } : {};
+    })() : {}),
     ...(row.selected_option_id ? { selectedOptionId: row.selected_option_id } : {}),
     ...(evidenceReviewed ? { evidenceReviewed } : {}),
     ...(delegatedVideoEvidence ? { delegatedVideoEvidence } : {}),
