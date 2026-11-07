@@ -218,7 +218,7 @@ test("Machine Settings is one form: its name as the description, Delete Machineâ
   }
   // An offline machine still saves every field now; the runner takes its settings on reconnect.
   assert.equal(dialog.querySelector(".notice")?.textContent,
-    "Studio Mac is offline. Changes save now; Capacity Limit and automatic switching take effect when it reconnects.");
+    "Studio Mac is offline. Changes save now; Capacity Limit, automatic switching, and reviewer executable policy take effect when it reconnects.");
 });
 
 test("Save Changes sends exactly the changed fields with their revisions, then closes with a toast; an unchanged form sends nothing", async () => {
@@ -537,4 +537,32 @@ test("an SSH machine whose runner has not arrived shows only Machine Name", asyn
   assert.equal(dialog.querySelector(".modal-desc")?.textContent, "Golf Simulator");
   assert.deepEqual([...dialog.querySelectorAll("label")].map((label) => label.textContent), ["Machine Name"]);
   assert.equal(buttonNamed(dialog, "Delete Machineâ€¦")!.disabled, false, "an SSH machine is deleted through its box");
+});
+
+test("reviewer policy saves the selected mode and revision, and older or read-only machines cannot change it", async () => {
+  const view = await mount(machine({ reviewerSecurity: { policy: "strict", revision: 7 } }), {
+    client: { updateMachineReviewerSecurity: async (runnerId, input) => {
+      view.calls.push(["reviewerSecurity", runnerId, input]);
+      return { reviewerSecurity: { policy: input.policy, revision: input.expectedRevision + 1 } };
+    } },
+  });
+  const control = [...view.dialog()!.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="listbox"]')]
+    .find(button => button.getAttribute("aria-label")?.includes("Reviewer Executable Policy"));
+  assert.ok(control);
+  await press(control);
+  const option = [...body.querySelectorAll<HTMLElement>('[role="option"]')]
+    .find(element => element.textContent?.includes("Personal Machine"));
+  assert.ok(option);
+  await act(async () => { option.click(); });
+  await settle();
+  await save(view.dialog()!);
+  assert.deepEqual(view.calls, [["reviewerSecurity", "studio", { policy: "personal_machine", expectedRevision: 7 }]]);
+  await view.unmount();
+  for (const overrides of [{ protocolVersion: 324 }, { canManage: false }]) {
+    const readOnly = await mount(machine(overrides));
+    const button = [...readOnly.dialog()!.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="listbox"]')]
+      .find(element => element.getAttribute("aria-label")?.includes("Reviewer Executable Policy"));
+    assert.equal(button?.getAttribute("aria-disabled"), "true");
+    await readOnly.unmount();
+  }
 });

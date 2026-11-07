@@ -24,6 +24,7 @@ import websocket from "@fastify/websocket";
 import { isSqliteBusy, withRunnerPersistenceRetry } from "./runner-persistence.js";
 import cors from "@fastify/cors";
 import { canMutateQuestionPolicy } from "./question-policy.js";
+import { registerReviewerSecurityRoutes } from "./reviewer-security-route.js";
 import { automaticAccountSwitchForRunner } from "./automatic-account-switch-compatibility.js";
 import {
   archiveSessionPage,
@@ -1460,6 +1461,8 @@ app.register(async (instance) => {
           ...(runnerSupportsProtocol(msg.protocolVersion, "machineRunnerCapacity")
             ? { runnerCapacity: db.machineRunnerCapacityConfiguration(runnerId) ?? undefined }
             : {}),
+          ...(runnerSupportsProtocol(msg.protocolVersion, "reviewerSecurityPolicy")
+            ? { reviewerSecurity: db.machineReviewerSecurity(runnerId) } : {}),
           automaticAccountSwitching: automaticAccountSwitchForRunner(
             db.machineAutomaticAccountSwitchConfiguration(runnerId),
             msg.protocolVersion,
@@ -3644,6 +3647,8 @@ app.put("/api/runners/:id/capacity", async (req, reply) => {
   if (boxId) hub.boxChanged(boxId);
   return { capacity: changed.configuration };
 });
+
+registerReviewerSecurityRoutes(app, db, hub, requestPrincipal);
 
 app.put("/api/runners/:id/automatic-account-switching", async (req, reply) => {
   const id = (req.params as { id: string }).id;

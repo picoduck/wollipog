@@ -134,3 +134,26 @@ installation paths, with bounded reasons that preserve the other reviewer.
 
 The optional release-digest pin is not implemented. Static trust does not detect tampering that
 predates installation protection or writes by processes with unsandboxed host-user access.
+
+## Reviewer Executable Policy
+
+Machine Settings → Reviewer Executable Policy is controlled by the machine owner or an
+organization admin. It is saved per machine, survives reconnects, and applies to subsequent
+review admission and discovery. A connected runner needs protocol 325 or later. Offline changes
+are delivered on reconnect to a supported runner. Running reviews are not interrupted.
+
+**Strict** is the default and preserves existing behavior: paths must belong to the runner user
+or root; group writes require proof that the group is private to the runner user.
+
+**Personal Machine** accepts group-writable paths owned by the runner user without querying
+group membership. This suits a machine whose other local accounts you trust, including normal
+user-owned CLI installations with mode 775. It accepts the risk that another member of that
+group could replace a tool. When the runner uses a non-root account, root-owned group-writable
+paths still require the Strict checks. A runner running as root treats root-owned paths as its
+own under Personal Machine, including the group-write exception.
+
+Both policies reject world-writable paths, other owners, and session-writable locations, and
+check symlink containers, targets, and script interpreters. The policy covers reviewers and
+their Git, forge CLI, and SSH tools. It does not relax session sandbox rules, credential
+protection, workflow approvals, or the review contract. Agents cannot change it through
+session tools, project files, or environment variables.

@@ -16,6 +16,7 @@ import {
   resolveAgentEnvironmentValue, type RunnerConfigAgent, type RunnerConfigWorkspace, type RunnerProviderAccount,
 } from "./config.js";
 import type { SessionMeta } from "./session-store.js";
+import type { ReviewerSecurityPolicy } from "@wollipog/protocol";
 import { isUserPrivateGroup } from "./review-private-group.js";
 
 /** Home-relative caches a protected session can write (mirrors execution-isolation's list). */
@@ -78,7 +79,7 @@ export class SessionWritableRootError extends Error {
 
 /** Check the write boundary and ownership of every component, retaining both for the exception. */
 function checkResolved(real: string, roots: readonly string[], uid: number, rootUid: number,
-  codex: CodexReviewerProtection | undefined, privateGroup: (uid: number, gid: number) => boolean): void {
+  codex: CodexReviewerProtection | undefined, privateGroup: (uid: number, gid: number) => boolean, policy: ReviewerSecurityPolicy): void {
   for (const root of roots) {
     if (!within(root, real)) continue;
     const codexHome = codex && join(codex.home, ".codex");
@@ -102,7 +103,7 @@ function checkResolved(real: string, roots: readonly string[], uid: number, root
     // anyone, its group included, so it is a safe ancestor; the path itself never may be writable.
     const stickyAncestor = info.isDirectory() && (info.mode & 0o1000) !== 0 && index < ordered.length - 1;
     if ((info.mode & 0o002) && !stickyAncestor) throw new Error(`${component} is writable by every user`);
-    if ((info.mode & 0o020) && !stickyAncestor) {
+    if ((info.mode & 0o020) && !stickyAncestor && !(policy === "personal_machine" && info.uid === uid)) {
       let safe = false;
       try { safe = info.uid === uid && privateGroup(uid, info.gid); }
       catch (error) { throw new Error(`${component} is writable by its group: ${(error as Error).message}`); }
@@ -112,13 +113,16 @@ function checkResolved(real: string, roots: readonly string[], uid: number, root
 }
 
 /**
- * Resolve `path` and refuse it unless no other user, and no session, could have changed it.
+ * Resolve `path` and enforce session write boundaries plus the selected local-user trust policy.
  * Links are followed one at a time: each must be owned by `uid` or root and sit in a directory that
  * passes the same checks, so no hop on the way can be repointed. Group-write is accepted only
- * for a proven user-private group, even below a private ancestor.
+ * for a proven user-private group, even below a private ancestor. Personal Machine trusts
+ * group writes on paths owned by the runner user; world writes and session-writable roots
+ * remain refused under both policies.
  */
 export function trustedPath(path: string, roots: readonly string[], uid: number, rootUid = 0,
-  codex?: CodexReviewerProtection, privateGroup: (uid: number, gid: number) => boolean = isUserPrivateGroup): string {
+  codex?: CodexReviewerProtection, privateGroup: (uid: number, gid: number) => boolean = isUserPrivateGroup,
+  policy: ReviewerSecurityPolicy = "strict"): string {
   const groups = new Map<number, boolean>();
   const checkGroup = (owner: number, gid: number) => {
     if (!groups.has(gid)) groups.set(gid, privateGroup(owner, gid));
@@ -138,12 +142,12 @@ export function trustedPath(path: string, roots: readonly string[], uid: number,
     if (!info.isSymbolicLink()) { resolved = next; continue; }
     if (++hops > 40) throw new Error(`${path} has too many symbolic links`);
     if (info.uid !== uid && info.uid !== rootUid) throw new Error(`${next} is owned by another user`);
-    checkResolved(resolved, roots, uid, rootUid, codex, checkGroup);
+    checkResolved(resolved, roots, uid, rootUid, codex, checkGroup, policy);
     const target = readlinkSync(next);
     if (isAbsolute(target)) resolved = "/";
     pending.unshift(...target.split("/").filter(Boolean));
   }
-  checkResolved(resolved, roots, uid, rootUid, codex, checkGroup);
+  checkResolved(resolved, roots, uid, rootUid, codex, checkGroup, policy);
   return resolved;
 }
 
@@ -314,7 +318,7 @@ function elided(path: string): string {
  * is reported.
  */
 export function trustedExecutable(name: string, pathEnv: string | undefined, roots: readonly string[], uid: number,
-  rootUid?: number, codex?: CodexReviewerProtection): string {
+  rootUid?: number, codex?: CodexReviewerProtection, policy: ReviewerSecurityPolicy = "strict"): string {
   let refusal: string | undefined;
   for (const dir of (pathEnv ?? "").split(":")) {
     if (!dir || !isAbsolute(dir)) continue;
@@ -323,7 +327,7 @@ export function trustedExecutable(name: string, pathEnv: string | undefined, roo
       const info = statSync(candidate);
       if (!info.isFile() || !(info.mode & 0o111)) continue;
     } catch { continue; }
-    try { return trustedPath(candidate, roots, uid, rootUid, codex); }
+    try { return trustedPath(candidate, roots, uid, rootUid, codex, undefined, policy); }
     catch (error) { refusal ??= (error as Error).message; }
   }
   throw new Error(refusal ?? `${name} is not installed`);
@@ -351,20 +355,21 @@ function interpreterLine(path: string): string | undefined {
  */
 export function reviewerInterpreter(
   script: string, pathEnv: string | undefined, roots: readonly string[], uid: number, rootUid?: number,
+  policy: ReviewerSecurityPolicy = "strict",
 ): { name: string; path: string } | undefined {
   const line = interpreterLine(script);
   if (line === undefined) return undefined;
   const words = line.split(/\s+/u).filter(Boolean);
   const interpreter = words[0];
   if (!interpreter || !isAbsolute(interpreter)) throw new Error(`${script} names an interpreter that is not an absolute path`);
-  trustedPath(interpreter, roots, uid, rootUid);
+  trustedPath(interpreter, roots, uid, rootUid, undefined, undefined, policy);
   if (basename(interpreter) !== "env") return undefined;
   const program = words.slice(1).find((word) => !word.startsWith("-") && !word.includes("="));
   if (!program) throw new Error(`${script} names no program for env to run`);
-  if (isAbsolute(program)) { trustedPath(program, roots, uid, rootUid); return undefined; }
+  if (isAbsolute(program)) { trustedPath(program, roots, uid, rootUid, undefined, undefined, policy); return undefined; }
   if (!/^[A-Za-z0-9_+-][A-Za-z0-9._+-]{0,63}$/u.test(program)) throw new Error(`${script} names an unsupported interpreter`);
   try {
-    return { name: program, path: trustedExecutable(program, pathEnv, roots, uid, rootUid) };
+    return { name: program, path: trustedExecutable(program, pathEnv, roots, uid, rootUid, undefined, policy) };
   } catch (error) {
     throw new Error(`${script} runs under ${program}, which is unavailable: ${(error as Error).message}`);
   }
@@ -416,6 +421,7 @@ export interface ReviewToolEnvironment {
   extraRoots?: readonly string[];
   /** Session-writable temporary directories; defaults to the system's. */
   temporaryRoots?: readonly string[];
+  securityPolicy?: ReviewerSecurityPolicy;
 }
 
 /** Find and verify git, gh, glab and ssh. Never throws: a refusal is returned as its reason. git
@@ -424,9 +430,9 @@ export interface ReviewToolEnvironment {
 export function discoverReviewTools(env: ReviewToolEnvironment): ReviewTools | { unavailable: string } {
   try {
     const roots = sessionWritableRoots(env.home, env.dataDir, env.extraRoots, env.temporaryRoots);
-    const git = trustedExecutable("git", env.pathEnv, roots, env.uid, env.rootUid);
+    const git = trustedExecutable("git", env.pathEnv, roots, env.uid, env.rootUid, undefined, env.securityPolicy);
     const optional = (name: string): { path?: string; error?: string } => {
-      try { return { path: trustedExecutable(name, env.pathEnv, roots, env.uid, env.rootUid) }; } catch (error) {
+      try { return { path: trustedExecutable(name, env.pathEnv, roots, env.uid, env.rootUid, undefined, env.securityPolicy) }; } catch (error) {
         return { error: (error as Error).message };
       }
     };

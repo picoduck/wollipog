@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, symlinkSync, chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { isUserPrivateGroup, type GroupDatabase } from "./review-private-group.js";
-import { trustedPath } from "./review-trust.js";
+import { discoverReviewTools, trustedPath } from "./review-trust.js";
 
 function database(options: { source?: string; members?: string; otherPrimary?: boolean; configured?: string; process?: string; denied?: boolean; exited?: boolean; hidden?: boolean; duplicateGroup?: boolean; initgroups?: string } = {}): GroupDatabase {
   const user = "owner:x:1000:1000::/home/owner:/bin/sh";
@@ -65,4 +65,42 @@ test("group-writable trust accepts only proven private membership; world writes 
   assert.throws(() => trustedPath(file, [], uid, rootUid, undefined, () => { throw new Error("NSS source ldap"); }), /reviewer.*NSS source ldap/);
   chmodSync(file, 0o777);
   assert.throws(() => trustedPath(file, [], uid, rootUid, undefined, () => true), /writable by every user/);
+});
+
+test("Personal Machine accepts owner group writes through symlinks while preserving write boundaries", { skip: process.platform === "win32" }, (t) => {
+  const root = mkdtempSync(join(tmpdir(), "review-personal-machine-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const bin = join(root, "bin");
+  mkdirSync(bin); chmodSync(bin, 0o775);
+  const target = join(root, "reviewer");
+  writeFileSync(target, "native fixture"); chmodSync(target, 0o775);
+  const link = join(bin, "codex"); symlinkSync(target, link);
+  const uid = process.getuid!(), rootUid = statSync("/").uid;
+  const unknown = () => { throw new Error("cannot enumerate local accounts"); };
+  assert.throws(() => trustedPath(link, [], uid, rootUid, undefined, unknown), /writable by its group/);
+  assert.equal(trustedPath(link, [], uid, rootUid, undefined, unknown, "personal_machine"), target);
+  assert.throws(() => trustedPath(link, [bin], uid, rootUid, undefined, unknown, "personal_machine"), /session can write/);
+  assert.throws(() => trustedPath(link, [target], uid, rootUid, undefined, unknown, "personal_machine"), /session can write/);
+  chmodSync(target, 0o777);
+  assert.throws(() => trustedPath(link, [], uid, rootUid, undefined, unknown, "personal_machine"), /writable by every user/);
+});
+
+test("Personal Machine policy reaches Git, forge tools and PATH script interpreters", { skip: process.platform === "win32" }, async (t) => {
+  const { verifySpawnedCommand } = await import("./review-sessions.js");
+  const root = mkdtempSync(join(tmpdir(), "review-personal-tools-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const bin = join(root, "bin"); mkdirSync(bin); chmodSync(bin, 0o775);
+  for (const name of ["git", "gh", "ssh", "local-interpreter"]) {
+    writeFileSync(join(bin, name), "native fixture"); chmodSync(join(bin, name), 0o775);
+  }
+  const script = join(bin, "reviewer");
+  writeFileSync(script, "#!/usr/bin/env local-interpreter\n"); chmodSync(script, 0o775);
+  const uid = process.getuid!(), rootUid = statSync("/").uid;
+  const env = { home: join(root, "home"), dataDir: join(root, "state"), uid, rootUid, pathEnv: bin, temporaryRoots: [] };
+  assert.deepEqual(discoverReviewTools({ ...env, securityPolicy: "personal_machine" }), {
+    git: join(bin, "git"), gh: join(bin, "gh"), ssh: join(bin, "ssh"),
+  });
+  assert.equal(verifySpawnedCommand(script, bin, [], uid, rootUid, undefined, "personal_machine"), script);
+  assert.throws(() => verifySpawnedCommand(script, bin, [join(bin, "local-interpreter")], uid, rootUid, undefined, "personal_machine"), /session can write/);
+  assert.throws(() => trustedPath(script, [], uid + 1, rootUid, undefined, () => true, "personal_machine"), /owned by another user/);
 });

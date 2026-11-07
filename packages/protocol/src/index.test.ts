@@ -120,7 +120,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 325);
+  assert.equal(PROTOCOL_VERSION, 326);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -358,10 +358,10 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 325", () => {
-  assert.equal(PROTOCOL_VERSION, 325);
-  // Forge facts read through a Location need a v325 runner there (#4119).
-  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.locationForgeObservation, 325);
+test("PROTOCOL_VERSION is 326", () => {
+  assert.equal(PROTOCOL_VERSION, 326);
+  // Forge facts read through a Location need a v326 runner there (#4119).
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.locationForgeObservation, 326);
   assert.equal(runnerSupportsProtocol(RUNNER_CAPABILITY_MIN_PROTOCOL.locationForgeObservation - 1, "locationForgeObservation"), false);
   assert.equal(runnerSupportsProtocol(RUNNER_CAPABILITY_MIN_PROTOCOL.locationForgeObservation, "locationForgeObservation"), true);
   // A closure through a Location needs a v323 runner there (#4119).
@@ -2242,4 +2242,9 @@ test("a hold's reason says when Background Work does not list the work it waits 
     oldestUnfinishedJob: { launchType: "shell", startedAt: Date.UTC(2026, 9, 28, 4, 0) },
     unlistedJobs: [{ id: "tool:toolu_1", kind: "provisional" }],
   }), /\(the oldest, a shell command started at 2026-10-28T04:00Z\), 1 of which Background Work does not list\.$/u);
+});
+
+test("reviewer executable security requires a runner that understands the human policy", () => {
+  assert.equal(runnerSupportsProtocol(324, "reviewerSecurityPolicy"), false);
+  assert.equal(runnerSupportsProtocol(325, "reviewerSecurityPolicy"), true);
 });

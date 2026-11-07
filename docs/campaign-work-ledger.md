@@ -553,7 +553,7 @@ derivation, refresh) and `apps/runner/src/campaign-forge-status.ts` (the read).
 - **Another campaign repository (#4119):** its pull requests are read by the runner of one of its
   Locations, with that runner's own login, in that Location's path, and never with the root's. A
   read names one repository's pull requests and a runner refuses any other's. With no such runner
-  online, or only one below v325, nothing is read and the fact says why. A stored value names the
+  online, or only one below v326, nothing is read and the fact says why. A stored value names the
   one runner whose login supplied it, and another runner's failure removes it rather than keeping it
   as a last value. A person needs access to that runner to see the fact, and to the runner that
   would read next to cause a read. The background pass runs while the root's runner is online;

@@ -167,7 +167,7 @@ test("agents outside the three harness families keep their own names (CR-1.4)", 
 });
 
 test("a valid capacity is compared as the number it saves (CR-1.2)", () => {
-  const saved = { name: "Studio Mac", capacity: "24", switching: false, defaultAccounts: {}, installations: {} };
+  const saved = { name: "Studio Mac", capacity: "24", switching: false, reviewerSecurity: "strict" as const, defaultAccounts: {}, installations: {} };
   assert.equal(fieldChanged({ kind: "capacity" }, { ...saved, capacity: "024" }, saved), false);
   assert.equal(fieldChanged({ kind: "capacity" }, { ...saved, capacity: "25" }, saved), true);
   assert.equal(fieldChanged({ kind: "capacity" }, { ...saved, capacity: "abc" }, saved), true);
@@ -181,8 +181,8 @@ test("changed fields come from the form against the last saved snapshot, in save
     providerAccountDefaults: [{ provider: "claude", accountId: null, revision: 3 }],
   });
   const saved = machineSettingsSnapshot(machine, undefined);
-  assert.deepEqual(saved.values, { name: "Studio Mac", capacity: "16", switching: false, defaultAccounts: { claude: "" }, installations: {} });
-  assert.deepEqual(saved.revisions, { capacity: 2, switching: 4, defaultAccounts: { claude: 3 } });
+  assert.deepEqual(saved.values, { name: "Studio Mac", capacity: "16", switching: false, reviewerSecurity: "strict" as const, defaultAccounts: { claude: "" }, installations: {} });
+  assert.deepEqual(saved.revisions, { capacity: 2, switching: 4, reviewerSecurity: 0, defaultAccounts: { claude: 3 } });
   const order = fieldOrder({ name: true, capacity: true, switching: true, defaultAccounts: ["codex", "claude"], installations: ["g"] });
   assert.deepEqual(order.map((field) => fieldLabel(field, [])),
     ["Machine Name", "Capacity Limit", "Switch Accounts Automatically", "Default Claude Account", "Default Codex Account", "Agent Installation"]);

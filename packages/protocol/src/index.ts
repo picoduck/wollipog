@@ -1028,12 +1028,14 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 // 324: a new Custom campaign starts with the repositories its Project verified (#4118), in the
 //      `repositories` list v317 added, and a Custom seed proposal refuses `repositoryNames` by name
 //      rather than ignoring it. Both are the control plane's: no runner or client needs this version.
-// 325: forge facts about another campaign repository's pull requests are read through one of its
+// 325: human-controlled reviewer executable permission policy on each Machine.
+// 326: forge facts about another campaign repository's pull requests are read through one of its
 //      Locations (#4119). `campaign_forge_observe` may name a `location`: the runner reads with its
 //      own forge login, without an Orchestrator session, and refuses a pull request of any other
-//      repository. A runner below v325 is never sent one, and its Location's facts read
-//      `runner_unsupported` rather than falling back to the root's login.
-export const PROTOCOL_VERSION = 325;
+//      repository. A runner below v326 is never sent one, and its Location's facts read
+//      `runner_unsupported` rather than falling back to the root's login. (This change first
+//      claimed 325, which another change took.)
+export const PROTOCOL_VERSION = 326;
 
 export * from "./campaign-authority.js";
 export * from "./decision-questions.js";
@@ -1298,6 +1300,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   harnessSelectionBackgroundConsumers: 177,
   automaticAccountSwitchHarnessSelection: 178,
   automaticProviderAccountSwitch: 173,
+  reviewerSecurityPolicy: 325,
   sessionProviderAccountSwitch: 171,
   /** v180 current-identity inspection and account selection from an Authentication Required card. */
   providerAuthenticationAccountRecovery: 180,
@@ -1635,8 +1638,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   repositoryQualifiedIssueScope: 313,
   /** v323 inspects and closes an issue in a named Location's own path (#4119). */
   locationIssueClosure: 323,
-  /** v325 reads forge facts about a repository's pull requests in a named Location (#4119). */
-  locationForgeObservation: 325,
+  /** v326 reads forge facts about a repository's pull requests in a named Location (#4119). */
+  locationForgeObservation: 326,
   /** v317 asks for and carries out a campaign repository addition (#4117). */
   campaignRepositoryAddition: 317,
   /** v318 reads a Location's issue facts for a repository-qualified scope proposal (#4118). */
@@ -4470,6 +4473,15 @@ export interface RunnerCapacityConfiguration {
   revision: number;
 }
 
+/** Local-user permission policy for reviewer executables on one Machine. */
+export type ReviewerSecurityPolicy = "strict" | "personal_machine";
+
+/** Human-controlled local executable checks; session write boundaries always apply. */
+export interface RunnerReviewerSecurityConfiguration {
+  policy: ReviewerSecurityPolicy;
+  revision: number;
+}
+
 /** Durable control-plane configuration for opt-in provider-account failover on one Machine. */
 export interface RunnerAutomaticAccountSwitchConfiguration {
   enabled: boolean;
@@ -4567,6 +4579,8 @@ export interface RunnerView {
   capacity?: RunnerCapacityState;
   /** v173 control-plane-authoritative opt-in; absent means disabled. */
   automaticAccountSwitching?: RunnerAutomaticAccountSwitchConfiguration;
+  /** v325; omission preserves Strict. */
+  reviewerSecurity?: RunnerReviewerSecurityConfiguration;
   /** Principal-specific mutation permission; absent on older control planes. */
   canManage?: boolean;
   /** Protocol v60 projection. Placement is separate from the agent definitions above. */
@@ -10816,7 +10830,7 @@ export interface CampaignForgeObserveMessage {
   /** The root campaign Orchestrator session whose repository context runs `gh`. */
   sessionId: string;
   pullRequests: CampaignPullRequestRef[];
-  /** v325 (#4119): the Location of the pull requests' repository whose runner reads them, with its
+  /** v326 (#4119): the Location of the pull requests' repository whose runner reads them, with its
    * own forge login, when that is not the root's. Resolved by the control plane, never by an agent. */
   location?: GithubIssueClosureLocation;
   /** #3600: this control plane accepts GitLab merge-request observations, so the runner may read
@@ -11515,6 +11529,8 @@ export interface RegisteredMessage {
   runnerCapacity?: RunnerCapacityConfiguration;
   /** Present once the Machine has a persisted automatic account-switch preference. */
   automaticAccountSwitching?: RunnerAutomaticAccountSwitchConfiguration;
+  /** v325; omission preserves Strict. */
+  reviewerSecurity?: RunnerReviewerSecurityConfiguration;
   /** Complete Machine choices, including unavailable installations. Protocol v177+. */
   harnessInstallationChoices?: HarnessInstallationChoice[];
   /** Protocol v209+. At most 64 pending admissions, scoped to this authenticated runner.
@@ -12241,6 +12257,11 @@ export interface RediscoverMessage {
 /** Idempotent monotonic application of the control plane's durable Machine capacity setting. */
 export interface ConfigureRunnerCapacityMessage extends RunnerCapacityConfiguration {
   type: "configure_runner_capacity";
+}
+
+/** Idempotent monotonic application of the Machine's human-selected executable policy. */
+export interface ConfigureReviewerSecurityMessage extends RunnerReviewerSecurityConfiguration {
+  type: "configure_reviewer_security";
 }
 
 /** Idempotent monotonic application of the Machine's automatic account-switch preference. */
@@ -13563,6 +13584,7 @@ export type ControlPlaneToRunner =
   | RediscoverMessage
   | ConfigureRunnerCapacityMessage
   | ConfigureAutomaticAccountSwitchMessage
+  | ConfigureReviewerSecurityMessage
   | RefreshSubscriptionUsageMessage
   | GenerateSessionTitleMessage
   | RunDecisionMessage
