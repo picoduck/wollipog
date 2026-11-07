@@ -328,6 +328,8 @@ import {
   WorktreeCleanupJournal,
   type WorktreeCleanupRecord,
   type WorktreeHandle,
+  type WorktreeHolder,
+  type RecoveredBranchWorktree,
   type DiscoveredMergedPullRequest,
   type MergedPullRequestContainment,
   type MissingUpstreamPullRequestIdentity,
@@ -10299,7 +10301,9 @@ export class SessionManager {
     if (process.platform !== "linux" || meta.context.kind !== "native" || !meta.worktreePath ||
         meta.executionTarget?.adapter === "container" || meta.executionTarget?.adapter === "cloud") return false;
     const selected = this.attributedWorktreeForPath(meta, meta.worktreePath);
-    return !!selected && selected.source !== "attached";
+    // A worktree a Location switch reused in place keeps the boundary a new one would have had, so
+    // continuing existing work never runs the provider less confined than the switch would (#4138).
+    return !!selected && (selected.source !== "attached" || selected.reusedInPlace === true);
   }
 
   /**
@@ -14693,27 +14697,38 @@ export class SessionManager {
     const options = { context: meta.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash,
       allowedProjectPaths: this.configuredProjectPaths };
     let worktree: SessionWorktreeView;
+    let reused: { uncommittedChanges?: number } | undefined;
     try {
       const repoPath = await verifyLocationSwitchTarget(meta.context, this.sharedDirectoryWorkspaces,
         { workspaceId: pending.workspaceId, workspacePath: pending.repoPath, repository: pending.repository });
       if (repoPath !== pending.repoPath) throw new LocationSwitchRefusal("path_changed");
-      const created = pending.recoverBranch
-        ? await createRecoveredBranchWorktree(repoPath, sessionId, pending.recoverBranch, options)
+      const created: RecoveredBranchWorktree = pending.recoverBranch
+        ? await createRecoveredBranchWorktree(repoPath, sessionId, pending.recoverBranch,
+          { ...options, holderOf: (path) => this.worktreeHolder(sessionId, meta.context, path) })
         : await createRequestedWorktree(repoPath, sessionId,
           { baseRef: (await fetchRemoteDefaultBase(repoPath, options)).ref, branch: `agent/${sessionId}` }, options);
       const defaultBranch = await readRepositoryDefaultBranch(repoPath, options);
-      worktree = {
-        id: created.path.split(/[\\/]/u).at(-1)!, path: created.path, branch: created.branch, baseRef: created.baseRef,
-        baseCommit: created.baseCommit, source: "created", ...(defaultBranch ? { defaultBranch } : {}),
-        // A recovered branch is the person's existing work: removing this worktree keeps it.
-        ...(pending.recoverBranch ? { branchPreexisted: true } : {}),
-      };
+      reused = created.reusedInPlace;
+      worktree = reused
+        // An existing worktree is continued as it is and stays its owner's: attached, so nothing
+        // ever sets it up, tears it down or removes it with this session.
+        ? { id: createHash("sha256").update(created.path).digest("hex").slice(0, 16), path: created.path,
+          branch: created.branch, baseRef: created.baseRef, baseCommit: created.baseCommit, source: "attached",
+          reusedInPlace: true, ...(defaultBranch ? { defaultBranch } : {}) }
+        : {
+          id: created.path.split(/[\\/]/u).at(-1)!, path: created.path, branch: created.branch, baseRef: created.baseRef,
+          baseCommit: created.baseCommit, source: "created", ...(defaultBranch ? { defaultBranch } : {}),
+          // A recovered branch is the person's existing work: removing this worktree keeps it.
+          ...(pending.recoverBranch ? { branchPreexisted: true } : {}),
+        };
     } catch (error) {
       this.failLocationSwitch(sessionId, entry, pending, error instanceof LocationSwitchRefusal ? error.message
         : `the target worktree could not be prepared: ${errText(error)}`);
       return;
     }
     const release = async () => {
+      // A reused worktree was never this switch's to give back: it stays exactly where it was.
+      if (reused) return;
       await (pending.recoverBranch
         ? releaseRecoveredWorktree(pending.repoPath, worktree.path, options)
         : removeWorktree(pending.repoPath, { path: worktree.path, branch: worktree.branch }, options)).catch((error) =>
@@ -14768,8 +14783,13 @@ export class SessionManager {
       },
       queueFailureReason: () => "the session could not resume in its new Location",
       onLaunched: (replacementEntry) => {
-        this.emitEvent(sessionId, { kind: "stderr",
-          text: `Moved this session to Location "${pending.locationName}" (${pending.repository}), worktree ${worktree.branch}.` });
+        const changes = reused?.uncommittedChanges;
+        this.emitEvent(sessionId, { kind: "stderr", text: reused
+          ? `Moved this session to Location "${pending.locationName}" (${pending.repository}). It continues on ${worktree.branch} ` +
+            `in the existing worktree ${worktree.path}, as it was` +
+            (changes === undefined ? "." : changes === 0 ? ", with no uncommitted changes."
+              : `, with its ${changes} uncommitted change${changes === 1 ? "" : "s"} kept.`)
+          : `Moved this session to Location "${pending.locationName}" (${pending.repository}), worktree ${worktree.branch}.` });
         this.queueLocationContinuation(sessionId, replacementEntry);
       },
     });
@@ -14790,6 +14810,27 @@ export class SessionManager {
       : moved ? "the session moved, but its provider could not start in the new Location; send it a message to retry there"
       : "the provider could not resume in the new Location";
     this.failLocationSwitch(sessionId, entry, pending, reason);
+  }
+
+  /** Who on this runner still has a claim on `path` (#4138), from the runner's own records only: a
+   * pending cleanup that will remove it, or a session (this one included) that records it now or in
+   * an earlier Location. A stopped holder counts too: its record would remove or reuse the worktree
+   * later, under whoever then works in it. */
+  private worktreeHolder(sessionId: string, context: AgentContext, path: string): WorktreeHolder | undefined {
+    const same = (candidate: string | null | undefined) => !!candidate && sameWorktreePath(context, candidate, path);
+    const removal = this.cleanupJournal.list().find((record) => same(record.worktreePath));
+    if (removal) return { sessionId: removal.sessionId, removalPending: true };
+    for (const meta of this.store.listSessions()) {
+      const recorded = [
+        meta.worktreePath, ...this.attributedWorktrees(meta).map((worktree) => worktree.path),
+        ...(meta.locationHistory ?? []).flatMap((left) => [left.worktreePath, ...left.worktrees.map((worktree) => worktree.path)]),
+      ];
+      if (!recorded.some(same)) continue;
+      const live = this.active.has(meta.sessionId) ||
+        ["queued", "starting", "running", "input_required"].includes(meta.status);
+      return { sessionId: meta.sessionId, ...(meta.sessionId === sessionId ? { self: true } : {}), ...(live ? { live } : {}) };
+    }
+    return undefined;
   }
 
   /** Queue the automatic turn a completed move owes, once, ahead of anything else, in a provider

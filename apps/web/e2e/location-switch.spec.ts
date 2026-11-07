@@ -35,6 +35,8 @@ for (const width of [1440, 390]) {
     await expect(details).toContainText("Existing Branch");
     await expect(details).toContainText("fix/install-link");
     await expect(details).toContainText("Switch and Continue moves this session to that Location: it keeps its conversation");
+    await expect(details).toContainText("If a worktree that no session uses already has that branch checked out, the session " +
+      "continues there as it is, with any uncommitted changes in it.");
     const foot = page.locator(".request-dock .request-card-foot");
     for (const name of ["Stay Here", "Start a New Session", "Switch and Continue"]) {
       await expect(foot.getByRole("button", { name, exact: true })).toBeVisible();
@@ -66,7 +68,8 @@ for (const width of [1440, 390]) {
       await expect(notice).toBeVisible();
       await expect(notice).toContainText(state === "pending"
         ? "This session moves to Location “Docs Site” (acme/docs) when its current turn ends, then continues the task there."
-        : "The switch to Location “Docs Site” (acme/docs) didn’t finish. The target worktree could not be prepared");
+        : "The switch to Location “Docs Site” (acme/docs) didn’t finish. The target worktree could not be prepared: branch " +
+          "fix/install-link is checked out in worktree /home/dev/src/docs-install-link, which session s_docs_fix is using");
       await expect(notice.getByRole("button", { name: "Dismiss Notice", exact: true })).toHaveCount(state === "failed" ? 1 : 0);
       if (evidenceDir) await page.screenshot({ path: join(evidenceDir, `location-switch-notice-${state}-${width}.png`), fullPage: true });
     }

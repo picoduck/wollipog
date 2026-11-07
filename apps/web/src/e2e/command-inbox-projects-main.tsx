@@ -736,7 +736,9 @@ function initialModel(): FixtureModel {
       status: failed ? "idle" : "running", activeTurnId: failed ? null : "turn-alpha",
       locationSwitch: {
         state: failed ? "failed" : "pending", repository: "acme/docs", workspaceId: "docs", locationName: "Docs Site", at: 5,
-        ...(failed ? { reason: "the target worktree could not be prepared: branch fix/install-link is checked out in another worktree" } : {}),
+        ...(failed ? { reason: "the target worktree could not be prepared: branch fix/install-link is checked out in worktree " +
+          "/home/dev/src/docs-install-link, which session s_docs_fix is using; continue the task in that session instead, so " +
+          "the work and its pull request stay with it" } : {}),
       },
     });
   }

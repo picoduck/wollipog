@@ -160,6 +160,8 @@ test("where the live session can move, Switch and Continue is the primary and St
     const text = view.container.textContent ?? "";
     assert.match(text, /Existing Branch\s*fix\/install-link/u);
     assert.match(text, /Switch and Continue moves this session to that Location: it keeps its conversation/u);
+    // The person learns before approving that an unused worktree already on the branch is continued as it is.
+    assert.match(text, /If a worktree that no session uses already has that branch checked out, the session continues there as it is, with any uncommitted changes in it\./u);
     await act(async () => { view.container.querySelector<HTMLButtonElement>("[data-press-a]")!.click(); await tick(); });
     assert.deepEqual(decisions, []);
     await act(async () => { view.container.querySelector<HTMLButtonElement>(".request-card-foot > button.primary")!.click(); await tick(); });
