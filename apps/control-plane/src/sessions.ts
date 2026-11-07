@@ -71,6 +71,10 @@ import { forgeRefKey, type ForgeReadResult } from "./campaign-forge-observations
 import { campaignFirstMergeHold, type CampaignMergeHold } from "./campaign-merge-dependencies.js";
 import { PREREQUISITE_MERGE_WATCH_RUNNER } from "./pull-request-watches.js";
 import { campaignMergeHoldReason } from "@wollipog/protocol";
+
+/** #4120: Claude Code tools that can run a command, so possibly a held armed merge. The runner's
+ * driver treats Bash and PowerShell as its shell tools; Monitor also runs a command. */
+const CLAUDE_COMMAND_TOOLS: ReadonlySet<string> = new Set(["Bash", "PowerShell", "Monitor"]);
 import {
   REVIEW_FULL_REASON_LIMIT, REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
   compactReviewFinding, REVIEW_ROUND_REFUSALS, type ReviewLaunchPolicy, type ReviewSessionRequest, type ReviewSessionUpdate, type ReviewSessionView, type ReviewSessionsPage,
@@ -3029,7 +3033,7 @@ export class SessionsService {
     // #4120: an allow here, or a defer under a provider mode that asks nobody, would let a held armed
     // merge run unseen. The hook can't see which command it is, so every shell command is denied
     // while one is held, and the session is parked on the prerequisite.
-    if (parsed.value.context?.toolName === "Bash") {
+    if (CLAUDE_COMMAND_TOOLS.has(parsed.value.context?.toolName ?? "")) {
       const heldArmed = this.heldArmedMergeOfSession(session);
       if (heldArmed) {
         if (this.db.pullRequestWatches.visibleFor(sessionId)?.state !== "watching") {
@@ -18545,7 +18549,7 @@ export class SessionsService {
         return fail("policy hook approvals require the Allow or Deny option", 409);
       }
       // #4120: as at evaluation, a held armed merge blocks allowing any of the session's shell commands.
-      const heldArmed = optionId === "allow" && pending.context?.toolName === "Bash" ? this.heldArmedMergeOfSession(session) : null;
+      const heldArmed = optionId === "allow" && CLAUDE_COMMAND_TOOLS.has(pending.context?.toolName ?? "") ? this.heldArmedMergeOfSession(session) : null;
       if (heldArmed) return this.mergeHeld(session, heldArmed.decision.occurrenceId, heldArmed.held);
       const resolved = this.db.resolvePolicyHookApproval(
         sessionId,

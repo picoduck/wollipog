@@ -862,7 +862,8 @@ test("while a session's armed merge is held, Claude's policy hook denies its she
     assert.match(denied.data?.reason ?? "", /^Merge held until prerequisite pull request owner\/api#7 \(api in owner\/api\) is observed MERGED; it is not freshly observed\..* Shell commands are blocked until then/su);
     const watch = h.db.pullRequestWatches.visibleFor("app")!;
     assert.deepEqual([watch.repository, watch.number, watch.state], ["owner/api", 7, "watching"], "parked on the prerequisite");
-    // Other tools are not affected, and the approval stays armed.
+    // Every tool that can run a command is denied too; other tools are not affected, and the approval stays armed.
+    assert.deepEqual(["PowerShell", "Monitor"].map((tool) => hook(`${tool}-1`, tool).data?.decision), ["deny", "deny"]);
     assert.equal(hook("read-1", "Read").data?.decision, "defer");
     const held = h.db.workflowDecisionByOccurrence(merge.occurrenceId)!;
     assert.deepEqual([held.status, held.actionAdmission?.kind], ["approved", "pr_merge_enqueue"]);

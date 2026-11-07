@@ -237,9 +237,9 @@ possible later work.
   rejected.
 - **Claude's policy hook.** The hook never carries a command (raw tool input doesn't cross that
   boundary), so it can't tell the armed command from another shell command. While a session's armed
-  merge is held, the hook denies every shell command of that session and parks it on the
-  prerequisite, and a policy-hook card for a shell command can't be allowed; other tools are
-  unaffected, and shell commands pass again once the hold lifts.
+  merge is held, the hook denies every use of a tool that can run a command (Bash, PowerShell,
+  Monitor) by that session and parks it on the prerequisite, and a policy-hook card for one can't be
+  allowed; other tools are unaffected, and those tools pass again once the hold lifts.
 - **What can't be intercepted.** A provider running the armed command with neither a permission
   request nor a policy-hook evaluation reports it only afterwards, so the guard above is the only
   fence on that path. A person merging on the forge, and a raw `gh pr merge` that was never armed,
