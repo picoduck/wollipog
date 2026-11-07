@@ -479,7 +479,7 @@ test("durable command completion rejects missing starts and missing, failed, mis
         actionProviderTurnId: "provider-turn-before-restart",
       }, PROTOCOL_VERSION);
       assert.equal(result.accepted, false, mismatch);
-      assert.equal(result.error, "provider history did not contain one exact successful command");
+      assert.equal(result.error, "provider history could not prove the exact successful command and its action admission");
     } finally {
       h.cleanup();
     }

@@ -335,6 +335,7 @@ export interface Driver {
     occurrenceId: string,
     command: string,
     fence?: CompletedCommandReconciliationFence,
+    onFailure?: (reason: string) => void,
   ): Promise<CompletedCommandReconciliationProof | null>;
 
   /** Incorporate input into the currently active provider turn when the transport can receipt it. */
