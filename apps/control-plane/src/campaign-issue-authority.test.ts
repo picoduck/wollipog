@@ -3836,6 +3836,7 @@ test("a follow-up from work in the same repository, when that isn't the launch o
     const project = h.db.createProject({ name: "Multi" });
     const api = h.db.addProjectLocation(project.id, { runnerId: "r2", workspaceId: "a" });
     h.db.raw().prepare("UPDATE sessions SET project_id=? WHERE id='root'").run(project.id);
+    h.db.raw().prepare("UPDATE sessions SET project_id=?, runner_id='r2', workspace_id='a' WHERE id='child'").run(project.id);
     // team/api is in the boundary, and team/api#50 is in the scope: the work the follow-up comes from.
     const policy = h.db.getSession("root")!.orchestratorPolicy!;
     if (policy.control?.mode !== "full_control") throw new Error("fixture control expected");
@@ -3898,6 +3899,203 @@ test("a follow-up from work in the same repository, when that isn't the launch o
     assert.ok(h.approve(joined.data!).ok);
     assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueScope!.issues, [{ repository: "team/api", number: 50 }, { repository: "team/api", number: 77 }, { repository: "team/repo", number: 100 }]);
     assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100], "the launch repository's numbers are unchanged");
+    // It was published by the child's own login: Wollipog never performed it, and refuses to.
+    const local = recordPublication(h, "team/api", "Second api repair", origin.id);
+    const own = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "own-repository", resourceKey: "own-repository", resourceSnapshot: local });
+    assert.ok(h.svc.resolveWorkflowDecision("root", "child", own.data!.occurrenceId, { outcome: "approve" }, "orchestrator", { kind: "agent", id: "root" }, () => true).ok);
+    const notRouted = await h.svc.executeWorkflowDecision("child", own.data!.occurrenceId, { resourceDigest: own.data!.resourceDigest });
+    assert.equal(notRouted.status, 403, notRouted.error ?? "");
+  } finally { h.db.close(); }
+});
+
+/** A recorded, accepted follow-up in `repository`, and the exact publication of it. */
+function recordPublication(h: ReturnType<typeof harness>, repository: string, title: string, originWorkItemId: string) {
+  const recorded = h.svc.recordCampaignFollowUp("root", { originSessionId: "child", repository, title, originWorkItemIds: [originWorkItemId] });
+  assert.ok(recorded.ok, recorded.error ?? "record");
+  assert.ok(h.svc.adjudicateCampaignRecommendation("root", { recommendationId: recorded.data!.id, disposition: "accepted",
+    reason: "Observed while delivering the work", publicationRequired: true }).ok);
+  return { category: "follow_up_issue_publication" as const, repository, sanitizedTitle: title, sanitizedBody: body, labels: [] as string[], recommendationId: recorded.data!.id };
+}
+
+/** team/repo (the root's), team/api on r2 and team/web on r3, with team/api#50 in the scope and the
+ * work it names planned. Every runner request is recorded with who was asked. */
+function multiRepositoryCampaign() {
+  const h = harness();
+  const runner = (runnerId: string, id: string, path: string) => h.db.registerRunner({ runnerId, hostname: runnerId, os: "linux", version: "test", workspaces: [{ id, name: id, path }], agents: [],
+    runtime: { maxConcurrentSessions: 4, campaignLaunchInspection: { version: 4 } } as RunnerMetadata["runtime"] }, 1, PROTOCOL_VERSION);
+  runner("r2", "a", "/repos/api");
+  runner("r3", "b", "/repos/web");
+  const project = h.db.createProject({ name: "Multi" });
+  const api = h.db.addProjectLocation(project.id, { runnerId: "r2", workspaceId: "a" });
+  const web = h.db.addProjectLocation(project.id, { runnerId: "r3", workspaceId: "b" });
+  h.db.raw().prepare("UPDATE sessions SET project_id=? WHERE id IN ('root','child')").run(project.id);
+  const policy = h.db.getSession("root")!.orchestratorPolicy!;
+  if (policy.control?.mode !== "full_control") throw new Error("fixture control expected");
+  policy.control.boundary.repositories = [{ repository: "team/repo", locationIds: [] }, { repository: "team/api", locationIds: [api.id] }, { repository: "team/web", locationIds: [web.id] }];
+  policy.issueScope!.issues = [{ repository: "team/api", number: 50 }, { repository: "team/repo", number: 100 }];
+  h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
+  assert.equal(campaignBoundaryCurrent(h.db.getSession("root")!), true);
+  const planned = h.svc.recordCampaignPlan("root", { items: [{ key: "issue:100", issue: { repository: "team/repo", number: 100 } },
+    { key: "issue:50", issue: { repository: "team/api", number: 50 } }], planComplete: true });
+  assert.ok(planned.ok, planned.error ?? "plan");
+  const page = h.db.campaignWorkLedger.page("root", { state: "all", limit: 100 }, Date.now());
+  assert.ok(page.ok);
+  const origin = (repository: string) => page.data.items.find((item) => item.issue?.repository === repository)!.id;
+
+  const repositories: Record<string, string> = { r2: "team/api", r3: "team/web" };
+  const inspections: string[] = [];
+  const actions: Array<{ runnerId: string; kind: string; location?: unknown; action: unknown }> = [];
+  const control = { answer: (kind: string): Record<string, unknown> => kind === "issue_publication" ? { outcome: "published", issue: 77 } : { outcome: "uncertain" },
+    inspectionOk: true };
+  const inner = h.hub.requestFromRunner;
+  h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+    if (message.type === "forge_decision_action") {
+      actions.push({ runnerId, kind: message.action.kind, location: message.location, action: message.action });
+      return { type: "forge_decision_action_result", requestId, sessionId: message.sessionId, occurrenceId: message.occurrenceId, ...control.answer(message.action.kind) } as never;
+    }
+    if (message.type === "campaign_issue_scope" && message.operation === "publication_inspect") {
+      inspections.push(runnerId);
+      if (!control.inspectionOk) return { type: "campaign_issue_scope_result" as const, requestId, sessionId: message.sessionId, ok: false };
+      return inner(runnerId, requestId, message, timeout);
+    }
+    if (message.type !== "campaign_launch_inspect") return inner(runnerId, requestId, message, timeout);
+    inspections.push(runnerId);
+    const result = { type: "campaign_launch_inspection_result" as const, requestId, workspaceId: message.workspaceId, ok: true, repository: repositories[runnerId]!,
+      issueNumbers: message.issueNumbers, digest: "d".repeat(64) };
+    if (!control.inspectionOk) return { ...result, ok: false, failure: "publication_refused" as const };
+    return message.issueNumbers.length ? result : { ...result, publicationDigest: issueEvidenceDigest(message.publication), duplicateSearch: "subject" as const };
+  };
+  const approved = async (requestId: string, snapshot: ReturnType<typeof recordPublication>) => {
+    const decision = await h.svc.createWorkflowDecisionWithVideo("child", { requestId, resourceKey: requestId, resourceSnapshot: snapshot });
+    assert.ok(decision.ok, decision.error ?? "request");
+    assert.equal(decision.data!.authority, "orchestrator", JSON.stringify(decision.data!.authorityEvaluation));
+    assert.ok(h.svc.resolveWorkflowDecision("root", "child", decision.data!.occurrenceId, { outcome: "approve" }, "orchestrator", { kind: "agent", id: "root" }, () => true).ok);
+    return decision.data!;
+  };
+  const perform = (decision: WorkflowDecisionView) => h.svc.executeWorkflowDecision("child", decision.occurrenceId, { resourceDigest: decision.resourceDigest });
+  return { h, origin, inspections, actions, control, approved, perform, runner };
+}
+
+test("a publication in another repository is created through a Location of it with that runner's login, and the requester's is never used (#4119)", async () => {
+  const c = multiRepositoryCampaign();
+  const { h } = c;
+  try {
+    // The child works in the launch repository's Location and publishes into team/api.
+    const snapshot = recordPublication(h, "team/api", "Api repair from the launch work", c.origin("team/repo"));
+    const decision = await c.approved("routed", snapshot);
+    const read = () => h.db.workflowDecisionByOccurrence(decision.occurrenceId)!;
+
+    // Consuming is what would hand it to the child's own login, so it is refused, and the approval stands.
+    const consumed = await h.svc.consumeWorkflowDecision("child", decision.occurrenceId, { resourceSnapshot: decision.resourceSnapshot });
+    assert.equal(consumed.status, 409);
+    assert.match(consumed.error!, /execute_workflow_decision/u);
+    assert.equal(read().status, "approved");
+
+    // With no capable Location nothing is created and no other runner stands in: offline, then too old.
+    const online = h.hub.isRunnerOnline;
+    h.hub.isRunnerOnline = (runnerId) => runnerId !== "r2" && online.call(h.hub, runnerId);
+    const offline = await c.perform(decision);
+    assert.equal(offline.status, 409);
+    assert.match(offline.error!, /No Location of team\/api is online/u);
+    h.hub.isRunnerOnline = online;
+    h.db.registerRunner({ runnerId: "r2", hostname: "r2", os: "linux", version: "test", workspaces: [{ id: "a", name: "a", path: "/repos/api" }], agents: [],
+      runtime: { maxConcurrentSessions: 4, campaignLaunchInspection: { version: 4 } } as RunnerMetadata["runtime"] }, 1, RUNNER_CAPABILITY_MIN_PROTOCOL.locationIssuePublication - 1);
+    assert.equal((await c.perform(decision)).status, 409);
+    assert.deepEqual(c.actions, [], "no runner was asked to create anything");
+    assert.equal(read().status, "approved");
+    c.runner("r2", "a", "/repos/api");
+
+    // A wrong digest, and a fresh duplicate search that no longer holds: nothing is created and the approval stands.
+    assert.equal((await h.svc.executeWorkflowDecision("child", decision.occurrenceId, { resourceDigest: "0".repeat(64) })).status, 409);
+    c.control.inspectionOk = false;
+    const duplicate = await c.perform(decision);
+    assert.deepEqual([duplicate.data!.forgeAction?.outcome, duplicate.data!.forgeAction?.refusal?.reason, duplicate.data!.status], ["refused", "publication_refused", "approved"]);
+    assert.deepEqual(c.actions, []);
+    c.control.inspectionOk = true;
+
+    // A refusal that changed nothing leaves it to retry; then r2, and only r2, creates the exact approved issue.
+    const answer = c.control.answer;
+    c.control.answer = () => ({ outcome: "refused", refusal: { reason: "repository_mismatch", summary: "Another checkout" } });
+    const refused = await c.perform(decision);
+    assert.deepEqual([refused.data!.forgeAction?.outcome, refused.data!.status], ["refused", "approved"]);
+    c.control.answer = answer;
+    c.actions.length = 0;
+    const performed = await c.perform(decision);
+    assert.ok(performed.ok, performed.error ?? "execute");
+    assert.deepEqual(c.actions, [{ runnerId: "r2", kind: "issue_publication",
+      location: { workspaceId: "a", workspacePath: "/repos/api", repository: "team/api" },
+      action: { kind: "issue_publication", repository: "team/api", title: snapshot.sanitizedTitle, body, labels: [] } }]);
+    assert.deepEqual([performed.data!.status, performed.data!.forgeAction?.outcome, performed.data!.forgeAction?.publishedIssue, performed.data!.forgeAction?.performedByRunnerId],
+      ["consumed", "published", 77, "r2"]);
+    assert.equal((await c.perform(decision)).status, 409, "one approval, one issue");
+    assert.equal(c.actions.length, 1);
+  } finally { h.db.close(); }
+});
+
+test("a publication that may have run is never created again: a later attempt only looks for its issue (#4119)", async () => {
+  const c = multiRepositoryCampaign();
+  const { h } = c;
+  try {
+    const decision = await c.approved("uncertain", recordPublication(h, "team/api", "Api repair of uncertain fate", c.origin("team/repo")));
+    // No answer at all, and a success that names no issue, prove nothing.
+    c.control.answer = () => ({ outcome: "published" });
+    const noIssue = await c.perform(decision);
+    assert.deepEqual([noIssue.data!.forgeAction?.outcome, noIssue.data!.status], ["uncertain", "approved"]);
+    // Refusals and missing runners while looking can't reopen creation, and neither can a look that finds nothing.
+    c.control.answer = () => ({ outcome: "refused", refusal: { reason: "forge_unavailable", summary: "Offline" } });
+    assert.equal((await c.perform(decision)).data!.forgeAction?.outcome, "uncertain");
+    c.control.answer = () => ({ outcome: "uncertain" });
+    assert.equal((await c.perform(decision)).data!.forgeAction?.outcome, "uncertain");
+    // A look can't report a fresh creation.
+    c.control.answer = () => ({ outcome: "published", issue: 91 });
+    assert.equal((await c.perform(decision)).data!.forgeAction?.outcome, "uncertain");
+    assert.deepEqual(c.actions.map((action) => action.kind), ["issue_publication", "issue_publication_observe", "issue_publication_observe", "issue_publication_observe"]);
+    // Finding it settles the approval, with its number and the runner that read it.
+    c.control.answer = () => ({ outcome: "already_published", issue: 78 });
+    const found = await c.perform(decision);
+    assert.deepEqual([found.data!.status, found.data!.forgeAction?.outcome, found.data!.forgeAction?.publishedIssue, found.data!.forgeAction?.performedByRunnerId],
+      ["consumed", "already_published", 78, "r2"]);
+    assert.equal(c.actions.at(-1)!.kind, "issue_publication_observe");
+    assert.equal(c.actions.at(-1)!.runnerId, "r2");
+  } finally { h.db.close(); }
+});
+
+test("a follow-up from a non-launch repository publishes into the launch repository, and from one non-launch repository into another, each through the target's own place (#4119)", async () => {
+  const c = multiRepositoryCampaign();
+  const { h } = c;
+  try {
+    // The child works in team/api, so its origin is team/api#50 and it isn't the launch repository.
+    h.db.raw().prepare("UPDATE sessions SET runner_id='r2', workspace_id='a' WHERE id='child'").run();
+
+    // Non-launch to launch: the root's runner inspects and creates it in the root's own checkout.
+    const toLaunch = recordPublication(h, "team/repo", "Launch repair found in the API", c.origin("team/api"));
+    const launch = await c.approved("to-launch", toLaunch);
+    assert.deepEqual(publicationEvidence(h.db, h.db.getSession("root")!, toLaunch)?.lineage, { target: "team/repo", origins: ["team/api#50"] });
+    assert.deepEqual(c.inspections, ["r"]);
+    assert.ok((await c.perform(launch)).ok);
+    assert.deepEqual(c.actions.map((action) => [action.runnerId, action.location]),
+      [["r", { workspaceId: "w", workspacePath: "/repos/test", repository: "team/repo" }]]);
+    assert.deepEqual(c.inspections, ["r", "r"]);
+
+    // B to C: only team/web's Location is asked, never the root's runner or the child's.
+    c.inspections.length = 0;
+    c.actions.length = 0;
+    const toWeb = recordPublication(h, "team/web", "Web repair found in the API", c.origin("team/api"));
+    const web = await c.approved("to-web", toWeb);
+    assert.deepEqual(publicationEvidence(h.db, h.db.getSession("root")!, toWeb)?.lineage, { target: "team/web", origins: ["team/api#50"] });
+    assert.ok((await c.perform(web)).ok);
+    assert.deepEqual(c.inspections, ["r3", "r3"]);
+    assert.deepEqual(c.actions.map((action) => [action.runnerId, action.location]),
+      [["r3", { workspaceId: "b", workspacePath: "/repos/web", repository: "team/web" }]]);
+
+    // It joins the scope through that lineage, as team/web's own issue.
+    assert.ok(h.svc.adjudicateCampaignRecommendation("root", { recommendationId: toWeb.recommendationId, disposition: "accepted", reason: "Published payload read back",
+      resultingWorkItemKey: `followup:${toWeb.recommendationId}`, resultingIssue: { repository: "team/web", number: 77 } }).ok);
+    const joined = await h.svc.proposeCampaignIssueScope("root", { requestId: "join-web", expectedRevision: h.db.getSession("root")!.orchestratorPolicy!.issueScope!.revision,
+      additions: [{ repository: "team/web", number: 77 }], removals: [], explanation: "The published follow-up", lineage: { kind: "follow_up", publicationOccurrenceId: web.occurrenceId } });
+    assert.ok(joined.ok, joined.error ?? "join");
+    assert.equal(joined.data!.authority, "orchestrator", JSON.stringify(joined.data!.authorityEvaluation));
+    assert.deepEqual(c.inspections.at(-1), "r3");
   } finally { h.db.close(); }
 });
 
@@ -3919,6 +4117,9 @@ test("a follow-up in another boundary repository is inspected through its Locati
     let whileInspecting: (() => void) | null = null;
     const runner = h.hub.requestFromRunner;
     h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+      if (message.type === "forge_decision_action") {
+        return { type: "forge_decision_action_result" as const, requestId, sessionId: message.sessionId, occurrenceId: message.occurrenceId, outcome: "published" as const, issue: 77 };
+      }
       if (message.type !== "campaign_launch_inspect") return runner(runnerId, requestId, message, timeout);
       whileInspecting?.();
       const result = { type: "campaign_launch_inspection_result" as const, requestId, workspaceId: message.workspaceId, ok: true, repository: "team/api",
@@ -3966,11 +4167,12 @@ test("a follow-up in another boundary repository is inspected through its Locati
       publication: { sanitizedTitle: "Api inside repair", sanitizedBody: body, labels: [] } }]);
     // Its lineage names the originating repository's issue and the target repository.
     assert.deepEqual(publicationEvidence(h.db, h.db.getSession("root")!, inside)?.lineage, { target: "team/api", origins: ["team/repo#100"] });
-    // Consumption inspects again through the same Location.
+    // Performing it inspects again through the same Location, whose runner creates the issue.
     assert.ok(h.svc.resolveWorkflowDecision("root", "child", admitted.data!.occurrenceId, { outcome: "approve" }, "orchestrator",
       { kind: "agent", id: "root" }, () => true).ok);
-    const consumed = await h.svc.consumeWorkflowDecision("child", admitted.data!.occurrenceId, { resourceSnapshot: admitted.data!.resourceSnapshot });
-    assert.ok(consumed.ok, consumed.error ?? "consume");
+    const performed = await h.svc.executeWorkflowDecision("child", admitted.data!.occurrenceId, { resourceDigest: admitted.data!.resourceDigest });
+    assert.ok(performed.ok, performed.error ?? "execute");
+    assert.equal(performed.data!.status, "consumed");
     assert.equal(inspections.length, 2);
     assert.equal(inspections[1]!.runnerId, "r2");
 
@@ -4009,7 +4211,7 @@ test("a follow-up in another boundary repository is inspected through its Locati
     assert.ok(humanGrant.ok, humanGrant.error ?? "request");
     assert.ok(h.svc.resolveWorkflowDecision("root", "child", humanGrant.data!.occurrenceId, { outcome: "approve" }, "orchestrator",
       { kind: "agent", id: "root" }, () => true).ok);
-    assert.ok((await h.svc.consumeWorkflowDecision("child", humanGrant.data!.occurrenceId, { resourceSnapshot: humanGrant.data!.resourceSnapshot })).ok);
+    assert.ok((await h.svc.executeWorkflowDecision("child", humanGrant.data!.occurrenceId, { resourceDigest: humanGrant.data!.resourceDigest })).ok);
     assert.ok(h.svc.adjudicateCampaignRecommendation("root", { recommendationId: humanJoin.recommendationId, disposition: "accepted", reason: "Published payload read back",
       resultingWorkItemKey: `followup:${humanJoin.recommendationId}`, resultingIssue: { repository: "team/api", number: 78 } }).ok);
     const humanChange = await h.svc.proposeCampaignIssueScope("root", { requestId: "human-join", expectedRevision: h.db.getSession("root")!.orchestratorPolicy!.issueScope!.revision,

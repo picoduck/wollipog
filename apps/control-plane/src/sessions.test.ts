@@ -7658,6 +7658,65 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     } finally { db.close(); }
   });
 
+  await t.test("an all-reported merge whose checks change after approval is neither armed nor enqueued (#4119)", async () => {
+    const { db, hub, svc, parent, child } = setup(AGENT_ID);
+    try {
+      const passed = (name: string) => ({ name, state: "passed" });
+      let checks: Record<string, unknown> = { required: 0, clean: true, reported: [passed("build")] };
+      hub.githubMergePreflight = (message) => ({ type: "github_merge_preflight_result", requestId: message.requestId, sessionId: message.sessionId, ok: true,
+        check: { checkedAt: 2, closures: [] }, checks } as RunnerRequestResult);
+      const dispatched: ForgeDecisionActionMessage[] = [];
+      const approved = async (pullRequest: number) => {
+        const headSha = String(pullRequest).padStart(40, "a").slice(-40);
+        const snapshot = { category: "pr_merge" as const, repository: "picoduck/wollipog", pullRequest, headSha, reviewResult: "merge" as const, checksBasis: "all_reported" as const,
+          requiredChecks: { headSha, status: "passed" as const, checkedAt: 10, checks: [{ name: "build", state: "passed" as const }] } };
+        const decision = await svc.createWorkflowDecisionWithVideo(child.id, { requestId: `all-reported-${pullRequest}`, resourceKey: `all-reported-${pullRequest}`, resourceSnapshot: snapshot });
+        assert.ok(decision.ok && decision.data, decision.error);
+        assert.equal(decision.data.authority, "orchestrator");
+        assert.ok(svc.resolveDescendantRequest(parent.id, child.id, decision.data.occurrenceId, { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+        const consume = () => svc.consumeWorkflowDecision(child.id, decision.data!.occurrenceId,
+          { resourceSnapshot: snapshot, action: { kind: "pr_merge_enqueue", command: canonicalPrMergeEnqueueCommand(snapshot) } });
+        const perform = () => svc.executeWorkflowDecision(child.id, decision.data!.occurrenceId, { resourceDigest: decision.data!.resourceDigest });
+        return { decision: decision.data, consume, perform };
+      };
+
+      // At arming: a check that fails after approval arms nothing, and the approval waits.
+      const first = await approved(4119);
+      checks = { required: 0, clean: true, reported: [{ name: "build", state: "failing" }] };
+      const failing = await first.consume();
+      assert.equal(failing.status, 409);
+      assert.match(failing.error ?? "", /is failing/u);
+      assert.equal(db.workflowDecisionByOccurrence(first.decision.occurrenceId)?.status, "approved");
+      assert.equal(db.workflowDecisionByOccurrence(first.decision.occurrenceId)?.actionAdmission, undefined, "nothing was armed");
+
+      // At performing: it armed while passing, then a check went back to pending. Nothing reaches the forge.
+      checks = { required: 0, clean: true, reported: [passed("build")] };
+      assert.equal((await first.consume()).status, 200);
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "enqueued" }), dispatched);
+      checks = { required: 0, clean: true, reported: [{ name: "build", state: "pending" }] };
+      const pending = await first.perform();
+      assert.equal(pending.data?.status, "approved");
+      assert.equal(pending.data?.forgeAction?.refusal?.reason, "forge_unavailable");
+      assert.match(pending.data?.forgeAction?.refusal?.summary ?? "", /has not finished/u);
+
+      // A merge state that stopped being clean refuses the same way, and a new required check revokes it.
+      checks = { required: 0, clean: false, reported: [passed("build")] };
+      assert.equal((await first.perform()).data?.forgeAction?.refusal?.reason, "forge_unavailable");
+      checks = { required: 1, clean: true, reported: [passed("build")] };
+      const required = await first.perform();
+      assert.equal(required.data?.status, "revoked", "its basis no longer applies");
+      assert.equal(dispatched.length, 0, "nothing reached the forge");
+
+      // Still passing and clean, it is enqueued.
+      checks = { required: 0, clean: true, reported: [passed("build")] };
+      const second = await approved(4120);
+      assert.equal((await second.consume()).status, 200);
+      const enqueued = await second.perform();
+      assert.equal(enqueued.data?.forgeAction?.outcome, "enqueued", enqueued.error);
+      assert.equal(dispatched.length, 1);
+    } finally { hub.githubMergePreflight = undefined; db.close(); }
+  });
+
   await t.test("a refused enqueue that never ran stays approved for a retry, and a stale one is revoked (#4067)", async () => {
     const { db, hub, svc, child, arm } = setup(AGENT_ID);
     try {

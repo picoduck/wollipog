@@ -232,6 +232,14 @@ approval is invalidated. A legacy campaign with no saved repository stays unveri
   Locations then wait for Include in Campaign, because the approval named one Location.
 - **Admission.** Maximum Issues counts issues across all repositories. Follow-up lineage admits a
   publication in any boundary repository (#4119), and one in another repository than its origins records both.
+- **Publication.** A publication in a repository other than the one its requester works in is created by a
+  Location of that repository, with that runner's own login (#4119, v327). Consuming it is refused, because
+  consuming is what lets the requester create the issue; `execute_workflow_decision` performs it instead,
+  and records the issue and the runner. With no capable Location online nothing is published, and no other
+  login stands in. A later attempt after an uncertain answer only looks for the issue. A repository the
+  requester works in stays as it was, and so does one the campaign holds no entry for, which only a person
+  can have approved: there is no Location of it to route through. This binds Wollipog's own route. A
+  requester's shell can still run `gh`, but such an issue has no consumed grant, so it can't join the scope.
 - **Epics.** `issueAuthority.epics` are the launch repository's, and `issueAuthority.otherEpics` holds
   the boundary's other repositories' as qualified refs. A stored boundary has none, and its epics read as
   the launch repository's at the same revision. A person's launch authorizes them: `otherIssues` on a

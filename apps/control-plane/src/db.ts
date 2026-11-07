@@ -6355,10 +6355,8 @@ export class ControlPlaneDb {
       if (!page.ok) return { state: "recovery_held", recoveryIds: [] };
       for (const item of page.data.items) {
         if (handedOff.has(item.id)) continue;
-        // Delivery is proven in the launch repository only until per-repository gates (#4119) land:
-        // an item in another campaign repository stays the campaign's ordinary unfinished work.
-        if (item.commitment !== "committed" || !item.issue || item.issue.repository.toLowerCase() !== scope.repository.toLowerCase() ||
-            !campaignIssueInScope(policy, item.issue)) continue;
+        // Delivery is proven in the item's own repository, whichever of the campaign's it is (#4119).
+        if (item.commitment !== "committed" || !item.issue || !campaignIssueInScope(policy, item.issue)) continue;
         // A never-dispatched placeholder of an epic this campaign closed from its members (#4060) is
         // finished by that closure. Any item with an attempt still needs its own delivery.
         if (item.attemptCount === 0 && !item.currentAttempt && this.memberProvenEpicClosure(campaignId, item.issue.repository, item.issue.number)) continue;
@@ -6374,14 +6372,17 @@ export class ControlPlaneDb {
         // A stale grant cannot establish delivery or admit a forge/review repair.
         // Only completion truth is retained; the existing admission still fences all effects.
         if (!boundaryCurrent) continue;
-        const refs = item.stage?.pullRequests.filter(ref => ref.repository.toLowerCase() === scope.repository.toLowerCase()) ?? [];
+        const itemRepository = item.issue.repository.toLowerCase();
+        const refs = item.stage?.pullRequests.filter(ref => ref.repository.toLowerCase() === itemRepository) ?? [];
         if (refs.length === 0) { unfinished = true; continue; }
         for (const { ref, fact } of this.campaignForgeObservations.facts(campaignId, refs, now)) {
           if (fact.availability === "fresh" && fact.value.state === "merged" && fact.value.mergeCommitSha) continue;
           unfinished = true;
+          // A repair rests on a fact from the runner that reads this repository now: the root's for
+          // the launch repository, one of its Locations' for another.
           if (fact.availability !== "fresh" || fact.value.state !== "open" ||
               (this.stmt("SELECT runner_id FROM campaign_forge_observations WHERE campaign_session_id=? AND repository_key=? AND number=?")
-                .get(campaignId, ref.repository.toLowerCase(), ref.number) as { runner_id: string } | undefined)?.runner_id !== row.runner_id) continue;
+                .get(campaignId, ref.repository.toLowerCase(), ref.number) as { runner_id: string } | undefined)?.runner_id !== this.campaignForgeObservingRunner(campaignId, ref.repository)?.runnerId) continue;
           for (const record of records) {
             if (record.policyRevision !== row.parent_control_policy_revision || record.dispatchFenced ||
                 record.effectiveOwner !== "orchestrator" || !["ready", "backoff", "dispatched"].includes(record.state) ||

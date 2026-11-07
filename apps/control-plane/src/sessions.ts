@@ -38,7 +38,8 @@ import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignClosureIssueHeld, campaignRepositoryLimits, campaignControlForRunner, campaignControlRevisionForRunner, campaignLaunchRepository, campaignOtherRepository, campaignScopeRepositories, carriedCampaignRepositories } from "./campaign-authority.js";
 import { campaignRepositoryOutsideLimit } from "./campaign-authority.js";
-import { campaignBoundaryRepositoryAt, campaignRepositoryPlaces, launchBoundaryRepositories } from "./campaign-repository-boundary.js";
+import { campaignBoundaryRepositoryAt, campaignRepositoryPlaces, launchBoundaryRepositories, type CampaignRepositoryPlace } from "./campaign-repository-boundary.js";
+import type { CampaignBoundaryRepository } from "@wollipog/protocol";
 import { inspectBoundaryPublication, verifyBoundaryPublishedIssue } from "./project-location-inspection.js";
 import { campaignBoundaryRepository } from "@wollipog/protocol";
 import { genericRequestScreenData, implementationQuestionScreenData, ownerDecisionScreenData, screenCredentialRequest, type CredentialScreenSurface } from "./credential-screen.js";
@@ -4816,7 +4817,9 @@ export class SessionsService {
       if (!preflight.supported || !campaignBoundaryCurrent(campaignController)) {
         return campaignRefusalFail(preflight.requirement ?? preflight.reason ?? "campaign authority boundary is stale");
       }
-      const misplaced = this.campaignPlacementRefusal(campaignController, parentSession, req);
+      // The paced-video reviewer the root launches for a child, and a review its requester asked for.
+      const misplaced = this.campaignPlacementRefusal(campaignController, parentSession, req,
+        creationContext?.[PREPARED_MEDIA_CAPTURE]?.decision.sessionId ?? creationContext?.review?.policy.requesterSessionId);
       if (misplaced) return fail(misplaced, 409);
     } else if (campaignController) {
       const misplaced = this.campaignPlacementRefusal(campaignController, parentSession, req);
@@ -10515,7 +10518,7 @@ export class SessionsService {
    * each session works in exactly one. An ad-hoc path is never a Location. Sessions, runs and
    * workflows all apply it. */
   private campaignPlacementRefusal(root: SessionView, parent: SessionView | null,
-    place: { runnerId: string; workspaceId?: string | null; workspacePath?: string }): string | null {
+    place: { runnerId: string; workspaceId?: string | null; workspacePath?: string }, servedSessionId?: string): string | null {
     if (root.orchestratorPolicy?.control?.mode !== "full_control") {
       // A limit outlives Full Control (#4118): a Custom child isn't bound to a repository, but it
       // can't work in one the limit leaves out, as far as this campaign can tell which that is.
@@ -10526,7 +10529,9 @@ export class SessionsService {
         ? `The owner's first message limited this campaign to ${campaignRepositoryLimits(root.orchestratorPolicy).join(", ")}, so a child can't work in ${known}. Place it in a Location of one of those repositories.` : null;
     }
     const repository = place.workspacePath ? null : campaignBoundaryRepositoryAt(this.db, root, place);
-    const parentRepository = parent && parent.id !== root.id ? campaignBoundaryRepositoryAt(this.db, root, parent) : repository;
+    // A session the root launches for a child stays in that child's repository, like the child's own.
+    const served = servedSessionId && servedSessionId !== root.id ? this.db.getSession(servedSessionId) : parent && parent.id !== root.id ? parent : null;
+    const parentRepository = served ? campaignBoundaryRepositoryAt(this.db, root, served) : repository;
     // The launch entry a first-message limit leaves out stays only because the root runs there (#4117).
     if (repository && campaignRepositoryOutsideLimit(root.orchestratorPolicy, repository)) {
       return `The owner's first message limited this campaign to ${campaignRepositoryLimits(root.orchestratorPolicy).join(", ")}, so a child can't work in ${repository}. Place it in a Location of one of those repositories.`;
@@ -10536,15 +10541,38 @@ export class SessionsService {
   }
 
   /** A campaign participant runs in a Location of a boundary repository, and in the same one as the
-   * campaign session it serves (#4119): its parent, unless that parent is the root, which serves
-   * every repository. */
+   * campaign session it serves (#4119): its parent, or the child a root-parented reviewer works for.
+   * Only a session serving the root alone, which serves every repository, is free to be anywhere. */
   private campaignServesOwnRepository(root: SessionView, session: SessionView): boolean {
     const repository = campaignBoundaryRepositoryAt(this.db, root, session);
     if (!repository) return false;
     // Only the root may be in a repository a first-message limit leaves out (#4117).
     if (session.id !== root.id && campaignRepositoryOutsideLimit(root.orchestratorPolicy, repository)) return false;
-    const parent = session.parentSessionId && session.parentSessionId !== root.id ? this.db.getSession(session.parentSessionId) : null;
-    return !parent || campaignBoundaryRepositoryAt(this.db, root, parent) === repository;
+    const servedId = this.campaignServedSessionId(root, session);
+    const served = servedId ? this.db.getSession(servedId) : null;
+    return !served || campaignBoundaryRepositoryAt(this.db, root, served) === repository;
+  }
+
+  /** The session other than the root that this one works for, from trusted records: its parent, a
+   * review session's requester, or the child whose video a paced-video reviewer reviews. */
+  private campaignServedSessionId(root: SessionView, session: SessionView): string | null {
+    if (session.id === root.id) return null;
+    if (session.parentSessionId && session.parentSessionId !== root.id) return session.parentSessionId;
+    const requester = this.db.reviewSessions.view(session.id)?.requesterSessionId;
+    if (requester && requester !== root.id) return requester;
+    let child: string | null = null;
+    try {
+      child = (this.db.raw().prepare("SELECT json_extract(record,'$.childSessionId') AS child FROM delegated_video_reviews WHERE reviewer_session_id=?")
+        .get(session.id) as { child: string | null } | undefined)?.child ?? null;
+    } catch { /* No delegated video reviews in this installation. */ }
+    return child && child !== root.id ? child : null;
+  }
+
+  /** Whether this runner's discovery matches the boundary's retained controlled-review profile. Read
+   * from the runner the session runs on, at authorization and at each later admission alike (#4119). */
+  private controlledReviewAvailable(runnerId: string, profile: Parameters<typeof controlledReviewCapabilityKey>[0]): boolean {
+    const capability = this.db.getRunner(runnerId)?.runtime?.campaignReview;
+    return Boolean(capability) && controlledReviewCapabilityKey(capability!) === controlledReviewCapabilityKey(profile);
   }
 
   /** The requester with the boundary repository whose Location it runs in (#4119), for campaign
@@ -10784,12 +10812,15 @@ export class SessionsService {
       if (!session.workspaceId) return fail("Full Control requires a repository workspace binding", 409);
       if(control.boundary.budgetAuthority?.controlledReview) {
         if(this.db.sessionScope(sessionId)?.owner.kind!=="user") return fail("Controlled native review requires a user-owned campaign charge scope.",409);
-        const capability=this.db.getRunner(session.runnerId)?.runtime?.campaignReview;
-        if(!capability || controlledReviewCapabilityKey(capability)!==controlledReviewCapabilityKey(control.boundary.budgetAuthority.controlledReview)) return fail("Required native reviewer profile is unsupported or differs from current runner discovery.",409);
+        if(!this.controlledReviewAvailable(session.runnerId, control.boundary.budgetAuthority.controlledReview)) return fail("Required native reviewer profile is unsupported or differs from current runner discovery.",409);
       }
       for (const id of [sessionId, ...this.db.campaignDescendantIds(sessionId)]) {
         const participant = this.db.getSession(id);
         if (!participant || isTerminal(participant.status)) continue;
+        if (control.boundary.budgetAuthority?.controlledReview &&
+            !this.controlledReviewAvailable(participant.runnerId, control.boundary.budgetAuthority.controlledReview)) {
+          return fail("Required native reviewer profile is unsupported or differs from current runner discovery.",409);
+        }
         // Under the boundary being authorized, each participant runs in one of its Locations (#4119).
         if (!this.campaignServesOwnRepository({ ...session, orchestratorPolicy: { ...session.orchestratorPolicy!, control } }, participant)) {
           return fail("campaign participants must run in a Location of a repository in the campaign's boundary", 409);
@@ -11765,9 +11796,8 @@ export class SessionsService {
     if (!preflight.supported) return preflight.requirement ?? preflight.reason ?? "campaign allowance requires supported accounting peers";
     if (!this.campaignServesOwnRepository(controller, session)) return "campaign allowance requires a Location of the same boundary repository as the session it serves";
     if (view.state !== "active") return view.reason ?? "campaign allowance unavailable";
-    if(view.authority.controlledReview) {
-      const capability=this.db.getRunner(controller.runnerId)?.runtime?.campaignReview;
-      if(!capability || controlledReviewCapabilityKey(capability)!==controlledReviewCapabilityKey(view.authority.controlledReview)) return "required native reviewer capability/profile is unavailable; protected dispatch refused";
+    if(view.authority.controlledReview && !this.controlledReviewAvailable(session.runnerId, view.authority.controlledReview)) {
+      return "required native reviewer capability/profile is unavailable; protected dispatch refused";
     }
     const allocation = this.db.campaignBudgets.allocation(session.id)!;
     if (config?.costBudgetUsd !== undefined && (config.costBudgetUsd <= 0 || allocation.costUsd !== undefined && config.costBudgetUsd !== allocation.costUsd) ||
@@ -12194,6 +12224,53 @@ export class SessionsService {
         result.repository?.toLowerCase() === snapshot.repository && result.publicationDigest && result.duplicateSearch === "subject"
         ? result.publicationDigest : null;
     } catch { return null; }
+  }
+
+  /** A bounded publication's evidence and duplicate search, read again just before its issue is
+   * authorized or created: why it no longer holds, or null. A person-owned publication has none. */
+  private async publicationFreshnessRefusal(decision: WorkflowDecisionView, parent: SessionView, policy: NonNullable<SessionView["parentControlPolicy"]>,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>): Promise<string | null> {
+    if (decision.authority !== "orchestrator" || !snapshot.issueAdmission) return null;
+    const evidence = publicationEvidence(this.db, parent, snapshot);
+    if (!evidence) return "Publication lineage, capacity or disposition changed before consumption";
+    // The same inspection as admission, through the same repository's runner and Location (#4119).
+    const publicationDigest = await this.inspectCampaignPublicationDigest(parent, snapshot);
+    if (!publicationDigest) return "Fresh duplicate inspection failed; no publication grant was consumed";
+    return issueEvidenceDigest({ evidence, publicationDigest }) !== snapshot.issueAdmission.evidenceDigest ||
+      issueEvidenceDigest(publicationEvidence(this.db, this.db.getSession(parent.id)!, snapshot)) !== issueEvidenceDigest(evidence) ||
+      !this.workflowDecisionAuthorityCurrent(this.db.getSession(parent.id)!, policy, decision)
+      ? "Fresh publication evidence changed; request a new exact grant" : null;
+  }
+
+  /** The campaign entry a publication must be created through (#4119), or null when its requester
+   * creates it as before: a repository the requester itself works in, a single-repository campaign,
+   * or a repository the campaign holds no Location of, which only a person can have approved. */
+  private publicationRoute(requester: SessionView, controller: SessionView,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>):
+    { root: SessionView; entry: CampaignBoundaryRepository } | null {
+    const rootId = this.db.campaignRootForMember(requester.id);
+    const root = (rootId ? this.db.getSession(rootId) : null) ?? controller;
+    const entries = campaignScopeRepositories(root);
+    const repository = snapshot.repository.toLowerCase();
+    const entry = entries.find((candidate) => candidate.repository === repository);
+    if (!entry || entries.length < 2) return null;
+    const own = requester.id === root.id ? campaignLaunchRepository(root) : this.db.campaignParticipantRepository(root, requester);
+    return own === repository ? null : { root, entry };
+  }
+
+  /** Where a routed publication runs: the first place of its repository whose runner is online and
+   * can do it. The launch repository's own checkout is the root's, then its listed Locations. No
+   * other runner's login ever stands in, so with none there is nothing to perform it. */
+  private publicationPlace(route: { root: SessionView; entry: CampaignBoundaryRepository }): CampaignRepositoryPlace | null {
+    const { root, entry } = route;
+    const rootPath = root.workspaceId ? this.db.getWorkspacePath(root.runnerId, root.workspaceId) : null;
+    const places: CampaignRepositoryPlace[] = [
+      ...(entry.repository === campaignLaunchRepository(root) && root.workspaceId && rootPath
+        ? [{ runnerId: root.runnerId, workspaceId: root.workspaceId, workspacePath: rootPath, repository: entry.repository }] : []),
+      ...campaignRepositoryPlaces(this.db, root, entry),
+    ];
+    return places.find((place) => this.hub.isRunnerOnline(place.runnerId) &&
+      runnerSupportsProtocol(this.db.getRunner(place.runnerId)?.protocolVersion, "locationIssuePublication")) ?? null;
   }
 
   /** Admits a publication of an accepted related recommendation as Orchestrator-owned. The root or
@@ -15027,16 +15104,15 @@ export class SessionsService {
     }
     const action = normalizeWorkflowDecisionAction(normalized.data, request?.action);
     if (!action.ok) return failAs(action);
-    if (decision.authority === "orchestrator" && normalized.data.category === "follow_up_issue_publication" && normalized.data.issueAdmission) {
-      const snapshot = normalized.data;
-      const evidence = publicationEvidence(this.db, parent, snapshot);
-      if (!evidence) return fail("Publication lineage, capacity or disposition changed before consumption", 409);
-      // The same inspection as admission, through the same repository's runner and Location (#4119).
-      const publicationDigest = await this.inspectCampaignPublicationDigest(parent, snapshot);
-      if (!publicationDigest) return fail("Fresh duplicate inspection failed; no publication grant was consumed", 409);
-      if (issueEvidenceDigest({ evidence, publicationDigest }) !== snapshot.issueAdmission!.evidenceDigest ||
-          issueEvidenceDigest(publicationEvidence(this.db, this.db.getSession(parent.id)!, snapshot)) !== issueEvidenceDigest(evidence) ||
-          !this.workflowDecisionAuthorityCurrent(this.db.getSession(parent.id)!, policy, decision)) return fail("Fresh publication evidence changed; request a new exact grant", 409);
+    if (normalized.data.category === "follow_up_issue_publication") {
+      // Consuming is what hands an issue's creation to the requester's own login, so a publication
+      // in another of the campaign's repositories never gets it (#4119). The approval still stands.
+      if (this.publicationRoute(child, parent, normalized.data)) {
+        return fail(`This publication is in ${normalized.data.repository}, another of the campaign's repositories, so a Location of that repository creates it with that runner's own login, never yours. ` +
+          "Nothing was consumed: call execute_workflow_decision with this decision's occurrenceId and resourceDigest instead of creating the issue yourself.", 409);
+      }
+      const stale = await this.publicationFreshnessRefusal(decision, parent, policy, normalized.data);
+      if (stale) return fail(stale, 409);
     }
     if (action.data) {
       if (child.driver !== "claude-code" && child.driver !== "codex-app-server") {
@@ -15251,13 +15327,14 @@ export class SessionsService {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== sessionId || !canAccess(sessionId)) return fail("workflow decision not found", 404);
     const snapshot = decision.resourceSnapshot;
-    if (snapshot.category !== "merged_branch_deletion" && snapshot.category !== "pr_merge") {
-      return fail("Wollipog performs only an approved merged_branch_deletion or an armed pr_merge", 403);
+    if (snapshot.category !== "merged_branch_deletion" && snapshot.category !== "pr_merge" && snapshot.category !== "follow_up_issue_publication") {
+      return fail("Wollipog performs only an approved merged_branch_deletion, an armed pr_merge, or a follow_up_issue_publication in another of a campaign's repositories", 403);
     }
     if (typeof request?.resourceDigest !== "string" || request.resourceDigest !== decision.resourceDigest) {
       return fail("the resource digest does not match this decision; read get_workflow_decision and pass its resourceDigest", 409);
     }
-    const kind: WorkflowDecisionForgeAction["kind"] = snapshot.category === "pr_merge" ? "pr_merge_enqueue" : "branch_deletion";
+    const kind: WorkflowDecisionForgeAction["kind"] = snapshot.category === "pr_merge" ? "pr_merge_enqueue"
+      : snapshot.category === "follow_up_issue_publication" ? "issue_publication" : "branch_deletion";
     const performed = decision.forgeAction && (FORGE_DECISION_ACTION_SUCCESSES as ReadonlySet<string>).has(decision.forgeAction.outcome);
     const consumedDeletion = kind === "branch_deletion" && decision.status === "consumed" && !performed;
     if (decision.status !== "approved" && !consumedDeletion) {
@@ -15266,7 +15343,8 @@ export class SessionsService {
     }
     const child = this.db.getSession(sessionId);
     const parent = this.db.getSession(decision.controllingSessionId);
-    if (child) {
+    // A publication is performed by its Location's runner, whose own version is checked below.
+    if (child && snapshot.category !== "follow_up_issue_publication") {
       const unsupported = this.capabilityFailure(child.runnerId, "forgeDecisionActions", "Wollipog-performed forge actions");
       if (unsupported) return unsupported;
     }
@@ -15280,7 +15358,11 @@ export class SessionsService {
       return Boolean(latest && latest.status === decision.status && latest.resourceDigest === decision.resourceDigest &&
         currentChild && currentParent && policy && !isTerminal(currentChild.status) && !isTerminal(currentParent.status) &&
         canAccess(currentChild.id) && canAccess(currentParent.id) &&
-        this.workflowDecisionRelationship(currentParent.id, currentChild.id) && policy.revision === decision.policyRevision &&
+        (this.workflowDecisionRelationship(currentParent.id, currentChild.id) ||
+          // A Custom root's own owner-approved publication, the same exception as consuming it (#3919).
+          decision.category === "follow_up_issue_publication" && decision.authority === "human" &&
+            currentChild.id === currentParent.id && this.customRootOwnPublication(currentChild)) &&
+        policy.revision === decision.policyRevision &&
         this.workflowDecisionAuthorityCurrent(currentParent, policy, latest));
     };
     if (!child || !parent || !authorityCurrent()) {
@@ -15290,7 +15372,25 @@ export class SessionsService {
       return fail("workflow decision authority was revoked or ancestry changed before the action", 409);
     }
     let action: ForgeDecisionAction;
-    if (snapshot.category === "merged_branch_deletion") {
+    // A publication whose earlier attempt may have run only looks for its issue from then on. A
+    // dispatch still `in_progress` here is one the begin below will read as stale, so uncertain too.
+    const lookOnly = snapshot.category === "follow_up_issue_publication" &&
+      (decision.forgeAction?.outcome === "uncertain" || decision.forgeAction?.outcome === "in_progress");
+    let publicationPlace: ReturnType<SessionsService["publicationPlace"]> = null;
+    if (snapshot.category === "follow_up_issue_publication") {
+      const route = this.publicationRoute(child, parent, snapshot);
+      if (!route) return fail("This publication is in the requester's own repository, or outside the campaign's repositories, so its requester consumes it and creates the issue; nothing was performed", 403);
+      if (campaignRepositoryLocation(snapshot.repository)?.forge === "gitlab") {
+        return fail("Wollipog creates issues on GitHub only; nothing was published", 409);
+      }
+      publicationPlace = this.publicationPlace(route);
+      if (!publicationPlace) {
+        return fail(`No Location of ${snapshot.repository} is online on a runner that can create its issues, and no other login stands in; nothing was published. The approval still stands: retry once one is.`, 409);
+      }
+      action = lookOnly
+        ? { kind: "issue_publication_observe", repository: snapshot.repository, title: snapshot.sanitizedTitle, body: snapshot.sanitizedBody }
+        : { kind: "issue_publication", repository: snapshot.repository, title: snapshot.sanitizedTitle, body: snapshot.sanitizedBody, labels: snapshot.labels };
+    } else if (snapshot.category === "merged_branch_deletion") {
       if (campaignRepositoryLocation(snapshot.repository)?.forge === "gitlab") {
         return fail("Wollipog performs branch deletions on GitHub only; nothing was deleted", 409);
       }
@@ -15316,7 +15416,7 @@ export class SessionsService {
       }
       action = { kind: "pr_merge_enqueue", repository: snapshot.repository, pullRequest: snapshot.pullRequest, headSha: snapshot.headSha };
     }
-    if (!this.hub.isRunnerOnline(child.runnerId)) return fail("the session's runner is offline; nothing was performed", 409);
+    if (!publicationPlace && !this.hub.isRunnerOnline(child.runnerId)) return fail("the session's runner is offline; nothing was performed", 409);
     if (this.forgeActionsInFlight.has(occurrenceId)) return fail("Wollipog is already performing this decision", 409);
     this.forgeActionsInFlight.add(occurrenceId);
     try {
@@ -15327,9 +15427,19 @@ export class SessionsService {
           ? "the earlier enqueue may have run, so it is not replayed: reconcile_workflow_decision once the pull request reads MERGED"
           : "this decision has no attempt left, is being performed, or was already performed; read get_workflow_decision", 409);
       }
-      const finish = (outcome: WorkflowDecisionForgeAction["outcome"], refusal?: WorkflowDecisionForgeAction["refusal"]) => {
-        this.db.recordWorkflowDecisionForgeAction(occurrenceId, { ...begun, outcome, ...(refusal ? { refusal } : {}), updatedAt: Date.now() });
+      const finish = (outcome: WorkflowDecisionForgeAction["outcome"], refusal?: WorkflowDecisionForgeAction["refusal"], publishedIssue?: number) => {
+        // A look that found nothing proves nothing, so the issue may still exist and is never created.
+        const held = lookOnly && outcome === "refused";
+        this.db.recordWorkflowDecisionForgeAction(occurrenceId, { ...begun, outcome: held ? "uncertain" : outcome, ...(refusal && !held ? { refusal } : {}),
+          ...(publishedIssue === undefined ? {} : { publishedIssue, performedByRunnerId: publicationPlace!.runnerId }), updatedAt: Date.now() });
       };
+      if (snapshot.category === "follow_up_issue_publication" && !lookOnly) {
+        const stale = await this.publicationFreshnessRefusal(decision, parent, parent.parentControlPolicy!, snapshot);
+        if (stale) {
+          finish("refused", { reason: "publication_refused", summary: boundedForgeSummary(stale) });
+          return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+        }
+      }
       if (snapshot.category === "pr_merge") {
         // The description can change after arming, so GitHub is read again, as arming did (#3713).
         const checked = await this.mergeClosures(child, snapshot);
@@ -15360,11 +15470,22 @@ export class SessionsService {
           return this.forgeActionResult(sessionId, parent.id, occurrenceId);
         }
       }
+      // The inspection above was awaited: the Location must still be the one chosen, with nothing
+      // awaited between this check and the dispatch.
+      if (publicationPlace) {
+        const route = this.publicationRoute(this.db.getSession(sessionId)!, this.db.getSession(parent.id)!, snapshot as Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>);
+        const current = route && this.publicationPlace(route);
+        if (!current || current.runnerId !== publicationPlace.runnerId || current.workspacePath !== publicationPlace.workspacePath) {
+          finish("refused", { reason: "runner_unavailable", summary: "The repository's Location changed while the publication was being prepared; nothing was published." });
+          return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+        }
+      }
       const requestId = `forge_decision_action_${randomUUID()}`;
       let answer: Partial<ForgeDecisionActionResultMessage> | null = null;
       try {
-        answer = await this.hub.requestFromRunner(child.runnerId, requestId, {
+        answer = await this.hub.requestFromRunner(publicationPlace?.runnerId ?? child.runnerId, requestId, {
           type: "forge_decision_action", requestId, sessionId, occurrenceId, action,
+          ...(publicationPlace ? { location: { workspaceId: publicationPlace.workspaceId, workspacePath: publicationPlace.workspacePath, repository: publicationPlace.repository } } : {}),
         }, FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS) as unknown as Partial<ForgeDecisionActionResultMessage>;
       } catch (error) {
         if (isRunnerRequestNotSentError(error)) {
@@ -15377,8 +15498,12 @@ export class SessionsService {
       const outcome = valid ? answer!.outcome! : "uncertain";
       const allowed: ReadonlySet<string> = kind === "branch_deletion"
         ? new Set(["deleted", "already_deleted", "refused", "uncertain"])
-        : new Set(["enqueued", "already_queued", "already_merged", "refused", "uncertain"]);
-      if (!allowed.has(outcome)) {
+        : kind === "issue_publication"
+          ? new Set([lookOnly ? "already_published" : "published", "refused", "uncertain"])
+          : new Set(["enqueued", "already_queued", "already_merged", "refused", "uncertain"]);
+      // A publication's success must name the issue it created.
+      const publishedIssue = kind === "issue_publication" && Number.isSafeInteger(answer?.issue) && answer!.issue! > 0 ? answer!.issue! : undefined;
+      if (!allowed.has(outcome) || (kind === "issue_publication" && (outcome === "published" || outcome === "already_published") && publishedIssue === undefined)) {
         finish("uncertain");
         return this.forgeActionResult(sessionId, parent.id, occurrenceId);
       }
@@ -15396,7 +15521,7 @@ export class SessionsService {
         finish("uncertain");
         return this.forgeActionResult(sessionId, parent.id, occurrenceId);
       }
-      finish(outcome);
+      finish(outcome, undefined, publishedIssue);
       const now = Date.now();
       const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
       if (latest?.status === "approved") {

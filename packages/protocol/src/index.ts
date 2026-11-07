@@ -1035,7 +1035,12 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      repository. A runner below v326 is never sent one, and its Location's facts read
 //      `runner_unsupported` rather than falling back to the root's login. (This change first
 //      claimed 325, which another change took.)
-export const PROTOCOL_VERSION = 326;
+// 327: a publication in another of a campaign's repositories is created through a Location of that
+//      repository (#4119). `forge_decision_action` may name a `location` and an `issue_publication`
+//      action: that runner creates the issue with its own forge login, with no session of its own,
+//      and answers the issue number. Consuming such a decision is refused, and a runner below v327
+//      is never sent one, so the requester's login is never used instead.
+export const PROTOCOL_VERSION = 327;
 
 export * from "./campaign-authority.js";
 export * from "./decision-questions.js";
@@ -1640,6 +1645,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   locationIssueClosure: 323,
   /** v326 reads forge facts about a repository's pull requests in a named Location (#4119). */
   locationForgeObservation: 326,
+  /** v327 creates an approved follow-up issue in a named Location's repository (#4119). */
+  locationIssuePublication: 327,
   /** v317 asks for and carries out a campaign repository addition (#4117). */
   campaignRepositoryAddition: 317,
   /** v318 reads a Location's issue facts for a repository-qualified scope proposal (#4118). */
