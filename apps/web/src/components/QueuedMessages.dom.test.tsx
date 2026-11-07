@@ -569,6 +569,30 @@ test("on a desktop, a lone message that cannot steer says why under its row, wit
   }
 });
 
+test("on a desktop a lone unsteerable message or terminal receipt explains the missing Steer action (#3962)", async () => {
+  for (const prompt of [
+    queued("a", { steerable: false, steerDisabledReason: "Not eligible." }),
+    queued("a", { durableDeliveryState: "failed", steerable: false, liveQueueObserved: false }),
+  ]) {
+    const tray = await render({ prompts: [prompt] });
+    try {
+      assertNoDomNode(tray.summary());
+      assertNoDomNode(tray.button(tray.row("a"), "Steer Queued Message"));
+      assert.equal((tray.container.querySelector(".queue-rows") as HTMLElement).hidden, false);
+      const reason = prompt.durableDeliveryState === "failed"
+        ? "Delivery attempts for this message have ended, so it cannot be steered or edited."
+        : "Not eligible.";
+      if (prompt.durableDeliveryState === "failed") {
+        assert.equal(tray.row("a").querySelector(".queue-status")?.getAttribute("title"), reason);
+      } else {
+        assert.ok(tray.container.textContent?.includes(reason), "the refusal reason is reachable without a collapsed summary");
+      }
+    } finally {
+      await tray.unmount();
+    }
+  }
+});
+
 test("on a phone a lone message shows Steer beside its ⋯, whose sheet no longer repeats it (#3962)", async () => {
   phone = true;
   const tray = await render({ prompts: [queued("a")] });
