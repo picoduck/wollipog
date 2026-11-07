@@ -138,7 +138,9 @@ export class SessionRoleConversions {
       return refuse("The selected permission mode is no longer supported by this installation. Choose a compatible mode before changing roles.");
     }
     const descendants = this.db.campaignDescendantIds(id).map((childId) => this.db.getSession(childId)).filter((child) => child !== null);
-    if (descendants.some((child) => !isTerminal(child.status))) {
+    // Reviewers do not participate in campaign completion, but an active provider must still
+    // retire before changing its controller's role/authority surface.
+    if (descendants.some((child) => !isTerminal(child.status)) || this.db.delegatedImageReviews.activeForRoot(id).length > 0) {
       return refuse("Finish or stop the live child sessions before changing this role. Completed children keep their links and remain accessible to you.");
     }
     if ([session, ...descendants].some((child) => pendingRequests(child.pendingApproval).length > 0) ||

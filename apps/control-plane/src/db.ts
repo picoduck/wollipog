@@ -13410,7 +13410,9 @@ export class ControlPlaneDb {
       LEFT JOIN session_role_conversions conversion ON conversion.session_id=session.id
       LEFT JOIN (SELECT parent_session_id, COUNT(*) AS occupied FROM sessions
         WHERE parent_session_id IS NOT NULL AND archived=0
-         AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=sessions.id) AND status NOT IN ('completed','failed','stopped')
+         AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=sessions.id)
+         AND NOT EXISTS (SELECT 1 FROM delegated_image_reviews WHERE reviewer_session_id=sessions.id)
+         AND status NOT IN ('completed','failed','stopped')
         GROUP BY parent_session_id) children ON children.parent_session_id=session.id
       WHERE ${authorization.sql} ${includeArchived ? "" : "AND session.archived=0"}
       ORDER BY session.created_at DESC,session.id`;
@@ -17419,6 +17421,7 @@ export class ControlPlaneDb {
               (SELECT COUNT(*) FROM sessions child
                 WHERE child.parent_session_id=? AND child.archived=0
                   AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=child.id)
+                  AND NOT EXISTS (SELECT 1 FROM delegated_image_reviews WHERE reviewer_session_id=child.id)
                   AND child.status NOT IN ('completed','failed','stopped')) AS liveCount
        FROM sessions WHERE id=?`,
     ).get(parentSessionId, parentSessionId) as unknown as {
@@ -21564,7 +21567,8 @@ export class ControlPlaneDb {
         SELECT id FROM sessions WHERE parent_session_id=?
         UNION
         SELECT child.id FROM sessions child JOIN descendants parent ON child.parent_session_id=parent.id
-      ) SELECT id FROM descendants WHERE NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=descendants.id) ORDER BY id
+      ) SELECT id FROM descendants WHERE NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=descendants.id)
+        AND NOT EXISTS (SELECT 1 FROM delegated_image_reviews WHERE reviewer_session_id=descendants.id) ORDER BY id
     `).all(campaignSessionId) as unknown as Array<{ id: string }>).map((row) => row.id);
   }
 
@@ -28754,6 +28758,7 @@ export class ControlPlaneDb {
        FROM sessions
        WHERE parent_session_id IS NOT NULL AND archived=0
          AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=sessions.id)
+         AND NOT EXISTS (SELECT 1 FROM delegated_image_reviews WHERE reviewer_session_id=sessions.id)
          AND status NOT IN ('completed','failed','stopped')
        GROUP BY parent_session_id`,
     ).all() as unknown as Array<{ parentSessionId: string; occupied: number }>).map((entry) =>
