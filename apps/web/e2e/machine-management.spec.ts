@@ -1094,6 +1094,9 @@ test("a Machine owner can change capacity without receiving organization-wide co
   await expect(dialog.getByLabel("Machine Name")).toHaveCount(0);
   await expect(dialog.getByRole("group", { name: "Agent Installations" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Delete Machine…" })).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await providerAccounts(page).getByRole("button", { name: "Change New Claude Sessions" }).click();
+  await expect(page.getByRole("dialog", { name: "New Claude Sessions" }).getByRole("button", { name: /^Account:/u })).toBeEnabled();
 });
 
 test("Delete Machine… waits for an online native runner to stop, saying so, then confirms the deletion", async ({ page }) => {

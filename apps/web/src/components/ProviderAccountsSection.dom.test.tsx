@@ -115,7 +115,7 @@ async function render(props: RenderProps) {
   const settle = () => act(async () => { for (let index = 0; index < 5; index += 1) await new Promise((resolve) => setTimeout(resolve, 0)); });
   const apiClient = props.api ?? client().client;
   const draw = (next: RenderProps) => root.render(
-    <ApiProvider client={apiClient}>
+    <ApiProvider client={next.api ?? apiClient}>
       <FeedbackProvider>
         <ProviderAccountsSection runner={next.runner ?? runnerView()} online={next.online ?? true}
           machineName={next.machineName ?? "Studio Mac"} canManageProfiles={next.canManageProfiles ?? true} intent={next.intent}
@@ -258,10 +258,22 @@ test("a default editor retains its draft after a conflict and reloads the newly 
   } finally { await ui.unmount(); }
 });
 
-test("account usage is matched to machine and account, with stale limits behind disclosure", async () => {
+test("a machine manager can edit defaults without permission to adopt provider profiles", async () => {
+  const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), canManageProfiles: false });
+  try {
+    const change = ui.container.querySelector<HTMLButtonElement>('[aria-label="Change New Claude Sessions"]');
+    assert.ok(change);
+    await act(async () => change.click());
+    await ui.settle();
+    assert.equal(ui.dialog()?.querySelector(".modal-title")?.textContent, "New Claude Sessions");
+    assert.ok(ui.dialog()?.querySelector('[aria-haspopup="listbox"]'));
+  } finally { await ui.unmount(); }
+});
+
+test("account usage is scoped to its API, machine and account, with stale limits behind disclosure", async () => {
   const source = { sourceId: "source", runnerId: "runner-1", runnerName: "Machine", runnerStatus: "online" as const,
     agentId: "claude", agentName: "Claude", provider: "claude" as const, state: "available" as const,
-    fetchedAt: Date.now(), providerAccountId: "work", freshness: "stale" as const,
+    fetchedAt: Date.now() - 600_001, providerAccountId: "work", freshness: "fresh" as const,
     buckets: [{ id: "session", label: "Session Window", remainingPercent: 28 }, { id: "weekly", label: "Weekly Window", remainingPercent: 62 }] };
   const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: { ...client().client,
     subscriptionUsage: async () => ({ sources: [source, { ...source, runnerId: "other-machine", fetchedAt: source.fetchedAt + 1,
@@ -275,6 +287,9 @@ test("account usage is matched to machine and account, with stale limits behind 
     assert.equal(ui.row("Work").querySelectorAll('[role="progressbar"]').length, 2);
     assert.match(ui.row("Work").textContent ?? "", /Weekly Window/);
     assert.doesNotMatch(ui.row("Work").textContent ?? "", /Other Machine/);
+    await ui.rerender({ api: { ...client().client, subscriptionUsage: async () => { throw new Error("New instance is unavailable"); } } });
+    assert.match(ui.row("Work").textContent ?? "", /Usage Not Reported/);
+    assert.doesNotMatch(ui.row("Work").textContent ?? "", /28%|Weekly Window/, "no reading from the previous API survives");
   } finally { await ui.unmount(); }
 });
 

@@ -12,8 +12,10 @@ import { ChevronDownIcon } from "./Icons.js";
 export function useMachineAccountUsage() {
   const api = useApi();
   const [data, setData] = useState<SubscriptionUsageResponse | null>(null);
+  const [now, setNow] = useState(Date.now);
   useEffect(() => {
     let current = true;
+    setData(null);
     const load = async () => {
       try { const next = await api.subscriptionUsage(); if (current) setData(next); }
       catch { /* Unknown usage does not prevent account management. */ }
@@ -21,7 +23,11 @@ export function useMachineAccountUsage() {
     void load();
     return () => { current = false; };
   }, [api]);
-  return { response: data, now: Date.now() };
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return { response: data, now: Math.max(now, Date.now()) };
 }
 
 export function ProviderAccountUsage({ account, runnerId, online, data }: {

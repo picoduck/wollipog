@@ -775,7 +775,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
         newLogins.some(login => login.provider === provider) || defaults.some(value => value.provider === provider) || canAdd).map(provider => {
         const choice = defaults.find(value => value.provider === provider);
         const selected = accounts.find(account => account.id === choice?.accountId && account.provider === provider);
-        const canEdit = canManageProfiles && canManage && runnerSupportsProtocol(runner.protocolVersion, "providerAccounts");
+        const canEdit = canManage && runnerSupportsProtocol(runner.protocolVersion, "providerAccounts");
         return <div className="provider-account-group" key={provider}>
           <div className="provider-settings-heading">
             <div><h4>{providerName(provider)}</h4><p className="section-note">{choice?.accountId
@@ -853,7 +853,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
         </div>;
       })}
       <RunningSessionAccountSettings key={runner.runnerId} runner={runner} online={online} />
-      {editingProvider && canManageProfiles && canManage && <ProviderAccountSettingsDialog key={`${runner.runnerId}:${editingProvider}`} runner={settingsRunner}
+      {editingProvider && canManage && <ProviderAccountSettingsDialog key={`${runner.runnerId}:${editingProvider}`} runner={settingsRunner}
         provider={editingProvider} onClose={() => setEditingProvider(null)}
         onSaved={value => setSavedDefaults(current => [...current.filter(entry => entry.provider !== value.provider), value])} />}
       {leaseActions && detailsAccount && detailsLease && (

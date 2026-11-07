@@ -7,7 +7,7 @@ account explicitly for a session still overrides it. Editing a default does not 
 sessions.
 
 **No Saved Default** preserves each agent's configured account and the existing implicit fallback.
-A missing saved account remains visible until the person replaces or clears it. Owner/admin
+A missing saved account remains visible until the person replaces or clears it. Machine-owner/admin
 permissions, profile grants, account-email masking, and conditional writes retain their existing
 boundaries. A conflicting save keeps the draft and offers **Reload Saved Choice** rather than
 overwriting another editor.
