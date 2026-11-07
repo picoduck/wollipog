@@ -129,9 +129,14 @@ test("releaseAll preserves failed tokens and unchanged evidence until the finite
     assert.deepEqual(leaseEvidence(root), before);
     assert.equal(registry.getDiagnostics().filter(message => message.includes("release unpublished")).length, 1);
   } finally {
-    writeFileSync(releaseMarker, "release");
-    await ended;
+    // A failed readiness check may leave the child stuck before it can read the signal.
+    const terminate = setTimeout(() => reader.kill("SIGKILL"), 5_000);
+    try {
+      writeFileSync(releaseMarker, "release");
+      await ended;
+    } finally { clearTimeout(terminate); }
   }
+  assert.equal(reader.exitCode, 0, "reader exits cleanly after the release signal");
   assert.equal(registry.releaseAll(), true, "retained token releases after the reader exits");
   const next = new ProviderHomeLeaseRegistry("b".repeat(64));
   assert.equal(next.acquireHome(home), true); assert.equal(next.releaseHome(home), true);
