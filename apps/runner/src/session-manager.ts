@@ -11,9 +11,10 @@ import { launchOrchestratorMeta, nextCampaignControl, validControlRevision } fro
 import { boundedIssueNumbers, campaignBoundaryRepository, campaignRepositoryLocation, parseFullControlAutomaticResponse, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
 import type { GithubIssueClosureLocation, GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
-import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage, GitLabMergeClosuresMessage, GitLabMergeClosuresResultMessage, ForgeDecisionActionMessage, ForgeDecisionActionResultMessage } from "@wollipog/protocol";
+import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage, GitLabMergeClosuresMessage, GitLabMergeClosuresResultMessage, ForgeDecisionAction, ForgeDecisionActionMessage, ForgeDecisionActionOutcome, ForgeDecisionActionRefusalReason, ForgeDecisionActionResultMessage } from "@wollipog/protocol";
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
-import { executeBranchDeletion, executePullRequestEnqueue, observePullRequestMerge } from "./forge-decision-action.js";
+import { executeBranchDeletion, executeIssuePublication, executePullRequestEnqueue, observeIssuePublication, observePullRequestMerge } from "./forge-decision-action.js";
+import { githubSlug } from "./git-ops.js";
 import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
 import { gitlabMergePreflight } from "./gitlab-merge-preflight.js";
 import { githubMergePreflight } from "./github-merge-preflight.js";
@@ -129,8 +130,8 @@ import {
   type SessionWorktreeSwitchView,
 } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, realpathSync, writeSync } from "node:fs";
-import { mkdir, realpath, rm } from "node:fs/promises";
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, realpathSync, rmSync, writeSync } from "node:fs";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { validLocationSwitchBranch, type SessionLocationSwitchMessage } from "@wollipog/protocol";
 import {
@@ -20024,6 +20025,9 @@ export class SessionManager {
   ): Promise<ForgeDecisionActionResultMessage> {
     const base = { type: "forge_decision_action_result" as const, requestId: message.requestId,
       sessionId: message.sessionId, occurrenceId: message.occurrenceId };
+    if (message.action?.kind === "issue_publication" || message.action?.kind === "issue_publication_observe") {
+      return { ...base, ...await this.issuePublicationAtLocation(message, options.gh) };
+    }
     const meta = this.store.readMeta(message.sessionId);
     if (!meta) {
       return { ...base, outcome: "refused", refusal: { reason: "runner_unavailable",
@@ -20377,10 +20381,72 @@ export class SessionManager {
     }
   }
 
+  /** An approved publication in another of a campaign's repositories, created in a Location's path
+   * with this runner's own forge login (#4119). The session lives on another runner; nothing here
+   * needs it. The Location's origin must name the approved repository, read fresh, so the login that
+   * writes is the one holding that checkout. */
+  private async issuePublicationAtLocation(
+    message: ForgeDecisionActionMessage,
+    gh?: GhRunner,
+  ): Promise<{ outcome: ForgeDecisionActionOutcome; refusal?: { reason: ForgeDecisionActionRefusalReason; summary: string }; issue?: number }> {
+    const action = message.action as Extract<ForgeDecisionAction, { kind: "issue_publication" | "issue_publication_observe" }>;
+    const unusable = (summary: string) => ({ outcome: "refused" as const, refusal: { reason: "repository_mismatch" as const, summary } });
+    const location = message.location;
+    // Frames are not validated on the wire.
+    if (typeof location?.workspacePath !== "string" || !location.workspacePath.trim() || location.workspacePath.includes("\0") ||
+        typeof location.repository !== "string" || typeof action.repository !== "string" ||
+        location.repository.toLowerCase() !== action.repository.toLowerCase()) {
+      return unusable("A publication needs a Location of its own repository on this runner; nothing was published.");
+    }
+    let cwd: string;
+    try {
+      cwd = await realpath(location.workspacePath);
+      const origin = githubSlug((await issueClosureRun({ kind: "native" }, cwd)("git", ["remote", "get-url", "origin"])).trim());
+      if (origin?.toLowerCase() !== action.repository.toLowerCase()) return unusable("The Location's origin is not the approved repository; nothing was published.");
+    } catch {
+      return unusable("The Location's path could not be read on this runner; nothing was published.");
+    }
+    // Every `gh` call names its repository, so it runs from the filesystem root and reads nothing of the checkout.
+    const forge = gh ?? contextGhRunner({ kind: "native" }, parsePath(tmpdir()).root);
+    const directory = "location-issue-publications";
+    const digest = createHash("sha256").update(JSON.stringify(action)).digest("hex");
+    try {
+      const result = action.kind === "issue_publication_observe" ? await observeIssuePublication(action, forge)
+        : await executeIssuePublication(action, forge, {
+          fence: () => this.beginLocationAttempt(directory, message.occurrenceId, digest),
+          release: () => this.releaseLocationAttempt(directory, message.occurrenceId),
+          withPayloadFile: async (payload, use) => {
+            const folder = await mkdtemp(join(tmpdir(), "wollipog-publication-"));
+            try {
+              const path = join(folder, "payload.json");
+              await writeFile(path, payload, { mode: 0o600 });
+              return await use(path);
+            } finally {
+              await rm(folder, { recursive: true, force: true });
+            }
+          },
+        });
+      this.log(JSON.stringify({ event: "forge_decision_action_result", sessionId: message.sessionId, workspaceId: location.workspaceId,
+        occurrenceId: message.occurrenceId, kind: action.kind, outcome: result.outcome, ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
+      return result;
+    } catch {
+      return { outcome: "uncertain" };
+    }
+  }
+
   /** The durable fence before a Location's closure mutates anything (#4119): one record per occurrence,
    * created exclusively and flushed, so a replay or a restart can never close through it twice. */
   private beginLocationIssueClosure(occurrenceId: string, digest: string): boolean {
-    const directory = join(this.stateDir, "location-issue-closures");
+    return this.beginLocationAttempt("location-issue-closures", occurrenceId, digest);
+  }
+
+  /** Give back a fence once the forge proves the write never happened, so the approval can retry. */
+  private releaseLocationAttempt(name: string, occurrenceId: string): void {
+    rmSync(join(this.stateDir, name, `${createHash("sha256").update(occurrenceId).digest("hex")}.attempt`), { force: true });
+  }
+
+  private beginLocationAttempt(name: string, occurrenceId: string, digest: string): boolean {
+    const directory = join(this.stateDir, name);
     try {
       mkdirSync(directory, { recursive: true, mode: 0o700 });
       const fd = openSync(join(directory, `${createHash("sha256").update(occurrenceId).digest("hex")}.attempt`), "wx", 0o600);

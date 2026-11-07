@@ -2285,6 +2285,12 @@ restarts, or its provider session ends with an armed merge still approved, the o
 at once as before, so a relaunched provider cannot reuse it; the control plane then reads the forge
 and moves it to consumed if the approved head merged.
 
+A follow-up publication in another of a campaign's repositories than the one its requester works in
+(protocol v327, #4119) always takes this route and can't be consumed: the control plane sends the
+action, with a `location`, to the runner of a Location of that repository, and that runner creates the
+issue with its own `gh` login after checking the Location's origin names it. See
+[Campaign issue scope](campaign-issue-scope.md).
+
 A provider's own permission check can refuse an approved command: Claude Code's `auto` classifier
 decides inline, so a refusal never reaches the runner's permission channel. Wollipog then performs
 the one approved forge action itself (protocol v284, #4067) through `execute_workflow_decision`

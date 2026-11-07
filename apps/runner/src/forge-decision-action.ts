@@ -17,6 +17,9 @@
  * - An enqueue proves the pull request is open at the approved head, then runs the canonical
  *   `gh pr merge <url> --squash --match-head-commit <sha>`. A pull request already in the queue,
  *   or already merged at that head, is the approved action having taken effect.
+ * - A publication (#4119) runs on the runner of a Location of the approved repository, with that
+ *   runner's own login and no session of its own: `SessionManager` checks the Location's origin
+ *   names that repository, then this module creates the issue behind a durable fence.
  */
 import type {
   ForgeDecisionAction,
@@ -212,4 +215,81 @@ async function pullRequestEnqueue(
     return refused("forge_refused", "GitHub refused the enqueue (for example, the pull request is not mergeable yet); nothing was enqueued.");
   }
   return { outcome: "uncertain" };
+}
+
+/** What a publication needs from the runner (#4119): a durable one-attempt fence, its release when
+ * GitHub proves it created nothing, and the payload in a file, so the exact body never travels as a
+ * command-line argument with that platform's length limit. */
+export interface IssuePublicationSteps {
+  fence: () => boolean;
+  release: () => void;
+  withPayloadFile: <T>(payload: string, use: (path: string) => Promise<T>) => Promise<T>;
+}
+
+/** Create the approved issue once, through this runner's own `gh` login. The answer must name an
+ * issue of the approved repository; anything short of that may have created one, so it is uncertain
+ * and never repeated. */
+export async function executeIssuePublication(
+  action: Extract<ForgeDecisionAction, { kind: "issue_publication" }>,
+  gh: GhRunner,
+  steps: IssuePublicationSteps,
+): Promise<ForgeDecisionActionResult & { issue?: number }> {
+  if (!REPOSITORY.test(action.repository) || typeof action.title !== "string" || !action.title || typeof action.body !== "string" ||
+      !Array.isArray(action.labels) || action.labels.some((label) => typeof label !== "string")) {
+    return refused("repository_mismatch", "The decision does not name an issue this runner can create.");
+  }
+  // An earlier attempt, even from before a restart, may have created it.
+  if (!steps.fence()) return { outcome: "uncertain" };
+  const created = await steps.withPayloadFile(JSON.stringify({ title: action.title, body: action.body, labels: action.labels }),
+    (path) => gh(["api", "--hostname", "github.com", "-X", "POST", `repos/${action.repository}/issues`, "--input", path]));
+  if (created.code === null) {
+    const issue = publishedIssueNumber(record(parseJsonOrNull(created.stdout)), action.repository);
+    return issue === null ? { outcome: "uncertain" } : { outcome: "published", issue };
+  }
+  if (created.timedOut) return { outcome: "uncertain" };
+  // As for an enqueue: only a failure that proves GitHub accepted nothing leaves the approval to retry.
+  const failure = classifyGhFailure(created);
+  if (failure === "forge_cli_missing" || failure === "forge_unauthenticated" || failure === "forge_rate_limited") {
+    steps.release();
+    return refused("forge_unavailable", `${UNAVAILABLE_WORDS[failure]} Nothing was published.`);
+  }
+  if (failure === "forge_error" && /HTTP 4(?:0[0-9]|1[0-9]|2[0-9])\b/u.test(created.stderr) && !/HTTP 5\d\d|connection|timeout|EOF/iu.test(created.stderr)) {
+    steps.release();
+    return refused("forge_refused", "GitHub refused to create the issue (for example, this runner's login can't write to the repository); nothing was published.");
+  }
+  return { outcome: "uncertain" };
+}
+
+/** Look for the approved issue among the repository's newest, after a publication that may have run.
+ * Never writes: an exact title and body is the approved issue, and not finding it proves nothing,
+ * because the answer may lag, so it stays uncertain. */
+export async function observeIssuePublication(
+  action: Extract<ForgeDecisionAction, { kind: "issue_publication_observe" }>,
+  gh: GhRunner,
+): Promise<ForgeDecisionActionResult & { issue?: number }> {
+  if (!REPOSITORY.test(action.repository)) return { outcome: "uncertain" };
+  const read = await gh(["api", "--hostname", "github.com", "-X", "GET",
+    `repos/${action.repository}/issues?state=all&sort=created&direction=desc&per_page=100`]);
+  if (read.code !== null) return { outcome: "uncertain" };
+  const rows = parseJsonOrNull(read.stdout);
+  if (!Array.isArray(rows)) return { outcome: "uncertain" };
+  for (const value of rows) {
+    const row = record(value);
+    if (!row || row.pull_request || row.title !== action.title || (typeof row.body === "string" ? row.body : "").trimEnd() !== action.body.trimEnd()) continue;
+    const issue = publishedIssueNumber(row, action.repository);
+    if (issue !== null) return { outcome: "already_published", issue };
+  }
+  return { outcome: "uncertain" };
+}
+
+function parseJsonOrNull(text: string): unknown {
+  try { return JSON.parse(text); } catch { return null; }
+}
+
+/** The number of an issue GitHub reports in exactly this repository, or null. */
+function publishedIssueNumber(row: Record<string, unknown> | null, repository: string): number | null {
+  const number = row?.number;
+  const url = row?.html_url;
+  return typeof number === "number" && Number.isSafeInteger(number) && number > 0 && typeof url === "string" &&
+    url.toLowerCase() === `https://github.com/${repository.toLowerCase()}/issues/${number}` ? number : null;
 }

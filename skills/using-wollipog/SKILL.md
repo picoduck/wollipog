@@ -979,7 +979,11 @@ published issue back and record it on that recommendation before proposing its s
 Missing issue-boundary authority never turns ledger acceptance or ordinary prose into a grant.
 A follow-up may target any repository of the campaign's boundary, not only its origin's: under Full
 Control it is reviewed under the same floors, its duplicate search runs in the target repository
-through one of its Locations, and its lineage names both repositories. Once published and recorded,
+through one of its Locations, and its lineage names both repositories. When that repository isn't the
+one you work in, don't consume the approval or create the issue yourself: call
+`execute_workflow_decision`, and a Location of that repository creates it with that runner's own login
+and records the issue in `decision.forgeAction`. With no capable Location online nothing is published;
+retry once one is. After an uncertain answer, calling it again only looks for the issue. Once published and recorded,
 propose it as one repository-qualified addition with its follow-up lineage, as for any follow-up; its
 payload is read back through that repository's Location. A target outside the boundary
 is a person's (`target_outside_boundary`); if it is a repository of the campaign's Project, ask the
