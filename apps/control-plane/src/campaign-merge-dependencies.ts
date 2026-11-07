@@ -101,11 +101,13 @@ export function campaignMergeDependencyView(prerequisite: CampaignMergePrerequis
   };
 }
 
-/** Why a merge is held on this prerequisite, or null when it is met. Only an observation of MERGED
- * meets it, and the gate reads one fresh before arming and enqueueing (a read that fails holds the
- * merge whatever is stored); a stored MERGED stays met as it ages. An unavailable fact, a stale
- * fact of another state, an open or enqueued pull request, or a prerequisite that names none holds
- * the merge. A closed one or a cancelled prerequisite holds it for good. */
+/** Why a merge is held on this prerequisite, or null when it is met. Only a FRESH observation of
+ * MERGED meets it: a stale or unavailable fact, an open or enqueued pull request, or a prerequisite
+ * that names none holds the merge. A closed one or a cancelled prerequisite holds it for good.
+ * `staleMergedMeets` is for checks of a merge already armed, and only those: the arming read
+ * proved every prerequisite it had MERGED afresh, the ledger refuses new ones while it is armed, and
+ * a forge never un-merges, so a stored MERGED that has aged still meets it. Before arming, a
+ * prerequisite added after the authoritative read has only what is stored, which proves nothing. */
 export interface CampaignMergeHold {
   prerequisite: { id: string; key: string; title: string | null; repository: string | null };
   pullRequest: CampaignPullRequestRef | null;
@@ -114,7 +116,7 @@ export interface CampaignMergeHold {
   headSha: string | null;
 }
 
-export function campaignMergeHold(prerequisite: CampaignMergePrerequisite): CampaignMergeHold | null {
+export function campaignMergeHold(prerequisite: CampaignMergePrerequisite, options: { staleMergedMeets?: boolean } = {}): CampaignMergeHold | null {
   const identity = { id: prerequisite.id, key: prerequisite.key, title: prerequisite.title, repository: prerequisite.repository?.toLowerCase() ?? null };
   if (prerequisite.commitment !== "committed") return { prerequisite: identity, pullRequest: null, state: "cancelled", headSha: null };
   if (!prerequisite.pullRequests.length) return { prerequisite: identity, pullRequest: null, state: "none", headSha: null };
@@ -124,10 +126,9 @@ export function campaignMergeHold(prerequisite: CampaignMergePrerequisite): Camp
   if (outside) return { prerequisite: identity, pullRequest: outside.ref, state: "outside", headSha: null };
   const closed = prerequisite.pullRequests.find(({ fact }) => fact.availability === "fresh" && fact.value.state === "closed");
   if (closed) return { prerequisite: identity, pullRequest: closed.ref, state: "closed", headSha: closed.fact.availability === "fresh" ? closed.fact.value.headSha : null };
-  // A stored MERGED meets it as it ages, since a forge never un-merges a pull request: the gate's
-  // own authoritative read at arming and enqueue is what makes it fresh (`campaignMergeHold` in
-  // sessions.ts), and later checks from what is stored must not hold a merge that already passed.
-  const waiting = prerequisite.pullRequests.find(({ fact }) => fact.availability === "unavailable" || fact.value.state !== "merged");
+  const met = (fact: ForgeFact) => fact.availability === "fresh" ? fact.value.state === "merged"
+    : fact.availability === "stale" && options.staleMergedMeets === true && fact.value.state === "merged";
+  const waiting = prerequisite.pullRequests.find(({ fact }) => !met(fact));
   if (!waiting) return null;
   const { fact } = waiting;
   const head = fact.availability === "unavailable" ? fact.lastValue?.headSha ?? null : fact.value.headSha;
@@ -136,7 +137,8 @@ export function campaignMergeHold(prerequisite: CampaignMergePrerequisite): Camp
 
 /** The first unmet prerequisite, closed or cancelled ones before those still open: a merge that can
  * never be attempted says so rather than waiting. */
-export function campaignFirstMergeHold(prerequisites: readonly CampaignMergePrerequisite[]): CampaignMergeHold | null {
-  const holds = prerequisites.map(campaignMergeHold).filter((hold): hold is CampaignMergeHold => hold !== null);
+export function campaignFirstMergeHold(prerequisites: readonly CampaignMergePrerequisite[],
+  options: { staleMergedMeets?: boolean } = {}): CampaignMergeHold | null {
+  const holds = prerequisites.map((prerequisite) => campaignMergeHold(prerequisite, options)).filter((hold): hold is CampaignMergeHold => hold !== null);
   return holds.find((hold) => hold.state === "closed" || hold.state === "cancelled") ?? holds[0] ?? null;
 }

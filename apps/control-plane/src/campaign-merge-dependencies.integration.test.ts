@@ -902,3 +902,26 @@ test("an armed merge's prerequisite observed MERGED stays met as its observation
     assert.equal(h.db.workflowDecisionByOccurrence(merge.occurrenceId)!.status, "consumed");
   } finally { h.observer.dispose(); h.db.close(); }
 });
+
+test("a prerequisite added while arming reads, with only an aged MERGED stored, still holds the merge (#4120)", async () => {
+  const h = await fixture({ dependency: null });
+  try {
+    // owner/api#7 was observed MERGED long ago, and its Location can't be asked now.
+    const ref = { repository: "owner/api", number: 7 };
+    h.db.campaignForgeObservations.record("root", "r2", [{ ref, observation: pull("merged") }], Date.now() - 11 * 60_000);
+    assert.equal(h.db.campaignForgeObservations.facts("root", [ref], Date.now())[0]!.fact.availability, "stale");
+    h.offline.add("r2");
+    const merge = h.approvedMerge("app", "owner/app", 5);
+    const paused = h.pausePreflight();
+    const arming = merge.arm();
+    await paused.reached;
+    // Not armed yet, so the ledger accepts the dependency; the arming read never covered it.
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item("app"), dependsOn: [h.item("api")] }).ok);
+    paused.release();
+    const held = await arming;
+    assert.equal(held.status, 409, held.error ?? "armed");
+    assert.match(held.error!, /^Merge held until prerequisite pull request owner\/api#7 \(api in owner\/api\) is observed MERGED; it is not freshly observed\./u);
+    assert.equal(h.db.workflowDecisionByOccurrence(merge.occurrenceId)!.actionAdmission, undefined, "nothing was armed");
+    assert.deepEqual(h.reads, [], "nothing read it");
+  } finally { h.observer.dispose(); h.db.close(); }
+});

@@ -11530,11 +11530,13 @@ export class SessionsService {
 
   /** #4120: the same hold from what is stored now, with no read: the last synchronous check before a
    * merge is armed or dispatched, so a dependency added, or a prerequisite cancelled, while the
-   * forge was being read still holds it. */
+   * forge was being read still holds it, unless freshly MERGED. Only checks of an already armed merge
+   * pass `staleMergedMeets` (see `campaignMergeHold` in campaign-merge-dependencies.ts). */
   private campaignMergeHoldNow(child: SessionView,
-    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>): { campaignId: string; hold: CampaignMergeHold } | null {
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
+    options: { staleMergedMeets?: boolean } = {}): { campaignId: string; hold: CampaignMergeHold } | null {
     const scope = this.mergeHoldPrerequisites(child, snapshot);
-    const hold = scope ? campaignFirstMergeHold(scope.prerequisites) : null;
+    const hold = scope ? campaignFirstMergeHold(scope.prerequisites, options) : null;
     return scope && hold ? { campaignId: scope.campaignId, hold } : null;
   }
 
@@ -11549,7 +11551,7 @@ export class SessionsService {
     const action: WorkflowDecisionAction = { kind: "pr_merge_enqueue", command };
     for (const decision of this.db.approvedWorkflowDecisionsForAction(session.id, auditDigest(action)!)) {
       if (decision.resourceSnapshot.category !== "pr_merge" || decision.actionAdmission?.command !== command) continue;
-      const held = this.campaignMergeHoldNow(session, decision.resourceSnapshot);
+      const held = this.campaignMergeHoldNow(session, decision.resourceSnapshot, { staleMergedMeets: true });
       if (held) return { decision, held };
     }
     return null;
@@ -11563,7 +11565,7 @@ export class SessionsService {
     for (const decision of this.db.unconsumedWorkflowDecisionsForSession(session.id)) {
       if (decision.status !== "approved" || decision.resourceSnapshot.category !== "pr_merge" ||
           decision.actionAdmission?.kind !== "pr_merge_enqueue") continue;
-      const held = this.campaignMergeHoldNow(session, decision.resourceSnapshot);
+      const held = this.campaignMergeHoldNow(session, decision.resourceSnapshot, { staleMergedMeets: true });
       if (held) return { decision, held };
     }
     return null;
