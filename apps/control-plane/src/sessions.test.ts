@@ -26433,6 +26433,8 @@ test("#4245 image reviewers have a separate bounded slot and keep finite parent 
     h.db.updateSessionStatus(child.id, "running", Date.now());
     h.db.raw().prepare("UPDATE delegated_image_reviews SET created_at=? WHERE review_id=?")
       .run(Date.now() - 16 * 60_000, review.data.reviewId);
+    const expired = h.svc.delegatedImageReviewForOrchestrator(h.parent.id, review.data.reviewId, () => true);
+    assert.equal(expired.data?.endedReason, "reviewer_deadline_expired");
     assert.equal(busy().status, 409, "deadline requests stop without admitting an overlapping worker");
     assert.ok(h.db.sessionStopIntent(review.data.reviewerSessionId));
     h.db.updateSessionStatus(review.data.reviewerSessionId, "stopped", Date.now());
@@ -26440,6 +26442,20 @@ test("#4245 image reviewers have a separate bounded slot and keep finite parent 
     h.db.settleSessionStopIntent(review.data.reviewerSessionId, Date.now(), "runner_terminal");
     const replacement = prepareImageReview(h, child.id, second.occurrenceId);
     assert.ok(replacement.ok, replacement.error);
+  } finally { h.db.close(); }
+});
+
+test("#4245 an image reviewer leaves a fair share of finite parent budget for implementation", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    h.db.updateSessionCostBudget(h.parent.id, 8, Date.now());
+    const decision = h.request(child.id, "ui", [h.screenshot(child.id, "shot").item]).data!;
+    const review = prepareImageReview(h, child.id, decision.occurrenceId);
+    assert.ok(review.ok && review.data, review.error);
+    const reviewer = h.db.getSession(review.data.reviewerSessionId)!;
+    assert.ok(reviewer.costBudgetUsd! > 0 && reviewer.costBudgetUsd! < 8);
+    assert.ok(h.createChild("Implementation Still Has Budget"));
   } finally { h.db.close(); }
 });
 

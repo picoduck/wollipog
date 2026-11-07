@@ -57,6 +57,23 @@ function harness(role: SessionRole = "normal", protocol = PROTOCOL_VERSION) {
   return { db, hub, conversions, defaults, commands, events, svc, metadata };
 }
 
+test("#4245 role conversion still waits for an active delegated reviewer after its gate resolves", () => {
+  const h = harness("orchestrator");
+  try {
+    h.db.createDelegatedImageReviewSession({ id: "reviewer", parentSessionId: "s", runnerId: "r", workspaceId: "w",
+      agentId: "claude", title: "Review", driver: "claude-code", config: { maxChildSessions: 0 }, useWorktree: false, now: 13 }, {
+      reviewId: "review", rootSessionId: "s", childSessionId: "producer", occurrenceId: "occurrence",
+      policyRevision: 1, resourceDigest: "a".repeat(64), evidence: [], briefSha256: "b".repeat(64),
+    });
+    h.db.updateSessionStatus("reviewer", "running", 14);
+    h.db.delegatedImageReviews.end("review", "decision_resolved", 15);
+    assert.deepEqual(h.db.campaignDescendantIds("s"), [], "not an implementation child for completion");
+    assert.match(h.conversions.preview("s", "normal", h.defaults, () => null).reason!, /live child sessions/);
+    h.db.updateSessionStatus("reviewer", "idle", 16);
+    assert.equal(h.conversions.preview("s", "normal", h.defaults, () => null).available, true);
+  } finally { h.db.close(); }
+});
+
 for (const role of ["normal", "orchestrator"] as const) {
   test(`an expired automation approval stops blocking conversion from ${role}`, async (t) => {
     let now = Date.now();

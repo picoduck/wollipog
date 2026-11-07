@@ -4732,12 +4732,15 @@ export class SessionsService {
       }
       parentSession = parent;
       const allocated = this.db.childSessionAllocations(parentSessionId);
+      const implementationSlots = (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - allocated.liveCount;
       const guarded = childSessionGuardrails({
         ...parent,
         ...this.childCeilingsOf(parent),
         costUsd: (parent.costUsd ?? 0) + allocated.costBudgetUsd,
         toolCallCount: (parent.toolCallCount ?? 0) + allocated.maxToolCalls,
-      }, req.config, imageReview ? 1 : (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - allocated.liveCount,
+      // The separate reviewer slot shares finite remaining budget with the available implementation
+      // slots. Exempt capacity admission without reserving their whole allowance for the reviewer.
+      }, req.config, imageReview ? Math.max(1, implementationSlots + 1) : implementationSlots,
       parent.projectId ? this.db.projectChildSessionDefaults(parent.projectId) : null);
       if ("error" in guarded) return fail(guarded.error, 409);
       req = { ...req, config: guarded.config };
@@ -16728,7 +16731,7 @@ export class SessionsService {
       }
       // A reviewer whose turn or Session ended without a verdict will never submit one.
       const reviewer = this.db.getSession(review.reviewerSessionId);
-      if (!reviewer || isTerminal(reviewer.status) || reviewer.status === "idle") reason = "reviewer_finished_without_verdict";
+      if (!reason && (!reviewer || isTerminal(reviewer.status) || reviewer.status === "idle")) reason = "reviewer_finished_without_verdict";
     } else if (review.state === "verdict" && review.verdict) {
       // A verdict rests on its receipts. Once any of them expires the reviewer cannot look again
       // (nothing is delivered after a verdict), so the review is retired for a fresh one (#4074).
