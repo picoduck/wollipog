@@ -4,6 +4,7 @@ import {
   CAMPAIGN_WORK_REVISION_CHANGED,
   type CampaignWorkItemDetail,
   type CampaignWorkItemSummary,
+  type CampaignWorkRepositoryCounts,
   type CampaignWorkSummary,
   type OrchestratorCampaignProjection,
   type SessionView,
@@ -52,6 +53,9 @@ export interface CampaignListState {
   status: CampaignLoadStatus;
   items: readonly CampaignWorkItemSummary[];
   total: number | null;
+  /** #4120: every repository's counts, for group headers and the Repository filter; null from an
+   * older control plane, whose list stays ungrouped. */
+  repositories: readonly CampaignWorkRepositoryCounts[] | null;
   hasMore: boolean;
   loadingMore: boolean;
   /** The shown rows are being reloaded (a new revision, reconnect, or retry); paging waits. */
@@ -85,7 +89,7 @@ function isAbort(cause: unknown): boolean {
   return (cause as { name?: string } | null)?.name === "AbortError";
 }
 
-const EMPTY_LIST: CampaignListState = { status: "loading", items: [], total: null, hasMore: false, loadingMore: false, reloading: false, error: null };
+const EMPTY_LIST: CampaignListState = { status: "loading", items: [], total: null, repositories: null, hasMore: false, loadingMore: false, reloading: false, error: null };
 
 function isRevisionChanged(cause: unknown): boolean {
   return cause instanceof ApiError && cause.status === 409 && cause.code === CAMPAIGN_WORK_REVISION_CHANGED;
@@ -255,7 +259,7 @@ export function useCampaignStatus({
   }, []);
 
   /* ---------------------------------------------------------------- work list */
-  const listKey = JSON.stringify([session.id, filters.origin, filters.state, filters.sort]);
+  const listKey = JSON.stringify([session.id, filters.origin, filters.state, filters.sort, filters.repository]);
   const [list, setList] = useState<{ key: string; state: CampaignListState; cursor: string | null }>(
     () => ({ key: listKey, state: EMPTY_LIST, cursor: null }),
   );
@@ -286,6 +290,7 @@ export function useCampaignStatus({
     const seen = new Set<string>();
     let cursor: string | null = null;
     let total: number | null = null;
+    let repositories: readonly CampaignWorkRepositoryCounts[] | null = null;
     do {
       const limit = Math.min(CAMPAIGN_WORK_PAGE_CEILING, Math.max(1, want - rows.length));
       const page = await api.campaignWorkItems(session.id, campaignWorkItemsQuery(filtersRef.current, cursor, limit), signal);
@@ -293,11 +298,12 @@ export function useCampaignStatus({
       const before = rows.length;
       for (const item of page.items) if (!seen.has(item.id)) { seen.add(item.id); rows.push(item); }
       total = page.total;
+      repositories = page.repositories ?? null;
       cursor = page.nextCursor;
       // A page that adds nothing would repeat forever; what was shown stays, and Show More remains.
       if (rows.length === before) break;
     } while (cursor && rows.length < want);
-    return { rows, total, cursor };
+    return { rows, total, repositories, cursor };
   }, [api, session.id]);
 
   /**
@@ -324,11 +330,11 @@ export function useCampaignStatus({
           const read = await readRows(want, controller.signal, live);
           // A newer reload may have started while this continuation was queued.
           if (!read || !live()) return;
-          const { rows, total, cursor } = read;
+          const { rows, total, repositories, cursor } = read;
           reloading.current = false;
           setList({
             key: listKey,
-            state: { status: "ready", items: rows, total, hasMore: cursor !== null, loadingMore: false, reloading: false, error: null },
+            state: { status: "ready", items: rows, total, repositories, hasMore: cursor !== null, loadingMore: false, reloading: false, error: null },
             cursor,
           });
           return;
@@ -381,6 +387,7 @@ export function useCampaignStatus({
             status: "ready",
             items: [...latest.state.items, ...page.items.filter((item) => !seen.has(item.id))],
             total: page.total,
+            repositories: page.repositories ?? latest.state.repositories,
             hasMore: page.nextCursor !== null,
             loadingMore: false,
             reloading: false,
@@ -443,7 +450,7 @@ export function useCampaignStatus({
           // Cost changes that arrived while this read was in flight leave the rows stale, so the
           // list this sets re-runs the effect and reads once more.
           rowsStale.current = seenCostReads.current !== tick;
-          setList({ key: listKey, state: { ...shown.state, items: read.rows, total: read.total, hasMore: read.cursor !== null }, cursor: read.cursor });
+          setList({ key: listKey, state: { ...shown.state, items: read.rows, total: read.total, repositories: read.repositories, hasMore: read.cursor !== null }, cursor: read.cursor });
           return;
         } catch (cause) {
           if (!live() || isAbort(cause)) {

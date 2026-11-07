@@ -733,6 +733,17 @@ export interface CampaignWorkItemsQuery {
   origin?: CampaignWorkItemOrigin;
   state?: CampaignWorkItemStateFilter;
   sort?: CampaignWorkItemSort;
+  /** #4120: only items whose `repository` is this one (compared case-insensitively). */
+  repository?: string;
+}
+
+/** #4120: one repository's work-item counts, for Campaign Status's group headers. */
+export interface CampaignWorkRepositoryCounts {
+  /** Lower-cased, or null for items whose repository is unknown. */
+  repository: string | null;
+  /** Items recorded for it, by derived state, whatever the list's filters. */
+  byState: Record<CampaignWorkItemPrimaryState, number>;
+  total: number;
 }
 
 export interface CampaignWorkItemsPage {
@@ -742,6 +753,9 @@ export interface CampaignWorkItemsPage {
   nextCursor: string | null;
   /** Items matching the filter at this revision. */
   total: number;
+  /** #4120: every repository the campaign's items work in, in the order its first item was recorded,
+   * with an unknown repository last. Omitted by older control planes. */
+  repositories?: CampaignWorkRepositoryCounts[];
 }
 
 /** Error code returned with HTTP 409 when a cursor was minted at an older revision. */

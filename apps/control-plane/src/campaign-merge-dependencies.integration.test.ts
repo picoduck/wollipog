@@ -468,6 +468,31 @@ test("once a merge is armed, no ledger change may move its prerequisite into ano
   } finally { h.observer.dispose(); h.db.close(); }
 });
 
+test("the work list filters by repository and counts each repository's items by state (#4120)", async () => {
+  const h = await fixture();
+  try {
+    const page = (query: Parameters<typeof h.db.campaignWorkLedger.page>[1]) => h.db.campaignWorkLedger.page("root", query, Date.now());
+    const all = page({ state: "all" });
+    assert.ok(all.ok);
+    // The plan records all three in one call, so their order among equal times is not asserted.
+    assert.deepEqual(all.data.items.map((item) => `${item.key} ${item.repository}`).sort(), ["api owner/api", "app owner/app", "app-sibling owner/app"]);
+    // Each repository's counts cover all its items, whatever the list's filters.
+    const counted = all.data.repositories!.map((entry) => [entry.repository, entry.total, Object.entries(entry.byState).filter(([, count]) => count > 0)])
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+    assert.deepEqual(counted, [["owner/api", 1, [["running", 1]]], ["owner/app", 2, [["planned", 1], ["running", 1]]]]);
+    const api = page({ state: "all", repository: "Owner/API" });
+    assert.ok(api.ok);
+    assert.deepEqual([api.data.items.map((item) => item.key), api.data.total], [["api"], 1]);
+    assert.deepEqual(api.data.repositories, all.data.repositories, "counts don't follow the filter");
+    // A cursor is bound to its repository filter, and a malformed repository is refused.
+    const first = page({ state: "all", repository: "owner/app", limit: 1 });
+    assert.ok(first.ok && first.data.nextCursor);
+    assert.equal(page({ state: "all", repository: "owner/api", limit: 1, cursor: first.data.nextCursor! }).ok, false);
+    const refused = page({ state: "all", repository: "not a repository" });
+    assert.equal(refused.ok, false);
+  } finally { h.observer.dispose(); h.db.close(); }
+});
+
 test("a dependency can't be added once the merge is armed, and Wollipog's enqueue still holds on one that is there (#4120)", async () => {
   const h = await fixture({ dependency: null });
   try {

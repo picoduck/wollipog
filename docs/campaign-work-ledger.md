@@ -354,6 +354,14 @@ the client restarts.
     revision, and, for the `cost` and `elapsed` sorts, to the order its first page saw (see the
     Orchestrator routes above). A cursor from another revision returns
     `409 {code: "revision_changed", revision}` and the client restarts from the first page.
+    `repository` (#4120) lists only items whose derived `repository` is that one, compared
+    case-insensitively; the cursor is bound to it too. Every page also carries `repositories`: each
+    repository's item counts by state over all its items, whatever the filters, in the order its
+    first item was recorded, with an unknown repository last. Campaign Status groups the loaded rows
+    under one header per repository and offers a **Repository** filter only when there are two or
+    more; a single-repository campaign's list, and any list from an older control plane, stays
+    ungrouped. A row shows **Depends On** `owner/repo: Title` for each merge dependency, and a held
+    item shows **Waiting for Prerequisite Merge** with the pull request it waits on.
   - `GET /api/sessions/:id/campaign/work-items/:itemId` returns a `CampaignWorkItemDetailResponse`.
   - `GET /api/sessions/:id/campaign/recommendations?cursor&limit&disposition` returns a
     `CampaignRecommendationsPage`: recommendations awaiting adjudication or publication, and

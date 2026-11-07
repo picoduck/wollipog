@@ -32,6 +32,7 @@ import { createRoot } from "react-dom/client";
 import {
   CAMPAIGN_AUTOMATION_HOLD_REASONS,
   CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE,
+  CAMPAIGN_WORK_ITEM_PRIMARY_STATES,
   campaignIssueLimitsRequirement,
   campaignIssueScopeChangesRequirement,
   PROTOCOL_VERSION,
@@ -153,7 +154,51 @@ const items: CampaignWorkItemSummary[] = [
   }),
 ];
 
+// `workRepositories=1` (#4120): work in two repositories. The settings change in picoduck/wollipog
+// waits for the account field in picoduck/account-api, whose pull request is still in its queue.
+const workRepositories = params.get("workRepositories") === "1";
+if (workRepositories) {
+  for (const item of items) item.repository = "picoduck/wollipog";
+  Object.assign(items[3]!, {
+    title: "Show Account Field in Settings", primaryState: "waiting", stateCauses: ["dependency_unmerged", "attempt_awaiting_verification"],
+    mergeDependencies: [{ id: "cwi_10", key: "api:account-field", title: "Add Account Field", repository: "picoduck/account-api", status: "unmerged",
+      pullRequests: [{ ref: { repository: "picoduck/account-api", number: 88 }, state: "open" }] }],
+  } satisfies Partial<CampaignWorkItemSummary>);
+  items.push(
+    itemSummary("cwi_10", NOW, {
+      title: "Add Account Field", key: "api:account-field", issue: { repository: "picoduck/account-api", number: 41 }, repository: "picoduck/account-api",
+      queuePosition: 2, primaryState: "running", currentAttempt: { id: "catt_10", sessionId: "s_child_10", sessionTitle: "Account API: Add Account Field" },
+      elapsed: { startedAt: NOW - 40 * MINUTE, endedAt: null }, cost: knownCost(1.85), activityAt: NOW - 2 * MINUTE,
+      stage: { stage: "merge_queued", note: null, pullRequests: [{ repository: "picoduck/account-api", number: 88 }], sourceSessionId: "s_root", reportedAt: NOW - 5 * MINUTE },
+    }),
+    itemSummary("cwi_11", NOW, {
+      title: "Document Account Field", key: "api:account-docs", issue: null, repository: "picoduck/account-api", queuePosition: 9,
+      primaryState: "delivered", currentAttempt: null, attemptCount: 1, elapsed: { startedAt: NOW - 2 * HOUR, endedAt: NOW - HOUR },
+      cost: knownCost(0.6), activityAt: NOW - HOUR,
+    }),
+  );
+}
+
+/** The control plane's per-repository counts over every recorded item (#4120). */
+function fixtureRepositoryCounts(all: readonly CampaignWorkItemSummary[]) {
+  const counts = new Map<string | null, { repository: string | null; total: number; byState: Record<string, number> }>();
+  for (const item of all) {
+    const repository = item.repository ?? null;
+    const entry = counts.get(repository) ?? { repository, total: 0, byState: Object.fromEntries(CAMPAIGN_WORK_ITEM_PRIMARY_STATES.map((state) => [state, 0])) };
+    entry.byState[item.primaryState] = (entry.byState[item.primaryState] ?? 0) + 1;
+    entry.total += 1;
+    counts.set(repository, entry);
+  }
+  return [...counts.values()] as import("@wollipog/protocol").CampaignWorkRepositoryCounts[];
+}
+
 const details: Record<string, CampaignWorkItemDetail> = Object.fromEntries(items.map((item) => [item.id, itemDetail(item)]));
+if (workRepositories) {
+  details.cwi_4 = itemDetail(items[3]!, {
+    dependsOn: [{ id: "cwi_10", key: "api:account-field", title: "Add Account Field", primaryState: "running" }],
+    nextAction: "Merge once picoduck/account-api#88 lands.",
+  });
+}
 details.cwi_2 = itemDetail(items[1]!, {
   dependsOn: [{ id: "cwi_1", key: "picoduck/wollipog#1", title: "Campaign Work Ledger Contract", primaryState: "delivered" }],
   nextAction: "Open the pull request once the read API lands.",
@@ -1069,6 +1114,7 @@ const client = {
       origin: (search.get("origin") ?? "all") as CampaignWorkFilters["origin"],
       state: (search.get("state") ?? "unfinished") as CampaignWorkFilters["state"],
       sort: (search.get("sort") ?? "queue") as CampaignWorkFilters["sort"],
+      repository: search.get("repository") ?? "all",
     };
     const matching = applyCampaignWorkFilters(visibleItems, filters, Date.now());
     const offset = Number(search.get("cursor") ?? 0);
@@ -1079,6 +1125,7 @@ const client = {
       items: page,
       total: matching.length,
       nextCursor: offset + limit < matching.length ? String(offset + limit) : null,
+      ...(workRepositories ? { repositories: fixtureRepositoryCounts(visibleItems) } : {}),
     };
   },
   campaignWorkItem: async (_id: string, itemId: string) => {

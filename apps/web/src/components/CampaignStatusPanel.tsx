@@ -36,6 +36,14 @@ import {
   causeNeedsRequests,
   durationMetricView,
   filtersAreDefault,
+  campaignRepositoryFilterOptions,
+  groupCampaignWorkByRepository,
+  heldOnPullRequest,
+  mergeDependencyLabel,
+  repositoryCountsLabel,
+  MERGE_DEPENDENCY_STATUS_LABELS,
+  WAITING_FOR_PREREQUISITE_MERGE,
+  type CampaignWorkRepositoryGroup,
   issueRefHref,
   forgePullRequestView,
   issueRefLabel,
@@ -609,7 +617,11 @@ function CampaignWorkList({
 }) {
   const headingId = useId();
   const { list } = data;
-  const items = list.items;
+  // #4120: grouped by repository when the campaign works in more than one; keyboard order follows
+  // what is shown.
+  const groups = groupCampaignWorkByRepository(list.items, list.repositories);
+  const items = groups ? groups.flatMap((group) => group.items) : list.items;
+  const repositoryOptions = campaignRepositoryFilterOptions(list.repositories, filters.repository ?? "all");
   // One tab stop for the list: the remembered row when it is still listed, otherwise the first.
   const stopId = items.some((item) => item.id === focusItemId) ? focusItemId : items[0]?.id ?? null;
 
@@ -624,6 +636,20 @@ function CampaignWorkList({
     onFocusItem(next.id);
     rowRefs.current.get(next.id)?.focus();
   };
+
+  const row = (item: CampaignWorkItemSummary) => (
+    <li key={item.id}>
+      <CampaignWorkRow
+        item={item}
+        now={now}
+        assignment={item.id === currentWorkItemId}
+        tabStop={item.id === stopId}
+        rowRef={(node) => { rowRefs.current.set(item.id, node); }}
+        onFocus={() => { if (item.id !== stopId) onFocusItem(item.id); }}
+        onOpen={() => onOpen(item)}
+      />
+    </li>
+  );
 
   let body: ReactNode;
   if (list.status === "loading" && items.length === 0) {
@@ -657,19 +683,11 @@ function CampaignWorkList({
           </Notice>
         )}
         <ul className="campaign-work-list" aria-labelledby={headingId} onKeyDown={onKeyDown}>
-          {items.map((item) => (
-            <li key={item.id}>
-              <CampaignWorkRow
-                item={item}
-                now={now}
-                assignment={item.id === currentWorkItemId}
-                tabStop={item.id === stopId}
-                rowRef={(node) => { rowRefs.current.set(item.id, node); }}
-                onFocus={() => { if (item.id !== stopId) onFocusItem(item.id); }}
-                onOpen={() => onOpen(item)}
-              />
-            </li>
-          ))}
+          {groups ? groups.map((group) => (
+            <CampaignWorkGroup key={group.repository ?? ""} group={group}>
+              {group.items.map(row)}
+            </CampaignWorkGroup>
+          )) : items.map(row)}
         </ul>
         {list.hasMore && (
           <BusyButton className="btn ghost sm campaign-work-more" busy={list.loadingMore} progress="Loading more work items…"
@@ -693,9 +711,27 @@ function CampaignWorkList({
           onChange={(origin) => onFiltersChange({ ...filters, origin })} />
         <Select label="State" value={filters.state} options={CAMPAIGN_STATE_FILTER_OPTIONS}
           onChange={(state) => onFiltersChange({ ...filters, state })} />
+        {repositoryOptions.length > 0 && (
+          <Select label="Repository" value={filters.repository ?? "all"} options={repositoryOptions}
+            onChange={(repository) => onFiltersChange({ ...filters, repository })} />
+        )}
       </div>
       {body}
     </section>
+  );
+}
+
+/** #4120: one repository's rows under a header with that repository's counts. */
+function CampaignWorkGroup({ group, children }: { group: CampaignWorkRepositoryGroup; children: ReactNode }) {
+  const headingId = useId();
+  return (
+    <li className="campaign-work-group">
+      <h4 id={headingId} className="campaign-work-group-head">
+        <span className="campaign-work-group-name">{group.label}</span>
+        <span className="campaign-work-group-counts">{repositoryCountsLabel(group.counts, group.items.length)}</span>
+      </h4>
+      <ul className="campaign-work-list" aria-labelledby={headingId}>{children}</ul>
+    </li>
   );
 }
 
@@ -718,6 +754,7 @@ function CampaignWorkRow({
 }) {
   const time = workItemTimeView(item, now);
   const cost = campaignCostView(item.cost);
+  const held = heldOnPullRequest(item);
   return (
     <button
       ref={rowRef}
@@ -741,6 +778,20 @@ function CampaignWorkRow({
           {cost.priced && <span title={cost.provenance ?? "Cost"}>{cost.text}</span>}
         </span>
       </span>
+      {/* #4120: prerequisites in other repositories, and the merge an item is held on. */}
+      {item.mergeDependencies?.map((dependency) => (
+        <span key={dependency.id} className="campaign-work-row-line campaign-work-row-dependency">
+          <span className="campaign-work-row-dependency-label">Depends On</span>
+          <span>{mergeDependencyLabel(dependency)}</span>
+          <span className="campaign-status-meta">{MERGE_DEPENDENCY_STATUS_LABELS[dependency.status]}</span>
+        </span>
+      ))}
+      {held && (
+        <span className="campaign-work-row-line campaign-work-row-held">
+          <span className="campaign-work-row-dependency-label">{WAITING_FOR_PREREQUISITE_MERGE}</span>
+          <span>{held}</span>
+        </span>
+      )}
     </button>
   );
 }
@@ -1026,12 +1077,17 @@ function CampaignWorkItemDetailView({
               <dt>Depends On</dt>
               <dd>{detail.dependsOn.length === 0 ? "None" : (
                 <ul className="campaign-detail-list">
-                  {detail.dependsOn.map((dependency) => (
-                    <li key={dependency.id}>
-                      {workItemTitle(dependency)}
-                      <span className="campaign-status-meta">{CAMPAIGN_WORK_STATE_LABELS[dependency.primaryState]}</span>
-                    </li>
-                  ))}
+                  {detail.dependsOn.map((dependency) => {
+                    // #4120: a prerequisite in another repository names it, and whether it merged.
+                    const merge = detail.mergeDependencies?.find((candidate) => candidate.id === dependency.id);
+                    return (
+                      <li key={dependency.id}>
+                        {merge ? mergeDependencyLabel(merge) : workItemTitle(dependency)}
+                        <span className="campaign-status-meta">{CAMPAIGN_WORK_STATE_LABELS[dependency.primaryState]}</span>
+                        {merge && <span className="campaign-status-meta">{MERGE_DEPENDENCY_STATUS_LABELS[merge.status]}</span>}
+                      </li>
+                    );
+                  })}
                 </ul>
               )}</dd>
             </div>
@@ -1043,7 +1099,8 @@ function CampaignWorkItemDetailView({
           <DetailSection title="Progress">
             <div><dt>Queue Position</dt><dd>{detail.queuePosition === null ? "Not Queued" : detail.queuePosition}</dd></div>
             {detail.stateCauses.length > 0 && (
-              <div><dt>Reason</dt><dd>{detail.stateCauses.map(stateCauseText).join(" ")}</dd></div>
+              <div><dt>Reason</dt><dd>{detail.stateCauses.map(stateCauseText).join(" ")}
+                {heldOnPullRequest(detail) && <> Waiting for {heldOnPullRequest(detail)}.</>}</dd></div>
             )}
             <div>
               <dt>Blocker</dt>

@@ -5607,6 +5607,44 @@ body.shell-dock-dragging * {
   flex: none;
   font-variant-numeric: tabular-nums;
 }
+/* #4120: a third filter (Repository) takes the whole row below the first two. */
+.campaign-work-filters > :nth-child(3) {
+  grid-column: 1 / -1;
+}
+/* #4120: one repository's rows under a header with its counts. */
+.campaign-work-group + .campaign-work-group {
+  margin-top: var(--space-3);
+}
+.campaign-work-group-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  font: var(--type-small);
+}
+.campaign-work-group-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.campaign-work-group-counts {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.campaign-work-row-dependency,
+.campaign-work-row-held {
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  color: var(--text-dim);
+  font: var(--type-small);
+  overflow-wrap: anywhere;
+}
+.campaign-work-row-dependency-label {
+  color: var(--text);
+  font-weight: 500;
+}
 .campaign-work-more {
   justify-self: start;
 }
