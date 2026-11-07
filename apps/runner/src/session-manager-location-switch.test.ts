@@ -613,9 +613,13 @@ test("the reuse check refuses exactly the placements the managed boundary's laun
   const tmp = ["/tmp"];
   assert.match(managedWorktreeLaunchRefusal("/tmp/docs-wt", "/src/docs/.git", [], tmp)!, /directly in the temporary directory \/tmp/u);
   assert.equal(managedWorktreeLaunchRefusal("/tmp/work/docs-wt", "/src/docs/.git", [], tmp), null);
-  // A shared writable directory may sit beside the worktree, never around it or its Git directory.
+  // As at launch, a shared writable directory may sit beside the worktree, be the worktree itself
+  // (already its working directory) or be exactly its parent, but nothing wider and never inside the
+  // worktree or around its Git directory. execution-isolation.test.ts checks these against the launch.
   assert.equal(managedWorktreeLaunchRefusal("/work/docs-wt", "/src/docs/.git", ["/work/cache"], tmp), null);
-  assert.match(managedWorktreeLaunchRefusal("/work/docs-wt", "/src/docs/.git", ["/work"], tmp)!, /overlaps the shared writable directory \/work,/u);
+  assert.equal(managedWorktreeLaunchRefusal("/work/docs-wt", "/src/docs/.git", ["/work/docs-wt"], tmp), null);
+  assert.equal(managedWorktreeLaunchRefusal("/work/docs-wt", "/src/docs/.git", ["/work"], tmp), null);
+  assert.match(managedWorktreeLaunchRefusal("/work/docs-wt", "/src/docs/.git", ["/"], tmp)!, /overlaps the shared writable directory \/,/u);
   assert.match(managedWorktreeLaunchRefusal("/work/docs-wt", "/src/docs/.git", ["/work/docs-wt/out"], tmp)!, /overlaps/u);
   assert.match(managedWorktreeLaunchRefusal("/work/docs-wt", "/src/docs/.git", ["/src/docs/.git/objects"], tmp)!, /overlaps/u);
 });

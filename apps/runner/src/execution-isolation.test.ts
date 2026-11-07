@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   cloneExecutionIsolationState,
+  managedWorktreeLaunchRefusal,
   migrateExecutionIsolationState,
   adoptLegacyWslExecutionIsolationState,
   parseWslIsolationProbe,
@@ -16,6 +17,70 @@ import {
 
 const provider = { mode: "provider" as const, network: "inherit" as const };
 const bwrap = { mode: "bwrap" as const, network: "deny" as const };
+
+test("a Location switch's reuse check refuses exactly the placements the managed launch refuses (#4138)", async () => {
+  // The launch reserves a real `config.worktree` in the worktree's admin directory; every other
+  // path is answered by the runtime stubs as canonical and existing.
+  const root = mkdtempSync(join(tmpdir(), "wollipog-reuse-launch-"));
+  const commonGitDir = join(root, "docs", ".git");
+  mkdirSync(join(commonGitDir, "worktrees", "wt"), { recursive: true });
+  // The real launch, with canonical paths that all exist, for a protected worktree and extra roots.
+  const launches = async (worktree: string, roots: string[]): Promise<boolean> => {
+    const admin = `${commonGitDir}/worktrees/wt`;
+    const readOnly = [`${worktree}/.git`, `${admin}/gitdir`, `${admin}/commondir`, `${admin}/config.worktree`];
+    try {
+      await resolveExecutionIsolation(bwrap, { kind: "native" }, {
+        platform: "linux", uid: () => 1000, nativeTmp: () => "/tmp",
+        realpathNative: async (path) => path, existsNative: async () => true, mkdirNative: async () => {},
+        isRunnerOwnedEntryNative: async (path) => readOnly.includes(path), isExposableEntryNative: async () => false,
+        resolveNative: async (name) => name === "bwrap" ? {
+          path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] },
+        } : null,
+      }, {
+        driver: "acp", dataDir: "/state", env: { HOME: "/home/me" }, sessionId: "s1", cwd: worktree,
+        additionalWritableRoots: roots, readOnlyPaths: readOnly,
+        protectedWorktree: {
+          path: worktree, requiredReadOnlyPaths: readOnly,
+          gitWritableRoots: [admin, `${commonGitDir}/objects`, `${commonGitDir}/refs`, `${commonGitDir}/logs`],
+        },
+      });
+      return true;
+    } catch (error) {
+      if (/overlaps protected worktree roots|canonical existing child and private parent/u.test((error as Error).message)) return false;
+      throw error;
+    }
+  };
+  const cases: Array<[string, string[]]> = [
+    ["/work/docs-wt", []],
+    ["/tmp/docs-wt", []],
+    ["/tmp/work/docs-wt", []],
+    ["/work/docs-wt", ["/work/docs-wt"]],
+    ["/work/docs-wt", ["/work"]],
+    ["/work/docs-wt", ["/work/cache"]],
+    ["/work/docs-wt", ["/work/docs-wt/out"]],
+    ["/work/docs-wt", ["/"]],
+    ["/work/docs-wt", [join(commonGitDir, "objects")]],
+    ["/work/docs-wt", [join(root, "docs")]],
+    ["/work/docs-wt", ["/elsewhere/cache"]],
+  ];
+  try {
+    const outcomes: boolean[] = [];
+    for (const [worktree, roots] of cases) {
+      const launched = await launches(worktree, roots);
+      outcomes.push(launched);
+      const refusal = managedWorktreeLaunchRefusal(worktree, commonGitDir, roots, ["/tmp"]);
+      assert.equal(refusal === null, launched, `${worktree} with ${JSON.stringify(roots)}: launch ${launched}, check ${refusal}`);
+    }
+    // The cases cover both outcomes, including the launch's two exceptions: a root equal to the
+    // worktree (already bound as its working directory) and one equal to its parent.
+    assert.ok(outcomes.includes(true) && outcomes.includes(false));
+    assert.equal(managedWorktreeLaunchRefusal("/work/docs-wt", commonGitDir, ["/work/docs-wt"], ["/tmp"]), null);
+    assert.equal(managedWorktreeLaunchRefusal("/work/docs-wt", commonGitDir, ["/work"], ["/tmp"]), null);
+    assert.match(managedWorktreeLaunchRefusal("/tmp/docs-wt", commonGitDir, [], ["/tmp"])!, /temporary directory/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("a protected worktree cannot silently use provider isolation", async () => {
   await assert.rejects(() => resolveExecutionIsolation(provider, { kind: "native" }, { platform: "linux" }, {

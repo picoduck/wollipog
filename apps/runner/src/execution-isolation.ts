@@ -359,13 +359,32 @@ function pathsOverlap(left: string, right: string): boolean {
   return pathWithinOrEqual(left, right) || pathWithinOrEqual(right, left);
 }
 
+/** Whether a managed Linux writable mount at canonical `path` (requested as `requested`) would
+ * expose the protected worktree's parent or its Git administration. A separate sibling inside the
+ * parent is allowed, and so is a requested extra root that is exactly the parent. The launch and a
+ * Location switch's check before it moves a session both use this one rule. */
+function managedWritableRootConflicts(
+  path: string,
+  requested: string,
+  protectedParent: string,
+  protectedChild: string,
+  commonGitDir: string,
+  requestedWorktree: boolean,
+): boolean {
+  const exactRequestedBoundary = requestedWorktree && requested === protectedParent && path === protectedParent;
+  const separateSibling = path === requested &&
+    pathWithinOrEqual(protectedParent, path) && !pathsOverlap(path, protectedChild);
+  return pathsOverlap(path, commonGitDir) ||
+    (pathsOverlap(path, protectedParent) && !exactRequestedBoundary && !separateSibling);
+}
+
 /** Why the managed bubblewrap boundary would refuse to launch a provider in this existing,
  * canonical worktree, or null (#4138). A Location switch that reuses a worktree checks this before
  * it retires the provider or moves the session, so a worktree the launch would refuse is refused
- * while nothing has changed. These are the launch's own rules: a protected worktree's parent may
- * not be the temporary directory (see `resolveExecutionIsolation`), and no extra writable root may overlap
- * its Git directory or its parent, unless it is a separate sibling inside that parent (see
- * `canonicalManagedWritableRoot`). */
+ * while nothing has changed. The rules are the launch's own, applied to canonical extra writable
+ * roots as `resolveExecutionIsolation` applies them: the protected worktree's parent may not be the
+ * temporary directory; a root equal to the worktree is skipped, as the launch binds it as the
+ * working directory already; every other root goes through `managedWritableRootConflicts`. */
 export function managedWorktreeLaunchRefusal(
   worktree: string,
   commonGitDir: string,
@@ -377,8 +396,8 @@ export function managedWorktreeLaunchRefusal(
     return `it sits directly in the temporary directory ${parent}, where the session's sandbox cannot protect it`;
   }
   for (const root of writableRoots) {
-    const separateSibling = pathWithinOrEqual(parent, root) && !pathsOverlap(root, worktree);
-    if (pathsOverlap(root, commonGitDir) || (pathsOverlap(root, parent) && !separateSibling)) {
+    if (root === worktree) continue;
+    if (managedWritableRootConflicts(root, root, parent, worktree, commonGitDir, true)) {
       return `it overlaps the shared writable directory ${root}, which the session's sandbox cannot grant beside it`;
     }
   }
@@ -417,11 +436,7 @@ async function canonicalManagedWritableRoot(
   }
   const planned = posix.join(await runtime.realpathNative(ancestor), posix.relative(ancestor, requested));
   const validate = (path: string) => {
-    const exactRequestedBoundary = requestedWorktree && requested === protectedParent && path === protectedParent;
-    const separateSibling = path === requested &&
-      pathWithinOrEqual(protectedParent, path) && !pathsOverlap(path, protectedChild);
-    if (pathsOverlap(path, commonGitDir) ||
-        (pathsOverlap(path, protectedParent) && !exactRequestedBoundary && !separateSibling)) {
+    if (managedWritableRootConflicts(path, requested, protectedParent, protectedChild, commonGitDir, requestedWorktree)) {
       throw new Error(`managed worktree ${role} writable mount overlaps protected worktree roots or Git administration`);
     }
   };
