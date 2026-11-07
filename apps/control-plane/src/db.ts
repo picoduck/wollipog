@@ -6491,6 +6491,8 @@ export class ControlPlaneDb {
       },
       forgePullRequests: (campaignId, refs, now) => this.campaignForgeObservations.facts(campaignId, refs, now),
       sessionRepository: (campaignId, sessionId) => this.campaignSessionRepository(campaignId, sessionId),
+      armedMerge: (sessionId) => this.stmt(`SELECT 1 FROM workflow_decisions WHERE session_id=? AND category='pr_merge'
+        AND status='approved' AND action_kind='pr_merge_enqueue' AND action_armed_at IS NOT NULL LIMIT 1`).get(sessionId) !== undefined,
     });
     return this.campaignWorkLedgerStore;
   }

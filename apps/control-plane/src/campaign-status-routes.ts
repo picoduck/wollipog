@@ -93,6 +93,24 @@ export function forgeFactsForPrincipal<T extends CampaignWorkItemDetail>(item: T
   };
 }
 
+/** #4120: a merge dependency's pull-request states and status come from the same forge facts, so a
+ * reader who may not see a pull request's fact sees its state as `unknown`, and the status as
+ * `unknown` unless the facts it shows decide it. The item's derived state is the campaign's, shown to
+ * every reader, as its reported stage is. */
+export function mergeDependenciesForPrincipal<T extends CampaignWorkItemSummary>(item: T, visible: boolean | ((ref: CampaignPullRequestRef) => boolean)): T {
+  if (visible === true || !item.mergeDependencies?.length) return item;
+  return {
+    ...item,
+    mergeDependencies: item.mergeDependencies.map((dependency) => {
+      const pullRequests = dependency.pullRequests.map((entry) => visible !== false && visible(entry.ref) ? entry : { ...entry, state: "unknown" as const });
+      const hidden = pullRequests.some((entry, index) => entry !== dependency.pullRequests[index]);
+      // A cancelled prerequisite fails, and one naming no pull request is unmerged, whatever the forge says.
+      const decidedWithoutFacts = dependency.status === "failed" && !dependency.pullRequests.some((entry) => entry.state === "closed");
+      return { ...dependency, pullRequests, status: hidden && !decidedWithoutFacts ? "unknown" as const : dependency.status };
+    }),
+  };
+}
+
 /* ------------------------------ Routes ------------------------------ */
 
 interface CampaignReader {
@@ -256,9 +274,8 @@ export function registerCampaignStatusRoutes(
     const attempts = page.data.items.some((item) => item.cost) ? ledger.attemptSessionIdsByItem(read.rootId) : null;
     return reply.send({
       ...page.data,
-      items: attempts
-        ? page.data.items.map((item) => workItemForPrincipal(item, attempts.get(item.id) ?? [], read.canSee))
-        : page.data.items,
+      items: page.data.items.map((item) => mergeDependenciesForPrincipal(
+        attempts ? workItemForPrincipal(item, attempts.get(item.id) ?? [], read.canSee) : item, read.forgeFactVisible)),
     });
   });
 
@@ -271,10 +288,10 @@ export function registerCampaignStatusRoutes(
     if (!item) return reply.code(404).send({ error: "work item not found in this campaign" });
     const response: CampaignWorkItemDetailResponse = {
       revision: ledger.revision(read.rootId),
-      item: forgeFactsForPrincipal(
+      item: mergeDependenciesForPrincipal(forgeFactsForPrincipal(
         workItemForPrincipal(item, item.attempts.map((attempt) => attempt.sessionId), read.canSee),
         read.forgeFactVisible,
-      ),
+      ), read.forgeFactVisible),
     };
     return reply.send(response);
   });

@@ -11457,12 +11457,30 @@ export class SessionsService {
     if (!campaignId || campaignId === child.id) return null;
     const assignment = this.db.campaignWorkLedger.currentAssignment(child.id);
     if (!assignment || assignment.campaignSessionId !== campaignId) return null;
-    const prerequisites = () => this.db.campaignWorkLedger.mergePrerequisites(campaignId, assignment.workItemId, snapshot.repository);
-    const before = prerequisites();
+    const before = this.db.campaignWorkLedger.mergePrerequisites(campaignId, assignment.workItemId, snapshot.repository);
     if (!before.length) return null;
     const refs = before.flatMap((prerequisite) => prerequisite.pullRequests.map(({ ref }) => ref));
-    if (refs.length && this.campaignForgeReadNow) await this.campaignForgeReadNow(campaignId, refs).catch(() => null);
-    const hold = campaignFirstMergeHold(prerequisites());
+    // A read that does not answer for every pull request proves nothing: a cached MERGED never stands
+    // in for it, so the hold stays as not freshly observed.
+    const read = refs.length && this.campaignForgeReadNow ? await this.campaignForgeReadNow(campaignId, refs).catch(() => null) : null;
+    const held = this.campaignMergeHoldNow(child, snapshot);
+    if (held || !refs.length || (read && read.length === refs.length)) return held;
+    const prerequisite = before.find((candidate) => candidate.pullRequests.length)!;
+    const { ref, fact } = prerequisite.pullRequests[0]!;
+    return { campaignId, hold: { prerequisite: { id: prerequisite.id, key: prerequisite.key, title: prerequisite.title, repository: prerequisite.repository },
+      pullRequest: ref, state: "unobserved", headSha: fact.availability === "unavailable" ? fact.lastValue?.headSha ?? null : fact.value.headSha } };
+  }
+
+  /** #4120: the same hold from what is stored now, with no read: the last synchronous check before a
+   * merge is armed or dispatched, so a dependency added, or a prerequisite cancelled, while the
+   * forge was being read still holds it. */
+  private campaignMergeHoldNow(child: SessionView,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>): { campaignId: string; hold: CampaignMergeHold } | null {
+    const campaignId = this.db.campaignRootForMember(child.id);
+    if (!campaignId || campaignId === child.id) return null;
+    const assignment = this.db.campaignWorkLedger.currentAssignment(child.id);
+    if (!assignment || assignment.campaignSessionId !== campaignId) return null;
+    const hold = campaignFirstMergeHold(this.db.campaignWorkLedger.mergePrerequisites(campaignId, assignment.workItemId, snapshot.repository));
     return hold ? { campaignId, hold } : null;
   }
 
@@ -15260,6 +15278,9 @@ export class SessionsService {
         this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
         return fail("Merge review evidence or authority changed while arming; request a new exact merge decision.", 409);
       }
+      // #4120: the ledger may have gained a hold while the forge was read above.
+      const heldNow = normalized.data.category === "pr_merge" ? this.campaignMergeHoldNow(child, normalized.data) : null;
+      if (heldNow) return this.mergeHeld(child, occurrenceId, heldNow);
       const armed = this.db.armWorkflowDecisionAction(occurrenceId, {
         ...action.data,
         commandDigest: auditDigest(action.data)!,
@@ -15433,6 +15454,13 @@ export class SessionsService {
           const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
           if (latest?.status === "approved") this.revokeWorkflowDecision(latest, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
           return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+        }
+        // #4120: a hold the ledger gained while GitHub was read stops the enqueue here. This attempt
+        // changed nothing and is recorded as such, as an authority change during preparation is.
+        const heldNow = this.campaignMergeHoldNow(currentChild, snapshot);
+        if (heldNow) {
+          finish("refused", { reason: "runner_unavailable", summary: boundedForgeSummary(campaignMergeHoldReason(heldNow.hold)) });
+          return this.mergeHeld(currentChild, occurrenceId, heldNow);
         }
       }
       const requestId = `forge_decision_action_${randomUUID()}`;

@@ -422,6 +422,10 @@ export interface CampaignWorkLedgerHooks {
   /** #4120: the campaign repository whose Location this session is placed in, lower-cased, or null.
    * A server fact (#4119), never agent text. Reads rows only. */
   sessionRepository?(campaignId: string, sessionId: string): string | null;
+  /** #4120: whether this session holds an approved `pr_merge` whose enqueue is armed and not yet
+   * consumed. Its provider may run that command without asking the control plane again, so a
+   * dependency added now could not hold it. */
+  armedMerge?(sessionId: string): boolean;
 }
 
 /** What `summary` derives from the ledger alone. Cached per campaign under the revision plus the
@@ -988,7 +992,15 @@ export class CampaignWorkLedgerStore {
       if (unique.includes(itemId)) return { error: `${label}: an item cannot depend on itself`, status: 409 };
       const missing = this.missingItemIds(campaignId, unique);
       if (missing.length) return { error: `${label}: unknown work items: ${missing.slice(0, 8).join(", ")}`, status: 404 };
-      if ([...(edges.get(itemId) ?? [])].sort().join("\n") === [...unique].sort().join("\n")) continue;
+      const before = edges.get(itemId) ?? [];
+      if ([...before].sort().join("\n") === [...unique].sort().join("\n")) continue;
+      // #4120: a new dependency is a promise to hold this item's merge, which an already armed enqueue
+      // would not keep: its provider may run it without asking again. Refused rather than recorded.
+      const session = unique.some((id) => !before.includes(id)) ? this.openAttemptForItem(itemId)?.session_id : null;
+      if (session && this.hooks.armedMerge?.(session)) {
+        return { error: `${label}: its child has already armed its approved merge, which a new dependency could not hold. ` +
+          "Record dependencies before a merge is armed; after this merge settles, record it again if it still applies.", status: 409 };
+      }
       edges.set(itemId, unique);
       changed.push(itemId);
     }

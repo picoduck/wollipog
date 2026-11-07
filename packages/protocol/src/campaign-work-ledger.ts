@@ -156,6 +156,10 @@ export type CampaignWorkItemStateCause =
  * prerequisite that names no pull request yet and one whose pull requests can't be read. */
 export type CampaignMergeDependencyStatus = "merged" | "unmerged" | "failed";
 
+/** What a reader is shown: also `unknown` when the reader may not see the forge facts that decide
+ * the status (#4119's per-runner visibility). */
+export type CampaignMergeDependencyShownStatus = CampaignMergeDependencyStatus | "unknown";
+
 /** #4120: one prerequisite in another repository, as a dependent item shows it. A dependency within
  * one repository is not a merge dependency and is not listed here. */
 export interface CampaignMergeDependencyView {
@@ -164,7 +168,7 @@ export interface CampaignMergeDependencyView {
   title: string | null;
   /** The prerequisite's repository, lower-cased. */
   repository: string;
-  status: CampaignMergeDependencyStatus;
+  status: CampaignMergeDependencyShownStatus;
   /** The pull requests the prerequisite names, each with its last observed state (`unknown` when
    * none can be shown). */
   pullRequests: Array<{ ref: CampaignPullRequestRef; state: "open" | "closed" | "merged" | "unknown" }>;

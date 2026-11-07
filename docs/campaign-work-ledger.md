@@ -203,7 +203,16 @@ display-only meaning; holding those too is possible later work.
   pull request. Nothing is armed, no forge-action attempt is spent, and the approval stays
   approved: once the prerequisite merges, the same approval is consumed again. A hold defers an
   operation already approved; it never grants or revokes one. The dependent's repository at the gate
-  is the repository of the pull request being merged.
+  is the repository of the pull request being merged. A read that doesn't answer for every pull
+  request (a Location offline, the read queue full, a timeout) holds the merge as not freshly
+  observed, even over a fresh MERGED already stored. The hold is evaluated again from what is stored,
+  with nothing awaited, immediately before arming and before Wollipog dispatches an enqueue, so a
+  dependency added or a prerequisite cancelled during the merge's own forge reads still holds it;
+  an enqueue stopped that late records its attempt as refused.
+- **No dependency after arming.** A child's provider may run an armed enqueue without asking the
+  control plane again, so a new dependency can't be added to an item whose child holds an armed,
+  unconsumed `pr_merge`: the ledger refuses it (409) rather than record a hold it couldn't keep.
+  Wollipog-performed enqueues still check holds, for a dependency already in the ledger.
 - **Wake.** A refusal while the prerequisite is still to merge parks the child on that pull request
   with #4071's watch, which the control plane keeps itself (`PREREQUISITE_MERGE_WATCH_RUNNER`): the
   child's runner may not be able to read that repository. The watch appears in `parkedChildren` and
@@ -220,7 +229,10 @@ display-only meaning; holding those too is possible later work.
   status (`merged`, `unmerged`, `failed`) and pull requests. A merge already observed stays merged
   as its observation ages, since a forge never un-merges a pull request; the gate itself always reads
   fresh. A dependent whose child is idle while a merge dependency is unmerged reads **waiting**
-  with `dependency_unmerged` first.
+  with `dependency_unmerged` first. Pull-request states follow forge-fact visibility: a reader
+  without access to the runner whose login supplied a fact sees its state as `unknown`, and the
+  status as `unknown` unless it is decided without forge facts (a cancelled prerequisite). The
+  item's derived state is the campaign's and is shown to every reader, as its reported stage is.
 - **Reading.** The background pass also reads the pull requests of every unfinished dependent's
   prerequisites, so a delivered prerequisite keeps being read until it merges or closes. With no
   Location of the prerequisite's repository online, its facts read `unavailable` and the hold stays.

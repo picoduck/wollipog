@@ -8,6 +8,9 @@ import { SessionsService, canonicalPrMergeEnqueueCommand } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { CampaignForgeObserver } from "./campaign-forge-observations.js";
 import { PREREQUISITE_MERGE_WATCH_RUNNER } from "./pull-request-watches.js";
+import Fastify from "fastify";
+import { registerCampaignStatusRoutes } from "./campaign-status-routes.js";
+import type { HumanPrincipal } from "./identity.js";
 
 /**
  * #4120: cross-repository work-item dependencies hold a dependent's merge until every pull request of
@@ -53,8 +56,11 @@ async function fixture(options: { dependency?: "api" | "app-sibling" | null } = 
   const forge = new Map<string, CampaignForgePullRequestObservation>();
   const reads: Array<{ runnerId: string; refs: string[]; location: string | null }> = [];
   const forgeActions: string[] = [];
+  /** While set, the merge preflight waits for it, so a test can change the ledger mid-request. */
+  const preflight: { gate: Promise<void> | null; reached: () => void } = { gate: null, reached: () => undefined };
   hub.requestFromRunner = (async (runnerId: string, requestId: string, message: ControlPlaneToRunner) => {
     if (message.type === "github_merge_preflight") {
+      if (preflight.gate) { preflight.reached(); await preflight.gate; }
       return { type: "github_merge_preflight_result", requestId, sessionId: message.sessionId, ok: true, check: { checkedAt: 1, closures: [] } };
     }
     if (message.type === "campaign_forge_observe") {
@@ -116,7 +122,14 @@ async function fixture(options: { dependency?: "api" | "app-sibling" | null } = 
     return { occurrenceId: created.data.occurrenceId, snapshot, arm };
   };
   const detail = (key: string) => db.campaignWorkLedger.detail("root", item(key), Date.now())!;
-  return { db, hub, svc, observer, forge, reads, forgeActions, offline, item, detail, approvedMerge };
+  /** Hold the next merge preflights until `release`; `reached` resolves once one is waiting. */
+  const pausePreflight = () => {
+    let release!: () => void;
+    const reached = new Promise<void>((resolve) => { preflight.reached = resolve; });
+    preflight.gate = new Promise<void>((resolve) => { release = () => { preflight.gate = null; resolve(); }; });
+    return { reached, release };
+  };
+  return { db, hub, svc, observer, forge, reads, forgeActions, offline, item, detail, approvedMerge, pausePreflight };
 }
 
 test("an owner/app merge is held while its owner/api prerequisite is open and proceeds on the same approval once it merges (#4120)", async () => {
@@ -325,13 +338,118 @@ test("an item works where its child is placed, so one feature issue can span two
   } finally { h.observer.dispose(); h.db.close(); }
 });
 
-test("a dependency recorded after the merge was armed still holds Wollipog's enqueue, spending no attempt (#4120)", async () => {
+test("a hold the ledger gains while the merge's own forge reads are pending still stops arming and Wollipog's enqueue (#4120)", async () => {
+  const h = await fixture({ dependency: null });
+  try {
+    h.forge.set("owner/api#7", pull("open"));
+    await h.observer.readNow("root", [{ repository: "owner/api", number: 7 }]);
+    // Arming: the dependency arrives while the closing-reference preflight is out.
+    const merge = h.approvedMerge("app", "owner/app", 5);
+    const paused = h.pausePreflight();
+    const arming = merge.arm();
+    await paused.reached;
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item("app"), dependsOn: [h.item("api")] }).ok, "not armed yet, so it may be added");
+    paused.release();
+    const held = await arming;
+    assert.equal(held.status, 409);
+    assert.match(held.error!, /owner\/api#7/u);
+    assert.equal(h.db.workflowDecisionByOccurrence(merge.occurrenceId)!.actionAdmission, undefined, "nothing was armed");
+    assert.equal(h.db.workflowDecisionByOccurrence(merge.occurrenceId)!.status, "approved");
+
+    // Wollipog's enqueue: armed with the prerequisite merged, then the prerequisite is cancelled
+    // while GitHub is read for the enqueue.
+    h.forge.set("owner/api#7", pull("merged"));
+    assert.equal((await merge.arm()).ok, true);
+    const executing = (() => {
+      const pausedAgain = h.pausePreflight();
+      const run = h.svc.executeWorkflowDecision("app", merge.occurrenceId, { resourceDigest: h.db.workflowDecisionByOccurrence(merge.occurrenceId)!.resourceDigest });
+      return { run, ...pausedAgain };
+    })();
+    await executing.reached;
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item("api"), commitment: { state: "cancelled", reason: "Not needed" } }).ok);
+    executing.release();
+    const stopped = await executing.run;
+    assert.equal(stopped.status, 409);
+    assert.match(stopped.error!, /^Merge held: its prerequisite api in owner\/api was cancelled or removed/u);
+    assert.deepEqual(h.forgeActions, [], "no enqueue was sent");
+    assert.equal(h.db.workflowDecisionByOccurrence(merge.occurrenceId)!.forgeAction?.outcome, "refused");
+  } finally { h.observer.dispose(); h.db.close(); }
+});
+
+test("a fresh MERGED already stored doesn't pass the gate when the authoritative read can't be made (#4120)", async () => {
+  const h = await fixture();
+  try {
+    h.forge.set("owner/api#7", pull("merged"));
+    await h.observer.readNow("root", [{ repository: "owner/api", number: 7 }]);
+    const [stored] = h.db.campaignForgeObservations.facts("root", [{ repository: "owner/api", number: 7 }], Date.now());
+    assert.equal(stored!.fact.availability, "fresh");
+    // r2 can't be asked now (its registration still reads online), so the read answers nothing.
+    h.offline.add("r2");
+    const merge = h.approvedMerge("app", "owner/app", 5);
+    const held = await merge.arm();
+    assert.equal(held.status, 409);
+    assert.match(held.error!, /owner\/api#7 \(api in owner\/api\) is observed MERGED; it is not freshly observed\./u);
+    assert.equal(h.db.workflowDecisionByOccurrence(merge.occurrenceId)!.status, "approved");
+    h.offline.delete("r2");
+    assert.equal((await merge.arm()).ok, true);
+  } finally { h.observer.dispose(); h.db.close(); }
+});
+
+test("a reader who can't reach the prerequisite's reading runner sees its merge state as unknown (#4120)", async () => {
+  const h = await fixture();
+  try {
+    h.forge.set("owner/api#7", pull("closed"));
+    await h.observer.readNow("root", [{ repository: "owner/api", number: 7 }]);
+    const identity = h.db.localIdentityContext();
+    const human: HumanPrincipal = { ...identity, kind: "human", actorId: identity.userId };
+    const status = Fastify();
+    registerCampaignStatusRoutes(status, { db: h.db, requestPrincipal: () => human });
+    await status.ready();
+    const read = async () => {
+      const page = (await status.inject({ method: "GET", url: "/api/sessions/root/campaign/work-items?state=all" })).json();
+      const detail = (await status.inject({ method: "GET", url: `/api/sessions/root/campaign/work-items/${h.item("app")}` })).json();
+      return [page.items.find((item: { key: string }) => item.key === "app").mergeDependencies[0], detail.item.mergeDependencies[0]];
+    };
+    for (const shown of await read()) {
+      assert.deepEqual([shown.status, shown.pullRequests[0].state], ["failed", "closed"], "the reader reaches r2");
+    }
+    // Without access to r2, whose login supplied the fact, neither the state nor the status it decides is shown.
+    const access = h.db.canAccessRunner.bind(h.db);
+    h.db.canAccessRunner = (principal, runnerId) => runnerId !== "r2" && access(principal, runnerId);
+    for (const shown of await read()) {
+      assert.deepEqual([shown.key, shown.repository, shown.status, shown.pullRequests], ["api", "owner/api", "unknown",
+        [{ ref: { repository: "owner/api", number: 7 }, state: "unknown" }]]);
+    }
+    // A cancelled prerequisite fails whatever the forge says, so its status stays shown.
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item("api"), commitment: { state: "cancelled", reason: "Not needed" } }).ok);
+    h.forge.set("owner/api#7", pull("open"));
+    h.db.canAccessRunner = access;
+    await h.observer.readNow("root", [{ repository: "owner/api", number: 7 }]);
+    h.db.canAccessRunner = (principal, runnerId) => runnerId !== "r2" && access(principal, runnerId);
+    for (const shown of await read()) assert.deepEqual([shown.status, shown.pullRequests[0].state], ["failed", "unknown"]);
+    await status.close();
+  } finally { h.observer.dispose(); h.db.close(); }
+});
+
+test("a dependency can't be added once the merge is armed, and Wollipog's enqueue still holds on one that is there (#4120)", async () => {
   const h = await fixture({ dependency: null });
   try {
     const merge = h.approvedMerge("app", "owner/app", 5);
     assert.equal((await merge.arm()).ok, true);
     h.forge.set("owner/api#7", pull("open"));
-    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item("app"), dependsOn: [h.item("api")] }).ok);
+    // The child's provider may run an armed command without asking again, so the promise to hold
+    // it can't be made now: the ledger refuses it, in the plan and in an update alike.
+    const refused = h.svc.updateCampaignWorkItem("root", { workItemId: h.item("app"), dependsOn: [h.item("api")] });
+    assert.equal(refused.status, 409);
+    assert.match(refused.error!, /its child has already armed its approved merge, which a new dependency could not hold/u);
+    const planned = h.svc.recordCampaignPlan("root", { planComplete: true, items: [{ key: "app", dependsOnKeys: ["api"] }] });
+    assert.equal(planned.status, 409);
+    assert.equal(h.detail("app").dependsOn.length, 0);
+    // Other items' dependencies are unaffected.
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item("app-sibling"), dependsOn: [h.item("api")] }).ok);
+    // A dependency already in the ledger (here written directly, as an older control plane could
+    // have) still holds the enqueue Wollipog performs.
+    h.db.raw().prepare("INSERT INTO campaign_work_item_dependencies (work_item_id, depends_on_id) VALUES (?, ?)").run(h.item("app"), h.item("api"));
     const digest = h.db.workflowDecisionByOccurrence(merge.occurrenceId)!.resourceDigest;
     const executed = await h.svc.executeWorkflowDecision("app", merge.occurrenceId, { resourceDigest: digest });
     assert.equal(executed.status, 409);
