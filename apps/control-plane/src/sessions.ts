@@ -71,6 +71,10 @@ import { forgeRefKey, type ForgeReadResult } from "./campaign-forge-observations
 import { campaignFirstMergeHold, type CampaignMergeHold } from "./campaign-merge-dependencies.js";
 import { PREREQUISITE_MERGE_WATCH_RUNNER } from "./pull-request-watches.js";
 import { campaignMergeHoldReason } from "@wollipog/protocol";
+
+/** #4120: Claude Code tools that can run a command, so possibly a held armed merge. The runner's
+ * driver treats Bash and PowerShell as its shell tools; Monitor also runs a command. */
+const CLAUDE_COMMAND_TOOLS: ReadonlySet<string> = new Set(["Bash", "PowerShell", "Monitor"]);
 import {
   REVIEW_FULL_REASON_LIMIT, REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
   compactReviewFinding, REVIEW_ROUND_REFUSALS, type ReviewLaunchPolicy, type ReviewSessionRequest, type ReviewSessionUpdate, type ReviewSessionView, type ReviewSessionsPage,
@@ -2385,7 +2389,7 @@ export class SessionsService {
    * an earlier answer. Without it an excluded pull request cannot be re-proven (#2940). */
   campaignForgeReadNow: ((campaignId: string, refs: readonly CampaignPullRequestRef[]) => Promise<ForgeReadResult[] | null>) | null = null;
   /** One in-flight excluded-pull-request read per closure occurrence; concurrent executes share it. */
-  private readonly excludedClosureReads = new Map<string, Promise<boolean>>();
+  private readonly excludedClosureReads = new Map<string, Promise<boolean | null>>();
   /** The Decision Model runtime (#4101) the Full Control screens use (#4104). The server shares
    * its own; tests replace it with a fake harness. */
   private decisionRuntime: DecisionRuntime;
@@ -3028,6 +3032,19 @@ export class SessionsService {
     if (!parsed.ok) return fail(parsed.error, 400);
     const now = Date.now();
     if (parsed.value.hookEventName !== "PreToolUse") return ok({ decision: "defer" });
+    // #4120: an allow here, or a defer under a provider mode that asks nobody, would let a held armed
+    // merge run unseen. The hook can't see which command it is, so every shell command is denied
+    // while one is held, and the session is parked on the prerequisite.
+    if (CLAUDE_COMMAND_TOOLS.has(parsed.value.context?.toolName ?? "")) {
+      const heldArmed = this.heldArmedMergeOfSession(session);
+      if (heldArmed) {
+        if (this.db.pullRequestWatches.visibleFor(sessionId)?.state !== "watching") {
+          this.mergeHeld(session, heldArmed.decision.occurrenceId, heldArmed.held);
+        }
+        return ok({ decision: "deny", reason: `${campaignMergeHoldReason(heldArmed.held.hold)} Shell commands are blocked until then, ` +
+          "since this session's armed merge must not run." });
+      }
+    }
     if (!parsed.value.toolUseId) {
       if (parsed.value.approvalRequestId) {
         return fail("policy hook approval polling requires a stable toolUseId", 409);
@@ -5791,7 +5808,7 @@ export class SessionsService {
     const { sessionId: launchSessionId, ...sharedSpec } = commandSpec;
     const spec: SessionLaunchSpec = {
       sessionId: launchSessionId,
-      campaignBudgetDispatch: this.db.campaignBudgets.dispatch(id),
+      campaignBudgetDispatch: this.db.campaignBudgets.dispatchTo(id),
       ...sharedSpec,
       // The original frames also had distinct orchestrator containers; their nested values and
       // config were already shared. Preserve that ownership without changing the staged frame.
@@ -11483,45 +11500,84 @@ export class SessionsService {
     return ok({ watch: this.db.pullRequestWatches.view(watchId)! });
   }
 
+  /** #4120: what a merge of this pull request waits for in the requester's campaign: the prerequisites
+   * of every item naming the pull request and of the requester's open attempt. Any campaign session
+   * is covered, the root and a worker without an attempt included. Null outside a campaign. */
+  private mergeHoldPrerequisites(child: SessionView, snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>):
+    { campaignId: string; prerequisites: ReturnType<CampaignWorkLedgerStore["mergePrerequisitesForMerge"]> } | null {
+    const campaignId = this.db.campaignRootForMember(child.id);
+    if (!campaignId) return null;
+    const ledger = this.db.campaignWorkLedger;
+    return { campaignId, prerequisites: ledger.mergePrerequisitesForMerge(campaignId,
+      { repository: snapshot.repository, number: snapshot.pullRequest }, ledger.openAttemptItem(campaignId, child.id)) };
+  }
+
   /**
-   * #4120: why this requester's merge is held on a prerequisite in another repository, or null. Only
-   * a campaign child's current work item can carry a merge dependency, and only one whose
-   * prerequisite works in another repository than the pull request being merged. The prerequisite's
-   * pull requests are read now through a Location of their own repository (#4119), past the
-   * observer's rate limit, and only a fresh MERGED meets the dependency: `delivered`, enqueued, stale
-   * or unreadable never does. Nothing here grants or revokes anything.
+   * #4120: why this merge is held on a prerequisite in another repository, or null. The pull request
+   * being merged decides, through whichever work item names it, as well as the requester's own work
+   * item. The prerequisite's pull requests are read now through a Location of their own repository
+   * (#4119), past the observer's rate limit, and only a fresh MERGED meets the dependency: `delivered`,
+   * enqueued, stale, unreadable or outside the campaign's repositories never does. Nothing here
+   * grants or revokes anything.
    */
   private async campaignMergeHold(child: SessionView,
     snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>): Promise<{ campaignId: string; hold: CampaignMergeHold } | null> {
-    const campaignId = this.db.campaignRootForMember(child.id);
-    if (!campaignId || campaignId === child.id) return null;
-    const assignment = this.db.campaignWorkLedger.currentAssignment(child.id);
-    if (!assignment || assignment.campaignSessionId !== campaignId) return null;
-    const before = this.db.campaignWorkLedger.mergePrerequisites(campaignId, assignment.workItemId, snapshot.repository);
-    if (!before.length) return null;
-    const refs = before.flatMap((prerequisite) => prerequisite.pullRequests.map(({ ref }) => ref));
+    const scope = this.mergeHoldPrerequisites(child, snapshot);
+    if (!scope?.prerequisites.length) return null;
+    const { campaignId, prerequisites: before } = scope;
+    const refs = before.flatMap((prerequisite) => prerequisite.pullRequests.flatMap((entry) => entry.outside ? [] : [entry.ref]));
     // A read that does not answer for every pull request proves nothing: a cached MERGED never stands
     // in for it, so the hold stays as not freshly observed.
     const read = refs.length && this.campaignForgeReadNow ? await this.campaignForgeReadNow(campaignId, refs).catch(() => null) : null;
     const held = this.campaignMergeHoldNow(child, snapshot);
     if (held || !refs.length || (read && read.length === refs.length)) return held;
-    const prerequisite = before.find((candidate) => candidate.pullRequests.length)!;
-    const { ref, fact } = prerequisite.pullRequests[0]!;
+    const prerequisite = before.find((candidate) => candidate.pullRequests.some((entry) => !entry.outside))!;
+    const { ref, fact } = prerequisite.pullRequests.find((entry) => !entry.outside)!;
     return { campaignId, hold: { prerequisite: { id: prerequisite.id, key: prerequisite.key, title: prerequisite.title, repository: prerequisite.repository },
       pullRequest: ref, state: "unobserved", headSha: fact.availability === "unavailable" ? fact.lastValue?.headSha ?? null : fact.value.headSha } };
   }
 
   /** #4120: the same hold from what is stored now, with no read: the last synchronous check before a
    * merge is armed or dispatched, so a dependency added, or a prerequisite cancelled, while the
-   * forge was being read still holds it. */
+   * forge was being read still holds it, unless freshly MERGED. Only checks of an already armed merge
+   * pass `staleMergedMeets` (see `campaignMergeHold` in campaign-merge-dependencies.ts). */
   private campaignMergeHoldNow(child: SessionView,
-    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>): { campaignId: string; hold: CampaignMergeHold } | null {
-    const campaignId = this.db.campaignRootForMember(child.id);
-    if (!campaignId || campaignId === child.id) return null;
-    const assignment = this.db.campaignWorkLedger.currentAssignment(child.id);
-    if (!assignment || assignment.campaignSessionId !== campaignId) return null;
-    const hold = campaignFirstMergeHold(this.db.campaignWorkLedger.mergePrerequisites(campaignId, assignment.workItemId, snapshot.repository));
-    return hold ? { campaignId, hold } : null;
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
+    options: { staleMergedMeets?: boolean } = {}): { campaignId: string; hold: CampaignMergeHold } | null {
+    const scope = this.mergeHoldPrerequisites(child, snapshot);
+    const hold = scope ? campaignFirstMergeHold(scope.prerequisites, options) : null;
+    return scope && hold ? { campaignId: scope.campaignId, hold } : null;
+  }
+
+  /** #4120: the hold on an armed merge that this permission request would run, whoever answers it:
+   * automatic admission, a policy, or a person. Null when the request runs no armed merge of the
+   * session's, or that merge is not held. */
+  private heldArmedMerge(session: SessionView, approval: PendingApproval):
+    { decision: WorkflowDecisionView; held: { campaignId: string; hold: CampaignMergeHold } } | null {
+    if (approval.kind === "authentication" || approval.kind === "question") return null;
+    const command = session.driver === "codex-app-server" ? approval.context?.commandIdentity?.input : approval.context?.input;
+    if (typeof command !== "string" || !command) return null;
+    const action: WorkflowDecisionAction = { kind: "pr_merge_enqueue", command };
+    for (const decision of this.db.approvedWorkflowDecisionsForAction(session.id, auditDigest(action)!)) {
+      if (decision.resourceSnapshot.category !== "pr_merge" || decision.actionAdmission?.command !== command) continue;
+      const held = this.campaignMergeHoldNow(session, decision.resourceSnapshot, { staleMergedMeets: true });
+      if (held) return { decision, held };
+    }
+    return null;
+  }
+
+  /** #4120: a held armed merge of this session's, whatever command it would run. Claude's policy hook
+   * never carries a command (raw tool input does not cross that boundary), so it can't tell the armed
+   * command from any other: while one is held, none of the session's shell commands may be allowed there. */
+  private heldArmedMergeOfSession(session: SessionView):
+    { decision: WorkflowDecisionView; held: { campaignId: string; hold: CampaignMergeHold } } | null {
+    for (const decision of this.db.unconsumedWorkflowDecisionsForSession(session.id)) {
+      if (decision.status !== "approved" || decision.resourceSnapshot.category !== "pr_merge" ||
+          decision.actionAdmission?.kind !== "pr_merge_enqueue") continue;
+      const held = this.campaignMergeHoldNow(session, decision.resourceSnapshot, { staleMergedMeets: true });
+      if (held) return { decision, held };
+    }
+    return null;
   }
 
   /** #4120: refuse a held merge with its fixed reason, leaving the approval as it is. A prerequisite
@@ -11552,17 +11608,17 @@ export class SessionsService {
     for (const watch of watches) {
       if (this.db.campaignRootForMember(watch.sessionId) !== campaignId) continue;
       const key = forgeRefKey(watch);
-      const assignment = this.db.campaignWorkLedger.currentAssignment(watch.sessionId);
-      const prerequisite = assignment?.campaignSessionId === campaignId
-        ? this.db.campaignWorkLedger.mergePrerequisites(campaignId, assignment.workItemId,
-          this.db.campaignSessionRepository(campaignId, watch.sessionId) ?? undefined)
-          .find((candidate) => candidate.pullRequests.some(({ ref }) => forgeRefKey(ref) === key))
-        : undefined;
+      // The watched pull request still holds one of the session's approved merges.
+      const session = this.db.getSession(watch.sessionId);
+      const prerequisite = session ? this.db.unconsumedWorkflowDecisionsForSession(watch.sessionId)
+        .flatMap((decision) => decision.status === "approved" && decision.resourceSnapshot.category === "pr_merge"
+          ? this.mergeHoldPrerequisites(session, decision.resourceSnapshot)?.prerequisites ?? [] : [])
+        .find((candidate) => candidate.pullRequests.some(({ ref }) => forgeRefKey(ref) === key)) : undefined;
       const fact = prerequisite?.pullRequests.find(({ ref }) => forgeRefKey(ref) === key)?.fact;
       const state = fact && fact.availability !== "unavailable" ? fact.value.state : null;
       let settled: boolean;
       if (!prerequisite) {
-        settled = this.db.pullRequestWatches.markLost(watch.watchId, "the work item no longer depends on this pull request; " +
+        settled = this.db.pullRequestWatches.markLost(watch.watchId, "no approved merge of yours waits on this pull request any more; " +
           "consume the approved merge again, which checks its hold", now);
       } else if (prerequisite.commitment !== "committed") {
         settled = this.db.pullRequestWatches.markLost(watch.watchId, `prerequisite ${prerequisite.key} was cancelled or removed, ` +
@@ -11570,9 +11626,9 @@ export class SessionsService {
       } else if (state === "merged" || state === "closed") {
         settled = this.db.pullRequestWatches.accept(PREREQUISITE_MERGE_WATCH_RUNNER, { type: "pull_request_watch_update",
           watchId: watch.watchId, state: "fired", outcome: state, summary: state === "merged"
-            ? `Prerequisite ${prerequisite.key} (${prerequisite.repository}) of your held merge is MERGED. Consume the same ` +
+            ? `Prerequisite ${prerequisite.key} (${prerequisite.repository ?? "unknown repository"}) of your held merge is MERGED. Consume the same ` +
               "approved pr_merge decision again; it stays valid."
-            : `Prerequisite ${prerequisite.key} (${prerequisite.repository}) was closed without merging, so your merge stays ` +
+            : `Prerequisite ${prerequisite.key} (${prerequisite.repository ?? "unknown repository"}) was closed without merging, so your merge stays ` +
               "held and the work item is blocked. Report it to your Orchestrator." }, now) !== null;
       } else continue;
       if (!settled) continue;
@@ -11894,7 +11950,7 @@ export class SessionsService {
     const holdFor = hasBlockingPendingRequest(configured.pendingApproval) ? "control_plane" as const
       : this.runnerHoldAfter(configured, this.guardrailFields(configured));
     return this.hub.sendToRunner(session.runnerId, { type: "rearm_governance", sessionId,
-      campaignBudgetDispatch: this.db.campaignBudgets.dispatch(sessionId),
+      campaignBudgetDispatch: this.db.campaignBudgets.dispatchTo(sessionId),
       config: { ...(allocation.costUsd === undefined ? {} : { costBudgetUsd: allocation.costUsd }),
         ...(allocation.toolCalls === undefined ? {} : { maxToolCalls: allocation.toolCalls }) }, ...(holdFor ? { holdFor } : {}) });
   }
@@ -13522,14 +13578,15 @@ export class SessionsService {
   /** The runner's authoritative read of every excluded pull request, past the observer's cache and
    * rate limit: a pull request reopened since its last read must not stay excluded. Concurrent
    * executes of one occurrence share a read in flight, and a settled answer is never reused. A
-   * read that cannot answer for every ref proves nothing. */
-  private excludedPullRequestsStillClosed(occurrenceId: string, root: SessionView, refs: CampaignPullRequestRef[]): Promise<boolean> {
+   * read that cannot answer for every ref returns null: it proves nothing and preserves approval. */
+  private excludedPullRequestsStillClosed(occurrenceId: string, root: SessionView, refs: CampaignPullRequestRef[]): Promise<boolean | null> {
     if (!refs.length) return Promise.resolve(true);
     const shared = this.excludedClosureReads.get(occurrenceId);
     if (shared) return shared;
     const read = (async () => {
       const results = this.campaignForgeReadNow ? await this.campaignForgeReadNow(root.id, refs).catch(() => null) : null;
-      return Boolean(results && results.length === refs.length && results.every((result) => result.observation?.state === "closed"));
+      if (!results || results.length !== refs.length || results.some((result) => !result.observation)) return null;
+      return results.every((result) => result.observation?.state === "closed");
     })().finally(() => this.excludedClosureReads.delete(occurrenceId));
     this.excludedClosureReads.set(occurrenceId, read);
     return read;
@@ -13732,7 +13789,7 @@ export class SessionsService {
         resourceKey,
         resourceSnapshot: snapshot,
       }, canAccess, { trustedIssueClosure: true });
-      if (!created.ok) return failAs(created);
+      if (!created.ok) return { ...failAs(created), ...(created.errorDetails ? { errorDetails: created.errorDetails } : {}) };
       const decided = created.data!.resourceSnapshot;
       // Say so beside the decision, so the root sees a person now decides and what it can fix (#4058).
       const proofGaps = created.data!.authorityEvaluation?.reason === "closure_proof_incomplete" && decided.category === "issue_closure" &&
@@ -13812,7 +13869,10 @@ export class SessionsService {
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline; no closure was attempted", 409);
     if (!this.closureTarget(session, snapshot.repository)) return fail(`No Location of ${snapshot.repository} is online on a runner that can close its issues; no closure was attempted. Retry once one is.`, 409);
     if (decision.authority === "orchestrator") await this.refreshClosureForge(sessionId, snapshot.issue, snapshot.repository);
-    if (decision.authority === "orchestrator" && (!snapshot.issueAdmission || issueEvidenceDigest(closureEvidence(this.db, session, snapshot)) !== snapshot.issueAdmission.evidenceDigest)) return fail("Verified closure delivery or disposition changed; request a new exact closure", 409);
+    if (decision.authority === "orchestrator" && (!snapshot.issueAdmission || issueEvidenceDigest(closureEvidence(this.db, session, snapshot)) !== snapshot.issueAdmission.evidenceDigest)) {
+      this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+      return fail("Verified closure delivery or disposition changed; approval retired; request a new exact closure", 409);
+    }
     // Guardrails and governance remain authoritative even though execution is provider-neutral.
     if (this.pendingPolicyAsk(session) || pendingRequests(session.pendingApproval).some((request) => request.kind !== "workflow_decision") ||
         this.db.listOpenPolicyHookApprovals(sessionId).length || this.gateOnPolicy(sessionId, now)) {
@@ -13829,23 +13889,39 @@ export class SessionsService {
     if (crossDelivery.length) {
       const refs = crossDelivery.map(({ repository, number }) => ({ repository, number }));
       const read = this.campaignForgeReadNow ? await this.campaignForgeReadNow(sessionId, refs).catch(() => null) : null;
+      if (!read || read.length !== refs.length || read.some((result) => !result.observation)) {
+        return fail("Delivering pull requests could not be read; approval preserved. Retry this exact approved closure when the forge is available.", 409);
+      }
       if (JSON.stringify(closureCrossRepositoryDelivery(refs, read)) !== JSON.stringify(crossDelivery)) {
-        return fail("A delivering pull request in another campaign repository could not be confirmed merged at its verified head; request a new exact closure", 409);
+        this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+        return fail("Approval retired. A delivering pull request in another campaign repository could not be confirmed merged at its verified head; request a new exact closure", 409);
       }
     }
     // The uncached read is the last await: a pull request reopened during synchronization is seen,
     // and only synchronous rechecks of every current-state condition separate it from consumption.
     const synchronized = this.db.getSession(sessionId) ?? session;
-    if (decision.authority === "orchestrator" &&
-        !await this.excludedPullRequestsStillClosed(occurrenceId, synchronized, closureExcludedRefs(closureEvidence(this.db, synchronized, snapshot)))) {
-      return fail("An excluded closed pull request could not be confirmed still closed and unmerged; request a new exact closure", 409);
+    const excludedClosed = decision.authority === "orchestrator"
+      ? await this.excludedPullRequestsStillClosed(occurrenceId, synchronized, closureExcludedRefs(closureEvidence(this.db, synchronized, snapshot))) : true;
+    if (excludedClosed === null) {
+      return fail("Excluded pull requests could not be read; approval preserved. Retry this exact approved closure when the forge is available.", 409);
+    }
+    if (!excludedClosed) {
+      this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+      return fail("Approval retired. An excluded closed pull request could not be confirmed still closed and unmerged; request a new exact closure", 409);
     }
     const freshSession = this.db.getSession(sessionId);
     if (!freshSession || isTerminal(freshSession.status) || !campaignClosureIssueHeld(freshSession.orchestratorPolicy, issueRef) ||
-        freshSession.orchestratorPolicy?.issueScope?.revision !== synchronizedScopeRevision || !this.closureScopeCurrent(freshSession, snapshot) ||
+        !this.closureScopeCurrent(freshSession, snapshot) ||
         !this.workflowDecisionAuthorityCurrent(freshSession, freshSession.parentControlPolicy!, decision) ||
         auditDigest(issueClosureActiveChildren(this.db, sessionId, { repository: snapshot.repository, number: snapshot.issue })) !== auditDigest(snapshot.activeChildren) ||
-        decision.authority === "orchestrator" && (scopeCompatibility(this.db, freshSession) || issueEvidenceDigest(closureEvidence(this.db, freshSession, snapshot)) !== snapshot.issueAdmission?.evidenceDigest)) return fail("Campaign authority, work or delivery changed during synchronization; request renewed exact review.", 409);
+        decision.authority === "orchestrator" && (scopeCompatibility(this.db, freshSession) || issueEvidenceDigest(closureEvidence(this.db, freshSession, snapshot)) !== snapshot.issueAdmission?.evidenceDigest)) {
+      this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+      return fail("Campaign authority, work or delivery changed during synchronization; approval retired; request renewed exact review.", 409);
+    }
+    // An unrelated scope addition only needs another synchronization, not renewed approval.
+    if (freshSession.orchestratorPolicy?.issueScope?.revision !== synchronizedScopeRevision) {
+      return fail("Campaign scope changed during synchronization; retry this exact approved closure once synchronization settles.", 409);
+    }
     const settled = Date.now();
     // Read again as the last step before consumption: the Location must still be one of the repository's.
     const target = this.closureTarget(freshSession, snapshot.repository);
@@ -14193,6 +14269,17 @@ export class SessionsService {
         internal?.trustedPublication && normalized.data.issueAdmission ? internal.requestedResourceKey ?? request.resourceKey : null);
       if ("refusal" in guarded) return guarded.refusal;
       retired = guarded.retire;
+    }
+    // #4301: like the publication guard, preserve a live approval and name exactly how to use it.
+    // Pending closures remain replaceable when newer delivery proof becomes available (#4058).
+    if (category === "issue_closure" && !this.db.workflowDecisionByRequestId(sessionId, request.requestId)) {
+      const held = this.db.unconsumedWorkflowDecisionsForSession(sessionId).find((decision) =>
+        decision.category === "issue_closure" && decision.status === "approved" && decision.resourceKey === request.resourceKey);
+      if (held) return { ok: false, status: 409, errorDetails: { code: "issue_closure_approval_open",
+        occurrenceId: held.occurrenceId, resourceDigest: held.resourceDigest },
+        error: `Issue closure decision ${held.occurrenceId} is approved and was preserved; nothing was created or replaced. ` +
+          `Execute close_github_issue with occurrenceId ${held.occurrenceId} and resourceDigest ${held.resourceDigest}. ` +
+          `Execution still checks the approved snapshot. If it is stale, execution retires that approval explicitly; then request a new closure.` };
     }
     const now = Date.now();
     const resourceDigest = workflowDecisionResourceDigest(normalized.data);
@@ -15099,6 +15186,7 @@ export class SessionsService {
       oweResume,
       normalizedResolution.delegatedVideoEvidence,
       delegatedImage,
+      actor,
     );
     let resolved: WorkflowDecisionView | null;
     try {
@@ -15596,10 +15684,10 @@ export class SessionsService {
           return this.forgeActionResult(sessionId, parent.id, occurrenceId);
         }
         // #4120: a hold the ledger gained while GitHub was read stops the enqueue here. This attempt
-        // changed nothing and is recorded as such, as an authority change during preparation is.
+        // changed nothing: it is recorded as `merge_held` and the approval stands.
         const heldNow = this.campaignMergeHoldNow(currentChild, snapshot);
         if (heldNow) {
-          finish("refused", { reason: "runner_unavailable", summary: boundedForgeSummary(campaignMergeHoldReason(heldNow.hold)) });
+          finish("refused", { reason: "merge_held", summary: boundedForgeSummary(campaignMergeHoldReason(heldNow.hold)) });
           return this.mergeHeld(currentChild, occurrenceId, heldNow);
         }
       }
@@ -18520,6 +18608,9 @@ export class SessionsService {
       if (optionId !== "allow" && optionId !== "deny") {
         return fail("policy hook approvals require the Allow or Deny option", 409);
       }
+      // #4120: as at evaluation, a held armed merge blocks allowing any of the session's shell commands.
+      const heldArmed = optionId === "allow" && CLAUDE_COMMAND_TOOLS.has(pending.context?.toolName ?? "") ? this.heldArmedMergeOfSession(session) : null;
+      if (heldArmed) return this.mergeHeld(session, heldArmed.decision.occurrenceId, heldArmed.held);
       const resolved = this.db.resolvePolicyHookApproval(
         sessionId,
         requestId,
@@ -18726,6 +18817,13 @@ export class SessionsService {
     // offline runner can't make us lose the pending approval irrecoverably.
     if (pending.kind !== "question" && optionId !== null && !pending.options.some((option) => option.optionId === optionId)) {
       return fail("approval option is not offered by this request", 409);
+    }
+    // #4120: a card asked before an armed merge gained its hold can't be allowed while it is held,
+    // by anyone; rejecting or cancelling it stays possible.
+    const chosen = optionId === null ? undefined : pending.options.find((option) => option.optionId === optionId);
+    if (pending.kind !== "question" && chosen && chosen.kind !== "cancel" && !chosen.kind?.startsWith("reject")) {
+      const heldArmed = this.heldArmedMerge(session, pending);
+      if (heldArmed) return this.mergeHeld(session, heldArmed.decision.occurrenceId, heldArmed.held);
     }
     // Who decided (#2628): the runner records it on this exact resolution, so the Decision Record
     // names the member per occurrence. Parent Control decisions name their parent session instead.
@@ -19992,7 +20090,7 @@ export class SessionsService {
         : (member.orchestrator ? false : (req.useWorktree ?? true));
       const spec: SessionLaunchSpec = {
         sessionId: id,
-        campaignBudgetDispatch: this.db.campaignBudgets.dispatch(id),
+        campaignBudgetDispatch: this.db.campaignBudgets.dispatchTo(id),
         workspaceId: req.workspaceId,
         workspacePath,
         agentId: member.agentId,
@@ -20938,7 +21036,7 @@ export class SessionsService {
       const spec: SessionLaunchSpec = {
         sessionId: id,
         workspaceId: req.workspaceId,
-        campaignBudgetDispatch: this.db.campaignBudgets.dispatch(id),
+        campaignBudgetDispatch: this.db.campaignBudgets.dispatchTo(id),
         workspacePath,
         agentId,
         agentVersion: launch.version,
@@ -20994,6 +21092,9 @@ export class SessionsService {
       this.log.warn(`ignoring session_status for ${sessionId} from ${fromRunnerId} (owned by ${session.runnerId})`);
       return;
     }
+    // A runner too old to prove provider retirement serves this generation: neither its checkpoint
+    // nor anything a later runner relays for it frees the slot (#3788).
+    if (fromRunnerId) this.noteServingRunner(sessionId, fromRunnerId);
     if (fromRunnerId && isTerminal(status) && budgetCheckpoint) {
       this.db.campaignBudgets.recordCheckpoint(sessionId, budgetCheckpoint);
       // History can arrive after terminal status. Its durable hydration completes settlement.
@@ -21946,6 +22047,22 @@ export class SessionsService {
         );
       }
 
+      // #4120: an armed merge that gained a hold since arming (a prerequisite PR not yet observed
+      // MERGED afresh) is refused here, at the last point the control plane sees the command, before
+      // automatic admission, a policy or a person could allow it: nobody may answer it with an allow.
+      // The approval stays armed; the requester is parked on the prerequisite and woken once it merges.
+      const heldArmed = this.heldArmedMerge(session(), approval);
+      if (heldArmed) {
+        const optionId = approval.options.find((option) => option.kind === "reject_once")?.optionId ?? null;
+        this.hub.sendToRunner(head.runnerId, { type: "resolve_permission", sessionId, requestId: approval.requestId, optionId });
+        this.recordGovernanceAudit(session(), approval, "resolution", "denied", { kind: "system", id: "campaign-merge-hold" }, now, {
+          optionId,
+          ...(policyDecision.policy ? { governancePolicyId: policyDecision.policy.policyId } : {}),
+        });
+        this.mergeHeld(session(), heldArmed.decision.occurrenceId, heldArmed.held);
+        this.hub.sessionChangedById(sessionId);
+        return;
+      }
       const actionAdmission = effectiveEffect === "deny" || approval.humanRequired
         ? null
         : this.workflowDecisionActionForPermission(session(), approval);
@@ -22293,6 +22410,13 @@ export class SessionsService {
     }
   }
 
+  /** Mark the session's live campaign generation when `runnerId`, its owner, is too old to prove
+   * provider retirement (#3788). A current runner costs one cached protocol lookup per report. */
+  private noteServingRunner(sessionId: string, runnerId: string): void {
+    if (runnerSupportsProtocol(this.runnerProtocolVersion(runnerId), "campaignProviderRetirementProof")) return;
+    this.db.campaignBudgets.noteServingRunner(sessionId, runnerId);
+  }
+
   /** Side chats use archived only to stay out of ordinary lists, not as a Stop intent.
    * A provisional disconnect may recover, but an ended child must not come back to life.
    * Pending explicit Stops are enforced separately, until terminal evidence confirms them. */
@@ -22316,7 +22440,9 @@ export class SessionsService {
     for (const s of this.db.listSessions({ includeArchived: true })) {
       if (s.runnerId !== runnerId) continue;
       if (this.dedicatedMediaLifecycle(s)) continue;
-      // No provider of an absent session runs, so its campaign slot is free (#2940).
+      // No provider of an absent session runs, so its campaign slot is free (#2940), unless the
+      // runner is too old to prove that, which keeps it held (#3788).
+      this.noteServingRunner(s.id, runnerId);
       if (!liveSet.has(s.id)) this.db.campaignBudgets.noteProviderAbsent(s.id);
       if (this.db.hasSessionStopIntent(s.id)) {
         if (liveSet.has(s.id)) {
@@ -22548,7 +22674,10 @@ export class SessionsService {
       const chunk = snapshots.slice(offset, offset + 32);
       for(const snap of chunk) {
         const owner=this.db.getSession(snap.id);
-        if(owner?.runnerId===runnerId && isTerminal(snap.status) && snap.campaignBudgetCheckpoint) this.db.campaignBudgets.recordCheckpoint(snap.id,snap.campaignBudgetCheckpoint);
+        if(owner?.runnerId!==runnerId) continue;
+        // A runner too old to prove provider retirement keeps the generation's slot held (#3788).
+        this.noteServingRunner(snap.id,runnerId);
+        if(isTerminal(snap.status) && snap.campaignBudgetCheckpoint) this.db.campaignBudgets.recordCheckpoint(snap.id,snap.campaignBudgetCheckpoint);
       }
       const unsupportedCostSessions = new Set(chunk.filter((snap) =>
         this.unsupportedCostReconciliation(runnerId, snap)).map((snap) => snap.id));
@@ -22734,7 +22863,9 @@ export class SessionsService {
       if (s.runnerId === runnerId && !byId.has(s.id)) {
         if (this.dedicatedMediaLifecycle(s)) continue;
         campaignBefore(s);
-        // An inventory without the session holds no provider of it, so its campaign slot is free (#2940).
+        // An inventory without the session holds no provider of it, so its campaign slot is free (#2940),
+        // unless the runner is too old to prove that, which keeps it held (#3788).
+        this.noteServingRunner(s.id, runnerId);
         this.db.campaignBudgets.noteProviderAbsent(s.id);
         if (this.db.hasSessionStopIntent(s.id)) this.settleStopIntent(s.id, now, "runner_absent");
         if (isTerminal(s.status)) this.revokeUnconsumedWorkflowDecisionsForSession(s.id, "provider-session-absent");
@@ -22815,6 +22946,8 @@ export class SessionsService {
   applySessionRuntimeUpdate(runnerId: string, snapshot: SessionSnapshot, batch?: RunnerAttentionBatch): void {
     const existing = this.db.getSession(snapshot.id);
     if (!existing || existing.runnerId !== runnerId || this.db.isTombstoned(snapshot.id)) return;
+    // A runner too old to prove provider retirement keeps the generation's slot held (#3788).
+    this.noteServingRunner(snapshot.id, runnerId);
     if(isTerminal(snapshot.status) && snapshot.campaignBudgetCheckpoint) this.db.campaignBudgets.recordCheckpoint(snapshot.id,snapshot.campaignBudgetCheckpoint);
     if (this.pendingMediaLifecycle(existing)) snapshot = { ...snapshot, status: existing.status };
     const unsupportedCost = this.unsupportedCostReconciliation(runnerId, snapshot);
@@ -22933,6 +23066,7 @@ export class SessionsService {
       campaignBefore: this.runtimeCampaignBefore(existing, runtimeSnapshot, batch),
       // The single-snapshot path's writes before its update, in its order; none publishes.
       before: () => {
+        this.noteServingRunner(sessionId, runnerId);
         if (terminal && snapshot.campaignBudgetCheckpoint) {
           this.db.campaignBudgets.recordCheckpoint(sessionId, snapshot.campaignBudgetCheckpoint);
         }

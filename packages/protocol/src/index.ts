@@ -1040,7 +1040,9 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      action: that runner creates the issue with its own forge login, with no session of its own,
 //      and answers the issue number. Consuming such a decision is refused, and a runner below v327
 //      is never sent one, so the requester's login is never used instead.
-export const PROTOCOL_VERSION = 327;
+// 329: Issue-closure decisions expose durable approval provenance (#4301). Approved re-requests
+//      are refused with the executable occurrence and digest; older readers may ignore provenance.
+export const PROTOCOL_VERSION = 329;
 
 export * from "./campaign-authority.js";
 export * from "./decision-questions.js";
@@ -1439,6 +1441,11 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * of being refused, so the control plane may fence its standing dismissal permanently (#2940). */
   durableAuthDismissal: 230,
   campaignBudgetAdmission: 218,
+  /** The runner attests a campaign worker's final checkpoint, and omits it from a reconnect
+   * inventory, only once it has proven every provider process tree of that generation gone
+   * (#3788, #4257, #4256). 307 is the first protocol on main that carries all three. An older
+   * runner's checkpoint or absence never frees the generation's concurrency slot. */
+  campaignProviderRetirementProof: 307,
   workflowDecisionActionAdmission: 151,
   workflowDecisionActionReconciliation: 153,
   /** v269 control plane withdraws a pending or approved, unconsumed workflow decision (#3917). */
@@ -6211,6 +6218,8 @@ export interface WorkflowDecisionView {
   delegatedImageReview?: import("./delegated-image-review.js").DelegatedImageReviewReference;
   createdAt: number;
   resolvedAt?: number;
+  /** v329 (#4301): durable issue-closure approval provenance; informational, never a grant. */
+  approval?: { actor: GovernanceActor; at: number };
   consumedAt?: number;
   actionAdmission?: WorkflowDecisionActionAdmission;
   /** v284 (#4067): what Wollipog did when it performed this approved forge action itself. */

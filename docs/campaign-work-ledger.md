@@ -187,59 +187,99 @@ waiting on dependencies or approvals stays unfinished.
 ### Merge Dependencies (#4120)
 
 Forges have no atomic cross-repository merge, so a change that needs another repository's change
-must land after it. `dependsOn` may name items in any of the campaign's repositories. A dependency
-whose prerequisite works in another repository than its dependent (by the derived `repository`,
-both known and different) is a **merge dependency**. It is met only when every pull request the
-prerequisite names, by its reported stage and its recorded deliveries, is freshly observed MERGED on
-its forge. `delivered` doesn't meet it (delivery is the Orchestrator's verification), nor does an
-enqueued pull request (a merge queue can still eject it), a stale or unavailable fact, or a
-prerequisite that names no pull request yet. A dependency within one repository keeps its earlier,
-display-only meaning; holding those too is possible later work.
+must land after it. `dependsOn` may name items in any of the campaign's repositories. An item works
+in every repository it is known to touch: its child's placement, each pull request it names, and its
+issue's (`campaignItemRepositories`). A dependency is a **merge dependency** when any repository the
+prerequisite works in differs from any its dependent works in, and it fails closed
+(`isCampaignMergeDependency`). At the merge gate the dependent's only repository is that of the pull
+request being merged, so there it is any prerequisite working outside that repository.
 
-- **Merge holds.** When a campaign child consumes an approved `pr_merge` to arm it, or asks Wollipog
-  to perform an armed one, the server reads the prerequisites' pull requests now, through a Location
-  of their repository ([Forge Status](#forge-status-slice-8), #4119), and refuses while one is
-  unmet. The refusal is a fixed sentence (`campaignMergeHoldReason`) naming the prerequisite and its
-  pull request. Nothing is armed, no forge-action attempt is spent, and the approval stays
+- In a campaign of several repositories, an item whose repository is not yet known might work in any
+  of them, so a dependency on or from it is a merge dependency.
+- In a campaign of one repository, an item whose repository is unknown works in it.
+- A campaign that records no repository (from before #4117) keeps its dependencies display-only.
+
+A merge dependency is met only when every pull request the prerequisite names, by its reported stage
+and its recorded deliveries, is freshly observed MERGED on its forge.
+`delivered` doesn't meet it (delivery is the Orchestrator's verification), nor does an enqueued pull
+request (a merge queue can still eject it), a stale or unavailable fact (only once a merge is armed
+does a stale MERGED still meet it; see the armed window below), a prerequisite that names no pull
+request yet, or a
+pull request in a repository outside the campaign's repositories (state `outside`: no Location of
+the campaign can observe it, and a fact read through the root's login never stands in for one). A
+dependency within one repository keeps its earlier, display-only meaning; holding those too is
+possible later work.
+
+- **What is held.** A merge of a pull request is held by the prerequisites of every work item that
+  names that pull request, by its stage or a recorded delivery, and of the requester's own open
+  attempt (`mergePrerequisitesForMerge`). The requester may be any campaign session: a child whose
+  attempt has ended, a descendant worker with no attempt of its own, or the root Orchestrator merging
+  itself. The dependent's repository at the gate is the repository of the pull request being merged.
+- **Merge holds.** When a campaign session consumes an approved `pr_merge` to arm it, or asks
+  Wollipog to perform an armed one, the server reads the prerequisites' pull requests now, through a
+  Location of their repository ([Forge Status](#forge-status-slice-8), #4119), and refuses while one
+  is unmet. The refusal is a fixed sentence (`campaignMergeHoldReason`) naming the prerequisite and
+  its pull request. Nothing is armed, no forge-action attempt is spent, and the approval stays
   approved: once the prerequisite merges, the same approval is consumed again. A hold defers an
-  operation already approved; it never grants or revokes one. The dependent's repository at the gate
-  is the repository of the pull request being merged. A read that doesn't answer for every pull
-  request (a Location offline, the read queue full, a timeout) holds the merge as not freshly
+  operation already approved; it never grants or revokes one. A read that doesn't answer for every
+  pull request (a Location offline, the read queue full, a timeout) holds the merge as not freshly
   observed, even over a fresh MERGED already stored. The hold is evaluated again from what is stored,
   with nothing awaited, immediately before arming and before Wollipog dispatches an enqueue, so a
-  dependency added or a prerequisite cancelled during the merge's own forge reads still holds it;
-  an enqueue stopped that late records its attempt as refused.
-- **No dependency after arming.** A child's provider may run an armed enqueue without asking the
-  control plane again, so a new dependency can't be added to an item whose child holds an armed,
-  unconsumed `pr_merge`: the ledger refuses it (409) rather than record a hold it couldn't keep.
-  More generally, every ledger mutation is refused, and rolled back, if it would give such an item
-  a merge prerequisite it did not have, including by moving an existing prerequisite into another
-  repository (assigning it to a child in another Location, naming another repository's pull
-  request on its stage, or changing its issue).
-  Wollipog-performed enqueues still check holds, for a dependency already in the ledger.
-- **Wake.** A refusal while the prerequisite is still to merge parks the child on that pull request
-  with #4071's watch, which the control plane keeps itself (`PREREQUISITE_MERGE_WATCH_RUNNER`): the
-  child's runner may not be able to read that repository. The watch appears in `parkedChildren` and
-  `get_session` like any other, the child's turn may end without owing its Orchestrator a
-  continuation, and the campaign's forge observation settles it: MERGED fires its wake (outcome
-  `merged`), and closed without merging fires `closed`. A prerequisite cancelled or removed, or a
-  dependency removed, ends the watch as lost with a reason. Each wake is one durable prompt that
-  grants nothing.
+  dependency added or a prerequisite cancelled during the merge's own forge reads still holds it; an
+  enqueue stopped that late records its attempt as refused with `merge_held`, and the approval stands.
+  These checks before arming and enqueueing need a fresh MERGED, so a prerequisite added during the
+  read, which the read never covered, holds whatever is stored. Once a merge is armed, the
+  permission and policy-hook checks below count a stored MERGED as met as it ages: the arming read
+  proved each prerequisite MERGED afresh, the ledger refuses new ones while it is armed, and a forge
+  never un-merges a pull request. A fact whose latest read failed holds the merge and is read again
+  in the background, so the hold lifts by itself once a Location answers.
+- **The armed window.** A provider may run an armed enqueue without asking the control plane again,
+  so while a `pr_merge` is armed and unconsumed the ledger refuses (409), and rolls back, any change
+  that would alter what holds that merge: a new dependency, a new item naming the pull request, a
+  prerequisite cancelled, a pull request named on a prerequisite's stage or delivery, or a
+  prerequisite moved into another repository. Make the change after the merge settles. When the
+  provider does ask (a permission request for the armed command), the stored hold is checked once
+  more, before automatic admission, a policy or a person could allow it, and a held merge is
+  rejected there; the approval stays armed and the requester is parked on the prerequisite. A card
+  for that command asked before the hold formed can't be allowed while it holds; it can still be
+  rejected.
+- **Claude's policy hook.** The hook never carries a command (raw tool input doesn't cross that
+  boundary), so it can't tell the armed command from another shell command. While a session's armed
+  merge is held, the hook denies every use of a tool that can run a command (Bash, PowerShell,
+  Monitor) by that session and parks it on the prerequisite, and a policy-hook card for one can't be
+  allowed; other tools are unaffected, and those tools pass again once the hold lifts.
+- **What can't be intercepted.** A provider running the armed command with neither a permission
+  request nor a policy-hook evaluation reports it only afterwards, so the guard above is the only
+  fence on that path. A person merging on the forge, and a raw `gh pr merge` that was never armed,
+  are outside Wollipog's gate; agents are told never to run one.
+- **Wake.** A refusal while the prerequisite is still to merge parks the requester on that pull
+  request with #4071's watch, which the control plane keeps itself (`PREREQUISITE_MERGE_WATCH_RUNNER`):
+  the requester's runner may not be able to read that repository. The watch appears in
+  `parkedChildren` and `get_session` like any other, the child's turn may end without owing its
+  Orchestrator a continuation, and the campaign's forge observation settles it: MERGED fires its wake
+  (outcome `merged`), and closed without merging fires `closed`. A prerequisite cancelled or removed,
+  or a dependency removed, so that no approved merge of the requester still waits on that pull
+  request, ends the watch as lost with a reason. Each wake is one durable prompt that grants nothing.
 - **Never attempted.** A prerequisite pull request closed without merging, or a prerequisite cancelled
   or removed, makes the merge dependency **failed**: the dependent is blocked
-  (`dependency_blocked`), its merge is refused for good, and the Orchestrator reports it as blocked
-  work. A replacement pull request named on the prerequisite's stage replaces the closed one.
-- **Display.** Each item lists its merge dependencies (`mergeDependencies`) with their repository,
-  status (`merged`, `unmerged`, `failed`) and pull requests. A merge already observed stays merged
-  as its observation ages, since a forge never un-merges a pull request; the gate itself always reads
-  fresh. A dependent whose child is idle while a merge dependency is unmerged reads **waiting**
-  with `dependency_unmerged` first. Pull-request states follow forge-fact visibility: a reader
-  without access to the runner whose login supplied a fact sees its state as `unknown`, and the
-  status as `unknown` unless it is decided without forge facts (a cancelled prerequisite). The
-  item's derived state is the campaign's and is shown to every reader, as its reported stage is.
+  (`dependency_blocked`), its merge is refused, and the Orchestrator reports it as blocked work. A
+  replacement pull request named on the prerequisite's stage replaces the closed one and lifts the
+  failure; that is accepted, since the replacement must itself be observed MERGED.
+- **Display.** Each item lists its merge dependencies (`mergeDependencies`) with their repository
+  (null when unknown, shown as Unknown Repository), status (`merged`, `unmerged`, `failed`) and pull
+  requests. A merge already observed stays merged as its observation ages, since a forge never
+  un-merges a pull request; the gate itself always reads fresh. A dependent whose child is idle while
+  a merge dependency is unmerged reads **waiting** with `dependency_unmerged` first. Pull-request
+  states follow forge-fact visibility: a reader without access to the runner whose login supplied a
+  fact sees its state as `unknown`, and the status as `unknown` unless it is decided without forge
+  facts (a cancelled prerequisite). The item's derived state is the campaign's and is shown to every
+  reader, as its reported stage is.
 - **Reading.** The background pass also reads the pull requests of every unfinished dependent's
-  prerequisites, so a delivered prerequisite keeps being read until it merges or closes. With no
-  Location of the prerequisite's repository online, its facts read `unavailable` and the hold stays.
+  prerequisites, so a delivered prerequisite keeps being read until it merges or closes, and every
+  prerequisite pull request a held merge is parked on, whatever state its items are in (a merge of a
+  finished item's pull request is held too); a pull request outside the campaign's repositories is
+  never read. With no Location of the prerequisite's
+  repository online, its facts read `unavailable` and the hold stays.
 
 The Orchestrator states "not safe to land alone" by recording the dependency; items without one
 merge independently, in any order.
@@ -476,9 +516,11 @@ only the open attempt.
   only when the principal can access that attempt's session (or the session was deleted and the
   principal can access the root). A campaign bucket is `unavailable{not_authorized}` when the
   principal cannot access every session contributing to it.
-- **Forge facts** (slice 8) need more than campaign access. They are read through the `gh` login of
-  the runner hosting the root campaign, so a human also needs access to that runner
-  (`canAccessRunner`); a shared campaign never extends a personal runner owner's GitHub visibility.
+- **Forge facts** (slice 8) need more than campaign access. Each is read through the forge login of
+  one runner: the root campaign's for the launch repository, a Location's for another campaign
+  repository (#4119). A human also needs access to the runner whose login supplied the fact
+  (`canAccessRunner`), or, before any value is stored, to the runner that would read it; a shared
+  campaign never extends a personal runner owner's forge visibility.
   Everyone else receives each fact as `unavailable{not_authorized}`, with no last value, while the
   pull-request references and the reported stage stay visible to every campaign reader. An agent
   reads them only as the campaign's own Orchestrator (the credential rule above). The on-demand

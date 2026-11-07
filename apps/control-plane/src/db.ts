@@ -32,7 +32,7 @@ import { applyCampaignBehavior, campaignBehaviorProjection, changedCampaignBehav
 import type { OrchestratorCampaignBehavior, OrchestratorCampaignBehaviorKey } from "@wollipog/protocol";
 import { ReviewSessions, type NewReviewSession } from "./review-sessions.js";
 import { DelegatedImageReviews, type NewDelegatedImageReview } from "./delegated-image-reviews.js";
-import { PullRequestWatches } from "./pull-request-watches.js";
+import { PREREQUISITE_MERGE_WATCH_RUNNER, PullRequestWatches } from "./pull-request-watches.js";
 import { SessionWaits } from "./session-waits.js";
 import { ReviewSettingsStore, type ReviewPolicyCapture } from "./review-settings.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
@@ -6372,6 +6372,9 @@ export class ControlPlaneDb {
         // A stale grant cannot establish delivery or admit a forge/review repair.
         // Only completion truth is retained; the existing admission still fences all effects.
         if (!boundaryCurrent) continue;
+        // Only items without a delivered verification reach here: a verified-delivered item is already
+        // finished, whichever campaign repository its pull request is in (#4120). An unverified item
+        // is finished only by a merge in its issue's own repository, never by another one's (#4119).
         const itemRepository = item.issue.repository.toLowerCase();
         const refs = item.stage?.pullRequests.filter(ref => ref.repository.toLowerCase() === itemRepository) ?? [];
         if (refs.length === 0) { unfinished = true; continue; }
@@ -6495,11 +6498,17 @@ export class ControlPlaneDb {
       armedMerge: (sessionId) => this.stmt(`SELECT 1 FROM workflow_decisions WHERE session_id=? AND category='pr_merge'
         AND status='approved' AND action_kind='pr_merge_enqueue' AND action_armed_at IS NOT NULL LIMIT 1`).get(sessionId) !== undefined,
       // Controlled by the root or one of its nested Orchestrators; the controller index keeps it cheap.
-      armedMergeSessions: (campaignId) => (this.stmt(`SELECT DISTINCT session_id FROM workflow_decisions
+      armedMerges: (campaignId) => (this.stmt(`SELECT occurrence_id, session_id, resource_snapshot FROM workflow_decisions
         WHERE controlling_session_id IN (SELECT value FROM json_each(?)) AND status='approved' AND category='pr_merge'
           AND action_kind='pr_merge_enqueue' AND action_armed_at IS NOT NULL`)
-        .all(JSON.stringify([campaignId, ...this.campaignDescendantIds(campaignId)])) as Array<{ session_id: string }>)
-        .map((row) => row.session_id).filter((sessionId) => this.campaignRootForMember(sessionId) === campaignId),
+        .all(JSON.stringify([campaignId, ...this.campaignDescendantIds(campaignId)])) as Array<{ occurrence_id: string; session_id: string; resource_snapshot: string }>)
+        .filter((row) => this.campaignRootForMember(row.session_id) === campaignId)
+        .flatMap((row) => {
+          const snapshot = parseJson<WorkflowDecisionResourceSnapshot>(row.resource_snapshot);
+          return snapshot?.category === "pr_merge" ? [{ occurrenceId: row.occurrence_id, sessionId: row.session_id,
+            pullRequest: { repository: snapshot.repository, number: snapshot.pullRequest } }] : [];
+        }),
+      campaignRepositories: (campaignId) => this.campaignRepositoriesOf(campaignId),
     });
     return this.campaignWorkLedgerStore;
   }
@@ -7546,6 +7555,8 @@ export class ControlPlaneDb {
       "resume_recalled_at INTEGER",
       // #4066: the occurrence that superseded this one.
       "superseded_by TEXT",
+      // #4301: approval survives supersession and later terminal transitions.
+      "closure_approval TEXT",
       // #4064: the root handed this Orchestrator-owned occurrence to the campaign's owner.
       "owner_handoff TEXT",
       // #4137: the installed or user-authored rule that kept this occurrence for a person.
@@ -8589,6 +8600,11 @@ export class ControlPlaneDb {
              VALUES (?, ?, ?, ?, ?, 'online', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(meta.runnerId, meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, now, editors, runtime, containerTargets, providerAccounts, providerLogins);
+      }
+      // A runner that cannot prove provider retirement now serves its sessions' live generations,
+      // so their slots stay held whatever it, or a later runner, attests for them (#3788).
+      if (!runnerSupportsProtocol(protocolVersion, "campaignProviderRetirementProof")) {
+        this.campaignBudgets.noteRunnerRetirementUnprovable(meta.runnerId);
       }
 
       const ownerKind = scope.owner.kind;
@@ -17757,6 +17773,14 @@ export class ControlPlaneDb {
     return campaignLocationRepository(this, root, campaignScopeRepositories(root), member);
   }
 
+  /** #4120: the campaign's repositories, lower-cased, launch repository first (`campaignScopeRepositories`),
+   * read from the root's row: a session view embeds the campaign projection, which reads the ledger. */
+  campaignRepositoriesOf(campaignId: string): string[] {
+    const row = this.stmt("SELECT orchestrator_policy FROM sessions WHERE id=?").get(campaignId) as { orchestrator_policy: string | null } | undefined;
+    const policy = orchestratorCampaignPolicyFromJson(row?.orchestrator_policy ?? null) ?? undefined;
+    return policy ? campaignScopeRepositories({ orchestratorPolicy: policy } as Pick<SessionView, "orchestratorPolicy">).map((entry) => entry.repository) : [];
+  }
+
   /** #4120: the campaign repository a session is placed in, by `campaignParticipantRepository`, read
    * from rows: a session view embeds the campaign projection, which reads the ledger that asks this. */
   campaignSessionRepository(campaignId: string, sessionId: string): string | null {
@@ -23019,6 +23043,29 @@ export class ControlPlaneDb {
 
   /** For the forge observer's background pass (#4067): each live campaign's merged pull requests
    * whose branch is pending, so a branch deleted by anyone is eventually seen gone. */
+  /** What the campaign forge observer reads in the background (slice 8 of #2417): unfinished items'
+   * pull requests, merged campaign pull requests whose branch is pending (#4067), and the
+   * prerequisites held merges are parked on (#4120). */
+  campaignForgeBackgroundTargets(include: (campaignId: string) => boolean): Array<{ campaignId: string; refs: CampaignPullRequestRef[] }> {
+    return [...this.campaignWorkLedger.forgeBackgroundTargets(include), ...this.campaignMergedBranchTargets(include),
+      ...this.campaignPrerequisiteWatchTargets(include)];
+  }
+
+  /** #4120: the prerequisite pull requests held merges are parked on, per campaign. They are read in
+   * the background whatever the state of the items involved: a merge of a finished item's pull request
+   * is held too, and only a read can fire its wake. */
+  campaignPrerequisiteWatchTargets(include: (campaignId: string) => boolean = () => true): Array<{ campaignId: string; refs: CampaignPullRequestRef[] }> {
+    const targets = new Map<string, Map<string, CampaignPullRequestRef>>();
+    for (const watch of this.pullRequestWatches.watchingOn(PREREQUISITE_MERGE_WATCH_RUNNER)) {
+      const campaignId = this.campaignRootForMember(watch.sessionId);
+      if (!campaignId || !include(campaignId)) continue;
+      const refs = targets.get(campaignId) ?? new Map<string, CampaignPullRequestRef>();
+      refs.set(`${watch.repository.toLowerCase()}#${watch.number}`, { repository: watch.repository, number: watch.number });
+      targets.set(campaignId, refs);
+    }
+    return [...targets].map(([campaignId, refs]) => ({ campaignId, refs: [...refs.values()] }));
+  }
+
   campaignMergedBranchTargets(include: (campaignId: string) => boolean = () => true): Array<{ campaignId: string; refs: CampaignPullRequestRef[] }> {
     const roots = (this.stmt("SELECT id FROM sessions WHERE archived=0 AND orchestrator_policy IS NOT NULL AND parent_session_id IS NULL")
       .all() as Array<{ id: string }>).map((row) => row.id).filter(include);
@@ -23530,11 +23577,12 @@ export class ControlPlaneDb {
     this.db.exec("BEGIN");
     try {
       const supersede = this.stmt(
-        `UPDATE workflow_decisions SET status='superseded', resolved_at=?, superseded_by=?
+        `UPDATE workflow_decisions SET status='superseded',
+           resolved_at=CASE WHEN category='issue_closure' THEN COALESCE(resolved_at, ?) ELSE ? END, superseded_by=?
          WHERE occurrence_id=? AND status IN ('pending','approved')`,
       );
       for (const { occurrence_id: occurrenceId } of superseded) {
-        supersede.run(input.createdAt, input.occurrenceId, occurrenceId);
+        supersede.run(input.createdAt, input.createdAt, input.occurrenceId, occurrenceId);
         this.retireWorkflowDecisionResume(occurrenceId, input.createdAt);
       }
       this.stmt(
@@ -23738,16 +23786,19 @@ export class ControlPlaneDb {
     oweResume = false,
     delegatedVideoEvidence?: WorkflowDecisionView["delegatedVideoEvidence"],
     delegatedImageReview?: WorkflowDecisionView["delegatedImageReview"],
+    actor?: GovernanceActor,
   ): WorkflowDecisionView | null {
     const owed = oweResume ? ", resume_state='held', resume_command_id=NULL, resume_updated_at=?" : "";
     const result = this.stmt(
       `UPDATE workflow_decisions SET status=?, selected_option_id=?, evidence_reviewed=?,
-       rationale_digest=?, child_message=?, delegated_video_evidence=?, delegated_image_review=?, resolved_at=?${owed}
+       rationale_digest=?, child_message=?, delegated_video_evidence=?, delegated_image_review=?, resolved_at=?,
+       closure_approval=CASE WHEN category='issue_closure' AND ?='approved' THEN ? ELSE closure_approval END${owed}
        WHERE occurrence_id=? AND status='pending' AND authority=?`,
     ).run(
       outcome, selectedOptionId ?? null, evidenceReviewed ? JSON.stringify(evidenceReviewed) : null,
       rationaleDigest ?? null, childMessage ?? null, delegatedVideoEvidence ? JSON.stringify(delegatedVideoEvidence) : null,
-      delegatedImageReview ? JSON.stringify(delegatedImageReview) : null, now, ...(oweResume ? [now] : []), occurrenceId, expectedAuthority,
+      delegatedImageReview ? JSON.stringify(delegatedImageReview) : null, now,
+      outcome, actor ? JSON.stringify({ actor, at: now }) : null, ...(oweResume ? [now] : []), occurrenceId, expectedAuthority,
     );
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
@@ -35336,6 +35387,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     child_message?: string | null;
     withdrawal?: string | null;
     superseded_by?: string | null;
+    closure_approval?: string | null;
     owner_handoff?: string | null;
     owner_rule?: string | null;
     issue_closure_result?: string | null;
@@ -35407,6 +35459,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
       : {}),
     ...(row.child_message ? { childMessage: row.child_message } : {}),
     ...(row.withdrawal ? { withdrawal: parseJson<NonNullable<WorkflowDecisionView["withdrawal"]>>(row.withdrawal) ?? undefined } : {}),
+    ...(row.closure_approval ? { approval: parseJson<NonNullable<WorkflowDecisionView["approval"]>>(row.closure_approval) ?? undefined } : {}),
     ...(row.status === "superseded" && row.superseded_by ? { supersededBy: row.superseded_by } : {}),
     ...(row.owner_handoff ? { ownerHandoff: parseJson<NonNullable<WorkflowDecisionView["ownerHandoff"]>>(row.owner_handoff) ?? undefined } : {}),
     ...(row.owner_rule ? { ownerRule: parseJson<NonNullable<WorkflowDecisionView["ownerRule"]>>(row.owner_rule) ?? undefined } : {}),

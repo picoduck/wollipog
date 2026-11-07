@@ -29647,12 +29647,12 @@ test("releaseQueueHold is refused for a runner older than v247 without contactin
 });
 
 test("issue closure requires an exact human decision and executes one durable action", async () => {
-  const successes = new Set(["success", "human_approve", "recovered", "unchanged_child", "multi_pending"]);
+  const successes = new Set(["success", "human_approve", "recovered", "unchanged_child", "multi_pending", "approved_rerequest", "pending_rerequest"]);
   const uncertain = new Set(["uncertain", "invalid_result"]);
   const refused = new Set(["runner_refused", "not_sent"]);
   for (const mode of ["success", "human_approve", "recovered", "unchanged_child", "multi_pending", "already_closed",
     "runner_refused", "not_sent", "deny", "expired", "changed_payload", "changed_policy", "new_child",
-    "changed_assignment", "history_reassignment", "superseded", "stopped", "uncertain", "invalid_result"]) {
+    "changed_assignment", "history_reassignment", "approved_rerequest", "pending_rerequest", "stopped", "uncertain", "invalid_result"]) {
     const { db, hub, svc } = makeHarness();
     try {
       const meta = runnerMeta();
@@ -29710,7 +29710,13 @@ test("issue closure requires an exact human decision and executes one durable ac
         continue;
       }
       assert.ok(requested.ok && requested.data?.decision, requested.error);
-      const decision = requested.data.decision;
+      let decision = requested.data.decision;
+      if (mode === "pending_rerequest") {
+        const next = await svc.requestGithubIssueClosure(id, { ...proposal, requestId: "closure-pending-2" });
+        assert.ok(next.ok && next.data?.decision, next.error);
+        assert.equal(svc.workflowDecision(id, decision.occurrenceId).data?.status, "superseded");
+        decision = next.data.decision;
+      }
       assert.equal(decision.controllingSessionId, id);
       assert.equal(decision.authority, "human");
       assert.equal(db.getSession(id)?.pendingApproval?.title, "Issue Closure Approval Required");
@@ -29741,7 +29747,17 @@ test("issue closure requires an exact human decision and executes one durable ac
       if (mode === "changed_assignment" || mode === "history_reassignment") db.stageSessionPromptCommand({ commandId: "changed-assignment",
         sessionId: "closure-assigned-child", runnerId: RUNNER_ID, payloadJson: JSON.stringify({ text: "Keep working on issue 123." }),
         payloadSha256: "c".repeat(64), expiresAt: Date.now() + 60_000, now: Date.now() });
-      if (mode === "superseded") assert.ok((await svc.requestGithubIssueClosure(id, { ...proposal, requestId: "closure-2", comment: "Changed comment." })).ok);
+      if (mode === "approved_rerequest") {
+        const approval = svc.workflowDecision(id, decision.occurrenceId).data!;
+        assert.deepEqual(approval.approval, { actor: { kind: "human", id: "reviewer" }, at: approval.resolvedAt });
+        const next = await svc.requestGithubIssueClosure(id, { ...proposal, requestId: "closure-2", comment: "Changed comment." });
+        assert.equal(next.status, 409);
+        assert.deepEqual(next.errorDetails, { code: "issue_closure_approval_open", occurrenceId: decision.occurrenceId,
+          resourceDigest: decision.resourceDigest });
+        assert.match(next.error!, /Execute close_github_issue/u);
+        assert.equal(db.workflowDecisionByRequestId(id, "closure-2"), null);
+        assert.deepEqual(svc.workflowDecision(id, decision.occurrenceId).data, approval);
+      }
       if (mode === "stopped") svc.stop(id);
       const digest = mode === "changed_payload" ? "b".repeat(64) : decision.resourceDigest;
       const result = await svc.executeGithubIssueClosure(id, decision.occurrenceId, digest);
@@ -29762,6 +29778,13 @@ test("issue closure requires an exact human decision and executes one durable ac
       } else {
         assert.equal(result.ok, false, `${mode}: no execution`);
         assert.equal(executions, 0);
+        if (mode === "new_child" || mode === "expired") {
+          assert.equal(svc.workflowDecision(id, decision.occurrenceId).data?.status, "revoked");
+          const next = await svc.requestGithubIssueClosure(id, { ...proposal, requestId: "renewed-closure" });
+          assert.ok(next.ok && next.data?.decision, next.error);
+          assert.notEqual(next.data.decision.occurrenceId, decision.occurrenceId);
+          assert.equal(next.data.decision.status, "pending", "renewal never inherits the old approval");
+        }
       }
     } finally { db.close(); }
   }
