@@ -788,16 +788,13 @@ export class CodexAppServerDriver implements Driver {
     return this.turnStartUndelivered;
   }
 
-  private reconciliationFailure = "provider history could not prove command and admission ordering";
-
-  completedCommandReconciliationFailure(): string { return this.reconciliationFailure; }
-
   async reconcileCompletedCommand(
     occurrenceId: string,
     command: string,
     fence?: CompletedCommandReconciliationFence,
+    onFailure?: (reason: string) => void,
   ): Promise<CompletedCommandReconciliationProof | null> {
-    this.reconciliationFailure = "provider history could not prove command and admission ordering";
+    onFailure?.("provider history could not prove command and admission ordering");
     if (!boundedProviderCorrelationId(occurrenceId) ||
         typeof command !== "string" || !command || command.length > 2000 ||
         !boundedProviderCorrelationId(this.threadId)) return null;
@@ -883,7 +880,7 @@ export class CodexAppServerDriver implements Driver {
           // An additional invocation can still become a second success. Do not select a
           // completed proof while that duplicate is unfinished, including via a receipt fence.
           if (liveSawUnfinishedExactCommand) {
-            this.reconciliationFailure = "provider history contains an unfinished exact command";
+            onFailure?.("provider history contains an unfinished exact command");
             return null;
           }
           if (matches.length !== 0) {
@@ -918,11 +915,11 @@ export class CodexAppServerDriver implements Driver {
           // provider turn/item coordinates to agree with the successful live command below.
           if (liveSawExactCommand) {
             if (fence || liveSawAdmissionCandidate || successfulExactCommands.length !== 1) {
-              this.reconciliationFailure = successfulExactCommands.length === 0
+              onFailure?.(successfulExactCommands.length === 0
                 ? "provider history did not prove successful completion of the exact command"
                 : successfulExactCommands.length > 1
                   ? "provider history contains ambiguous repeated successful exact commands"
-                  : "provider history did not prove the exact action admission before the successful command";
+                  : "provider history did not prove the exact action admission before the successful command");
               return null;
             }
             liveProjectionRequiresAgreement = true;
@@ -955,7 +952,7 @@ export class CodexAppServerDriver implements Driver {
       occurrenceId,
       command,
       fence,
-      (reason) => { this.reconciliationFailure = reason; },
+      (reason) => { onFailure?.(reason); },
     );
     if (!liveProjectionRequiresAgreement) return proof;
     if (!liveCompletedCommand) return null;

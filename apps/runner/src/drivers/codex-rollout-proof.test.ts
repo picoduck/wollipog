@@ -195,3 +195,12 @@ test("modern CLI re-enqueue belongs only to the latest admission before the last
     commandItem("landed", COMMAND, ""), completedTurn()].join("\n");
   assert.equal(parseCodexRolloutCompletedCommand(interleaved, THREAD, OCCURRENCE, COMMAND), null);
 });
+
+test("an unrecognized historical status stays fail closed and is diagnosed accurately", () => {
+  const content = [line("session_meta", { id: THREAD }, ""), commandItem("unknown", COMMAND, "", "declined"),
+    cliItem(), commandItem("landed", COMMAND, ""), completedTurn()].join("\n");
+  let failure = "";
+  assert.equal(parseCodexRolloutCompletedCommand(content, THREAD, OCCURRENCE, COMMAND, undefined,
+    (reason) => { failure = reason; }), null);
+  assert.match(failure, /unrecognized exact-command status/u);
+});

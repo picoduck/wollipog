@@ -128,7 +128,9 @@ export function parseCodexRolloutCompletedCommand(
   }
   if (!sessionIdentityMatches) return null;
   if ([...exactCommandStatuses.values()].some((status) => !["completed", "failed", "interrupted"].includes(status as string))) {
-    onFailure?.("provider rollout contains an unfinished exact command");
+    // Unknown provider statuses are not evidence of a terminal non-enqueue. Retain the
+    // conservative veto until that status has a documented terminal meaning.
+    onFailure?.("provider rollout contains an unfinished or unrecognized exact-command status");
     return null;
   }
   const commands = items.filter((item) => item.script === command);

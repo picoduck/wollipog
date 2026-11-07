@@ -4097,15 +4097,39 @@ test("standalone CLI admissions reconcile in the active turn and preserve re-enq
   turn.items.push({ ...enqueue, id: "neighbor", command: "gh pr view 4350 --json state" });
   assert.ok(await h.driver.reconcileCompletedCommand("workflow-cli", command));
   enqueue.exitCode = 1;
-  assert.equal(await h.driver.reconcileCompletedCommand("workflow-cli", command), null);
-  assert.match(h.driver.completedCommandReconciliationFailure(), /successful completion/u);
+  let failure = "";
+  const onFailure = (reason: string) => { failure = reason; };
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-cli", command, undefined, onFailure), null);
+  assert.match(failure, /successful completion/u);
   enqueue.exitCode = 0;
   turn.items = [enqueue, admission("workflow-cli")];
-  assert.equal(await h.driver.reconcileCompletedCommand("workflow-cli", command), null);
-  assert.match(h.driver.completedCommandReconciliationFailure(), /action admission before/u);
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-cli", command, undefined, onFailure), null);
+  assert.match(failure, /action admission before/u);
   turn.items = [admission("workflow-cli"), enqueue, admission("workflow-latest"), { ...enqueue, id: "latest" }];
   assert.equal(await h.driver.reconcileCompletedCommand("workflow-cli", command), null);
   assert.equal((await h.driver.reconcileCompletedCommand("workflow-latest", command))?.providerItemId, "latest");
+});
+
+test("concurrent command reconciliations keep their failure diagnostics local to the request", async () => {
+  const h = makeHarness({ resumeId: "thread-concurrent", context: { kind: "native" } });
+  (h.driver as any).threadId = "thread-concurrent";
+  const command = "gh pr merge https://github.com/team/repo/pull/1 --squash --match-head-commit " + "a".repeat(40);
+  const resolveReads: Array<(value: unknown) => void> = [];
+  (h.driver as any).peer = { request: () => new Promise((resolve) => { resolveReads.push(resolve); }) };
+  let firstFailure = "", secondFailure = "";
+  const first = h.driver.reconcileCompletedCommand("workflow-first", command, undefined, (reason) => { firstFailure = reason; });
+  const second = h.driver.reconcileCompletedCommand("workflow-second", command, undefined, (reason) => { secondFailure = reason; });
+  const history = (status: string, exitCode: number | null) => ({ thread: { id: "thread-concurrent", turns: [
+    { id: "turn-concurrent", status: "completed", itemsView: "full", items: [
+      { type: "commandExecution", id: "command-concurrent", command, status, exitCode },
+    ] },
+  ] } });
+  resolveReads[1]!(history("inProgress", null));
+  assert.equal(await second, null);
+  resolveReads[0]!(history("completed", 1));
+  assert.equal(await first, null);
+  assert.match(firstFailure, /successful completion/u);
+  assert.match(secondFailure, /unfinished exact command/u);
 });
 
 test("historical CLI admission survives a live projection that retained only the successful command", async () => {

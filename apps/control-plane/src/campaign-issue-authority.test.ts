@@ -2899,8 +2899,6 @@ function scopeImpactFixture(h: ReturnType<typeof harness>, delegateMerge = true)
   return { itemId, child, question, armedMerge, closure, status, forge };
 }
 
-/** A Full Control campaign whose boundary gives the Orchestrator merges and scope, so a person's
- * scope approval re-mints it (#3915). */
 test("#4350 a CLI-armed Codex merge reconciles from fake provider history and verifies without stopping", async () => {
   const { CodexAppServerDriver } = await import("../../runner/src/drivers/codex-app-server.js");
   const h = harness(false);
@@ -2951,6 +2949,8 @@ test("#4350 a CLI-armed Codex merge reconciles from fake provider history and ve
   } finally { h.db.close(); }
 });
 
+/** A Full Control campaign whose boundary gives the Orchestrator merges and scope, so a person's
+ * scope approval re-mints it (#3915). */
 function fullControlMergeHarness() {
   const h = harness(false);
   const revision = h.db.getSession("root")!.parentControlPolicy!.revision;
