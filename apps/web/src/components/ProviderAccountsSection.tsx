@@ -262,18 +262,16 @@ function AccountMenu({ name, heading, busy, items }: {
 }
 
 /**
- * One account (§5.2): a key icon, the label (masked under Hide Account Emails), the provider and its
- * profile access as line 2, the one status badge, then the row's actions. `children` is the row's
+ * One account (§5.2): a key icon, the label (masked under Hide Account Emails), its profile access as line 2, the one status badge, then the row's actions. `children` is the row's
  * expansion under it: its sign-in's steps or ending (#2996). While a sign-in runs for a label that is
  * a hidden email, `hiddenTitle` ("Signing In to Codex") replaces the mask, with "Email hidden" as line 2.
  */
-function ProviderAccountRow({ identity, label, hiddenTitle, provider, profile, lease, status, actions, children, isDefault = false, usage }: {
+function ProviderAccountRow({ identity, label, hiddenTitle, profile, lease, status, actions, children, isDefault = false, usage }: {
   isDefault?: boolean;
   usage?: ReactNode;
   identity: string;
   label: string;
   hiddenTitle?: string | null;
-  provider: ProviderAccountDefinition["provider"];
   profile?: string;
   /** A stale HOME lease (#3241), with why it cannot be recovered now, if it cannot. */
   lease?: { label: string; title?: string };
@@ -347,7 +345,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   const [notice, setNotice] = useState<SectionNotice | null>(null);
   const [editingProvider, setEditingProvider] = useState<ProviderAccountDefinition["provider"] | null>(null);
   const [savedDefaults, setSavedDefaults] = useState<NonNullable<RunnerView["providerAccountDefaults"]>>([]);
-  const usage = useMachineAccountUsage();
+  const usage = useMachineAccountUsage(runner, online);
   const defaults = (["claude", "codex"] as const).flatMap(provider => {
     const live = runner.providerAccountDefaults?.find(value => value.provider === provider);
     const saved = savedDefaults.find(value => value.provider === provider);
@@ -775,13 +773,17 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
         newLogins.some(login => login.provider === provider) || defaults.some(value => value.provider === provider) || canAdd).map(provider => {
         const choice = defaults.find(value => value.provider === provider);
         const selected = accounts.find(account => account.id === choice?.accountId && account.provider === provider);
-        const canEdit = canManage && runnerSupportsProtocol(runner.protocolVersion, "providerAccounts");
+        const canEdit = canManageProfiles && canManage && runnerSupportsProtocol(runner.protocolVersion, "providerAccounts");
+        let summary: ReactNode = "New sessions use each agent's configured account or the first available account.";
+        if (choice?.accountId) {
+          if (!selected) summary = "Saved account not found. Choose another account.";
+          else if (selected.profile?.access === "not_granted") summary = "The saved default cannot be used here. Choose another account or grant access.";
+          else summary = <>New sessions use <AccountLabel value={selected.label} />.</>;
+        }
         return <div className="provider-account-group" key={provider}>
           <div className="provider-settings-heading">
-            <div><h4>{providerName(provider)}</h4><p className="section-note">{choice?.accountId
-              ? selected ? <>New sessions use <AccountLabel value={selected.label} />.</> : "Saved account not found. Choose another account."
-              : "New sessions use each agent's configured account or the first available account."}</p></div>
-            {canEdit && <button type="button" className="btn" disabled={!online} aria-label={`Change New ${providerName(provider)} Sessions`}
+            <div><h4>{providerName(provider)}</h4><p className="section-note">{summary}</p></div>
+            {canEdit && <button type="button" className="btn" aria-label={`Change New ${providerName(provider)} Sessions`}
               onClick={() => setEditingProvider(provider)}>Change…</button>}
           </div>
           <div className="surface provider-accounts-list">
@@ -798,7 +800,6 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
                 identity={`${runner.runnerId}:${account.id}`}
                 label={account.label}
                 hiddenTitle={login && providerSignInHiddenTitle(login, privacy.hide)}
-                provider={account.provider}
                 profile={account.profile ? PROFILE_ACCESS[account.profile.access] : undefined}
                 lease={leaseActions && leases[account.id]?.state === "stale" ? {
                   label: "Recovery Needed",
@@ -838,7 +839,6 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
                 identity={`${runner.runnerId}:${login.accountId}`}
                 label={login.label}
                 hiddenTitle={providerSignInHiddenTitle(login, privacy.hide)}
-                provider={login.provider}
                 status={running ? "signing_in" : providerSignInAlreadyOnMachine(login) ? "not_added" : null}
                 actions={running && canManage ? cancelButton(login) : undefined}
               >
@@ -847,13 +847,13 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
             );
           })}
           {canAdd && <div className="provider-account-add">
-            <button type="button" className="btn ghost" disabled={!online} onClick={() => setAdding(provider)}>Add {providerName(provider)} Account…</button>
+            <button type="button" className="btn ghost" disabled={!online} aria-describedby={online ? undefined : offlineId} onClick={() => setAdding(provider)}>Add {providerName(provider)} Account…</button>
           </div>}
           </div>
         </div>;
       })}
-      <RunningSessionAccountSettings key={runner.runnerId} runner={runner} online={online} />
-      {editingProvider && canManage && <ProviderAccountSettingsDialog key={`${runner.runnerId}:${editingProvider}`} runner={settingsRunner}
+      <RunningSessionAccountSettings key={runner.runnerId} runner={runner} online={online} canEdit={canManageProfiles && canManage} />
+      {editingProvider && canManageProfiles && canManage && <ProviderAccountSettingsDialog key={`${runner.runnerId}:${editingProvider}`} runner={settingsRunner}
         provider={editingProvider} onClose={() => setEditingProvider(null)}
         onSaved={value => setSavedDefaults(current => [...current.filter(entry => entry.provider !== value.provider), value])} />}
       {leaseActions && detailsAccount && detailsLease && (

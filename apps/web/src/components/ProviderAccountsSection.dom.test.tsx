@@ -197,6 +197,98 @@ async function withHiddenEmails(run: () => Promise<void>) {
 
 // --- Section and statuses (#2995) ---
 
+test("offline account defaults save now and switching conflicts reload the server's current value", async () => {
+  const writes: unknown[] = [];
+  const ui = await render({ online: false, runner: runnerView({ status: "offline", providerAccounts: SIGN_IN_ACCOUNTS,
+    automaticAccountSwitching: { enabled: true, revision: 4 } }), api: { ...client().client,
+    updateMachineProviderAccountDefault: async (_runner, provider, input) => {
+      writes.push(input); return { providerAccountDefault: { provider, accountId: input.accountId, revision: 1 } };
+    },
+    updateMachineAutomaticAccountSwitching: async (_runner, input) => {
+      writes.push(input); throw new ApiError("Automatic Account Switching changed in another client", 409, undefined,
+        { current: { enabled: false, revision: 5 } });
+    },
+  } });
+  try {
+    await act(async () => ui.container.querySelector<HTMLButtonElement>('[aria-label="Change New Claude Sessions"]')!.click());
+    await ui.settle();
+    let dialog = ui.dialog()!;
+    assert.match(dialog.textContent ?? "", /choice saves now/);
+    await act(async () => dialog.querySelector<HTMLButtonElement>('[aria-haspopup="listbox"]')!.click());
+    await ui.settle();
+    await act(async () => [...ui.body.querySelectorAll<HTMLButtonElement>('[role="option"]')].find(option => option.textContent?.startsWith("Work"))!.click());
+    await act(async () => ui.button(dialog, "Save").click());
+    await ui.settle();
+    assert.deepEqual(writes, [{ accountId: "work", expectedRevision: 0 }]);
+    await act(async () => ui.container.querySelector<HTMLButtonElement>('[aria-label="Change Running Sessions"]')!.click());
+    await ui.settle(); dialog = ui.dialog()!;
+    await act(async () => dialog.querySelector<HTMLButtonElement>('[role="switch"]')!.click());
+    await act(async () => ui.button(dialog, "Save").click());
+    await ui.settle();
+    assert.deepEqual(writes[1], { enabled: false, expectedRevision: 4 });
+    assert.equal(ui.button(dialog, "Save").disabled, true);
+    await act(async () => ui.button(dialog, "Reload Saved Choice").click());
+    assert.equal(dialog.querySelector('[role="switch"]')?.getAttribute("aria-checked"), "false");
+    assert.equal(ui.button(dialog, "Save").disabled, true, "server revision reload is unchanged, despite stale props");
+    const add = ui.button(ui.container, "Add Claude Account…");
+    assert.equal(add.disabled, true);
+    assert.equal(ui.container.querySelector(`#${add.getAttribute("aria-describedby")}`)?.textContent, "This machine is offline.");
+  } finally { await ui.unmount(); }
+});
+
+test("non-revision refusals keep Save available for a corrected account choice", async () => {
+  const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: { ...client().client,
+    updateMachineProviderAccountDefault: async () => { throw new ApiError("This account isn't granted here.", 409, "PROVIDER_PROFILE_NOT_GRANTED"); },
+  } });
+  try {
+    await act(async () => ui.container.querySelector<HTMLButtonElement>('[aria-label="Change New Claude Sessions"]')!.click());
+    await ui.settle(); const dialog = ui.dialog()!;
+    const select = async (name: string) => {
+      await act(async () => dialog.querySelector<HTMLButtonElement>('[aria-haspopup="listbox"]')!.click());
+      await ui.settle();
+      await act(async () => [...ui.body.querySelectorAll<HTMLButtonElement>('[role="option"]')].find(option => option.textContent?.startsWith(name))!.click());
+    };
+    await select("Work");
+    await act(async () => ui.button(dialog, "Save").click()); await ui.settle();
+    assert.match(dialog.textContent ?? "", /This account isn't granted here/);
+    assert.equal([...dialog.querySelectorAll("button")].find(button => button.textContent === "Reload Saved Choice"), undefined);
+    await select("Personal");
+    assert.equal(ui.button(dialog, "Save").disabled, false);
+  } finally { await ui.unmount(); }
+});
+
+test("cached usage refreshes on account inventory and connection changes, and placeholders have no reading timestamp", async () => {
+  let reads = 0;
+  const machine = runnerView({ providerAccounts: SIGN_IN_ACCOUNTS });
+  const ui = await render({ runner: machine, api: { ...client().client, subscriptionUsage: async () => {
+    reads += 1;
+    return { sources: [{ sourceId: "placeholder", runnerId: "runner-1", runnerName: "Machine", runnerStatus: "online", agentId: "claude", agentName: "Claude",
+      provider: "claude", providerAccountId: "work", state: "unavailable", freshness: "fresh", fetchedAt: Date.now(), buckets: [] }],
+      staleAfterMs: 600_000, generatedAt: Date.now() };
+  } } });
+  try {
+    assert.equal(reads, 1);
+    await act(async () => ui.row("Work").querySelector<HTMLButtonElement>('[aria-label^="Usage Details for Work"]')!.click());
+    assertNoDomNode(ui.row("Work").querySelector("time"));
+    await ui.rerender({ online: false }); assert.equal(reads, 2);
+    await ui.rerender({ online: true }); assert.equal(reads, 3);
+    await ui.rerender({ runner: { ...machine, providerAccounts: [...SIGN_IN_ACCOUNTS, { id: "new", provider: "claude", label: "New", authStatus: "authenticated" }] } });
+    assert.equal(reads, 4);
+  } finally { await ui.unmount(); }
+});
+
+test("an unusable saved profile is explained, and alias-only editors have no email reveal", async () => {
+  await withHiddenEmails(async () => {
+    const ui = await render({ runner: runnerView({ providerAccountDefaults: [{ provider: "codex", accountId: "other", revision: 1 }] }) });
+    try {
+      assert.match(ui.container.textContent ?? "", /saved default cannot be used here/);
+      await act(async () => ui.container.querySelector<HTMLButtonElement>('[aria-label="Change New Codex Sessions"]')!.click());
+      await ui.settle();
+      assertNoDomNode(ui.dialog()!.querySelector('[aria-label="Show Emails"]'));
+    } finally { await ui.unmount(); }
+  });
+});
+
 test("provider settings are progressively disclosed and a saved default updates only its provider", async () => {
   const writes: unknown[] = [];
   const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: {
@@ -236,7 +328,8 @@ test("a default editor retains its draft after a conflict and reloads the newly 
   const writes: unknown[] = [];
   const ui = await render({ runner: machine, api: { ...client().client,
     updateMachineProviderAccountDefault: async (_runner, _provider, input) => {
-      writes.push(input); throw new ApiError("The default changed in another client.", 409);
+      writes.push(input); throw new ApiError("The default changed in another client.", 409, undefined,
+        { current: { provider: "claude", accountId: null, revision: 6 } });
     },
   } });
   try {
@@ -246,7 +339,6 @@ test("a default editor retains its draft after a conflict and reloads the newly 
     await act(async () => dialog.querySelector<HTMLButtonElement>('[aria-haspopup="listbox"]')!.click());
     await ui.settle();
     await act(async () => [...ui.body.querySelectorAll<HTMLButtonElement>('[role="option"]')].find(node => node.textContent?.startsWith("Personal"))!.click());
-    await ui.rerender({ runner: { ...machine, providerAccountDefaults: [{ provider: "claude", accountId: null, revision: 6 }] } });
     await act(async () => ui.button(dialog, "Save").click());
     await ui.settle();
     assert.deepEqual(writes, [{ accountId: "personal", expectedRevision: 5 }]);
@@ -258,15 +350,12 @@ test("a default editor retains its draft after a conflict and reloads the newly 
   } finally { await ui.unmount(); }
 });
 
-test("a machine manager can edit defaults without permission to adopt provider profiles", async () => {
+test("a machine manager outside the personal-organization admin scope sees account settings read-only", async () => {
   const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), canManageProfiles: false });
   try {
     const change = ui.container.querySelector<HTMLButtonElement>('[aria-label="Change New Claude Sessions"]');
-    assert.ok(change);
-    await act(async () => change.click());
-    await ui.settle();
-    assert.equal(ui.dialog()?.querySelector(".modal-title")?.textContent, "New Claude Sessions");
-    assert.ok(ui.dialog()?.querySelector('[aria-haspopup="listbox"]'));
+    assertNoDomNode(change);
+    assertNoDomNode(ui.container.querySelector('[aria-label="Change Running Sessions"]'));
   } finally { await ui.unmount(); }
 });
 
@@ -283,7 +372,9 @@ test("account usage is scoped to its API, machine and account, with stale limits
     assert.match(ui.row("Work").textContent ?? "", /28% Left · Last Known/);
     assert.doesNotMatch(ui.row("Personal").textContent ?? "", /28%/);
     assertNoDomNode(ui.row("Work").querySelector('[role="progressbar"]'));
-    await act(async () => ui.row("Work").querySelector<HTMLButtonElement>('[aria-label="Usage Details for Work"]')!.click());
+    const disclosure = ui.row("Work").querySelector<HTMLButtonElement>('[aria-label^="Usage Details for Work"]')!;
+    assert.match(disclosure.getAttribute("aria-label") ?? "", /28% Left · Last Known/);
+    await act(async () => disclosure.click());
     assert.equal(ui.row("Work").querySelectorAll('[role="progressbar"]').length, 2);
     assert.match(ui.row("Work").textContent ?? "", /Weekly Window/);
     assert.doesNotMatch(ui.row("Work").textContent ?? "", /Other Machine/);

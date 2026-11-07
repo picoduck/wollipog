@@ -145,7 +145,7 @@ async function mount(runner: RunnerView | undefined, {
       <FeedbackProvider>
         {surface === "claude" || surface === "codex" ? <ProviderAccountSettingsDialog runner={next!} provider={surface}
           onClose={() => { closed += 1; }} onSaved={() => undefined} />
-          : surface === "running" ? <RunningSessionAccountSettings runner={next!} online={next?.status === "online"} />
+          : surface === "running" ? <RunningSessionAccountSettings runner={next!} online={next?.status === "online"} canEdit />
           : <MachineSettingsDialog
           runner={next}
           {...(box ? { box } : {})}

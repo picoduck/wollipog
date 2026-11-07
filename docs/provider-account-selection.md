@@ -7,10 +7,13 @@ account explicitly for a session still overrides it. Editing a default does not 
 sessions.
 
 **No Saved Default** preserves each agent's configured account and the existing implicit fallback.
-A missing saved account remains visible until the person replaces or clears it. Machine-owner/admin
-permissions, profile grants, account-email masking, and conditional writes retain their existing
+A missing saved account remains visible until the person replaces or clears it. The existing API's
+global authorization requires an owner/admin of the personal control-plane organization who can
+manage the machine. Profile grants, account-email masking, and conditional writes retain their existing
 boundaries. A conflicting save keeps the draft and offers **Reload Saved Choice** rather than
-overwriting another editor.
+overwriting another editor. The reload uses the server's current value from the conflict response,
+even when the machine stream is behind. Offline preferences save immediately; the runner applies
+them when it reconnects. Sign-in and other machine-executed actions still require a connection.
 
 Usage in the overview is informational. It comes from the existing permission-scoped cached usage
 endpoint, matched by machine, provider, and account. Expand **Usage Details** to see the reported

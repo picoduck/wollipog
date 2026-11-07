@@ -1672,7 +1672,7 @@ export function NewSessionDialog({
               />
               {missingRequiredAccountChoice && (
                 <FieldError id={accountReasonId}>
-                  The saved default account isn't on this machine anymore. Choose an account, or change the default in Machine Settings.
+                  The saved default account isn't on this machine anymore. Choose an account, or change the default in this machine's Provider Accounts.
                 </FieldError>
               )}
             </div>

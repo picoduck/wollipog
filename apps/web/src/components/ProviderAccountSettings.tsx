@@ -1,9 +1,9 @@
-import React, { useRef, useState } from "react";
+import React, { useId, useRef, useState } from "react";
 import { runnerSupportsProtocol, type ProviderAccountDefinition, type RunnerView } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { accountStatusLabel } from "../machine-settings.js";
-import { maskedAccountTitles } from "../personal-identifiers.js";
+import { isPersonalIdentifier, maskedAccountTitles } from "../personal-identifiers.js";
 import { machineSettingsMutationError } from "../runners.js";
 import { AccountIdentifierRevealButton, useAccountIdentifierReveal } from "./AccountIdentifier.js";
 import { Modal } from "./Modal.js";
@@ -14,6 +14,14 @@ import { Select } from "./ui/ChoiceControls.js";
 import { SwitchRow } from "./ui/SettingsRows.js";
 
 const TERMS = "Provider terms assume ordinary individual usage and prohibit circumventing rate limits, so automatically rotating between your own subscriptions can be a gray area. You are responsible for ensuring this use complies with each provider's terms.";
+
+function conflictCurrent(cause: unknown): Record<string, unknown> | null {
+  if (!(cause instanceof ApiError) || cause.status !== 409) return null;
+  const value = cause.details?.current;
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  return typeof record.revision === "number" && Number.isSafeInteger(record.revision) && record.revision >= 0 ? record : null;
+}
 
 /** Keep the opened revision, even when a new machine report arrives while editing. */
 export function ProviderAccountSettingsDialog({ runner, provider, onClose, onSaved }: {
@@ -30,20 +38,20 @@ export function ProviderAccountSettingsDialog({ runner, provider, onClose, onSav
   const [saving, setSaving] = useState(false);
   const inFlight = useRef(false);
   const [error, setError] = useState<string | null>(null);
-  const [conflict, setConflict] = useState(false);
+  const [conflict, setConflict] = useState<{ accountId: string; revision: number } | null>(null);
   const accounts = (runner.providerAccounts ?? []).filter(account => account.provider === provider);
   const [revealed, toggleReveal] = useAccountIdentifierReveal(JSON.stringify([runner.runnerId, provider, choice, accounts.map(account => [account.id, account.label])]));
   const titles = maskedAccountTitles(accounts.map(account => account.label));
   const label = provider === "claude" ? "Claude" : "Codex";
   const dirty = choice !== baseline.accountId;
-  const online = runner.status === "online" && runner.canManage === true && runnerSupportsProtocol(runner.protocolVersion, "providerAccounts");
+  const editable = runner.canManage === true && runnerSupportsProtocol(runner.protocolVersion, "providerAccounts");
   const close = async () => {
     if (inFlight.current) return;
     if (dirty && !await confirm({ title: "Discard Changes", message: "Your account choice hasn't been saved.", confirmLabel: "Discard Changes", tone: "danger" })) return;
     onClose();
   };
   const save = async () => {
-    if (inFlight.current || !dirty || !online || conflict) return;
+    if (inFlight.current || !dirty || !editable || conflict) return;
     inFlight.current = true; setSaving(true); setError(null);
     try {
       const { providerAccountDefault } = await api.updateMachineProviderAccountDefault(runner.runnerId, provider, {
@@ -54,7 +62,9 @@ export function ProviderAccountSettingsDialog({ runner, provider, onClose, onSav
       onClose();
     } catch (cause) {
       setError(machineSettingsMutationError(cause));
-      setConflict(cause instanceof ApiError && cause.status === 409);
+      const current = conflictCurrent(cause);
+      setConflict(current?.provider === provider && (current.accountId === null || typeof current.accountId === "string")
+        ? { accountId: current.accountId ?? "", revision: current.revision as number } : null);
     } finally { inFlight.current = false; setSaving(false); }
   };
   const options = [
@@ -71,32 +81,36 @@ export function ProviderAccountSettingsDialog({ runner, provider, onClose, onSav
     onClose={() => void close()} footer={<>
       <span className="provider-settings-state" role="status">{dirty ? "Unsaved Changes" : "No Changes"}</span>
       <button type="button" className="btn" disabled={saving} onClick={() => void close()}>Cancel</button>
-      <BusyButton className="btn primary" busy={saving} progress="Saving the account choice…" disabled={!dirty || !online || conflict}
+      <BusyButton className="btn primary" busy={saving} progress="Saving the account choice…" disabled={!dirty || !editable || !!conflict}
         onClick={() => void save()}>Save</BusyButton>
     </>}>
     <div className="field">
       <div className="field-head"><span>Account</span>
-        <AccountIdentifierRevealButton label="Emails" revealed={revealed} onToggle={toggleReveal} />
+        {accounts.some(account => isPersonalIdentifier(account.label)) && <AccountIdentifierRevealButton label="Emails" revealed={revealed} onToggle={toggleReveal} />}
       </div>
-      <Select label="Account" value={choice} options={options} disabled={saving || !online}
-        onChange={value => { setChoice(value); setError(null); }} />
+      <Select label="Account" value={choice} options={options} disabled={saving || !editable}
+        onChange={value => { setChoice(value); if (!conflict) setError(null); }} />
       <p className="field-helper">{choice
         ? "New sessions that don't choose an account use this account in native execution contexts. If it can't run, choose another account."
         : "No machine default is saved. Each agent keeps its configured account or uses the first available account."}</p>
     </div>
-    {!online && <p className="field-helper">This machine is offline. Reconnect it to save changes.</p>}
+    {runner.status !== "online" && <p className="field-helper">This machine is offline. Your choice saves now and applies to new sessions when it reconnects.</p>}
     {error && <Notice tone="danger" title="Couldn't Save the Account Choice" role="alert">{error}</Notice>}
     {conflict && <button type="button" className="btn" onClick={() => {
       const saved = runner.providerAccountDefaults?.find(value => value.provider === provider);
-      setBaseline({ accountId: saved?.accountId ?? "", revision: saved?.revision ?? 0 });
-      setChoice(saved?.accountId ?? ""); setError(null); setConflict(false);
+      const value = saved && saved.revision > conflict.revision
+        ? { accountId: saved.accountId ?? "", revision: saved.revision } : conflict;
+      setBaseline(value);
+      onSaved({ provider, accountId: value.accountId || null, revision: value.revision });
+      setChoice(value.accountId); setError(null); setConflict(null);
     }}>Reload Saved Choice</button>}
   </Modal>;
 }
 
-export function RunningSessionAccountSettings({ runner, online }: { runner: RunnerView; online: boolean }) {
+export function RunningSessionAccountSettings({ runner, online, canEdit }: { runner: RunnerView; online: boolean; canEdit: boolean }) {
   const api = useApi();
   const { confirm, showToast } = useFeedback();
+  const unsupportedId = useId();
   const [editing, setEditing] = useState(false);
   const [opened, setOpened] = useState({ enabled: false, revision: 0 });
   const [draft, setDraft] = useState(false);
@@ -105,8 +119,8 @@ export function RunningSessionAccountSettings({ runner, online }: { runner: Runn
   const [saving, setSaving] = useState(false);
   const inFlight = useRef(false);
   const [error, setError] = useState<string | null>(null);
-  const [conflict, setConflict] = useState(false);
-  const supported = runnerSupportsProtocol(runner.protocolVersion, "automaticProviderAccountSwitch");
+  const [conflict, setConflict] = useState<{ enabled: boolean; revision: number } | null>(null);
+  const supported = !online || runnerSupportsProtocol(runner.protocolVersion, "automaticProviderAccountSwitch");
   const dirty = draft !== opened.enabled;
   const close = async () => {
     if (inFlight.current) return;
@@ -114,7 +128,7 @@ export function RunningSessionAccountSettings({ runner, online }: { runner: Runn
     setEditing(false);
   };
   const save = async () => {
-    if (inFlight.current || !dirty || !online || conflict || !runner.canManage || !supported) return;
+    if (inFlight.current || !dirty || conflict || !canEdit || !supported) return;
     inFlight.current = true;
     if (draft && !await confirm({ title: "Turn On Automatic Switching", message: "At a usage limit, the next turn moves to another account from the same provider.",
       details: <Notice tone="warning" compact>{TERMS}</Notice>, confirmLabel: "Turn On Automatic Switching" })) {
@@ -127,32 +141,36 @@ export function RunningSessionAccountSettings({ runner, online }: { runner: Runn
       showToast("Running session settings saved.", { tone: "success" });
     } catch (cause) {
       setError(machineSettingsMutationError(cause));
-      setConflict(cause instanceof ApiError && cause.status === 409);
+      const value = conflictCurrent(cause);
+      setConflict(value && typeof value.enabled === "boolean" ? { enabled: value.enabled, revision: value.revision as number } : null);
     } finally { inFlight.current = false; setSaving(false); }
   };
   const reload = () => {
-    const value = { enabled: current?.enabled ?? false, revision: current?.revision ?? 0 };
-    setOpened(value); setDraft(value.enabled); setError(null); setConflict(false);
+    const value = conflict && conflict.revision >= (current?.revision ?? 0) ? conflict
+      : { enabled: current?.enabled ?? false, revision: current?.revision ?? 0 };
+    setSaved(value);
+    setOpened(value); setDraft(value.enabled); setError(null); setConflict(null);
   };
   return <>
     <div className="provider-settings-heading provider-running-settings">
       <div><h4>Running Sessions</h4><p className="section-note">{current?.enabled
         ? "At a usage limit, the next turn can move to another account."
         : "At a usage limit, a session stays on its account."}</p></div>
-      {runner.canManage && <button type="button" className="btn" disabled={!online || !supported} aria-label="Change Running Sessions"
+      {canEdit && <button type="button" className="btn" disabled={!supported} aria-label="Change Running Sessions" aria-describedby={supported ? undefined : unsupportedId}
         onClick={() => { reload(); setEditing(true); }}>Change…</button>}
     </div>
-    {!supported && <p className="section-note">Update the runner to change usage-limit switching.</p>}
-    {editing && <Modal title="Running Sessions" description="Applies independently of new-session account choices." size="sm" phoneSheet="full"
+    {canEdit && !supported && <p className="section-note" id={unsupportedId}>Update the runner to change usage-limit switching.</p>}
+    {editing && canEdit && <Modal title="Running Sessions" description="Applies independently of new-session account choices." size="sm" phoneSheet="full"
       onClose={() => void close()} footer={<>
         <span className="provider-settings-state" role="status">{dirty ? "Unsaved Changes" : "No Changes"}</span>
         <button type="button" className="btn" disabled={saving} onClick={() => void close()}>Cancel</button>
-        <BusyButton className="btn primary" busy={saving} progress="Saving the switching setting…" disabled={!dirty || !online || conflict || !runner.canManage || !supported}
+        <BusyButton className="btn primary" busy={saving} progress="Saving the switching setting…" disabled={!dirty || !!conflict || !canEdit || !supported}
           onClick={() => void save()}>Save</BusyButton>
       </>}>
-      <SwitchRow title="Switch Accounts at a Usage Limit" checked={draft} disabled={saving || !online || !runner.canManage || !supported}
+      {!online && <p className="field-helper">This machine is offline. The setting saves now and takes effect when a compatible runner reconnects.</p>}
+      <SwitchRow title="Switch Accounts at a Usage Limit" checked={draft} disabled={saving || !canEdit || !supported}
         description="The next turn can use another account from the same provider. Existing handoff and cooldown checks still apply."
-        onClick={() => { setDraft(!draft); setError(null); }} />
+        onClick={() => { setDraft(!draft); if (!conflict) setError(null); }} />
       {error && <Notice tone="danger" title="Couldn't Save Running Session Settings" role="alert">{error}</Notice>}
       {conflict && <button type="button" className="btn" onClick={reload}>Reload Saved Choice</button>}
     </Modal>}

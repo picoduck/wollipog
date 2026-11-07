@@ -4957,7 +4957,7 @@ export class SessionsService {
       : undefined;
     if (providerAccountId && !providerAccount) {
       if (providerAccountId === savedProviderAccountId && !req.providerAccountId && !snapshotSpec?.providerAccountId) {
-        return fail("The saved default provider account is unavailable on this Machine. Choose another account or update Machine settings.", 409);
+        return fail("The saved default provider account is unavailable on this Machine. Choose another account or change the default in this Machine's Provider Accounts.", 409);
       }
       return fail(`provider account '${providerAccountId}' is not available for the selected agent`, 409);
     }

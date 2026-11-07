@@ -350,7 +350,7 @@ export function unsavedSentence(labels: readonly string[]): string {
 }
 
 /** What an offline machine's changes do. No field's endpoint needs the machine online: each saves
- * now, and the runner is sent its capacity and switching when it reconnects. */
+ * now, and the runner is sent its capacity and reviewer policy when it reconnects. */
 export function offlineSentence(name: string): string {
   return `${name} is offline. Changes save now; Capacity Limit and reviewer executable policy take effect when it reconnects.`;
 }

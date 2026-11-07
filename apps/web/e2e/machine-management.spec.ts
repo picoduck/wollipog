@@ -729,7 +729,7 @@ test("at 390px the code field and Submit Code stack at full width, and wrapped s
   }
 });
 
-test("a hidden email's sign-in head reads Signing In to Codex in full at 390px, its badge wrapping under it (#2996)", async ({ page }) => {
+test("a hidden email's sign-in head and badge remain unclipped at 390px (#2996)", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("wollipog.hide-account-emails", "true"));
   for (const [fixture, title] of [["code", "Signing In to Claude"], ["device", "Signing In to Codex"]] as const) {
     await page.goto(`/machine-management-e2e.html?signIn=${fixture}&emailLabels&${DESIGN_WORKSTATION}`);
@@ -1068,11 +1068,33 @@ for (const width of [390, 320]) {
     const discard = page.getByRole("dialog", { name: "Discard Changes", exact: true });
     await discard.getByRole("button", { name: "Discard Changes", exact: true }).click();
     await expect(dialog).toHaveCount(0);
-    await accounts.getByRole("button", { name: "Usage Details for Work" }).click();
+    await accounts.getByRole("button", { name: /^Usage Details for Work/u }).click();
     await expect(accountRow(page, "Work")).toContainText("Weekly Window");
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   });
 }
+
+test("offline account preferences save now while sign-in stays unavailable", async ({ page }) => {
+  await setOffline(page);
+  const accounts = providerAccounts(page);
+  await expect(accounts.getByRole("button", { name: "Add Claude Account…" })).toBeDisabled();
+  await expect(accounts.getByRole("button", { name: /^Usage Details for Work/u })).toHaveAccessibleName(/Last Known/u);
+  await accounts.getByRole("button", { name: "Change New Claude Sessions" }).click();
+  const defaults = page.getByRole("dialog", { name: "New Claude Sessions", exact: true });
+  await expect(defaults).toContainText("Your choice saves now");
+  await defaults.getByRole("button", { name: /^Account:/u }).click();
+  await page.getByRole("option", { name: "Work", exact: true }).click();
+  await defaults.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(defaults).toHaveCount(0);
+  await expect(accounts).toContainText("New sessions use Work.");
+  await accounts.getByRole("button", { name: "Change Running Sessions" }).click();
+  const running = page.getByRole("dialog", { name: "Running Sessions", exact: true });
+  await running.getByRole("switch").click();
+  await running.getByRole("button", { name: "Save", exact: true }).click();
+  await page.getByRole("dialog", { name: "Turn On Automatic Switching", exact: true }).getByRole("button", { name: "Turn On Automatic Switching", exact: true }).click();
+  await expect(running).toHaveCount(0);
+  await expect(accounts).toContainText("At a usage limit, the next turn can move to another account.");
+});
 
 test("ordinary members can inspect Runner Capacity but cannot change it", async ({ page }) => {
   await page.goto(`/machine-management-e2e.html?role=viewer&${DESIGN_WORKSTATION}`);
@@ -1095,8 +1117,8 @@ test("a Machine owner can change capacity without receiving organization-wide co
   await expect(dialog.getByRole("group", { name: "Agent Installations" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Delete Machine…" })).toHaveCount(0);
   await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
-  await providerAccounts(page).getByRole("button", { name: "Change New Claude Sessions" }).click();
-  await expect(page.getByRole("dialog", { name: "New Claude Sessions" }).getByRole("button", { name: /^Account:/u })).toBeEnabled();
+  await expect(providerAccounts(page).getByRole("button", { name: "Change New Claude Sessions" })).toHaveCount(0);
+  await expect(providerAccounts(page).getByRole("button", { name: "Change Running Sessions" })).toHaveCount(0);
 });
 
 test("Delete Machine… waits for an online native runner to stop, saying so, then confirms the deletion", async ({ page }) => {

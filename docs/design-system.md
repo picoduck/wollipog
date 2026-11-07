@@ -2174,7 +2174,8 @@ A Dialog whose fields save through separate endpoints still has one Save Changes
 revision, in the form's order. When one fails, the dialog stays open, every field that saved becomes
 the new baseline, and a danger Notice above the footer names what wasn't saved ("Capacity Limit
 wasn't saved.") with the server's words behind Show Details; Save Changes then retries only those.
-A change that needs consent (turning on automatic account switching) asks in a stacked,
+Account preferences live in Provider Accounts, with one focused editor per provider and a separate
+Running Sessions editor. A change that needs consent (turning on automatic account switching) asks in a stacked,
 non-destructive confirmation before anything is sent.
 
 The editor save bar is `.save-bar` (`SaveBar`): sticky at the bottom of its region, `--bg-elev`,
