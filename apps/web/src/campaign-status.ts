@@ -751,6 +751,11 @@ export function mergeDependencyLabel(dependency: CampaignMergeDependencyView): s
   return `${dependency.repository ?? "Unknown Repository"}: ${dependency.title ?? dependency.key}`;
 }
 
+/** #4120: what a Depends On line shows for a merge dependency: the prerequisite and whether it merged. */
+export function mergeDependencyLine(dependency: CampaignMergeDependencyView): { label: string; status: string } {
+  return { label: mergeDependencyLabel(dependency), status: MERGE_DEPENDENCY_STATUS_LABELS[dependency.status] };
+}
+
 /** #4120: the prerequisite pull request an item waits on, for the Waiting for Prerequisite Merge cause. */
 export function heldOnPullRequest(item: Pick<CampaignWorkItemSummary, "stateCauses" | "mergeDependencies">): string | null {
   if (!item.stateCauses.includes("dependency_unmerged")) return null;

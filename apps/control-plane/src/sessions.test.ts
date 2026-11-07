@@ -1532,12 +1532,14 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     }]);
     assert.notEqual(db.campaignProjection(parent.id)?.status, "verified_complete",
       "a stopped child with a retained worktree is not campaign-complete");
-    // #4146: Cleanup offers only an inspection, never a removal that could discard the changes.
+    // #4146: Cleanup never offers a removal that could discard the changes, and names the next step in
+    // words rather than a command to run inside the agent-managed worktree.
     const dirty = db.campaignProjection(parent.id)?.cleanup?.items.find((item) => item.kind === "worktree");
     assert.ok(dirty, "the refused worktree is listed under Cleanup");
     assert.equal(dirty.reason, "The worktree has uncommitted changes.");
-    assert.deepEqual(dirty.action, { kind: "command", command: `git -C '/worktrees/${child.data.id}' status`,
-      then: "Commit and push the changes you want to keep, or discard them yourself. Then ask the Orchestrator to retire the worktree through Wollipog." });
+    assert.deepEqual(dirty.action, { kind: "person", text: "Review the child's work from its session in Wollipog. " +
+      "Ask its session or the Orchestrator to commit and push the changes you want to keep, or confirm they are not needed. " +
+      "Then ask the Orchestrator to retire the worktree through Wollipog." });
     db.raw().prepare("UPDATE sessions SET archived=1, worktree_path=NULL, worktrees='[]' WHERE id=?")
       .run(child.data.id);
     // #4067, #4146: the grandchild's merged pull request still owes its branch until the forge reports it
@@ -27733,7 +27735,7 @@ test("an approved decision for a child whose worktree branch was switched is del
     assert.equal(holds?.length, 1);
     assert.equal(holds?.[0]?.kind, "worktree_recovery");
     assert.equal(holds?.[0]?.holdId, recovery.recoveryId);
-    assert.match(holds?.[0]?.recoveryAction ?? "", new RegExp(`git -C ${f.worktreePath} switch agent/${child.id}`, "u"));
+    assert.match(holds?.[0]?.recoveryAction ?? "", new RegExp(`Restore branch agent/${child.id} in ${f.worktreePath} and select`, "u"));
     assert.match(holds?.[0]?.recoveryAction ?? "", /select_worktree/u);
     assert.deepEqual(holds?.[0]?.heldResumes?.map((resume) => resume.occurrenceId), [merge.occurrenceId]);
     const descendants = svc.descendantRequests(root.id, () => true);
@@ -27753,7 +27755,7 @@ test("an approved decision for a child whose worktree branch was switched is del
     const refused = svc.prompt(child.id, "are you there?");
     assert.equal(refused.status, 409);
     assert.match(refused.error ?? "", /worktree recovery is required before sending another prompt/u);
-    assert.match(refused.error ?? "", new RegExp(`switch agent/${child.id}`, "u"));
+    assert.match(refused.error ?? "", new RegExp(`branch agent/${child.id} in ${f.worktreePath}`, "u"));
     assert.match(refused.error ?? "", /select_worktree/u);
     // A caller whose credential may not manage the child's worktrees is told who can, with the same
     // branch and path, instead of being handed tools its route refuses (#1863).
@@ -27761,12 +27763,12 @@ test("an approved decision for a child whose worktree branch was switched is del
     const refusedForReader = svc.prompt(child.id, "are you there?", [], undefined, undefined, undefined, "session",
       false, undefined, cannotManageWorktrees);
     assert.equal(refusedForReader.status, 409);
-    assert.match(refusedForReader.error ?? "", new RegExp(`switch agent/${child.id}`, "u"));
+    assert.match(refusedForReader.error ?? "", new RegExp(`branch agent/${child.id} in ${f.worktreePath}`, "u"));
     assert.doesNotMatch(refusedForReader.error ?? "", /select_worktree|create_worktree/u);
     assert.match(refusedForReader.error ?? "", /Only the session owner or its controlling Orchestrator can recover/u);
     const readerDescendants = svc.descendantRequests(root.id, () => true, "orchestrator", true, () => cannotManageWorktrees);
     const readerAdvice = readerDescendants.data?.blockedChildren?.[0]?.holds[0]?.recoveryAction ?? "";
-    assert.match(readerAdvice, new RegExp(`switch agent/${child.id}`, "u"));
+    assert.match(readerAdvice, new RegExp(`branch agent/${child.id} in ${f.worktreePath}`, "u"));
     assert.doesNotMatch(readerAdvice, /select_worktree|create_worktree/u);
     assert.equal(svc.descendantRequests(root.id, () => true, "orchestrator", true, () => ({
       ...cannotManageWorktrees, canManageWorktrees: true,

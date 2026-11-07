@@ -309,7 +309,7 @@ test("a person's Held Children advice is written for them, looking up only the o
   const refused = withHoldAdviceFor(view, { canManageWorktrees: false }).holds!;
   assert.equal(refused[0]!.recoveryAction, worktreeRecoveryAction(recovery, { canManageWorktrees: false }));
   assert.doesNotMatch(refused[0]!.recoveryAction, /select_worktree|create_worktree/u);
-  assert.match(refused[0]!.recoveryAction, /switch fix\/c/u, "the branch to restore is still named");
+  assert.match(refused[0]!.recoveryAction, /branch fix\/c in \/w\/c/u, "the branch to restore is still named");
   assert.equal(refused[1], view.holds[1], "a reader without canStopJobs leaves queue-hold advice as written");
 
   const both = { recoveryId: "wr_2", detectedAt: 1, selectedPath: "/w/b", expectedBranch: "fix/b", detail: "switched" };

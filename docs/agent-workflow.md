@@ -76,6 +76,21 @@ required baseline explicitly. Fetch the remote default branch and inspect its fi
 in a separate worktree pinned to the required commit. Record that commit and do not assume the
 primary checkout is current or change it merely to obtain fresh input.
 
+## Protocol Version Claims
+
+Parallel campaigns often claim protocol versions at the same time. `PROTOCOL_VERSION` is the
+highest entry of the ledger in `packages/protocol/src/protocol-version.ts`, and each version has
+its own `// vN slot` anchor (#975). Claim a version by inserting its entry directly below that
+anchor; see the Protocol Version section of `AGENTS.md`. Claims of different versions merge
+without a conflict, and a claim of a version someone else already took conflicts immediately.
+
+Versions must still land in increasing order, because a runner at version N is assumed to
+support everything up to N. Before choosing a number, check main and every open pull request's
+claim. Before requesting a merge and again before enqueueing, run `pnpm check:protocol-version`
+against freshly fetched main. CI runs the same check on the pull request's merge commit and on
+each merge-group commit. If the claim is no longer greater than the commit it lands on, renumber
+to the version the check names. A pull request that claims no version is never affected.
+
 ## Decisions and Delivery
 
 Before the first dispatch, the root may declare completion relationships in `record_campaign_plan`

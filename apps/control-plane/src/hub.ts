@@ -394,6 +394,7 @@ export type RunnerRequestResult =
   | GithubMergePreflightResultMessage
   | GitLabMergeClosuresResultMessage
   | import("@wollipog/protocol").ForgeDecisionActionResultMessage
+  | import("@wollipog/protocol").MergeClosureWatchResultMessage
   | WorkflowActionReconciliationResultMessage
   | import("@wollipog/protocol").CampaignIssueScopeResultMessage
   | GithubIssueClosureResultMessage

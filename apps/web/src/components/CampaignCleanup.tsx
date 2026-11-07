@@ -10,17 +10,25 @@ import { BusyButton } from "./ui/BusyButton.js";
  * Campaign Status's Cleanup and Campaign Stuck sections (#4146). Cleanup lists the housekeeping a
  * delivered campaign still owes, each item with its reason and the exact action that settles it:
  * **Delete Merged Branches** where Wollipog holds an approved deletion it can perform, otherwise the
- * exact command, or what Wollipog is already doing about it. Handed-off work items keep their own
+ * exact command, or what Wollipog is already doing about it. A refused worktree shows its path, the
+ * refusal reason and the child's session, and its next step in words. Handed-off work items keep their own
  * Handed Off section; Cleanup only counts them. Campaign Stuck names the undelivered work behind the
  * status and why nothing is moving.
  */
 
-/** What settles one cleanup item, in words or as a command a person can copy. */
-function CleanupAction({ action, subject }: { action: CampaignCleanupItem["action"]; subject: string }) {
+/** A refused worktree's next step when the projection still carries a command (an older control
+ * plane): the step after it, never the command itself. */
+const WORKTREE_FALLBACK_STEP = "Review the child's work from its session in Wollipog and decide what to keep. " +
+  "Then ask the Orchestrator to retire the worktree through Wollipog.";
+
+/** What settles one cleanup item, in words or as a command a person can copy. A worktree item never
+ * shows a command: the worktree is agent-managed, so its next step is reviewed through Wollipog. */
+function CleanupAction({ action, subject, worktree }: { action: CampaignCleanupItem["action"]; subject: string; worktree: boolean }) {
   switch (action.kind) {
     case "delete_merged_branches":
       return <>Wollipog can delete it with its approved deletion: choose <strong>Delete Merged Branches</strong>.</>;
     case "command":
+      if (worktree) return <>{action.then ?? WORKTREE_FALLBACK_STEP}</>;
       return <>
         <code>{action.command}</code>
         <span className="campaign-status-meta">
@@ -68,7 +76,7 @@ function CleanupList({ items, onOpenSession }: { items: readonly CleanupItem[]; 
               </div>
             )}
             <div><dt>Reason</dt><dd>{item.reason}</dd></div>
-            <div><dt>Action</dt><dd><CleanupAction action={item.action} subject={cleanupSubject(item)} /></dd></div>
+            <div><dt>Action</dt><dd><CleanupAction action={item.action} subject={cleanupSubject(item)} worktree={item.kind === "worktree"} /></dd></div>
           </dl>
         </li>
       ))}

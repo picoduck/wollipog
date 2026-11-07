@@ -88,7 +88,7 @@ under a new generation needs and gets its own proof.
 ### Releasing a Held Slot
 
 Some held slots no automatic proof can ever free: a generation an older runner served, and a fence
-that carries no process evidence. A runner from protocol 330 reports such a fence in its session
+that carries no process evidence. A runner from protocol 331 reports such a fence in its session
 snapshots (`campaignRetirementHold`) once it was left by an earlier runner process and nothing of
 the current process is still retiring that generation, with the reason `fence_without_evidence`, or
 `unsupported_location` when the host can't record evidence for the provider's location (WSL, a

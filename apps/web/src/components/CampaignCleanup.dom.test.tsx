@@ -3,7 +3,7 @@ import { test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { OrchestratorCampaignProjection } from "@wollipog/protocol";
+import { worktreeRefusalAction, type OrchestratorCampaignProjection } from "@wollipog/protocol";
 import { api } from "../api.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { CampaignCleanup, CampaignStuck } from "./CampaignCleanup.js";
@@ -36,8 +36,8 @@ const cleanup: NonNullable<OrchestratorCampaignProjection["cleanup"]> = { total:
     state: "pending", reason: "The last deletion was refused: the forge could not be reached.",
     action: { kind: "delete_merged_branches", occurrenceId: "workflow_delete" } },
   { kind: "worktree", sessionId: "child-3", path: "/worktrees/child-3", status: "refused",
-    reason: "The worktree has uncommitted changes.", action: { kind: "command", command: "git -C '/worktrees/child-3' status",
-      then: "Commit and push the changes you want to keep, or discard them yourself. Then ask the Orchestrator to retire the worktree through Wollipog." } },
+    reason: "The worktree has uncommitted changes (2 paths): \"report.md\", \"notes.txt\".",
+    action: worktreeRefusalAction("the worktree has uncommitted changes (2 paths): \"report.md\", \"notes.txt\"") },
   { kind: "handoff", workItemId: "item-1", title: "Rotate the signing key", issue: null, responsibleActor: "human",
     reason: "Only the owner can rotate it.", action: { kind: "person", text: "Rotate the key in the release settings." } },
 ] };
@@ -56,9 +56,18 @@ test("Cleanup lists each item with its reason and exact action, and Delete Merge
       "Title Case labels; handed-off items keep their own section");
     const codes = [...container.querySelectorAll("code")].map((node) => node.textContent);
     assert.ok(codes.includes("gh api -X DELETE 'repos/picoduck/wollipog/git/refs/heads/agent/child-1'"), "the exact command");
-    assert.ok(codes.includes("git -C '/worktrees/child-3' status"), "a dirty worktree is inspected, never removed");
-    assert.match(container.textContent ?? "", /Commit and push the changes you want to keep, or discard them yourself\./u);
-    assert.doesNotMatch(container.textContent ?? "", /worktree remove|--force|reset --hard|git clean/u);
+    assert.ok(codes.includes("/worktrees/child-3"), "the refused worktree's path");
+    assert.ok(!codes.some((code) => /^git\b|git -C/u.test(code ?? "")), "no git command is suggested");
+    const worktreeRow = [...container.querySelectorAll("li")].find((node) => node.textContent?.includes("/worktrees/child-3"));
+    assert.ok(worktreeRow, "the worktree row");
+    assert.match(worktreeRow.textContent ?? "", /The worktree has uncommitted changes \(2 paths\): "report\.md", "notes\.txt"\./u,
+      "the refusal reason with the dirty paths the runner reported");
+    assert.equal(worktreeRow.querySelector("a[href='/sessions/child-3']")?.textContent, "child-3", "the child's session opens from the row");
+    assert.match(worktreeRow.textContent ?? "", /Review the child's work from its session in Wollipog\. Ask its session or the Orchestrator to commit and push the changes you want to keep, or confirm they are not needed\. Then ask the Orchestrator to retire the worktree through Wollipog\./u);
+    assert.deepEqual([...worktreeRow.querySelectorAll("code")].map((node) => node.textContent), ["/worktrees/child-3"],
+      "the path is the only code in the worktree row");
+    assertNoDomNode(worktreeRow.querySelector("button"), "nothing to copy or run for a worktree");
+    assert.doesNotMatch(container.textContent ?? "", /worktree remove|--force|reset --hard|git clean|git -C/u);
     assert.ok(container.querySelector("button[aria-label='Copy Command for agent/child-1']"), "each command can be copied, named");
     assert.match(container.textContent ?? "", /1 handed-off item is listed under Handed Off\./u);
     assert.match(container.textContent ?? "", /Wollipog can delete it with its approved deletion/u);
@@ -72,6 +81,25 @@ test("Cleanup lists each item with its reason and exact action, and Delete Merge
     view.unmount();
     api.deleteCampaignMergedBranches = original;
   }
+});
+
+test("a worktree item that still carries a command shows only its next step, never the command", async () => {
+  const legacy: NonNullable<OrchestratorCampaignProjection["cleanup"]> = { total: 2, items: [
+    { kind: "worktree", sessionId: "child-4", path: "/worktrees/child-4", status: "refused", reason: "The branch has unpushed commits.",
+      action: { kind: "command", command: "git -C '/worktrees/child-4' log --oneline '@{upstream}..HEAD'",
+        then: "Push the commits you want to keep, or confirm they are not needed. Then ask the Orchestrator to retire the worktree through Wollipog." } },
+    { kind: "worktree", sessionId: "child-5", path: "/worktrees/child-5", status: "refused", reason: "The worktree has a detached HEAD.",
+      action: { kind: "command", command: "git -C '/worktrees/child-5' status" } },
+  ] };
+  const view = await render(<CampaignCleanup campaignId="root-1" cleanup={legacy} canAct onOpenSession={(id) => <a href={`/sessions/${id}`}>{id}</a>} />);
+  try {
+    const { container } = view;
+    assert.deepEqual([...container.querySelectorAll("code")].map((node) => node.textContent), ["/worktrees/child-4", "/worktrees/child-5"]);
+    assert.doesNotMatch(container.textContent ?? "", /git -C|@\{upstream\}/u);
+    assertNoDomNode(container.querySelector("button"), "no Copy Command for a worktree");
+    assert.match(container.textContent ?? "", /Push the commits you want to keep, or confirm they are not needed\./u);
+    assert.match(container.textContent ?? "", /Review the child's work from its session in Wollipog and decide what to keep\./u);
+  } finally { view.unmount(); }
 });
 
 test("Delete Merged Branches is not offered without an approved deletion, or outside the campaign's own view (#4146)", async () => {

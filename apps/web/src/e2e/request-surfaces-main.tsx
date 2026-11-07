@@ -71,6 +71,8 @@ const scenario = new URLSearchParams(window.location.search).get("scenario") ?? 
 // `notices=1` (two session notices behind the card's "+N More"), `tall=1` (a body taller than the
 // dock's cap) and `keyboard=1` (the software keyboard is open).
 const query = new URLSearchParams(window.location.search);
+// `theme=light` switches the palette, for UI evidence.
+if (query.get("theme") === "light") document.documentElement.dataset.theme = "light";
 const runnerOnline = query.get("runner") !== "offline";
 const respondAs = query.get("respond");
 const withNotices = query.get("notices") === "1";

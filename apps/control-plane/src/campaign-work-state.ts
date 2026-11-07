@@ -43,6 +43,9 @@ export interface CampaignWorkItemStateRecord {
   /** #4120: the status of each merge dependency, a prerequisite in another repository. Omitted
    * means none; dependencies within one repository are only in `dependsOn`. */
   mergeDependencies?: readonly CampaignMergeDependencyStatus[];
+  /** #4120: every pull request the item names is observed MERGED (it names at least one). Only read
+   * for an item verified delivered that has merge dependencies. Omitted means not known to be. */
+  ownPullRequestsMerged?: boolean;
 }
 
 export interface CampaignWorkItemDerivedState {
@@ -64,10 +67,18 @@ export function deriveCampaignWorkItemState(
   if (record.commitment === "cancelled") return { state: "cancelled", causes: [] };
   if (record.commitment === "scope_removed") return { state: "removed", causes: [] };
   const attempt = record.latestAttempt;
-  if (attempt?.delivered || record.recordedDelivery) return { state: "delivered", causes: [] };
   // #4120: a prerequisite in another repository that can no longer merge means this item's merge is
   // never attempted, whether or not a child is working on it.
   const mergeDependencyFailed = record.mergeDependencies?.includes("failed") ?? false;
+  // A recorded delivery (#4070) is a merge into the default branch, so it is delivered whatever its
+  // prerequisites do. A verified report is not a merge: until the item's own pull requests are
+  // observed MERGED, its merge still waits on its prerequisites, so it is unfinished, blocked for good
+  // when one can never merge, and otherwise waiting on the merge.
+  if (record.recordedDelivery) return { state: "delivered", causes: [] };
+  if (attempt?.delivered) {
+    if (record.ownPullRequestsMerged || !record.mergeDependencies?.some((status) => status !== "merged")) return { state: "delivered", causes: [] };
+    return mergeDependencyFailed ? { state: "blocked", causes: ["dependency_blocked"] } : { state: "waiting", causes: ["dependency_unmerged"] };
+  }
   if (attempt?.open) {
     if (record.hasBlocker) return { state: "blocked", causes: ["recorded_blocker"] };
     if (mergeDependencyFailed) return { state: "blocked", causes: ["dependency_blocked"] };

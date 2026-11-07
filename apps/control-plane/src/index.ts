@@ -218,6 +218,7 @@ import {
 import { registerCampaignStatusRoutes } from "./campaign-status-routes.js";
 import { CampaignWorkObservations } from "./campaign-work-observation.js";
 import { CampaignForgeObserver } from "./campaign-forge-observations.js";
+import { MergeClosureWatcher } from "./merge-closure-watch.js";
 import { APP_RELEASE_VERSION, RUNNER_RELEASE_TAG } from "./release-version.js";
 import { ProviderPublicationUnavailable, type PublicationObservation } from "./provider-profile-publication-store.js";
 import { readSshConfigHosts } from "./ssh-config.js";
@@ -1126,6 +1127,15 @@ const campaignForgeObserver = new CampaignForgeObserver({
   newRequestId: () => `campaign_forge_${randomUUID()}`,
 });
 campaignForgeObserver.start();
+// #4323: a consumed merge is read through its child's runner until it lands, so a closure changed
+// while it waits in the merge queue or train is dequeued, or reported to the campaign's owner.
+const mergeClosureWatcher = new MergeClosureWatcher({
+  ...svc.mergeClosureWatcherDeps(),
+  requestFromRunner: (runnerId, requestId, message, timeoutMs) => hub.requestFromRunner(runnerId, requestId, message, timeoutMs),
+  warn: (message) => app.log.warn(message),
+  newRequestId: () => `merge_closure_watch_${randomUUID()}`,
+});
+mergeClosureWatcher.start();
 /** An on-demand read waits at most this long before the route answers with what is stored. */
 const CAMPAIGN_FORGE_REFRESH_WAIT_MS = 20_000;
 const refreshCampaignForge = (campaignId: string, refs: readonly CampaignPullRequestRef[]) => new Promise<void>((resolve) => {
@@ -1616,6 +1626,7 @@ app.register(async (instance) => {
       case "github_merge_preflight_result":
       case "gitlab_merge_closures_result":
       case "forge_decision_action_result":
+      case "merge_closure_watch_result":
         if (runnerId) hub.resolveRunnerRequest(msg, runnerId);
         break;
       case "github_issue_closure_result":
@@ -7544,6 +7555,7 @@ const runnerLivenessTimer = setInterval(() => {
 runnerLivenessTimer.unref();
 app.addHook("onClose", async () => {
   campaignForgeObserver.dispose();
+  mergeClosureWatcher.dispose();
   clearInterval(workflowRecoveryTimer);
   clearInterval(automationTimer);
   clearInterval(outboundEventTimer);

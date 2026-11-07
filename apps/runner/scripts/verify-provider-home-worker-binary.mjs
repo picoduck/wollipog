@@ -13,6 +13,7 @@ import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { WebSocketServer } from "ws";
+import { LEDGER_PATH, parseLedger } from "../../../scripts/protocol-version-ledger.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const source = process.argv.includes("--source"), maximal = process.argv.includes("--maximal");
@@ -22,7 +23,8 @@ const packagedNames = packaged ? readdirSync(packageDir).filter(name => /^wollip
 if (packaged) assert.equal(packagedNames.length, 1, "fixture expects exactly one native packaged runner");
 const binary = source ? process.execPath : packaged ? join(packageDir, packagedNames[0]) : resolve(process.argv[2]);
 const loader = pathToFileURL(createRequire(import.meta.url).resolve("tsx/esm")).href;
-const protocol = Number(readFileSync(join(repo, "packages/protocol/src/index.ts"), "utf8").match(/export const PROTOCOL_VERSION = (\d+);/u)[1]);
+const protocol = parseLedger(readFileSync(join(repo, LEDGER_PATH), "utf8")).version;
+assert.ok(Number.isInteger(protocol), "protocol version ledger must be readable");
 const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-worker-daemon-")));
 const home = join(root, "home"), temp = join(root, "tmp"), emptyBin = join(root, "bin");
 for (const path of [home, temp, emptyBin]) mkdirSync(path, { mode: 0o700 });

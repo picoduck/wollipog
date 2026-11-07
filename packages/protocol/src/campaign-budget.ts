@@ -56,11 +56,11 @@ export interface CampaignBudgetView {
   rootAllocation?: CampaignBudgetAllocation;
   costAccounting?: "priced" | "unavailable";
   requiredNativeReview?: {supported:boolean;reason:string};
-  /** v330 (#4331): ended workers whose slot no automatic proof can ever free. Only the campaign's
+  /** v331 (#4331): ended workers whose slot no automatic proof can ever free. Only the campaign's
    * owner can release one, with `POST /api/sessions/:root/orchestrator-campaign/slots/release`.
    * Absent when there are none. */
   heldSlots?: CampaignHeldSlot[];
-  /** v330 (#4331): slots people released, newest first, at most CAMPAIGN_SLOT_RELEASES_LIMIT. */
+  /** v331 (#4331): slots people released, newest first, at most CAMPAIGN_SLOT_RELEASES_LIMIT. */
   slotReleases?: CampaignSlotRelease[];
 }
 

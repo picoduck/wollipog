@@ -38,6 +38,7 @@ import {
   campaignIssueLimitsRequirement,
   campaignIssueScopeChangesRequirement,
   PROTOCOL_VERSION,
+  worktreeRefusalAction,
   type CampaignWorkItemDetail,
   type CampaignWorkItemHandoff,
   type CampaignWorkItemSummary,
@@ -177,6 +178,29 @@ if (workRepositories) {
       title: "Document Account Field", key: "api:account-docs", issue: null, repository: "picoduck/account-api", queuePosition: 9,
       primaryState: "delivered", currentAttempt: null, attemptCount: 1, elapsed: { startedAt: NOW - 2 * HOUR, endedAt: NOW - HOUR },
       cost: knownCost(0.6), activityAt: NOW - HOUR,
+    }),
+  );
+}
+
+// `verifiedHolds=1` (#4120, with `workRepositories=1`): two items whose reports were verified while
+// their own pull requests are still open. One waits for its prerequisite's merge; the other's
+// prerequisite closed without merging, so it is blocked and never merged.
+if (workRepositories && params.get("verifiedHolds") === "1") {
+  const verified = { currentAttempt: null, attemptCount: 1, elapsed: { startedAt: NOW - 3 * HOUR, endedAt: null }, cost: knownCost(0.9), activityAt: NOW - 30 * MINUTE };
+  items.push(
+    itemSummary("cwi_12", NOW, {
+      ...verified, title: "Show Account Badge", key: "app:account-badge", issue: { repository: "picoduck/wollipog", number: 4120 }, repository: "picoduck/wollipog",
+      queuePosition: 10, primaryState: "waiting", stateCauses: ["dependency_unmerged"],
+      stage: { stage: "in_review", note: null, pullRequests: [{ repository: "picoduck/wollipog", number: 4400 }], sourceSessionId: "s_root", reportedAt: NOW - 30 * MINUTE },
+      mergeDependencies: [{ id: "cwi_10", key: "api:account-field", title: "Add Account Field", repository: "picoduck/account-api", status: "unmerged",
+        pullRequests: [{ ref: { repository: "picoduck/account-api", number: 88 }, state: "open" }] }],
+    }),
+    itemSummary("cwi_13", NOW, {
+      ...verified, title: "Show Account Avatar", key: "app:account-avatar", issue: { repository: "picoduck/wollipog", number: 4121 }, repository: "picoduck/wollipog",
+      queuePosition: 11, primaryState: "blocked", stateCauses: ["dependency_blocked"],
+      stage: { stage: "in_review", note: null, pullRequests: [{ repository: "picoduck/wollipog", number: 4401 }], sourceSessionId: "s_root", reportedAt: NOW - 30 * MINUTE },
+      mergeDependencies: [{ id: "cwi_14", key: "api:avatar-field", title: "Add Avatar Field", repository: "picoduck/account-api", status: "failed",
+        pullRequests: [{ ref: { repository: "picoduck/account-api", number: 87 }, state: "closed" }] }],
     }),
   );
 }
@@ -492,9 +516,9 @@ function activityProjection(state: "active" | "cleanup" | "complete" | "stuck"):
         state: "pending" as const, reason: "The last deletion was refused: The forge could not be reached.",
         action: { kind: "delete_merged_branches" as const, occurrenceId: "workflow_delete_4223" } },
       { kind: "worktree" as const, sessionId: "s_child", path: "/home/dev/worktrees/wollipog/s_079714ea231c", status: "refused" as const,
-        reason: "The worktree has uncommitted changes.",
-        action: { kind: "command" as const, command: "git -C '/home/dev/worktrees/wollipog/s_079714ea231c' status",
-          then: "Commit and push the changes you want to keep, or discard them yourself. Then ask the Orchestrator to retire the worktree through Wollipog." } },
+        // The reason and action come from the protocol, as the control plane derives them.
+        reason: "The worktree has uncommitted changes (2 paths): \"report.md\", \"notes.txt\".",
+        action: worktreeRefusalAction("the worktree has uncommitted changes (2 paths): \"report.md\", \"notes.txt\"") },
     ] } } : {}),
     ...(state === "stuck" && !activityLegacy ? { stuck: { total: 2, items: [
       { kind: "unverified_child" as const, sessionId: "s_child", status: "idle", reason: "The child's latest report has not been verified." },
