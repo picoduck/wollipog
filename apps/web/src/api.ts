@@ -1183,6 +1183,12 @@ export function createApiClient(transport: ApiTransport) {
       method: "POST",
       body: JSON.stringify({ proposal: { mode: "custom" }, expectedRevision }),
     }),
+  /** The campaign owner's release of one ended worker's held slot (#4331). Person-only: the server
+   * refuses every agent credential. */
+  releaseCampaignSlot: (campaignId: string, request: import("@wollipog/protocol").ReleaseCampaignSlotRequest) =>
+    req<import("@wollipog/protocol").CampaignSlotRelease>(
+      `/api/sessions/${encodeURIComponent(campaignId)}/orchestrator-campaign/slots/release`,
+      { method: "POST", body: JSON.stringify(request) }),
   /** Authenticated Human-only change to a Full Control campaign's follow-up approval limit (#2940);
    * `null` clears it. Compare-and-set on the campaign's policy revision. */
   setCampaignFollowUpLimit: (id: string, acceptedFollowUps: number | null, expectedRevision: number) =>
