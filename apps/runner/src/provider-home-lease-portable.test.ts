@@ -128,13 +128,13 @@ test("releaseAll preserves failed tokens and unchanged evidence until the finite
     assert.ok(elapsed >= 9_900 && elapsed < 30_000, `finite release grace: ${elapsed}`);
     assert.deepEqual(leaseEvidence(root), before);
     assert.equal(registry.getDiagnostics().filter(message => message.includes("release unpublished")).length, 1);
-  } finally {
+  } catch (error) {
     // A failed readiness check may leave the child stuck before it can read the signal.
-    const terminate = setTimeout(() => reader.kill("SIGKILL"), 5_000);
-    try {
-      writeFileSync(releaseMarker, "release");
-      await ended;
-    } finally { clearTimeout(terminate); }
+    reader.kill("SIGKILL");
+    throw error;
+  } finally {
+    writeFileSync(releaseMarker, "release");
+    await ended;
   }
   assert.equal(reader.exitCode, 0, "reader exits cleanly after the release signal");
   assert.equal(registry.releaseAll(), true, "retained token releases after the reader exits");
