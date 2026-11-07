@@ -474,9 +474,11 @@ test("the work list filters by repository and counts each repository's items by 
     const page = (query: Parameters<typeof h.db.campaignWorkLedger.page>[1]) => h.db.campaignWorkLedger.page("root", query, Date.now());
     const all = page({ state: "all" });
     assert.ok(all.ok);
-    assert.deepEqual(all.data.items.map((item) => [item.key, item.repository]), [["api", "owner/api"], ["app-sibling", "owner/app"], ["app", "owner/app"]]);
-    // Each repository's counts cover all its items, whatever the list's filters, in the order its first item was recorded.
-    const counted = all.data.repositories!.map((entry) => [entry.repository, entry.total, Object.entries(entry.byState).filter(([, count]) => count > 0)]);
+    // The plan records all three in one call, so their order among equal times is not asserted.
+    assert.deepEqual(all.data.items.map((item) => `${item.key} ${item.repository}`).sort(), ["api owner/api", "app owner/app", "app-sibling owner/app"]);
+    // Each repository's counts cover all its items, whatever the list's filters.
+    const counted = all.data.repositories!.map((entry) => [entry.repository, entry.total, Object.entries(entry.byState).filter(([, count]) => count > 0)])
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
     assert.deepEqual(counted, [["owner/api", 1, [["running", 1]]], ["owner/app", 2, [["planned", 1], ["running", 1]]]]);
     const api = page({ state: "all", repository: "Owner/API" });
     assert.ok(api.ok);
