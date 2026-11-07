@@ -1,5 +1,5 @@
 /**
- * Merge closure watch (#4323, protocol v328; see `@wollipog/protocol` merge-closure-watch).
+ * Merge closure watch (#4323, protocol v330; see `@wollipog/protocol` merge-closure-watch).
  *
  * `mergeClosures` reads what a `pr_merge` would close when it is requested, when it is armed and
  * before Wollipog's own enqueue. The forge closes issues when the merge lands, from the description
@@ -16,7 +16,7 @@
  *   checked; after `giveUpAfterMs` the watch ends `unverified`.
  *
  * An unchanged pull request costs one read per interval and nothing else. A child whose runner
- * predates v328 is not watched, exactly as before.
+ * predates v330 is not watched, exactly as before.
  */
 import {
   MERGE_CLOSURE_DEQUEUE_OUTCOMES,

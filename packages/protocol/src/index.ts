@@ -1040,13 +1040,16 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      action: that runner creates the issue with its own forge login, with no session of its own,
 //      and answers the issue number. Consuming such a decision is refused, and a runner below v327
 //      is never sent one, so the requester's login is never used instead.
-// 328: a consumed `pr_merge` is watched until it lands (#4323). `merge_closure_watch` asks the
+// 329: Issue-closure decisions expose durable approval provenance (#4301). Approved re-requests
+//      are refused with the executable occurrence and digest; older readers may ignore provenance.
+// 330: a consumed `pr_merge` is watched until it lands (#4323). `merge_closure_watch` asks the
 //      child's runner what the pull request or merge request would close, in any state, or to take
 //      it out of the merge queue or train. While it is open at the approved head, closures that no
 //      longer match `intendedClosures` dequeue it and the decision stops covering it; a landed merge
-//      that closed an issue nobody approved is reported to the campaign's owner. A runner below v328
-//      is never sent one, and its merges keep the checks they had before.
-export const PROTOCOL_VERSION = 328;
+//      that closed an issue nobody approved is reported to the campaign's owner. A runner below v330
+//      is never sent one, and its merges keep the checks they had before. (This change first claimed
+//      328, which no released version uses.)
+export const PROTOCOL_VERSION = 330;
 
 export * from "./campaign-authority.js";
 export * from "./decision-questions.js";
@@ -1654,8 +1657,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   locationForgeObservation: 326,
   /** v327 creates an approved follow-up issue in a named Location's repository (#4119). */
   locationIssuePublication: 327,
-  /** v328 reads a consumed merge's closures in any state and dequeues it (#4323). */
-  mergeClosureWatch: 328,
+  /** v330 reads a consumed merge's closures in any state and dequeues it (#4323). */
+  mergeClosureWatch: 330,
   /** v317 asks for and carries out a campaign repository addition (#4117). */
   campaignRepositoryAddition: 317,
   /** v318 reads a Location's issue facts for a repository-qualified scope proposal (#4118). */
@@ -6219,11 +6222,13 @@ export interface WorkflowDecisionView {
   delegatedImageReview?: import("./delegated-image-review.js").DelegatedImageReviewReference;
   createdAt: number;
   resolvedAt?: number;
+  /** v329 (#4301): durable issue-closure approval provenance; informational, never a grant. */
+  approval?: { actor: GovernanceActor; at: number };
   consumedAt?: number;
   actionAdmission?: WorkflowDecisionActionAdmission;
   /** v284 (#4067): what Wollipog did when it performed this approved forge action itself. */
   forgeAction?: import("./forge-decision-action.js").WorkflowDecisionForgeAction;
-  /** v328 (#4323): a consumed merge's watch, from approval until it lands. */
+  /** v330 (#4323): a consumed merge's watch, from approval until it lands. */
   closureWatch?: import("./merge-closure-watch.js").MergeClosureWatch;
   issueClosureResult?: GithubIssueClosureResult;
   automationCreationResult?: AutomationCreationResult;

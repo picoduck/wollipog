@@ -192,16 +192,17 @@ propagation; success and cancellation do not trigger retry.
 The 2453-second coherent natural measured remainder is a dated snapshot. Natural-run margin
 evidence triggers remeasurement: collect the five consecutive complete runs
 below, retaining phase timings and at least 180 seconds spare on every shard.
-If a shard loses that margin, remeasure all five shards and revisit the finite
+If a shard loses that margin, remeasure all ten shards and revisit the finite
 budget or distribution using those observations. A pre-merge exact tree-hash
 gate would block new e2e work before its natural integration measurements exist;
 authors must not edit a provenance hash to imply a measurement that never happened.
 
 Local checks and PR/merge-group CI do not complete #2700. Observe **five consecutive
 naturally occurring complete main or merge-group runs containing this change**,
-all five browser shards successful with at least 180 seconds spare:
-`active <= 4320s` at the current 75-minute limit. The earlier 59-minute model
-used a 3360-second threshold; its observations are historical, not evidence for
+all ten browser shards successful with at least 180 seconds spare:
+`active <= 3060s` at the current 54-minute limit. The earlier 59-minute and
+75-minute models used 3360-second and 4320-second thresholds respectively;
+their observations are historical, not evidence for
 the revised setup model. Read exact first-attempt metadata for each run:
 
 ```sh

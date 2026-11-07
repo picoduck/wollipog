@@ -1,5 +1,5 @@
 /**
- * Merge closure watch (#4323, protocol v328; see `@wollipog/protocol` merge-closure-watch). After a
+ * Merge closure watch (#4323, protocol v330; see `@wollipog/protocol` merge-closure-watch). After a
  * `pr_merge` decision is consumed, the control plane asks this runner what the pull request (GitHub)
  * or merge request (GitLab) would close, in whatever state it is now, and, when that changed while it
  * was still open, to take it out of the merge queue or train.

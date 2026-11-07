@@ -11576,6 +11576,26 @@ export class SessionManager {
       deadlineAt: operation.deadlineAt,
       text: `${displayText}${steeringReferenceText}`,
       images: steeringImages,
+      onLateAccepted: (providerTurnId) => {
+        // Settle the initial response first, including the runner/CP timeout race. Only this
+        // operation's retained receipt may strengthen its unresolved uncertainty.
+        void operation.promise.then(() => {
+          if (this.steeringRegistry.get(request.sessionId)?.get(request.submissionId) !== operation ||
+              operation.result?.disposition !== "uncertain" || operation.result.reason !== "transport_uncertain" || operation.resolved ||
+              this.active.get(request.sessionId)?.client !== entry!.client) return;
+          if (!this.appendAcceptedSteeringEvent(request.sessionId, request.turnId,
+            request.submissionId, displayText, imageInputs)) return;
+          operation.result = this.makeSteeringResult(request, "accepted", "accepted", { providerTurnId });
+          operation.promise = Promise.resolve(operation.result);
+          const current = this.active.get(request.sessionId);
+          if (current && operation.source) this.reservedPromotions(current).delete(operation.source.id);
+          operation.source = undefined;
+          operation.request = { sessionId: request.sessionId, turnId: request.turnId,
+            submissionId: request.submissionId };
+          if (current) this.emitQueue(request.sessionId);
+          this.pruneSteeringRegistry(request.sessionId);
+        }).catch((error) => this.log(`late steering receipt failed: ${errText(error)}`));
+      },
     });
     const provider = await this.awaitSteeringDeadline(providerPromise, operation.deadlineAt, operation.lifecyclePromise);
     if (provider.cancelled) {
@@ -20017,7 +20037,7 @@ export class SessionManager {
     }
   }
 
-  /** v328 (#4323): after a `pr_merge` decision is consumed, read what its pull request or merge
+  /** v330 (#4323): after a `pr_merge` decision is consumed, read what its pull request or merge
    * request would close in any state, or take it out of the merge queue or train. Through the
    * child session's own `gh` or `glab` login and context, from the filesystem root as forge
    * actions run, so nothing the agent can write in its worktree is read on the way. A failure is a

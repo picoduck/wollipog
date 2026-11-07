@@ -1691,7 +1691,7 @@ retry rules are the GitHub ones above. A pre-v295 child runner is not asked, and
 refused rather than created: a current runner's GitLab decision always carries its check, which is
 what Full Control's ownership of it rests on (see campaign-issue-scope.md).
 
-Protocol v328 keeps checking after approval (#4323). The forge closes issues when the merge lands,
+Protocol v330 keeps checking after approval (#4323). The forge closes issues when the merge lands,
 from the description it has then, which in a merge queue or merge train is often much later than
 the last check. So once a `pr_merge` decision is consumed (or Wollipog performed its enqueue), the
 control plane sends `merge_closure_watch` to the child's runner about once a minute (every ten
@@ -1721,7 +1721,7 @@ in any other state. The decision records the result as `closureWatch`:
 - A pull request closed without merging ends the watch. One moved to another head is still read,
   because the decision never covered that head, and is reported if it lands with unapproved closures.
 
-A child runner below v328 is never sent `merge_closure_watch`; its merges keep the checks they had
+A child runner below v330 is never sent `merge_closure_watch`; its merges keep the checks they had
 before, and their decisions read `not_watched`. Merges consumed before the control plane added the
 watch are marked `not_watched` once, so none of them is read or reported.
 
@@ -2244,6 +2244,15 @@ The reviewer follows the video reviewer's provenance pattern, but for images:
   bounded at $10 and two tool calls per image plus eight. Under a campaign allowance it is a budget
   member like any child, so its cost is reserved against the allowance and shows in campaign
   accounting. Like a review session, it holds no concurrency slot.
+- **Separate admission for evidence review (#4245).** Only this server-created reviewer of an exact
+  pending Orchestrator-owned decision bypasses implementation child harness/model/effort, placement
+  and capacity rules. It stays on the root's disclosed provider/model and runner; ordinary session
+  requests cannot select this exemption. At most one active image reviewer per root is admitted,
+  independently of implementation slots, and at most one live review per occurrence. On a review
+  read or preparation after 15 minutes, a stalled reviewer is stopped; a replacement waits for
+  confirmed retirement. Idle reviewers cannot receive more work. Reviewers remain subject to all
+  parent and campaign cost/tool ceilings, unpriced-stop admission and accounting, and are excluded
+  from implementation child verification, occupancy and Stop and Archive completion.
 - **Two tools only.** The runner launches it as a native Claude Code session with no built-in
   tools, no slash commands, no user or project settings, and only the runner's management MCP
   server. That server exposes exactly `review_evidence_image` and `submit_evidence_verdict`. The

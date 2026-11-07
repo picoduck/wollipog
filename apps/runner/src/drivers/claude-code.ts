@@ -159,6 +159,7 @@ interface PendingClaudeSteer {
 }
 
 interface UnacknowledgedClaudeSteer {
+  onLateAccepted?: (providerTurnId: string) => void;
   turnId: number;
   generation: number;
 }
@@ -290,7 +291,8 @@ const ORCHESTRATOR_REPOSITORY_OVERRIDE_ENV = ["GH_REPO", "GH_HOST"] as const;
 
 /**
  * Map a Claude permission mode to CLI flags. Exported for tests.
- * - "default": ask before every tool (stdio control protocol -> Allow/Reject UI).
+ * - "default": ask before every tool (stdio control protocol -> Allow/Reject UI). The mode is
+ *   always passed as --permission-mode default rather than left to the CLI's own starting mode.
  * - "auto": the classifier model reviews each action — it auto-approves safe ones and
  *   blocks risky ones inline (the agent is told and adapts). We keep the stdio control
  *   channel open so the headless turn streams and settles gracefully on a block rather
@@ -314,7 +316,13 @@ export function claudePermissionArgs(
   routineControlChannel = false,
 ): { interactive: boolean; streamInput: boolean; args: string[] } {
   if (mode === "default") {
-    return { interactive: true, streamInput: true, args: ["--input-format", "stream-json", "--permission-prompt-tool", "stdio"] };
+    // Named explicitly: the CLI's own starting mode is not `default` on every release. 2.1.296
+    // starts an auto-capable model in `auto` when no mode is passed (#3849).
+    return {
+      interactive: true,
+      streamInput: true,
+      args: ["--input-format", "stream-json", "--permission-prompt-tool", "stdio", "--permission-mode", "default"],
+    };
   }
   if (mode === "auto") {
     return {
@@ -1185,7 +1193,7 @@ export class ClaudeCodeDriver implements Driver {
     this.turnFailureCategory = null;
   }
 
-  async steer({ submissionId, text, images = [], deadlineAt }: DriverSteerInput): Promise<DriverSteerResult> {
+  async steer({ submissionId, text, images = [], deadlineAt, onLateAccepted }: DriverSteerInput): Promise<DriverSteerResult> {
     if (!text && images.length === 0) return { outcome: "rejected", reason: "steering input is empty" };
     if (this.opts.capabilities?.supportsSteering !== true) {
       return { outcome: "rejected", reason: "Claude steering was not verified for this installation" };
@@ -1224,7 +1232,7 @@ export class ClaudeCodeDriver implements Driver {
       };
       this.pendingSteersByMessage.set(providerMessageId, pending);
       this.pendingSteerSubmissions.add(submissionId);
-      this.unacknowledgedSteerMessages.set(providerMessageId, { turnId: turn.id, generation });
+      this.unacknowledgedSteerMessages.set(providerMessageId, { turnId: turn.id, generation, onLateAccepted });
 
       try {
         child.stdin.write(JSON.stringify(buildClaudeUserMessage(text, images, providerMessageId)) + "\n", (error?: Error | null) => {
@@ -1877,8 +1885,9 @@ export class ClaudeCodeDriver implements Driver {
       return true;
     }
     this.unacknowledgedSteerMessages.delete(msg.uuid);
-    // A replay after Wollipog's deadline proves provider receipt but cannot retroactively replace
-    // the already-published Uncertain result. It does make retaining this transport safe.
+    unacknowledged.onLateAccepted?.(this.sessionId!);
+    // Only the exact replay UUID, session and live generation prove receipt. The deadline
+    // bounded the initial response, not the lifetime of this evidence. Never write again.
     if (!pending) return true;
     this.settleClaudeSteer(pending, {
       outcome: "accepted",

@@ -233,7 +233,7 @@ test("an unreadable forge never counts as unchanged: the owner is told, and a da
 });
 
 test("a child runner too old for the watch keeps today's behavior: no read, no dequeue (#4323)", async () => {
-  const f = fixture({ childProtocol: 327 });
+  const f = fixture({ childProtocol: 329 });
   const { occurrenceId, forge } = f.consumedMerge(f.github(45));
   forge.closures = [closure("owner/app#8", "Closes #8")];
   await f.pass();

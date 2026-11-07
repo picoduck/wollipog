@@ -26291,9 +26291,184 @@ test("delegated UI evidence review fails closed on tampering, policy change, sup
   }
 });
 
+for (const refusal of ["harness", "capacity", "placement"] as const) {
+  test("#4245 delegated image reviewers bypass implementation " + refusal + " admission", () => {
+    const h = uiEvidenceReviewHarness();
+    try {
+      const child = h.createChild("UI Child");
+      const policy = h.db.sessionOrchestratorPolicy(h.parent.id)!;
+      if (refusal === "harness") {
+        policy.behavior.childHarness = { agentId: "codex-app-server", driver: "codex-app-server", context: { kind: "native" } };
+        policy.behavior.childModel = "implementation-model";
+        policy.behavior.childEffort = "high";
+        h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), h.parent.id);
+      }
+      if (refusal === "capacity") h.db.raw().prepare("UPDATE sessions SET max_child_sessions=1 WHERE id=?").run(h.parent.id);
+      {
+        policy.issueScope = { repository: "team/repo", issueNumbers: [4245], revision: 1,
+          authorizedByUserId: h.db.localIdentityContext().userId, authorizedAt: 1 };
+        policy.issueNumbers = [4245];
+        h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), h.parent.id);
+        const principal = { ...h.db.localIdentityContext(), kind: "human" as const, actorId: h.db.localIdentityContext().userId };
+        const enabled = h.svc.setCampaignControl(h.parent.id, { mode: "full_control", objective: "Review UI evidence",
+          operations: ["ui_evidence_approval"], delegatablePolicyIds: [] }, 1, principal);
+        assert.ok(enabled.ok, enabled.error);
+        if (refusal === "placement") h.db.raw().prepare("UPDATE sessions SET workspace_path='/ad-hoc-review' WHERE id=?").run(h.parent.id);
+      }
+      const shot = h.screenshot(child.id, refusal);
+      const ordinary = h.svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
+        agentId: h.parent.agentId!, ...(refusal === "placement" ? { workspacePath: "/ad-hoc-review" } : {}),
+        // Caller-supplied fields cannot mint the private reviewer exemption.
+        delegatedImageReview: { reviewId: "forged" }, uiEvidenceReviewer: { reviewId: "forged" },
+      } as never, undefined, undefined, false, false, false, { parentSessionId: h.parent.id });
+      assert.equal(ordinary.status, 409, ordinary.error);
+      assert.match(ordinary.error!, refusal === "harness" ? /child harness is fixed/ :
+        refusal === "capacity" ? /remaining live child slots/ : /Full Control children/);
+      const decision = h.request(child.id, "ui", [shot.item]);
+      assert.ok(decision.ok && decision.data, decision.error);
+      const prepared = prepareImageReview(h, child.id, decision.data.occurrenceId);
+      assert.ok(prepared.ok && prepared.data, refusal + ": " + prepared.error);
+      const reviewer = h.db.getSession(prepared.data.reviewerSessionId)!;
+      assert.equal(reviewer.driver, h.parent.driver);
+      assert.equal(reviewer.model, h.db.getSession(h.parent.id)!.model);
+      assert.equal(reviewer.maxChildSessions, 0);
+      assert.equal(reviewer.useWorktree, false);
+      assert.deepEqual(h.db.campaignDescendantIds(h.parent.id), [child.id]);
+      assert.equal(h.db.campaignProjection(h.parent.id)!.children.total, 1);
+      assert.equal(h.svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID },
+        undefined, undefined, false, false, false, { parentSessionId: reviewer.id }).status, 409);
+      assert.equal(h.db.childSessionAllocations(h.parent.id).liveCount, 1);
+      assert.equal(h.db.campaignProjection(h.parent.id)!.limits.occupied, 1);
+      assert.equal(h.db.listSessionSummaries().find((s) => s.id === h.parent.id)!.liveChildCapacity!.occupied, 1);
+      assert.equal(h.db.listSessions().find((s) => s.id === h.parent.id)!.liveChildCapacity!.occupied, 1);
+      reviewerLook(h, reviewer.id, shot.item.evidenceId);
+      assert.ok(reviewerVerdict(h, reviewer.id, passingVerdict([shot.item.evidenceId])).ok);
+      const view = h.svc.delegatedImageReviewForOrchestrator(h.parent.id, prepared.data.reviewId, () => true);
+      assert.ok(view.data?.delegatedImageReview, JSON.stringify(view));
+      const approved = h.svc.resolveDescendantRequest(h.parent.id, child.id, decision.data.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: [shot.item.evidenceId],
+          delegatedImageReview: view.data.delegatedImageReview }, () => true);
+      assert.ok(approved.ok, approved.error);
+    } finally { h.db.close(); }
+  });
+}
+
+test("#4245 an ineligible reviewer names the missing restricted harness and direct fallback", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    h.db.raw().prepare("UPDATE sessions SET driver='codex-app-server' WHERE id=?").run(h.parent.id);
+    const decision = h.request(child.id, "ui", [h.screenshot(child.id, "shot").item]).data!;
+    const refused = h.svc.prepareDescendantImageEvidenceReview(h.parent.id, child.id, decision.occurrenceId, "brief", () => true);
+    assert.equal(refused.status, 409);
+    assert.match(refused.error!, /native Claude Code harness/);
+    assert.match(refused.error!, /restricted two-tool reviewer/);
+    assert.match(refused.error!, /review_descendant_ui_evidence/);
+    assert.equal(h.db.delegatedImageReviews.activeForRoot(h.parent.id).length, 0);
+  } finally { h.db.close(); }
+});
+
+test("#4245 image reviewers retain managed campaign accounting and unpriced stop admission", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const shot = h.screenshot(child.id, "shot");
+    h.db.raw().prepare("UPDATE sessions SET driver='claude-code',model='vision' WHERE id IN (?,?)").run(h.parent.id, child.id);
+    const rates = new Map([["vision", { inputCostPerToken: 0.000001, outputCostPerToken: 0.000001,
+      cacheReadCostPerToken: 0.000001, cacheCreationCostPerToken: 0.000001 }]]);
+    h.db.setUsageRateTable(rates);
+    const policy = h.db.sessionOrchestratorPolicy(h.parent.id)!;
+    policy.issueScope = { repository: "team/repo", issueNumbers: [4245], revision: 1,
+      authorizedByUserId: h.db.localIdentityContext().userId, authorizedAt: 1 };
+    policy.issueNumbers = [4245];
+    h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), h.parent.id);
+    const principal = { ...h.db.localIdentityContext(), kind: "human" as const, actorId: h.db.localIdentityContext().userId };
+    const enabled = h.svc.setCampaignControl(h.parent.id, { mode: "full_control", objective: "Review UI evidence",
+      operations: ["ui_evidence_approval"], delegatablePolicyIds: [], budgetAuthority: {
+        version: 1, accounting: "managed_workers_only", unpriced: "stop", concurrency: 1, toolCalls: 200, costUsd: 200,
+      } }, 1, principal);
+    assert.ok(enabled.ok, enabled.error);
+    const current = h.request(child.id, "current-ui", [shot.item]).data!;
+    h.db.setUsageRateTable(new Map());
+    const unpriced = prepareImageReview(h, child.id, current.occurrenceId);
+    assert.equal(unpriced.status, 409);
+    assert.match(unpriced.error!, /pric|accounting/i);
+    h.db.setUsageRateTable(rates);
+    const prepared = prepareImageReview(h, child.id, current.occurrenceId);
+    assert.ok(prepared.ok && prepared.data, prepared.error);
+    const budget = h.db.campaignBudgets.view(h.parent.id)!;
+    assert.ok(h.db.campaignBudgets.members(h.parent.id).includes(prepared.data.reviewerSessionId));
+    assert.ok(h.db.campaignBudgets.allocation(prepared.data.reviewerSessionId));
+    assert.equal(budget.authority.concurrency, 1);
+    assert.equal(h.db.childSessionAllocations(h.parent.id).liveCount, 1);
+  } finally { h.db.close(); }
+});
+
+test("#4245 image reviewers have a separate bounded slot and keep finite parent budget admission", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const shot = h.screenshot(child.id, "shot");
+    const first = h.request(child.id, "first", [shot.item]).data!;
+    h.db.updateSessionCostBudget(h.parent.id, 0.01, Date.now());
+    h.db.raw().prepare("UPDATE sessions SET cost_usd=1 WHERE id=?").run(h.parent.id);
+    // The parent has exhausted its ceiling; reviewer capacity must not bypass that ceiling.
+    const exhausted = h.svc.prepareDescendantImageEvidenceReview(h.parent.id, child.id, first.occurrenceId, "brief", () => true);
+    assert.equal(exhausted.status, 409);
+    assert.match(exhausted.error!, /budget|remaining/);
+    h.db.updateSessionCostBudget(h.parent.id, null, Date.now());
+    const review = prepareImageReview(h, child.id, first.occurrenceId);
+    assert.ok(review.ok && review.data, review.error);
+    assert.equal(h.db.delegatedImageReviews.activeForRoot(h.parent.id).length, 1);
+    const second = h.request(child.id, "second", [shot.item]).data!;
+    const busy = () => h.svc.prepareDescendantImageEvidenceReview(h.parent.id, child.id, second.occurrenceId, "brief", () => true);
+    assert.match(busy().error!, /separate review limit is 1/);
+    assert.equal(prepareImageReview(h, child.id, first.occurrenceId).data?.reviewId, review.data.reviewId);
+    // Reviewers reserve dollars/tools but never an implementation slot.
+    const charged = h.db.childSessionAllocations(h.parent.id);
+    assert.ok(charged.costBudgetUsd >= 10);
+    assert.ok(charged.maxToolCalls >= 10);
+    h.db.updateSessionStatus(child.id, "stopped", Date.now());
+    h.createChild("Implementation Still Has Its Slot");
+    h.db.updateSessionStatus(child.id, "running", Date.now());
+    h.db.raw().prepare("UPDATE delegated_image_reviews SET created_at=? WHERE review_id=?")
+      .run(Date.now() - 16 * 60_000, review.data.reviewId);
+    const expired = h.svc.delegatedImageReviewForOrchestrator(h.parent.id, review.data.reviewId, () => true);
+    assert.equal(expired.data?.endedReason, "reviewer_deadline_expired");
+    assert.equal(busy().status, 409, "deadline requests stop without admitting an overlapping worker");
+    assert.ok(h.db.sessionStopIntent(review.data.reviewerSessionId));
+    h.db.updateSessionStatus(review.data.reviewerSessionId, "stopped", Date.now());
+    assert.equal(busy().status, 409, "a provisional stop is not proof that the provider retired");
+    h.db.settleSessionStopIntent(review.data.reviewerSessionId, Date.now(), "runner_terminal");
+    const replacement = prepareImageReview(h, child.id, second.occurrenceId);
+    assert.ok(replacement.ok, replacement.error);
+  } finally { h.db.close(); }
+});
+
+test("#4245 an image reviewer leaves a fair share of finite parent budget for implementation", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    h.db.updateSessionCostBudget(h.parent.id, 8, Date.now());
+    const decision = h.request(child.id, "ui", [h.screenshot(child.id, "shot").item]).data!;
+    const review = prepareImageReview(h, child.id, decision.occurrenceId);
+    assert.ok(review.ok && review.data, review.error);
+    const reviewer = h.db.getSession(review.data.reviewerSessionId)!;
+    assert.ok(reviewer.costBudgetUsd! > 0 && reviewer.costBudgetUsd! < 8);
+    assert.ok(h.createChild("Implementation Still Has Budget"));
+  } finally { h.db.close(); }
+});
+
 /** #4074: hand a decision to a delegated image reviewer, approving the spawn the harness gates on. */
 function prepareImageReview(h: ReturnType<typeof uiEvidenceReviewHarness>, childId: string, occurrenceId: string,
   brief = "The settings panel shows the new Review Model field under Reviews.") {
+  // Fake runner lifecycle: finished/invalidated reviews have returned from their provider turn.
+  for (const review of h.db.delegatedImageReviews.activeForRoot(h.parent.id)) {
+    if (review.state !== "running") {
+      h.db.updateSessionStatus(review.reviewerSessionId, "stopped", Date.now());
+      h.db.confirmSessionStop(review.reviewerSessionId, "runner_terminal", Date.now());
+    }
+  }
   let prepared = h.svc.prepareDescendantImageEvidenceReview(h.parent.id, childId, occurrenceId, brief, () => true);
   if (prepared.status === 428) {
     assert.ok(h.svc.approve(h.parent.id, h.db.getSession(h.parent.id)!.pendingApproval!.requestId, "allow").ok);
@@ -29472,12 +29647,12 @@ test("releaseQueueHold is refused for a runner older than v247 without contactin
 });
 
 test("issue closure requires an exact human decision and executes one durable action", async () => {
-  const successes = new Set(["success", "human_approve", "recovered", "unchanged_child", "multi_pending"]);
+  const successes = new Set(["success", "human_approve", "recovered", "unchanged_child", "multi_pending", "approved_rerequest", "pending_rerequest"]);
   const uncertain = new Set(["uncertain", "invalid_result"]);
   const refused = new Set(["runner_refused", "not_sent"]);
   for (const mode of ["success", "human_approve", "recovered", "unchanged_child", "multi_pending", "already_closed",
     "runner_refused", "not_sent", "deny", "expired", "changed_payload", "changed_policy", "new_child",
-    "changed_assignment", "history_reassignment", "superseded", "stopped", "uncertain", "invalid_result"]) {
+    "changed_assignment", "history_reassignment", "approved_rerequest", "pending_rerequest", "stopped", "uncertain", "invalid_result"]) {
     const { db, hub, svc } = makeHarness();
     try {
       const meta = runnerMeta();
@@ -29535,7 +29710,13 @@ test("issue closure requires an exact human decision and executes one durable ac
         continue;
       }
       assert.ok(requested.ok && requested.data?.decision, requested.error);
-      const decision = requested.data.decision;
+      let decision = requested.data.decision;
+      if (mode === "pending_rerequest") {
+        const next = await svc.requestGithubIssueClosure(id, { ...proposal, requestId: "closure-pending-2" });
+        assert.ok(next.ok && next.data?.decision, next.error);
+        assert.equal(svc.workflowDecision(id, decision.occurrenceId).data?.status, "superseded");
+        decision = next.data.decision;
+      }
       assert.equal(decision.controllingSessionId, id);
       assert.equal(decision.authority, "human");
       assert.equal(db.getSession(id)?.pendingApproval?.title, "Issue Closure Approval Required");
@@ -29566,7 +29747,17 @@ test("issue closure requires an exact human decision and executes one durable ac
       if (mode === "changed_assignment" || mode === "history_reassignment") db.stageSessionPromptCommand({ commandId: "changed-assignment",
         sessionId: "closure-assigned-child", runnerId: RUNNER_ID, payloadJson: JSON.stringify({ text: "Keep working on issue 123." }),
         payloadSha256: "c".repeat(64), expiresAt: Date.now() + 60_000, now: Date.now() });
-      if (mode === "superseded") assert.ok((await svc.requestGithubIssueClosure(id, { ...proposal, requestId: "closure-2", comment: "Changed comment." })).ok);
+      if (mode === "approved_rerequest") {
+        const approval = svc.workflowDecision(id, decision.occurrenceId).data!;
+        assert.deepEqual(approval.approval, { actor: { kind: "human", id: "reviewer" }, at: approval.resolvedAt });
+        const next = await svc.requestGithubIssueClosure(id, { ...proposal, requestId: "closure-2", comment: "Changed comment." });
+        assert.equal(next.status, 409);
+        assert.deepEqual(next.errorDetails, { code: "issue_closure_approval_open", occurrenceId: decision.occurrenceId,
+          resourceDigest: decision.resourceDigest });
+        assert.match(next.error!, /Execute close_github_issue/u);
+        assert.equal(db.workflowDecisionByRequestId(id, "closure-2"), null);
+        assert.deepEqual(svc.workflowDecision(id, decision.occurrenceId).data, approval);
+      }
       if (mode === "stopped") svc.stop(id);
       const digest = mode === "changed_payload" ? "b".repeat(64) : decision.resourceDigest;
       const result = await svc.executeGithubIssueClosure(id, decision.occurrenceId, digest);
@@ -29587,6 +29778,13 @@ test("issue closure requires an exact human decision and executes one durable ac
       } else {
         assert.equal(result.ok, false, `${mode}: no execution`);
         assert.equal(executions, 0);
+        if (mode === "new_child" || mode === "expired") {
+          assert.equal(svc.workflowDecision(id, decision.occurrenceId).data?.status, "revoked");
+          const next = await svc.requestGithubIssueClosure(id, { ...proposal, requestId: "renewed-closure" });
+          assert.ok(next.ok && next.data?.decision, next.error);
+          assert.notEqual(next.data.decision.occurrenceId, decision.occurrenceId);
+          assert.equal(next.data.decision.status, "pending", "renewal never inherits the old approval");
+        }
       }
     } finally { db.close(); }
   }

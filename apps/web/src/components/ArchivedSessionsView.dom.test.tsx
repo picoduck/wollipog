@@ -976,6 +976,19 @@ test("Stop Session names the session by its one-line title and mentions queued m
   }
 });
 
+test("Stop Session for an unarchived session names Sessions as its destination (#3006)", async () => {
+  writeArchiveBrowse({ filters: { query: "", project: "", location: "", agent: "", lifecycle: "all", archive: "all" },
+    page: 1, cursors: [null], scrollTop: 0, rowId: null });
+  const fixture = await mount([session(7, { title: "Active Work", status: "running", archived: false })], {}, { restoreBrowse: true });
+  try {
+    const body = await confirmationBody(fixture.container, "Stop Session…");
+    assert.equal(body, "“Active Work” stops now. It stays in Sessions with its transcript, and you can send it a new prompt later.");
+    assert.doesNotMatch(body, /Archived Sessions/);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
 test("Stop Session counts only queued messages still waiting, not settled delivery receipts (#2278)", async () => {
   const fixture = await mount([session(8, {
     title: "Settled Receipts",

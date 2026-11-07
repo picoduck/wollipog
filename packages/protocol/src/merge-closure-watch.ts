@@ -1,5 +1,5 @@
 /**
- * Merge closure watch (#4323, protocol v328). A `pr_merge` decision is checked against what the
+ * Merge closure watch (#4323, protocol v330). A `pr_merge` decision is checked against what the
  * forge would close when it is requested, when it is armed and before Wollipog's own enqueue
  * (#3713 for GitHub, #3762 for GitLab). The forge closes issues when the merge lands, from the
  * description it has then, which in a merge queue or merge train is often much later. So after the
@@ -14,7 +14,7 @@
  *   campaign's owner, with the pull request and the text that closed it.
  *
  * Read and dequeue are one message with an `operation`, answered through the child session's own
- * forge login from a neutral directory, as forge actions are. A runner below v328 is never sent
+ * forge login from a neutral directory, as forge actions are. A runner below v330 is never sent
  * one, and its merges keep the checks they had before.
  */
 import type { PullRequestClosingReferenceCheck, PullRequestClosure } from "./index.js";
@@ -72,7 +72,7 @@ export interface MergeClosureWatchResultMessage {
  * - `landed_unapproved`: it merged closing an issue the decision did not approve; reported.
  * - `unverified`: what it closed could not be read before the watch gave up; reported.
  * - `ended`: closed without merging, moved to another head, or superseded by a newer decision.
- * - `not_watched`: the child's runner predates v328, or the merge predates this watch.
+ * - `not_watched`: the child's runner predates v330, or the merge predates this watch.
  */
 export type MergeClosureWatchState =
   | "watching" | "invalidated" | "verified" | "landed_unapproved" | "unverified" | "ended" | "not_watched";
