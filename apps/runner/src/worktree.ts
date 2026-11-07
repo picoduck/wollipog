@@ -4,7 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { worktreeDirtyPaths } from "@wollipog/protocol";
 import { homedir } from "node:os";
 import { performance } from "node:perf_hooks";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, posix, resolve, sep, win32 } from "node:path";
 import { mkdir, rm, rmdir, statfs } from "node:fs/promises";
 import {
   closeSync,
@@ -907,18 +907,93 @@ export async function createRequestedWorktree(
   return { path, branch, baseRef, baseCommit, attached: false, created: true };
 }
 
-/** Create a session-owned worktree on an EXISTING branch, so work that already exists (a pushed
- * pull request's head branch, or a local branch) continues without being recreated (#4138). The
- * branch is checked out as it is, never reset or rebased. A branch checked out in any other
- * worktree is refused rather than moved, so changes there stay where they are. A branch only the
- * remote has is fetched and tracked under the same name. */
+/** Who on this runner still has a claim on a worktree path (#4138): a session that records it as
+ * its own (now or in an earlier Location), or a pending cleanup that will remove it. A runner fact,
+ * read from its own session store and cleanup journal; never what an agent says. */
+export interface WorktreeHolder {
+  sessionId: string;
+  /** The holder is the session asking to recover the branch, from one of its earlier Locations. */
+  self?: boolean;
+  /** The holder's provider is running or about to, so the worktree is in use right now. */
+  live?: boolean;
+  /** A recorded cleanup is going to remove the worktree. */
+  removalPending?: boolean;
+}
+
+/** Where a recovered branch continues (#4138):
+ * - `slot`: this session's own recovery worktree already has it;
+ * - `new`: no worktree has it, so the runner checks it out in a new one;
+ * - `reuse`: a linked worktree nothing on this runner holds already has it, and the session
+ *   continues there in place, so its files, uncommitted changes included, stay exactly as they are;
+ * - `refuse`: it is checked out somewhere the session may not take over, with what to do instead. */
+export type RecoveredBranchPlacement =
+  | { kind: "slot"; entry: ListedWorktree }
+  | { kind: "new" }
+  | { kind: "reuse"; entry: ListedWorktree }
+  | { kind: "refuse"; reason: string };
+
+/** Decide where a recovered branch continues from the repository's own worktree list. Paths are
+ * compared in the session's execution context, so a Direct WSL distro path is matched as the POSIX
+ * path it is and a Windows path case-insensitively, exactly as every other worktree identity check. */
+export function recoveredBranchPlacement(
+  context: AgentContext,
+  listed: readonly ListedWorktree[],
+  branch: string,
+  slotPath: string,
+  holderOf: (path: string) => WorktreeHolder | undefined,
+): RecoveredBranchPlacement {
+  const slot = listed.find((entry) => sameWorktreePath(context, entry.path, slotPath));
+  if (slot) {
+    return slot.branch === branch && slot.head
+      ? { kind: "slot", entry: slot }
+      : { kind: "refuse", reason: "the recovery worktree slot is already registered with different Git coordinates" };
+  }
+  const elsewhere = listed.find((entry) => entry.branch === branch);
+  if (!elsewhere) return { kind: "new" };
+  const where = `branch ${branch} is checked out in`;
+  if (elsewhere.primary) {
+    // A session never works in a Location's own checkout; that would hand it the Location itself.
+    return { kind: "refuse", reason: `${where} the Location's primary checkout (${elsewhere.path}); a session never works ` +
+      "there, so switch that checkout to another branch, then ask again" };
+  }
+  const holder = holderOf(elsewhere.path);
+  if (holder) {
+    const keep = "continue the task in that session instead, so the work and its pull request stay with it";
+    return { kind: "refuse", reason: holder.removalPending
+      ? `${where} worktree ${elsewhere.path}, which the runner is removing for session ${holder.sessionId}; ask again once that finishes`
+      : holder.self
+      ? `${where} worktree ${elsewhere.path}, which this session still owns from an earlier Location; switch that worktree ` +
+        "to another branch, then ask again"
+      : holder.live
+      ? `${where} worktree ${elsewhere.path}, which session ${holder.sessionId} is using; ${keep}`
+      : `${where} worktree ${elsewhere.path}, which session ${holder.sessionId} still owns although it is not running; ${keep}` };
+  }
+  if (elsewhere.locked) {
+    return { kind: "refuse", reason: `${where} worktree ${elsewhere.path}, which is locked; unlock it (git worktree unlock) ` +
+      "once nothing uses it, then ask again" };
+  }
+  return { kind: "reuse", entry: elsewhere };
+}
+
+/** A recovered branch's worktree. `reusedInPlace` marks one that already existed and is continued as
+ * it was, with the number of uncommitted changes it held (unknown when Git could not say). */
+export type RecoveredBranchWorktree = SessionWorktreeHandle & { reusedInPlace?: { uncommittedChanges?: number } };
+
+/** Find or create the worktree a recovered, EXISTING branch continues in, so work that already
+ * exists (a pushed pull request's head branch, or a local branch) continues without being recreated
+ * (#4138). The branch is checked out as it is, never reset or rebased. When a linked worktree that
+ * nothing on this runner holds already has it checked out, that worktree is reused in place:
+ * nothing in it is moved, stashed, reset or deleted. It is reused only after the same proof a
+ * session's own attach needs (registered by this repository, not its primary checkout, on a branch,
+ * healthy, and sharing this repository's Git directory). A branch only the remote has is fetched and
+ * tracked under the same name. */
 export async function createRecoveredBranchWorktree(
   repoPath: string,
   sessionId: string,
   branchName: string,
-  options: RequestedWorktreeOptions = {},
+  options: RequestedWorktreeOptions & { holderOf: (path: string) => WorktreeHolder | undefined },
   remote = "origin",
-): Promise<SessionWorktreeHandle> {
+): Promise<RecoveredBranchWorktree> {
   const context = options.context ?? nativeContext;
   const branch = await validateBranch(context, repoPath, branchName);
   safeGitArgument(remote, "Git remote");
@@ -927,18 +1002,12 @@ export async function createRecoveredBranchWorktree(
     ? `${boundary}/${requestedSlot(branch)}`
     : join(boundary, requestedSlot(branch));
   const listed = parseWorktreePorcelain(await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]));
-  const matching = listed.find((entry) => sameWorktreePath(context, entry.path, path));
-  if (matching) {
-    if (matching.branch === branch && matching.head) {
-      return { path: matching.path, branch, baseRef: branch, baseCommit: matching.head, attached: false, created: false };
-    }
-    throw new Error("the recovery worktree slot is already registered with different Git coordinates");
+  const placement = recoveredBranchPlacement(context, listed, branch, path, options.holderOf);
+  if (placement.kind === "refuse") throw new Error(placement.reason);
+  if (placement.kind === "slot") {
+    return { path: placement.entry.path, branch, baseRef: branch, baseCommit: placement.entry.head!, attached: false, created: false };
   }
-  const elsewhere = listed.find((entry) => entry.branch === branch);
-  if (elsewhere) {
-    throw new Error(`branch ${branch} is checked out in another worktree (${elsewhere.path}); ` +
-      "commit or move that work, switch that worktree to another branch, then ask again");
-  }
+  if (placement.kind === "reuse") return reuseRecoveredBranchWorktree(repoPath, placement.entry.path, branch, options);
   const branchRef = `refs/heads/${branch}`;
   const local = (await command(context, repoPath, ["for-each-ref", "--format=%(refname)", branchRef])).trim() === branchRef;
   await removeExternalDirectory(context, repoPath, path, options);
@@ -954,6 +1023,86 @@ export async function createRecoveredBranchWorktree(
   const head = (await command(context, path, ["rev-parse", "HEAD"])).trim();
   if (!/^[a-f0-9]{40,64}$/u.test(head)) throw new Error("the recovered branch did not resolve to a commit");
   return { path, branch, baseRef: branch, baseCommit: head, attached: false, created: true };
+}
+
+/** One spelling of a native absolute path, without touching the filesystem: Git for Windows lists
+ * worktrees as `C:/repos/docs` where the real path reads `C:\repos\docs`, and Windows paths compare
+ * case-insensitively. Exported for tests, which pass the platform. */
+export function nativePathSpelling(value: string, platform: NodeJS.Platform = process.platform): string {
+  return platform === "win32" ? win32.resolve(value).replace(/\\/gu, "/").toLowerCase() : posix.resolve(value);
+}
+
+/** Prove an existing worktree that has the recovered branch checked out, and hand it back as it is.
+ * Read-only: Git is asked only questions, and the status read takes no optional lock, so not even
+ * the worktree's index is rewritten. */
+async function reuseRecoveredBranchWorktree(
+  repoPath: string,
+  path: string,
+  branch: string,
+  options: WorktreeOptions,
+): Promise<RecoveredBranchWorktree> {
+  const context = options.context ?? nativeContext;
+  const unverified = (reason: string) => new Error(`branch ${branch} is checked out in worktree ${path}, which could not be ` +
+    `verified as this Location's repository: ${reason}`);
+  // The path that was checked is the path that is used. A registered path reached through a symbolic
+  // link could otherwise pass every check below in one directory and hand the session another (the
+  // primary checkout, or a worktree someone else holds under its real name).
+  if (context.kind === "native") {
+    let real: string | null;
+    try {
+      real = lstatSync(path).isSymbolicLink() ? null : realpathSync.native(path);
+    } catch (error) {
+      throw unverified((error as Error).message);
+    }
+    if (real === null || nativePathSpelling(real) !== nativePathSpelling(path)) {
+      throw unverified("its registered path is not its real path");
+    }
+  }
+  let verified: SessionWorktreeHandle;
+  try {
+    verified = await registeredSessionWorktree(repoPath, path, options);
+  } catch (error) {
+    throw unverified((error as Error).message);
+  }
+  if (verified.branch !== branch) {
+    throw new Error(`worktree ${path} moved off branch ${branch} while it was being verified; ask again`);
+  }
+  // Registration describes the repository's record of the worktree; the directory itself must agree.
+  // Its `.git` link could name another worktree's admin directory of the same repository, which
+  // shares the Git directory checked above but has a different branch and index.
+  const [toplevel, gitDir, head] = (await command(context, path,
+    ["rev-parse", "--path-format=absolute", "--show-toplevel", "--absolute-git-dir", "--symbolic-full-name", "HEAD"]))
+    .trim().split("\n");
+  if (!toplevel || !sameWorktreePath(context, toplevel, path) || head !== `refs/heads/${branch}`) {
+    throw unverified("the directory does not have that branch checked out as its own worktree");
+  }
+  if (context.kind === "native") {
+    let backPointer = "";
+    try {
+      backPointer = readFileSync(join(gitDir!, "gitdir"), "utf8").replace(/\r?\n$/u, "");
+    } catch { /* a missing back-pointer is refused below */ }
+    if (!backPointer || !sameWorktreePath(context, resolve(gitDir!, backPointer), join(path, ".git"))) {
+      throw unverified("its Git admin directory belongs to another worktree");
+    }
+  }
+  let uncommittedChanges: number | undefined;
+  try {
+    const porcelain = await command(context, verified.path,
+      ["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+    const records = porcelain.split("\0");
+    uncommittedChanges = 0;
+    for (let i = 0; i < records.length; i++) {
+      if (!records[i]) continue;
+      uncommittedChanges++;
+      // Porcelain -z rename/copy entries have a second, NUL-separated source path.
+      if (/[RC]/u.test(records[i]!.slice(0, 2))) i++;
+    }
+  } catch {
+    // Only reported to the person; an unreadable status leaves the count unknown, never zero.
+    uncommittedChanges = undefined;
+  }
+  return { ...verified, baseRef: branch, attached: true, created: false,
+    reusedInPlace: uncommittedChanges === undefined ? {} : { uncommittedChanges } };
 }
 
 /** Resolve and fetch the remote's advertised default branch. No primary-checkout HEAD or current
@@ -1052,13 +1201,15 @@ export async function readRepositoryDefaultBranch(
   return branch;
 }
 
-interface ListedWorktree {
+export interface ListedWorktree {
   path: string;
   head: string | null;
   branch: string | null;
   /** Git documents the main worktree as the first porcelain record, including for bare repos. */
   primary: boolean;
   bare: boolean;
+  /** `git worktree lock` marked it: someone asked Git to leave it alone. */
+  locked?: boolean;
 }
 
 export function parseWorktreePorcelain(value: string): ListedWorktree[] {
@@ -1069,12 +1220,14 @@ export function parseWorktreePorcelain(value: string): ListedWorktree[] {
     const branchRef = fields.find((field) => field.startsWith("branch "))?.slice(7);
     if (!path) return [];
     const bare = fields.includes("bare");
+    const locked = fields.some((field) => field === "locked" || field.startsWith("locked "));
     return [{
       path,
       head,
       branch: branchRef?.startsWith("refs/heads/") ? branchRef.slice(11) : null,
       primary: index === 0 || bare,
       bare,
+      ...(locked ? { locked } : {}),
     }];
   });
 }

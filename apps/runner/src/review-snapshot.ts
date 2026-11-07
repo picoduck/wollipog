@@ -145,8 +145,11 @@ export async function bindPullRequestScope(input: {
     refuseReview("the pull request is not this session's open, same-repository pull request");
   }
   const worktree = meta?.worktreePath ? meta.worktrees?.find((candidate) => candidate.path === meta.worktreePath) : undefined;
+  // A worktree a Location switch reused in place (#4138) is the session's own through the same
+  // verified-Location identity as a created one; it is proven registered again below.
+  const reused = worktree?.source === "attached" && worktree.reusedInPlace === true;
   if (!meta || !meta.worktreePath ||
-      (worktree && worktree.source !== "created" && worktree.source !== "legacy") || meta.context?.kind !== "native" ||
+      (worktree && worktree.source !== "created" && worktree.source !== "legacy" && !reused) || meta.context?.kind !== "native" ||
       (meta.executionTarget?.adapter && meta.executionTarget.adapter !== "host")) {
     refuseReview("the review must cover the session's own native managed worktree");
   }
@@ -203,7 +206,7 @@ export async function bindPullRequestScope(input: {
   if (!lstatSync(commonDir, { throwIfNoEntry: false })?.isDirectory() || existsSync(join(commonDir, "commondir"))) {
     refuseReview("the review snapshot could not be prepared");
   }
-  if (automatic) {
+  if (automatic || reused) {
     // Read the primary checkout's registration/HEAD records. The worktree's own pointer is only
     // compared with that trusted repository, never used to choose the snapshot's source.
     // A durable launch proof cannot authorize a removed/replaced tree or a later branch switch.
@@ -220,6 +223,7 @@ export async function bindPullRequestScope(input: {
           actual[1] === `refs/heads/${worktree!.branch}`;
       }
     } catch { /* an unreadable registration fails closed */ }
+    // One fixed refusal for both: the protocol's review refusals are a closed list.
     if (!registered) refuseReview("the automatic worktree is no longer registered on this session's expected branch; restore it before requesting a review");
   }
   // Only a fallback: the head and, for GitLab, the merge base normally come from the session's own

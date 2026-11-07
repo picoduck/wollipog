@@ -1508,7 +1508,8 @@ export const TOOLS: McpTool[] = [
       trigger: { type: "string", enum: ["early", "worktree_attach", "review"] },
       recoverBranch: { type: "string", minLength: 1, maxLength: 255, description: "An existing branch of the target repository that " +
         "already holds this task's work, such as an open pull request's head branch. Switch and Continue continues on it, " +
-        "never resetting it, instead of starting a new branch." },
+        "never resetting it, instead of starting a new branch. A worktree that already has it checked out and that no " +
+        "session holds is continued in place, uncommitted changes included." },
     }, required: ["requestId", "repository", "reason", "handoff"], additionalProperties: false },
     handler: async (args, deps) => locationSwitchCall(deps, "POST", "", args),
   },

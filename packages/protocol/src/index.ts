@@ -8606,6 +8606,12 @@ export interface SessionWorktreeView {
   /** (#4138) The runner created this worktree on a branch that existed before it, such as one a
    * Location switch recovered. Removing the worktree never deletes or force-removes that branch. */
   branchPreexisted?: boolean;
+  /** (#4138) An `attached` worktree that a Location switch found already holding the approved
+   * branch, verified as the target Location's repository and held by nothing else on the runner,
+   * and continued in place. Only the runner sets it. Like any attached worktree it is never set up,
+   * torn down or removed with the session; unlike one, it keeps the managed sandbox and is the
+   * session's own worktree for hosted review. */
+  reusedInPlace?: boolean;
   /** Protocol v141: repository-owned setup lifecycle. Environment values and copied contents are
    * deliberately runner-private; only names, timing, and bounded outcomes cross the wire. */
   setup?: WorktreeSetupState;
