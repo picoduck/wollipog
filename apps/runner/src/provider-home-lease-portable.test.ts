@@ -14,11 +14,15 @@ const commonBoundaries = ["before-guard", "guard-temp-written", "guard-file-dura
   "before-candidate", "candidate-written", "candidate-file-durable", "candidate-durable", "before-selection",
   "selection-published", "selection-durable", "before-retire", "after-retire", "retirement-durable"];
 
-function holdFence(guard: string, marker: string, exclusive: boolean, seconds: number): ChildProcess {
-  if (process.platform !== "win32") return spawn("python3", ["-c", `import fcntl,time;f=open(${JSON.stringify(guard)},'rb');fcntl.flock(f,fcntl.${exclusive ? "LOCK_EX" : "LOCK_SH"});open(${JSON.stringify(marker)},'w').write('ready');time.sleep(${seconds})`], { stdio: ["ignore", "pipe", "pipe"] });
+function holdFence(guard: string, marker: string, exclusive: boolean, hold: number | { releaseMarker: string }): ChildProcess {
+  const pythonWait = typeof hold === "number" ? `time.sleep(${hold})`
+    : `\nwhile not os.path.exists(${JSON.stringify(hold.releaseMarker)}): time.sleep(0.01)`;
+  if (process.platform !== "win32") return spawn("python3", ["-c", `import fcntl,os,time;f=open(${JSON.stringify(guard)},'rb');fcntl.flock(f,fcntl.${exclusive ? "LOCK_EX" : "LOCK_SH"});open(${JSON.stringify(marker)},'w').write('ready');${pythonWait}`], { stdio: ["ignore", "pipe", "pipe"] });
   const quote = (value: string) => `'${value.replace(/'/gu, "''")}'`;
+  const powershellWait = typeof hold === "number" ? `Start-Sleep -Milliseconds ${hold * 1000}`
+    : `while(-not [IO.File]::Exists(${quote(hold.releaseMarker)})){Start-Sleep -Milliseconds 10}`;
   const types = `using System;using System.Runtime.InteropServices;public class FenceTest{[StructLayout(LayoutKind.Sequential)]public struct O{public IntPtr I,H;public uint Offset,High;public IntPtr Event;}[DllImport("kernel32.dll",SetLastError=true)]public static extern bool LockFileEx(IntPtr f,uint flags,uint reserved,uint low,uint high,ref O o);}`;
-  return spawn("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `Add-Type -TypeDefinition ${quote(types)};$f=[IO.File]::Open(${quote(guard)},[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete));$o=New-Object FenceTest+O;$o.Offset=[uint32]::MaxValue;if(-not [FenceTest]::LockFileEx($f.SafeFileHandle.DangerousGetHandle(),${exclusive ? 3 : 1},0,1,0,[ref]$o)){throw 'test fence unavailable'};[IO.File]::WriteAllText(${quote(marker)},'ready');Start-Sleep -Milliseconds ${seconds * 1000};$f.Dispose()`], { stdio: ["ignore", "pipe", "pipe"] });
+  return spawn("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `Add-Type -TypeDefinition ${quote(types)};$f=[IO.File]::Open(${quote(guard)},[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete));$o=New-Object FenceTest+O;$o.Offset=[uint32]::MaxValue;if(-not [FenceTest]::LockFileEx($f.SafeFileHandle.DangerousGetHandle(),${exclusive ? 3 : 1},0,1,0,[ref]$o)){throw 'test fence unavailable'};[IO.File]::WriteAllText(${quote(marker)},'ready');${powershellWait};$f.Dispose()`], { stdio: ["ignore", "pipe", "pipe"] });
 }
 
 async function fenceReady(child: ChildProcess, marker: string): Promise<void> {
@@ -111,16 +115,29 @@ test("releaseAll preserves failed tokens and unchanged evidence until the finite
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const root = seed(home), registry = new ProviderHomeLeaseRegistry(owner);
   registry.acquireHome(home);
-  const before = leaseEvidence(root), marker = join(home, "reader-ready");
-  const reader = holdFence(join(root, "mutable-home.lock", "protocol-v4.json"), marker, false, 13);
+  const before = leaseEvidence(root), marker = join(home, "reader-ready"), releaseMarker = join(home, "reader-release");
+  // Keep the reader alive until the assertions finish, even if a busy worker pauses the test.
+  const reader = holdFence(join(root, "mutable-home.lock", "protocol-v4.json"), marker, false, { releaseMarker });
+  const ended = new Promise<void>(resolve => reader.once("close", () => resolve()));
   t.after(() => { if (reader.exitCode === null && reader.signalCode === null) reader.kill("SIGKILL"); });
-  await fenceReady(reader, marker); const ended = new Promise<void>(resolve => reader.once("close", () => resolve()));
-  const started = performance.now(); registry.releaseAll();
-  const elapsed = performance.now() - started;
-  assert.ok(elapsed >= 9_900 && elapsed < 30_000, `finite release grace: ${elapsed}`);
-  assert.deepEqual(leaseEvidence(root), before);
-  assert.equal(registry.getDiagnostics().filter(message => message.includes("release unpublished")).length, 1);
-  await ended; registry.releaseAll();
+  try {
+    await fenceReady(reader, marker);
+    const started = performance.now();
+    assert.equal(registry.releaseAll(), false, "reader prevents release publication");
+    const elapsed = performance.now() - started;
+    assert.ok(elapsed >= 9_900 && elapsed < 30_000, `finite release grace: ${elapsed}`);
+    assert.deepEqual(leaseEvidence(root), before);
+    assert.equal(registry.getDiagnostics().filter(message => message.includes("release unpublished")).length, 1);
+  } catch (error) {
+    // A failed readiness check may leave the child stuck before it can read the signal.
+    reader.kill("SIGKILL");
+    throw error;
+  } finally {
+    writeFileSync(releaseMarker, "release");
+    await ended;
+  }
+  assert.equal(reader.exitCode, 0, "reader exits cleanly after the release signal");
+  assert.equal(registry.releaseAll(), true, "retained token releases after the reader exits");
   const next = new ProviderHomeLeaseRegistry("b".repeat(64));
   assert.equal(next.acquireHome(home), true); assert.equal(next.releaseHome(home), true);
 });
