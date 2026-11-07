@@ -407,6 +407,52 @@ test("a durable steered user message resolves a lost accepted receipt", () => {
   assert.equal(db.resolveSteeringAttemptFromUserMessage("sess-1", "unknown", "turn-1", 5), false);
 });
 
+test("durable steering evidence strengthens runner uncertainty but never rejection or recovery decisions", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  for (const disposition of ["uncertain", "rejected"] as const) {
+    db.createSteeringAttempt({ requestId: disposition, sessionId: "sess-1", submissionId: disposition,
+      turnId: "turn-1", source: "direct", requestSha256: "d".repeat(64), text: "continue", now: 1 });
+    db.recordSteeringResult("runner-1", { type: "steer_session_result", requestId: disposition,
+      sessionId: "sess-1", submissionId: disposition, turnId: "turn-1", disposition,
+      reason: disposition === "uncertain" ? "transport_uncertain" : "provider_rejected" }, 2);
+    assert.equal(db.resolveSteeringAttemptFromUserMessage("sess-1", disposition, "wrong-turn", 3), false);
+    assert.equal(db.resolveSteeringAttemptFromUserMessage("sess-1", disposition, "turn-1", 4), disposition === "uncertain");
+    assert.equal(db.getSteeringAttemptByRequestId(disposition)?.state, disposition === "uncertain" ? "accepted" : "rejected");
+  }
+  db.createSteeringAttempt({ requestId: "recovered", sessionId: "sess-1", submissionId: "recovered",
+    turnId: "turn-1", source: "direct", requestSha256: "e".repeat(64), text: "continue", now: 1 });
+  db.markSteeringAttemptUncertain("recovered", 2);
+  db.resolveUncertainSteeringAttempt("sess-1", "recovered", 3);
+  assert.equal(db.resolveSteeringAttemptFromUserMessage("sess-1", "recovered", "turn-1", 4), false);
+  db.close();
+});
+
+test("a refused Queue Again reconciles exact durable acceptance that raced its staged request", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  for (const evidenceTurn of ["wrong-turn", "turn-1"]) {
+    db.createSteeringAttempt({ requestId: evidenceTurn, sessionId: "sess-1", submissionId: evidenceTurn,
+      turnId: "turn-1", source: "direct", requestSha256: "f".repeat(64), text: "continue", now: 1 });
+    db.recordSteeringResult("runner-1", { type: "steer_session_result", requestId: evidenceTurn,
+      sessionId: "sess-1", submissionId: evidenceTurn, turnId: "turn-1", disposition: "uncertain",
+      reason: "transport_uncertain" }, 2);
+    const resolutionId = `resolve-${evidenceTurn}`;
+    assert.equal(db.stageSteeringResolution("sess-1", evidenceTurn, "queue_again", resolutionId, 3).kind, "staged");
+    db.appendEvent("sess-1", { kind: "user_message", text: "continue", turnId: evidenceTurn,
+      submissionId: evidenceTurn, deliveryIntent: "steer" }, 4);
+    assert.equal(db.resolveSteeringAttemptFromUserMessage("sess-1", evidenceTurn, evidenceTurn, 4), false);
+    db.recordSteeringResolutionResult("runner-1", { type: "resolve_steering_attempt_result",
+      requestId: resolutionId, sessionId: "sess-1", submissionId: evidenceTurn, action: "queue_again",
+      applied: false, reason: "attempt_not_uncertain" }, 5);
+    assert.equal(db.clearRejectedSteeringResolution(resolutionId), true);
+    assert.equal(db.getSteeringAttemptByRequestId(evidenceTurn)?.state,
+      evidenceTurn === "turn-1" ? "accepted" : "uncertain");
+    assert.equal(db.getSteeringAttemptByRequestId(evidenceTurn)?.resolution, undefined);
+  }
+  db.close();
+});
+
 /** The synchronous level in force at each COMMIT the database issues: 1 is NORMAL, 2 is FULL. */
 function recordCommitSynchronousLevels(db: ControlPlaneDb): number[] {
   const raw = db.raw();
