@@ -13410,7 +13410,9 @@ export class ControlPlaneDb {
       LEFT JOIN session_role_conversions conversion ON conversion.session_id=session.id
       LEFT JOIN (SELECT parent_session_id, COUNT(*) AS occupied FROM sessions
         WHERE parent_session_id IS NOT NULL AND archived=0
-         AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=sessions.id) AND status NOT IN ('completed','failed','stopped')
+         AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=sessions.id)
+         AND NOT EXISTS (SELECT 1 FROM delegated_image_reviews WHERE reviewer_session_id=sessions.id)
+         AND status NOT IN ('completed','failed','stopped')
         GROUP BY parent_session_id) children ON children.parent_session_id=session.id
       WHERE ${authorization.sql} ${includeArchived ? "" : "AND session.archived=0"}
       ORDER BY session.created_at DESC,session.id`;
@@ -17419,6 +17421,7 @@ export class ControlPlaneDb {
               (SELECT COUNT(*) FROM sessions child
                 WHERE child.parent_session_id=? AND child.archived=0
                   AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=child.id)
+                  AND NOT EXISTS (SELECT 1 FROM delegated_image_reviews WHERE reviewer_session_id=child.id)
                   AND child.status NOT IN ('completed','failed','stopped')) AS liveCount
        FROM sessions WHERE id=?`,
     ).get(parentSessionId, parentSessionId) as unknown as {
@@ -21564,7 +21567,8 @@ export class ControlPlaneDb {
         SELECT id FROM sessions WHERE parent_session_id=?
         UNION
         SELECT child.id FROM sessions child JOIN descendants parent ON child.parent_session_id=parent.id
-      ) SELECT id FROM descendants WHERE NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=descendants.id) ORDER BY id
+      ) SELECT id FROM descendants WHERE NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=descendants.id)
+        AND NOT EXISTS (SELECT 1 FROM delegated_image_reviews WHERE reviewer_session_id=descendants.id) ORDER BY id
     `).all(campaignSessionId) as unknown as Array<{ id: string }>).map((row) => row.id);
   }
 
@@ -27267,13 +27271,36 @@ export class ControlPlaneDb {
   }
 
   clearRejectedSteeringResolution(requestId: string): boolean {
-    const cleared = this.stmt(
-      `UPDATE session_steering_attempts SET resolution_action=NULL,resolution_request_id=NULL,
-       resolution_receipt_json=NULL,resolution_requested_at=NULL,updated_at=updated_at+1
-       WHERE resolution_request_id=? AND resolved_at IS NULL
-         AND json_extract(resolution_receipt_json,'$.applied')=0`,
-    ).run(requestId);
-    return Number(cleared.changes) > 0;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const cleared = this.stmt(
+        `UPDATE session_steering_attempts SET resolution_action=NULL,resolution_request_id=NULL,
+         resolution_receipt_json=NULL,resolution_requested_at=NULL,updated_at=updated_at+1
+         WHERE resolution_request_id=? AND resolved_at IS NULL
+           AND json_extract(resolution_receipt_json,'$.applied')=0
+         RETURNING session_id,submission_id,turn_id,updated_at`,
+      ).get(requestId) as { session_id: string; submission_id: string; turn_id: string; updated_at: number } | undefined;
+      // The runner may have accepted while this recovery request was in flight. Its durable
+      // event was fenced by the staged action; reconsider it only after a definite refusal.
+      // Applied recovery remains immutable, and unrelated history cannot prove this delivery.
+      if (cleared) {
+        const payload = "CASE WHEN json_valid(payload) THEN payload ELSE '{}' END";
+        const evidence = this.stmt(
+          `SELECT 1 FROM session_events WHERE session_id=? AND kind='user_message'
+           AND json_extract(${payload},'$.deliveryIntent')='steer'
+           AND json_extract(${payload},'$.submissionId')=?
+           AND json_extract(${payload},'$.turnId')=? LIMIT 1`,
+        ).get(cleared.session_id, cleared.submission_id, cleared.turn_id);
+        if (evidence) this.resolveSteeringAttemptFromUserMessage(
+          cleared.session_id, cleared.submission_id, cleared.turn_id, cleared.updated_at,
+        );
+      }
+      this.db.exec("COMMIT");
+      return Boolean(cleared);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   pendingSteeringResolutionMessages(
@@ -27520,7 +27547,7 @@ export class ControlPlaneDb {
     ).run(now, now).changes);
   }
 
-  /** A durable accepted user message is stronger evidence than a CP-local timeout. This also
+  /** A durable accepted user message is stronger evidence than a timeout receipt. This also
    * removes the recovery action if the correlated result was lost after history committed. */
   resolveSteeringAttemptFromUserMessage(
     sessionId: string,
@@ -27533,7 +27560,8 @@ export class ControlPlaneDb {
        terminal_at=?
        WHERE session_id=? AND submission_id=? AND turn_id=?
          AND compacted_at IS NULL
-         AND (disposition='pending' OR (disposition='uncertain' AND receipt_json IS NULL))`,
+         AND resolved_at IS NULL AND resolution_action IS NULL
+         AND disposition IN ('pending','uncertain')`,
     ).run(now, now, sessionId, submissionId, turnId);
     if (updated.changes) {
       const request = this.findSteeringAttemptBySubmission(sessionId, submissionId);
@@ -28730,6 +28758,7 @@ export class ControlPlaneDb {
        FROM sessions
        WHERE parent_session_id IS NOT NULL AND archived=0
          AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=sessions.id)
+         AND NOT EXISTS (SELECT 1 FROM delegated_image_reviews WHERE reviewer_session_id=sessions.id)
          AND status NOT IN ('completed','failed','stopped')
        GROUP BY parent_session_id`,
     ).all() as unknown as Array<{ parentSessionId: string; occupied: number }>).map((entry) =>
