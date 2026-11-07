@@ -4,6 +4,7 @@
  * rules live in exactly one place. The state is never stored.
  */
 import type {
+  CampaignMergeDependencyStatus,
   CampaignWorkItemCommitmentState,
   CampaignWorkItemDispatchState,
   CampaignWorkItemPrimaryState,
@@ -39,6 +40,9 @@ export interface CampaignWorkItemStateRecord {
   /** A recorded delivery (#4070) exists and no attempt was opened on the item after it. Omitted
    * means none. */
   recordedDelivery?: boolean;
+  /** #4120: the status of each merge dependency, a prerequisite in another repository. Omitted
+   * means none; dependencies within one repository are only in `dependsOn`. */
+  mergeDependencies?: readonly CampaignMergeDependencyStatus[];
 }
 
 export interface CampaignWorkItemDerivedState {
@@ -61,8 +65,12 @@ export function deriveCampaignWorkItemState(
   if (record.commitment === "scope_removed") return { state: "removed", causes: [] };
   const attempt = record.latestAttempt;
   if (attempt?.delivered || record.recordedDelivery) return { state: "delivered", causes: [] };
+  // #4120: a prerequisite in another repository that can no longer merge means this item's merge is
+  // never attempted, whether or not a child is working on it.
+  const mergeDependencyFailed = record.mergeDependencies?.includes("failed") ?? false;
   if (attempt?.open) {
     if (record.hasBlocker) return { state: "blocked", causes: ["recorded_blocker"] };
+    if (mergeDependencyFailed) return { state: "blocked", causes: ["dependency_blocked"] };
     const session = record.openAttemptSession;
     if (!session) return { state: "blocked", causes: ["attempt_session_unavailable"] };
     if (session.held) return { state: "blocked", causes: ["attempt_session_held"] };
@@ -76,12 +84,15 @@ export function deriveCampaignWorkItemState(
     }
     if (session.pendingRequests > 0) return { state: "waiting", causes: ["attempt_session_pending_decision"] };
     if (session.status === "idle" || session.status === "completed") {
-      return { state: "waiting", causes: ["attempt_awaiting_verification"] };
+      // Its merge is held on the prerequisite (#4120); a verification may still be owed, so it stays listed.
+      return record.mergeDependencies?.includes("unmerged")
+        ? { state: "waiting", causes: ["dependency_unmerged", "attempt_awaiting_verification"] }
+        : { state: "waiting", causes: ["attempt_awaiting_verification"] };
     }
     return { state: "running", causes: [] };
   }
   if (record.hasBlocker) return { state: "blocked", causes: ["recorded_blocker"] };
-  if (dependencyStates.some((state) => state === "unresolvable" || BLOCKING_DEPENDENCY.has(state))) {
+  if (mergeDependencyFailed || dependencyStates.some((state) => state === "unresolvable" || BLOCKING_DEPENDENCY.has(state))) {
     return { state: "blocked", causes: ["dependency_blocked"] };
   }
   const unfinishedDependency = dependencyStates.some((state) => !FINISHED.has(state as CampaignWorkItemPrimaryState));

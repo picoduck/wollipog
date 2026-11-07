@@ -74,6 +74,13 @@ import {
   type CampaignUsageAmount,
 } from "./campaign-work-accounting.js";
 import { campaignItemDurations, campaignItemTimelines } from "./campaign-work-times.js";
+import {
+  campaignItemRepository,
+  campaignMergeDependencyStatus,
+  campaignMergeDependencyView,
+  isCampaignMergeDependency,
+  type CampaignMergePrerequisite,
+} from "./campaign-merge-dependencies.js";
 
 /** Tables, in SCHEMA order. Child-session references are SET NULL so history survives a child's
  * deletion; the root campaign reference cascades, so deleting the root deletes its ledger. */
@@ -412,6 +419,15 @@ export interface CampaignWorkLedgerHooks {
    * only; the read routes narrow it for readers who may not see the observing runner. */
   forgePullRequests?(campaignId: string, refs: readonly CampaignPullRequestRef[], now: number):
     NonNullable<CampaignWorkItemDetail["observed"]["pullRequests"]>;
+  /** #4120: the campaign repository whose Location this session is placed in, lower-cased, or null.
+   * A server fact (#4119), never agent text. Reads rows only. */
+  sessionRepository?(campaignId: string, sessionId: string): string | null;
+  /** #4120: whether this session holds an approved `pr_merge` whose enqueue is armed and not yet
+   * consumed. Its provider may run that command without asking the control plane again, so a
+   * dependency added now could not hold it. */
+  armedMerge?(sessionId: string): boolean;
+  /** #4120: every session of this campaign that holds such an armed merge. */
+  armedMergeSessions?(campaignId: string): string[];
 }
 
 /** What `summary` derives from the ledger alone. Cached per campaign under the revision plus the
@@ -505,6 +521,11 @@ interface LedgerSnapshot {
   handoffs: Map<string, HandoffRow>;
   deliveries: Map<string, DeliveryRow[]>;
   derived: Map<string, CampaignWorkItemDerivedState>;
+  /** #4120: each item's repository, and its prerequisites in other repositories. */
+  repositories: Map<string, string | null>;
+  mergePrerequisites: Map<string, CampaignMergePrerequisite[]>;
+  /** An item's merge prerequisites as a dependent in `dependentRepository`. */
+  prerequisitesOf(itemId: string, dependentRepository: string | null): CampaignMergePrerequisite[];
   observations: Map<string, CampaignAttemptSessionObservation | null>;
   /** Usage attributed to each attempt (slice 6). */
   usage: Map<string, CampaignUsageAmount>;
@@ -550,6 +571,12 @@ function uniquePullRequests(refs: readonly CampaignPullRequestRef[]): CampaignPu
 /** The pull requests an item's reported stage names (slice 8 observes these). */
 function stagePullRequests(item: ItemRow): CampaignPullRequestRef[] {
   return uniquePullRequests(item.stage_pull_requests ? JSON.parse(item.stage_pull_requests) as CampaignPullRequestRef[] : []);
+}
+
+/** Every pull request an item names (#4120): its reported stage's, then its recorded deliveries'. */
+function namedPullRequests(item: ItemRow, deliveries: readonly DeliveryRow[] | undefined): CampaignPullRequestRef[] {
+  return uniquePullRequests([...stagePullRequests(item), ...(deliveries ?? []).flatMap((row) =>
+    (JSON.parse(row.pull_requests) as CampaignPullRequestRef[]).map((ref) => ({ repository: ref.repository, number: ref.number })))]);
 }
 
 function newId(prefix: string): string {
@@ -697,12 +724,49 @@ export class CampaignWorkLedgerStore {
     return statement;
   }
 
+  /** #4120: for each item whose open attempt's child holds an armed, unconsumed merge (optionally
+   * only these items), the ids of its merge prerequisites. One indexed read when nothing is armed. */
+  private armedMergePrerequisites(campaignId: string, sessions = this.hooks.armedMergeSessions?.(campaignId) ?? []):
+    Map<string, { itemId: string | null; prerequisites: Set<string> }> {
+    if (!sessions.length) return new Map();
+    const open = new Map((this.stmt(`SELECT work_item_id, session_id FROM campaign_work_attempts
+      WHERE campaign_session_id=? AND ended_at IS NULL AND session_id IS NOT NULL`).all(campaignId) as Array<{ work_item_id: string; session_id: string }>)
+      .map((row) => [row.session_id, row.work_item_id]));
+    const snapshot = this.snapshot(campaignId);
+    return new Map(sessions.map((sessionId) => {
+      const itemId = open.get(sessionId) ?? null;
+      return [sessionId, { itemId, prerequisites: new Set((itemId ? snapshot.mergePrerequisites.get(itemId) ?? [] : []).map((prerequisite) => prerequisite.id)) }];
+    }));
+  }
+
+  private itemKey(itemId: string): string {
+    return (this.stmt("SELECT item_key FROM campaign_work_items WHERE id=?").get(itemId) as { item_key: string } | undefined)?.item_key ?? itemId;
+  }
+
   /** Run one ledger mutation atomically. A refusal, returned or thrown, rolls back every write. */
-  private transact<T>(work: () => LedgerResult<T>): LedgerResult<T> {
+  private transact<T>(campaignId: string, work: () => LedgerResult<T>): LedgerResult<T> {
     try {
       return this.hooks.atomic(() => {
+        const armed = this.armedMergePrerequisites(campaignId);
         const result = work();
         if (!result.ok) throw new LedgerRefusal(result.error, result.status, result.details);
+        // #4120: a merge already armed can't be held any more, so no mutation may give its item a merge
+        // prerequisite it did not have: a new dependency, or a prerequisite whose repository changed
+        // (its child's placement, its pull requests or its issue). The whole mutation is refused.
+        // Keyed by the armed child, so reassigning it to another item is covered too. Arming never
+        // happens inside a ledger mutation, so the armed children are the same afterwards.
+        if (armed.size) {
+          const after = this.armedMergePrerequisites(campaignId, [...armed.keys()]);
+          for (const [sessionId, now] of after) {
+            const before = armed.get(sessionId)!.prerequisites;
+            const gained = [...now.prerequisites].find((id) => !before.has(id));
+            if (gained && now.itemId) {
+              throw new LedgerRefusal(`This change would give work item ${this.itemKey(now.itemId)} a prerequisite in another repository ` +
+                `(${this.itemKey(gained)}), but its child has already armed its approved merge, which nothing could hold now. ` +
+                "Make the change after that merge settles.", 409);
+            }
+          }
+        }
         return result;
       });
     } catch (error) {
@@ -967,7 +1031,15 @@ export class CampaignWorkLedgerStore {
       if (unique.includes(itemId)) return { error: `${label}: an item cannot depend on itself`, status: 409 };
       const missing = this.missingItemIds(campaignId, unique);
       if (missing.length) return { error: `${label}: unknown work items: ${missing.slice(0, 8).join(", ")}`, status: 404 };
-      if ([...(edges.get(itemId) ?? [])].sort().join("\n") === [...unique].sort().join("\n")) continue;
+      const before = edges.get(itemId) ?? [];
+      if ([...before].sort().join("\n") === [...unique].sort().join("\n")) continue;
+      // #4120: a new dependency is a promise to hold this item's merge, which an already armed enqueue
+      // would not keep: its provider may run it without asking again. Refused rather than recorded.
+      const session = unique.some((id) => !before.includes(id)) ? this.openAttemptForItem(itemId)?.session_id : null;
+      if (session && this.hooks.armedMerge?.(session)) {
+        return { error: `${label}: its child has already armed its approved merge, which a new dependency could not hold. ` +
+          "Record dependencies before a merge is armed; after this merge settles, record it again if it still applies.", status: 409 };
+      }
       edges.set(itemId, unique);
       changed.push(itemId);
     }
@@ -1035,7 +1107,7 @@ export class CampaignWorkLedgerStore {
         return fail(`${at}.dependsOnKeys must list at most ${L.dependsOn} keys`);
       }
     }
-    return this.transact(() => {
+    return this.transact(campaignId, () => {
       const existingCount = Number((this.stmt(
         "SELECT COUNT(*) AS count FROM campaign_work_items WHERE campaign_session_id=?",
       ).get(campaignId) as { count: number }).count);
@@ -1226,7 +1298,7 @@ export class CampaignWorkLedgerStore {
         (endAttempt.note !== undefined && !boundedText(endAttempt.note, L.textLength)))) {
       return fail("endAttempt.reason must be abandoned or failed");
     }
-    return this.transact(() => {
+    return this.transact(campaignId, () => {
       const item = this.item(campaignId, request.workItemId);
       if (!item) return fail<{ revision: number; itemId: string }>("work item not found in this campaign", 404);
       const sets: string[] = [];
@@ -1357,7 +1429,7 @@ export class CampaignWorkLedgerStore {
     closedAttempts: Array<{ id: string; workItemId: string; endReason: CampaignAttemptEndReason }>;
     created: boolean;
   }> {
-    return this.transact(() => {
+    return this.transact(campaignId, () => {
       const assignable = this.assignableItem(campaignId, workItemId);
       if (!assignable.ok) return assignable;
       const item = this.item(campaignId, workItemId)!;
@@ -1455,7 +1527,7 @@ export class CampaignWorkLedgerStore {
     },
     now: number,
   ): LedgerResult<{ revision: number; verification: CampaignWorkItemVerification }> {
-    return this.transact(() => {
+    return this.transact(campaignId, () => {
       const target = this.verificationTarget(campaignId, input.workItemId, input.childSessionId, input.outcome,
         input.report);
       if (!target.ok) return target;
@@ -1518,7 +1590,7 @@ export class CampaignWorkLedgerStore {
     evidence: CampaignDeliveryEvidence,
     now: number,
   ): LedgerResult<{ revision: number; deliveryId: string; itemId: string }> {
-    return this.transact(() => {
+    return this.transact(campaignId, () => {
       const item = this.item(campaignId, evidence.workItemId);
       if (!item) return fail<{ revision: number; deliveryId: string; itemId: string }>("work item not found in this campaign", 404);
       if (item.commitment !== "committed") {
@@ -1685,7 +1757,7 @@ export class CampaignWorkLedgerStore {
     if ((request.disposition === "rejected" || request.disposition === "deferred") && request.resultingWorkItemKey !== undefined) {
       return fail("a rejected or deferred recommendation has no resulting work item");
     }
-    return this.transact(() => {
+    return this.transact(campaignId, () => {
       const recommendation = this.stmt(
         "SELECT id, title, duplicate_of FROM orchestrator_campaign_follow_ups WHERE id=? AND campaign_session_id=?",
       ).get(request.recommendationId, campaignId) as { id: string; title: string; duplicate_of: string | null } | undefined;
@@ -1905,6 +1977,34 @@ export class CampaignWorkLedgerStore {
     ).all(campaignId) as unknown as DeliveryRow[]) {
       deliveries.set(row.work_item_id, [...(deliveries.get(row.work_item_id) ?? []), row]);
     }
+    // #4120: where each item works, and which of its dependencies are in another repository.
+    const placements = new Map<string, string | null>();
+    const repositories = new Map(items.map((item) => {
+      const sessionId = attempts.get(item.id)?.at(-1)?.session_id ?? null;
+      if (sessionId && !placements.has(sessionId)) placements.set(sessionId, this.hooks.sessionRepository?.(campaignId, sessionId) ?? null);
+      return [item.id, campaignItemRepository({ placement: sessionId ? placements.get(sessionId)! : null,
+        pullRequests: namedPullRequests(item, deliveries.get(item.id)), issue: issueOf(item.issue_repository, item.issue_number) })];
+    }));
+    const byId = new Map(items.map((item) => [item.id, item]));
+    const now = Date.now();
+    const prerequisiteOf = new Map<string, CampaignMergePrerequisite | null>();
+    const prerequisite = (id: string): CampaignMergePrerequisite | null => {
+      if (prerequisiteOf.has(id)) return prerequisiteOf.get(id)!;
+      const row = byId.get(id);
+      const repository = repositories.get(id) ?? null;
+      const refs = row ? namedPullRequests(row, deliveries.get(id)) : [];
+      const record = row && repository ? { id, key: row.item_key, title: row.title, repository, commitment: row.commitment,
+        pullRequests: refs.length ? this.hooks.forgePullRequests?.(campaignId, refs, now) ??
+          refs.map((ref) => ({ ref, fact: { availability: "unavailable", reason: "not_collected" } as const })) : [] } : null;
+      prerequisiteOf.set(id, record);
+      return record;
+    };
+    const prerequisitesOf = (itemId: string, dependentRepository: string | null): CampaignMergePrerequisite[] =>
+      (dependencies.get(itemId) ?? []).flatMap((id) => {
+        const record = isCampaignMergeDependency(dependentRepository, repositories.get(id) ?? null) ? prerequisite(id) : null;
+        return record ? [record] : [];
+      });
+    const mergePrerequisites = new Map(items.map((item) => [item.id, prerequisitesOf(item.id, repositories.get(item.id) ?? null)]));
     const observations = new Map<string, CampaignAttemptSessionObservation | null>();
     const records = items.map((item) => {
       const latest = attempts.get(item.id)?.at(-1);
@@ -1925,6 +2025,7 @@ export class CampaignWorkLedgerStore {
         } : null,
         openAttemptSession: open?.session_id ? observations.get(open.session_id) ?? null : null,
         recordedDelivery: currentDelivery(deliveries.get(item.id), latest) !== null,
+        mergeDependencies: (mergePrerequisites.get(item.id) ?? []).map(campaignMergeDependencyStatus),
       };
     });
     return {
@@ -1938,6 +2039,9 @@ export class CampaignWorkLedgerStore {
       handoffs,
       deliveries,
       derived: deriveCampaignWorkItemStates(records),
+      repositories,
+      mergePrerequisites,
+      prerequisitesOf,
       observations,
       usage: this.accounting.attemptUsage(campaignId),
       accountingStartedAt: this.accounting.startedAt(),
@@ -2070,6 +2174,9 @@ export class CampaignWorkLedgerStore {
         recordedBySessionId: item.blocker_recorded_by,
       } : null,
       handoff: handoff ? handoffView(handoff) : null,
+      repository: snapshot.repositories.get(item.id) ?? null,
+      ...(snapshot.mergePrerequisites.get(item.id)?.length
+        ? { mergeDependencies: snapshot.mergePrerequisites.get(item.id)!.map(campaignMergeDependencyView) } : {}),
       createdAt: item.created_at,
       updatedAt: item.updated_at,
       activityAt: item.updated_at,
@@ -2358,11 +2465,21 @@ export class CampaignWorkLedgerStore {
     const unfinished = new Set<string>(CAMPAIGN_WORK_ITEM_UNFINISHED_STATES);
     return campaigns.map((campaignId) => {
       const snapshot = this.snapshot(campaignId);
-      const refs = uniquePullRequests(snapshot.items
-        .filter((item) => unfinished.has(snapshot.derived.get(item.id)?.state ?? "blocked"))
-        .flatMap(stagePullRequests));
+      const open = snapshot.items.filter((item) => unfinished.has(snapshot.derived.get(item.id)?.state ?? "blocked"));
+      // #4120: a delivered prerequisite is finished, but an unfinished dependent still waits for its
+      // pull requests to merge, so they keep being read (a merged or closed one is then skipped).
+      const refs = uniquePullRequests([...open.flatMap(stagePullRequests),
+        ...open.flatMap((item) => (snapshot.mergePrerequisites.get(item.id) ?? []).flatMap((prerequisite) => prerequisite.pullRequests.map(({ ref }) => ref)))]);
       return { campaignId, refs };
     }).filter((target) => target.refs.length > 0);
+  }
+
+  /** #4120: an item's prerequisites in other repositories than `dependentRepository` (the repository
+   * of the pull request it is merging; the item's own when omitted), with their stored forge facts. */
+  mergePrerequisites(campaignId: string, workItemId: string, dependentRepository?: string): CampaignMergePrerequisite[] {
+    const snapshot = this.snapshot(campaignId);
+    if (!snapshot.repositories.has(workItemId)) return [];
+    return snapshot.prerequisitesOf(workItemId, dependentRepository?.toLowerCase() ?? snapshot.repositories.get(workItemId) ?? null);
   }
 
   /** Observed facts of the latest attempt's session, open or closed: a delivered item still shows
