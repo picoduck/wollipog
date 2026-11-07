@@ -265,6 +265,7 @@ export function registerCampaignStatusRoutes(
       ...(text(query, "cursor") !== undefined ? { cursor: text(query, "cursor") } : {}),
       ...limitOf(query),
       ...(text(query, "origin") !== undefined ? { origin: text(query, "origin") as CampaignWorkItemsQuery["origin"] } : {}),
+      ...(text(query, "repository") !== undefined ? { repository: text(query, "repository") } : {}),
       ...(text(query, "state") !== undefined ? { state: text(query, "state") as CampaignWorkItemsQuery["state"] } : {}),
       ...(text(query, "sort") !== undefined ? { sort: text(query, "sort") as CampaignWorkItemsQuery["sort"] } : {}),
     };

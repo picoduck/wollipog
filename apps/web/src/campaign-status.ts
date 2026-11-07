@@ -37,6 +37,8 @@ import {
   type CampaignWorkItemStateFilter,
   type CampaignWorkItemSummary,
   type CampaignWorkSummary,
+  type CampaignWorkRepositoryCounts,
+  type CampaignMergeDependencyView,
   type OrchestratorCampaignProjection,
   type SessionView,
 } from "@wollipog/protocol";
@@ -680,10 +682,83 @@ export interface CampaignWorkFilters {
   origin: CampaignWorkOriginFilter;
   state: CampaignWorkItemStateFilter;
   sort: CampaignWorkItemSort;
+  /** #4120: one repository, lower-cased, or `all`. */
+  repository: string;
 }
 
 /** Unfinished work first, in the Orchestrator's queue order; finished work is one filter away. */
-export const DEFAULT_CAMPAIGN_WORK_FILTERS: CampaignWorkFilters = { origin: "all", state: "unfinished", sort: "queue" };
+export const DEFAULT_CAMPAIGN_WORK_FILTERS: CampaignWorkFilters = { origin: "all", state: "unfinished", sort: "queue", repository: "all" };
+
+/** #4120: the Repository filter's options, or none when the campaign works in one repository (or an
+ * older control plane did not say), so a single-repository campaign's list looks as it did. A chosen
+ * repository stays listed even if it no longer has items. */
+export function campaignRepositoryFilterOptions(repositories: readonly CampaignWorkRepositoryCounts[] | null | undefined,
+  chosen: string): { value: string; label: string }[] {
+  const named = (repositories ?? []).flatMap((entry) => entry.repository ? [entry.repository] : []);
+  if (chosen !== "all" && !named.includes(chosen)) named.push(chosen);
+  return named.length > 1 || chosen !== "all"
+    ? [{ value: "all", label: "All Repositories" }, ...named.map((repository) => ({ value: repository, label: repository }))] : [];
+}
+
+/** #4120: the loaded rows grouped by repository, in the order the control plane lists repositories,
+ * each with that repository's counts. One group (or none known) means no grouping: null. */
+export interface CampaignWorkRepositoryGroup {
+  repository: string | null;
+  label: string;
+  items: CampaignWorkItemSummary[];
+  counts: CampaignWorkRepositoryCounts | null;
+}
+
+export function groupCampaignWorkByRepository(items: readonly CampaignWorkItemSummary[],
+  repositories: readonly CampaignWorkRepositoryCounts[] | null | undefined): CampaignWorkRepositoryGroup[] | null {
+  if (!repositories || repositories.length < 2) return null;
+  const order = repositories.map((entry) => entry.repository);
+  const groups = new Map<string | null, CampaignWorkItemSummary[]>();
+  for (const item of items) {
+    const repository = item.repository ?? null;
+    groups.set(repository, [...groups.get(repository) ?? [], item]);
+  }
+  const rank = (repository: string | null) => { const index = order.indexOf(repository); return index === -1 ? order.length : index; };
+  return [...groups.entries()].sort(([a], [b]) => rank(a) - rank(b)).map(([repository, rows]) => ({
+    repository, label: repository ?? "No Repository", items: rows,
+    counts: repositories.find((entry) => entry.repository === repository) ?? null,
+  }));
+}
+
+/** #4120: a group header's counts in words, unfinished states first, for example
+ * "3 Items: 1 Running, 1 Waiting, 1 Delivered". */
+export function repositoryCountsLabel(counts: CampaignWorkRepositoryCounts | null, shown: number): string {
+  if (!counts) return `${shown} ${shown === 1 ? "Item" : "Items"}`;
+  const parts = CAMPAIGN_WORK_ITEM_PRIMARY_STATES.filter((state) => counts.byState[state] > 0)
+    .map((state) => `${counts.byState[state]} ${CAMPAIGN_WORK_STATE_LABELS[state]}`);
+  return `${counts.total} ${counts.total === 1 ? "Item" : "Items"}${parts.length ? `: ${parts.join(", ")}` : ""}`;
+}
+
+export const MERGE_DEPENDENCY_STATUS_LABELS: Record<CampaignMergeDependencyView["status"], string> = {
+  merged: "Merged",
+  unmerged: "Not Merged",
+  failed: "Will Not Merge",
+  unknown: "Merge Unknown",
+};
+
+/** #4120: the cause a held item shows, as a label. */
+export const WAITING_FOR_PREREQUISITE_MERGE = "Waiting for Prerequisite Merge";
+
+/** #4120: how a merge dependency reads in a row, for example "owner/api: Add Account Field". */
+export function mergeDependencyLabel(dependency: CampaignMergeDependencyView): string {
+  return `${dependency.repository}: ${dependency.title ?? dependency.key}`;
+}
+
+/** #4120: the prerequisite pull request an item waits on, for the Waiting for Prerequisite Merge cause. */
+export function heldOnPullRequest(item: Pick<CampaignWorkItemSummary, "stateCauses" | "mergeDependencies">): string | null {
+  if (!item.stateCauses.includes("dependency_unmerged")) return null;
+  for (const dependency of item.mergeDependencies ?? []) {
+    if (dependency.status === "merged") continue;
+    const waiting = dependency.pullRequests.find((entry) => entry.state !== "merged") ?? null;
+    return waiting ? `${waiting.ref.repository}#${waiting.ref.number}` : `${dependency.repository}: ${dependency.title ?? dependency.key}`;
+  }
+  return null;
+}
 
 export const CAMPAIGN_STATE_FILTER_OPTIONS: readonly { value: CampaignWorkItemStateFilter; label: string }[] = [
   { value: "unfinished", label: "Unfinished" },
@@ -717,6 +792,8 @@ export function stateMatchesFilter(state: CampaignWorkItemPrimaryState, filter: 
 export function campaignWorkItemsQuery(filters: CampaignWorkFilters, cursor: string | null, limit: number): string {
   const query = new URLSearchParams({ limit: String(limit), sort: filters.sort, state: filters.state });
   if (filters.origin !== "all") query.set("origin", filters.origin);
+  // Filters remembered before #4120 have no repository: that is every repository.
+  if (filters.repository && filters.repository !== "all") query.set("repository", filters.repository);
   if (cursor) query.set("cursor", cursor);
   return query.toString();
 }
@@ -757,10 +834,12 @@ export function applyCampaignWorkFilters(
   now: number,
 ): CampaignWorkItemSummary[] {
   return items
-    .filter((item) => (filters.origin === "all" || item.origin === filters.origin) && stateMatchesFilter(item.primaryState, filters.state))
+    .filter((item) => (filters.origin === "all" || item.origin === filters.origin) && stateMatchesFilter(item.primaryState, filters.state) &&
+      (!filters.repository || filters.repository === "all" || item.repository === filters.repository))
     .sort(compareWorkItems(filters.sort, now));
 }
 
 export function filtersAreDefault(filters: CampaignWorkFilters): boolean {
-  return filters.origin === DEFAULT_CAMPAIGN_WORK_FILTERS.origin && filters.state === DEFAULT_CAMPAIGN_WORK_FILTERS.state;
+  return filters.origin === DEFAULT_CAMPAIGN_WORK_FILTERS.origin && filters.state === DEFAULT_CAMPAIGN_WORK_FILTERS.state &&
+    (filters.repository ?? "all") === DEFAULT_CAMPAIGN_WORK_FILTERS.repository;
 }

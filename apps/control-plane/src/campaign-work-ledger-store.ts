@@ -21,6 +21,7 @@ import {
   campaignRepositoryLocation,
   ISSUE_CLOSURE_EXCLUSION_ISSUES_MAX,
   type IssueClosureExclusionReason,
+  type CampaignWorkRepositoryCounts,
   type AdjudicateCampaignRecommendationRequest,
   type AgentHarnessIdentity,
   type CampaignAttempt,
@@ -633,6 +634,24 @@ const NOT_AUTHORIZED = { availability: "unavailable", reason: "not_authorized" }
 /** A deleted attempt session's share is visible to whoever may read the campaign itself. */
 function visible(attempt: AttemptRow, canSeeSession: SessionVisibility | undefined): boolean {
   return !canSeeSession || canSeeSession(attempt.session_id ?? attempt.campaign_session_id);
+}
+
+/** #4120: each repository's counts by derived state, in the order its first item was recorded,
+ * with items whose repository is unknown last. */
+function repositoryCounts(snapshot: LedgerSnapshot): CampaignWorkRepositoryCounts[] {
+  const counts = new Map<string | null, CampaignWorkRepositoryCounts>();
+  for (const item of snapshot.items) {
+    const repository = snapshot.repositories.get(item.id) ?? null;
+    let entry = counts.get(repository);
+    if (!entry) {
+      entry = { repository, total: 0, byState: Object.fromEntries(CAMPAIGN_WORK_ITEM_PRIMARY_STATES.map((state) => [state, 0])) as CampaignWorkRepositoryCounts["byState"] };
+      counts.set(repository, entry);
+    }
+    const state = snapshot.derived.get(item.id)?.state;
+    if (state) entry.byState[state] += 1;
+    entry.total += 1;
+  }
+  return [...counts.values()].sort((a, b) => Number(a.repository === null) - Number(b.repository === null));
 }
 
 function cursorKey(parts: Record<string, unknown>): string {
@@ -2366,11 +2385,16 @@ export class CampaignWorkLedgerStore {
     }
     const sort = query.sort ?? "queue";
     if (!["queue", "activity", "elapsed", "cost"].includes(sort)) return fail("sort is not recognized");
+    if (query.repository !== undefined && !campaignRepositoryLocation(query.repository)) {
+      return fail("repository filter must be \"owner/repo\" or \"<gitlab-host>/group/project\"");
+    }
+    const repository = query.repository?.toLowerCase();
     const snapshot = this.snapshot(campaignId);
-    const key = cursorKey({ list: "work-items", state, origin: query.origin, sort });
+    const key = cursorKey({ list: "work-items", state, origin: query.origin, sort, ...(repository ? { repository } : {}) });
     const unfinished = new Set<string>(CAMPAIGN_WORK_ITEM_UNFINISHED_STATES);
     const rows = snapshot.items.map((item) => this.summaryView(snapshot, item, canSeeSession)).filter((summary) =>
       (query.origin === undefined || summary.origin === query.origin) &&
+      (repository === undefined || summary.repository === repository) &&
       (state === "all" || (state === "unfinished" ? unfinished.has(summary.primaryState)
         : state === "finished" ? FINISHED_STATES.has(summary.primaryState) : summary.primaryState === state)));
     const cursor = parseCursor(query.cursor, key);
@@ -2405,6 +2429,7 @@ export class CampaignWorkLedgerStore {
       items,
       nextCursor: end < rows.length ? encodeCursor(snapshot.revision, key, end, binding) : null,
       total: rows.length,
+      repositories: repositoryCounts(snapshot),
     });
   }
 
