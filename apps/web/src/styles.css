@@ -10776,6 +10776,61 @@ textarea {
   padding: 0 var(--space-3) var(--space-3);
 }
 .provider-accounts-list > .provider-account-expansion + .row { box-shadow: inset 0 1px 0 var(--border); }
+.provider-account-group { margin-top: var(--space-6); margin-bottom: var(--space-6); }
+.provider-settings-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-3);
+}
+.provider-settings-heading > div { min-width: 0; }
+.provider-settings-heading h4 { margin: 0; font: var(--type-section); }
+.provider-settings-heading .section-note { margin: var(--space-1) 0 0; }
+.provider-settings-heading > button { flex: none; min-height: var(--space-12); }
+.provider-default-marker { color: var(--accent); font: var(--type-small); }
+.provider-account-add { padding: var(--space-2); border-top: 1px solid var(--border); }
+.provider-account-add button { min-height: var(--space-12); }
+.provider-running-settings { border-top: 1px solid var(--border); padding-top: var(--space-4); }
+.provider-settings-state { margin-right: auto; color: var(--text-dim); font: var(--type-small); }
+.provider-accounts-list > .row { height: auto; min-height: var(--row-h-2); padding-block: var(--space-2); }
+.provider-accounts-list > .row:has(.provider-account-usage) {
+  display: grid;
+  grid-template-columns: var(--icon) minmax(0, 1fr) minmax(0, calc(var(--space-16) * 4)) auto;
+}
+.provider-account-usage { display: contents; }
+.provider-accounts-list .provider-account-usage + .provider-account-actions { grid-column: 4; grid-row: 1; }
+.provider-usage-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: var(--space-12);
+  border: 0;
+  padding: var(--space-1);
+  background: transparent;
+  color: var(--text);
+  font: var(--type-small);
+  text-align: left;
+  cursor: pointer;
+}
+.provider-usage-toggle > svg { flex: none; }
+.provider-usage-reset { display: block; color: var(--text-dim); }
+.provider-usage-details { grid-column: 2 / -1; padding: var(--space-2) var(--space-1); font: var(--type-small); }
+.provider-usage-details p { margin: var(--space-2) 0; }
+.provider-usage-details .account-usage { display: grid; }
+@media (max-width: 760px) {
+  .provider-accounts-list > .row,
+  .provider-accounts-list > .row:has(.provider-account-usage) { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-1) var(--space-2); }
+  .provider-accounts-list > .row > .row-icon { display: none; }
+  .provider-accounts-list .row-body { grid-column: 1; }
+  .provider-accounts-list .provider-usage-toggle { grid-column: 1; }
+  .provider-accounts-list .provider-usage-details { grid-column: 1 / -1; grid-row: 3; }
+  .provider-accounts-list .provider-account-actions,
+  .provider-accounts-list .provider-account-usage + .provider-account-actions { grid-column: 2; grid-row: 1 / span 2; }
+  .provider-settings-state { flex-basis: 100%; }
+}
 /* A provider sign-in's two numbered steps and its endings (#2996, §8.7, §13.2): a local block of the
    shared ProviderSignIn part. Each step's first line is a 28px control (36px or 44px on touch), and
    its number is centred on it; the code field's step centres it on the field's label instead. Under
@@ -11148,11 +11203,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   font: var(--type-section);
 }
 .machine-settings-fieldset > .field-helper { margin-top: calc(-1 * var(--space-2)); }
-/* The switch row's text starts at the fields' left edge and takes all but the track's width. */
-.machine-settings-switch > .setting-row {
-  grid-template-columns: minmax(0, 1fr) auto;
-  padding-inline: 0;
-}
 /* An installation is named by its path. */
 .machine-settings-installations .choice-row-title {
   font-family: var(--font-mono);

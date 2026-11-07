@@ -862,7 +862,7 @@ test("every refused submit lands on a control described by its reason (#2952)", 
       };
       const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
       try {
-        const focused = await pressCreateAndHear(fixture, /The saved default account isn't on this machine anymore\. Choose an account, or change the default in Machine Settings\./, "account");
+        const focused = await pressCreateAndHear(fixture, /The saved default account isn't on this machine anymore\. Choose an account, or change the default in this machine's Provider Accounts\./, "account");
         assert.match(focused.getAttribute("aria-label") ?? "", /^Account:/);
         assert.equal(focused.getAttribute("aria-invalid"), "true");
       } finally { await unmountFixture(fixture); }
@@ -2762,7 +2762,7 @@ test("a missing saved default requires an explicit account choice", async () => 
   const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
   try {
     await assertCreateRefused(fixture);
-    assert.match(fixture.container.textContent ?? "", /The saved default account isn't on this machine anymore\. Choose an account, or change the default in Machine Settings\./u);
+    assert.match(fixture.container.textContent ?? "", /The saved default account isn't on this machine anymore\. Choose an account, or change the default in this machine's Provider Accounts\./u);
     await chooseSelectOption(fixture.container, "Account", "Work");
     assert.equal(createButton(fixture.container).disabled, false);
     await act(async () => { createButton(fixture.container).click(); });

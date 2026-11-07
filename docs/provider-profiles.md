@@ -466,7 +466,7 @@ older runners never receive an import request. Refusals carry a code
 A session that doesn't choose an account never takes one whose profile only other control planes
 may use (`profile.access` of `not_granted`): the control plane's implicit choice, and New Session's
 displayed preselection, skip it. Such an account can't be saved as the Machine's default either
-(409 `PROVIDER_PROFILE_NOT_GRANTED`); Machine Settings leaves it out of the choices unless it is the
+(409 `PROVIDER_PROFILE_NOT_GRANTED`); the Provider Accounts editor leaves it out of the choices unless it is the
 saved one, which says why. Naming the account explicitly is still the person's decision.
 
 ## Registration and Use

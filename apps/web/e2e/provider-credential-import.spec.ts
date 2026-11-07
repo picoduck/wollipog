@@ -7,7 +7,7 @@ async function openAddAccount(page: Page, query: string) {
   await page.goto(`/machine-management-e2e.html?${query}&${DESIGN_WORKSTATION}`);
   await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
   const section = page.locator("section").filter({ has: page.getByRole("heading", { name: /^Provider Accounts/ }) });
-  await section.getByRole("button", { name: "Add Account…" }).click();
+  await section.getByRole("button", { name: "Add Claude Account…" }).click();
   const dialog = page.getByRole("dialog", { name: "Add Account" });
   await expect(dialog).toBeVisible();
   return dialog;
