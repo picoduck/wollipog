@@ -5593,7 +5593,7 @@ test("an owner/repo issue delivered by merged pull requests in owner/repo and ot
         f.hub.resolveRunnerRequest = resolve;
         const inspection = (answer as { inspection?: object }).inspection;
         return resolve(inspection ? { ...answer, inspection: { ...inspection,
-          crossRepositoryDelivery: [{ repository: "other/repo", number: 22, headSha: head, mergeCommitSha: mergeCommit }] } } as typeof answer : answer, from);
+          crossRepositoryDelivery: [{ repository: "other/repo", number: 22, headSha: head, mergeCommitSha: mergeCommit }] } } as unknown as typeof answer : answer, from);
       };
       return sendClosure(runnerId, message);
     };
