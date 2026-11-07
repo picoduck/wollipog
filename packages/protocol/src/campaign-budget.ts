@@ -56,6 +56,58 @@ export interface CampaignBudgetView {
   rootAllocation?: CampaignBudgetAllocation;
   costAccounting?: "priced" | "unavailable";
   requiredNativeReview?: {supported:boolean;reason:string};
+  /** v331 (#4331): ended workers whose slot no automatic proof can ever free. Only the campaign's
+   * owner can release one, with `POST /api/sessions/:root/orchestrator-campaign/slots/release`.
+   * Absent when there are none. */
+  heldSlots?: CampaignHeldSlot[];
+  /** v331 (#4331): slots people released, newest first, at most CAMPAIGN_SLOT_RELEASES_LIMIT. */
+  slotReleases?: CampaignSlotRelease[];
+}
+
+/** Why a held slot can only be released by a person (#4331): its generation was served by a runner
+ * too old to prove retirement (#3788), or its runner's retirement fence carries no process evidence,
+ * either because that runner build couldn't record it or because the provider ran in a location the
+ * host can't observe (WSL, a container or a cloud machine). */
+export type CampaignHeldSlotReason = "older_runner" | "fence_without_evidence" | "unsupported_location";
+
+/** A runner's report that a worker's retirement fence can never be lifted by a later runner process. */
+export interface CampaignRetirementHold {
+  generation: string;
+  reason: Exclude<CampaignHeldSlotReason, "older_runner">;
+}
+
+export interface CampaignHeldSlot {
+  sessionId: string;
+  title: string | null;
+  /** The worker generation whose slot is held; a release names it, so it can't free a relaunch. */
+  generation: string;
+  reason: CampaignHeldSlotReason;
+  status: "completed" | "failed" | "stopped";
+}
+
+export interface CampaignSlotRelease {
+  sessionId: string;
+  title: string | null;
+  generation: string;
+  releasedByUserId: string;
+  releasedByName: string | null;
+  releasedAt: number;
+  /** The person's own words, for example "Rebooted the host". */
+  reason: string;
+  heldReason: CampaignHeldSlotReason;
+  /** What the reservation settled at: the runner's final checkpoint where one arrived, otherwise
+   * the usage the control plane recorded, never below a recorded charge. */
+  settlement: { costUsd: number; toolCalls: number; source: "checkpoint" | "recorded_usage" };
+}
+
+export const CAMPAIGN_SLOT_RELEASES_LIMIT = 20;
+/** The longest reason a person can give for a release. */
+export const CAMPAIGN_SLOT_RELEASE_REASON_MAX = 500;
+
+export interface ReleaseCampaignSlotRequest {
+  sessionId: string;
+  generation: string;
+  reason: string;
 }
 
 export function validCampaignBudgetAuthority(value: unknown): value is CampaignBudgetAuthority {

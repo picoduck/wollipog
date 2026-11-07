@@ -83,8 +83,33 @@ only attestations. The control plane records each worker generation such a runne
 when it registers, on each status or snapshot it sends, and, on upgrade, every live worker whose
 runner it last saw at an older or unknown protocol. That generation's slot and reservation stay
 held whatever that runner, or the same runner after an upgrade, later reports for it. A relaunch
-under a new generation needs and gets its own proof. Until a person-confirmed release exists
-(#4331), raising the concurrency allowance is the only way past such a slot.
+under a new generation needs and gets its own proof.
+
+### Releasing a Held Slot
+
+Some held slots no automatic proof can ever free: a generation an older runner served, and a fence
+that carries no process evidence. A runner from protocol 331 reports such a fence in its session
+snapshots (`campaignRetirementHold`) once it was left by an earlier runner process and nothing of
+the current process is still retiring that generation, with the reason `fence_without_evidence`, or
+`unsupported_location` when the host can't record evidence for the provider's location (WSL, a
+container or a cloud machine). Campaign Status lists these workers under **Held Slots**, and
+`get_campaign` returns them as `budget.heldSlots`. Nothing ever releases one automatically: no timer,
+startup, reconnect, upgrade or campaign completion (#4331).
+
+Only the campaign's owner can release one, with **Release Slot** on the campaign's own Campaign
+Status (`POST /api/sessions/<root>/orchestrator-campaign/slots/release` with the worker's
+`sessionId`, the `generation` it was shown and a `reason`). No agent can, an Orchestrator under Full
+Control included: the endpoint has no agent allowlist entry, tool, CLI command or workflow decision,
+and refuses every agent credential. A release applies only to an ended worker whose stop is confirmed
+and none pending, and only to the generation it names, so it can't free a relaunch. It stops nothing:
+a provider that is in fact still running keeps running outside the concurrency allowance.
+
+The release records who confirmed it, when and why (`budget.slotReleases`), and settles the worker's
+reservation in the same transaction, exactly once: from the runner's final checkpoint for that
+generation where one arrived, otherwise at the usage the control plane recorded, never below a
+recorded charge. A repeated or replayed release returns the same record, and a proof that arrives
+later settles nothing again. Raising the concurrency allowance is no longer needed to get past such a
+slot.
 
 In every case a worker's unspent reservation stays outstanding until its usage settles from the
 durable checkpoint, exactly once. Every campaign read settles ended workers whose hydrated history covers

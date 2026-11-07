@@ -26,6 +26,8 @@
  * its recovery automation (#3361).
  * `fullControl=rules|ready|old|degraded` makes it a Full Control campaign and shows its Full Control
  * section (#2940); see `fullControlProjection`.
+ * With `budget=1`, `slots=held` lists two ended workers whose slots only the person can release, and
+ * `slots=released` one of them released, with its record (#4331).
  */
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -622,6 +624,16 @@ const projectionFor = (rev: number) => campaignProjection(
         { occurrenceId: "workflow_follow_up_1", title: "Retry the Merge Group When Main Is Red" },
         { occurrenceId: "workflow_follow_up_2", title: "Show Runner Contention in Campaign Status" },
       ] } : { pending: [], approved: 0 },
+      // `slots=held`: two ended workers whose slots only the person can release; `slots=released`: one released (#4331).
+      ...(params.get("slots") === "held" ? { heldSlots: [
+        { sessionId: "s_child_3", title: "#2417 Slice 5: Read API", generation: "gen_3", reason: "older_runner" as const, status: "failed" as const },
+        { sessionId: "s_child_4", title: "#2417 Slice 6: Time and Cost", generation: "gen_4", reason: "unsupported_location" as const, status: "stopped" as const },
+      ] } : {}),
+      ...(params.get("slots") === "released" ? { heldSlots: [
+        { sessionId: "s_child_4", title: "#2417 Slice 6: Time and Cost", generation: "gen_4", reason: "unsupported_location" as const, status: "stopped" as const },
+      ], slotReleases: [{ sessionId: "s_child_3", title: "#2417 Slice 5: Read API", generation: "gen_3", releasedByUserId: "usr_owner",
+        releasedByName: "Sam Owner", releasedAt: NOW - 4 * MINUTE, reason: "Rebooted the build machine; no provider process remains",
+        heldReason: "older_runner" as const, settlement: { costUsd: 2.05, toolCalls: 41, source: "checkpoint" as const } }] } : {}),
       enforcement: "admission_and_best_effort_cancellation" as const, externalWorkers: "unsupported" as const,
       sessionLimits: {costBudgetUsd:40,maxToolCalls:null},rootAllocation:{sessionId:"s_parent",costUsd:25,toolCalls:500},costAccounting:"priced" as const,
     } } : {}),
@@ -1117,6 +1129,12 @@ const client = {
   setCampaignFollowUpLimit: async (_id: string, limit: number | null, expectedRevision: number) => {
     (window as unknown as { __FOLLOW_UP_LIMIT__: unknown }).__FOLLOW_UP_LIMIT__ = { limit, expectedRevision };
     return sessionsFor(revision)[0]!;
+  },
+  releaseCampaignSlot: async (_id: string, request: import("@wollipog/protocol").ReleaseCampaignSlotRequest) => {
+    (window as unknown as { __SLOT_RELEASE__: unknown }).__SLOT_RELEASE__ = request;
+    return { sessionId: request.sessionId, title: "#2417 Slice 5: Read API", generation: request.generation, releasedByUserId: "usr_owner",
+      releasedByName: "Sam Owner", releasedAt: NOW, reason: request.reason, heldReason: "older_runner" as const,
+      settlement: { costUsd: 2.05, toolCalls: 41, source: "checkpoint" as const } };
   },
   deleteCampaignMergedBranches: async (id: string) => {
     (window as unknown as { __DELETE_MERGED_BRANCHES__: unknown }).__DELETE_MERGED_BRANCHES__ = id;

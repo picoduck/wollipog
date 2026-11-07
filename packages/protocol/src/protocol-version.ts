@@ -1346,6 +1346,11 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   //      328, which no released version uses.)
   330,
   // v331 slot
+  // 331: A runner reports a campaign worker's retirement fence that no later runner process can lift
+  //      (`SessionSnapshot.campaignRetirementHold`, #4331), and the control plane lets the campaign's
+  //      owner, never an agent, release such a held slot. A runner below v331 reports no hold. (This
+  //      change first claimed 330, which another change took.)
+  331,
   // v332 slot
   // v333 slot
   // v334 slot

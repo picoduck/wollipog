@@ -12,7 +12,8 @@ import { inspectionResource, invalidInspectionReason } from "./campaign-worktree
 import { worktreeDirtyPaths } from "@wollipog/protocol";
 import { formatCampaignAssignment } from "./campaign-assignment.js";
 import { campaignFollowUpAdmissionKey } from "./campaign-budget.js";
-import type { CampaignFollowUpAdmissionSnapshot, CampaignFollowUpSubject, SetCampaignFollowUpLimitRequest, SetScopeGrantSelectionCountRequest } from "@wollipog/protocol";
+import { CAMPAIGN_SLOT_RELEASE_REASON_MAX } from "@wollipog/protocol";
+import type { CampaignFollowUpAdmissionSnapshot, CampaignFollowUpSubject, ReleaseCampaignSlotRequest, SetCampaignFollowUpLimitRequest, SetScopeGrantSelectionCountRequest } from "@wollipog/protocol";
 import { campaignBehaviorSources, campaignBehaviorValues, changedCampaignBehavior, exactChildHarnessRow,
   parseCampaignBehaviorRequest } from "./campaign-behavior.js";
 import { agentHarnessIdentityKey } from "@wollipog/protocol";
@@ -10940,6 +10941,37 @@ export class SessionsService {
     }
     for (const id of [before.id, ...this.db.campaignDescendantIds(before.id)]) this.hub.sessionChangedById(id);
     this.publishCampaignAttentionTransition(before);
+  }
+
+  /** The campaign owner's release of one ended worker's slot that no automatic proof can free
+   * (#4331). Person-only: the route refuses every agent, and no tool, CLI command or workflow
+   * decision reaches it, so a Full Control grant can't either. It stops no process; it records who
+   * confirmed it and why, and settles the worker's reservation exactly once. */
+  releaseCampaignSlot(rootId: string, request: ReleaseCampaignSlotRequest, principal: HumanPrincipal):
+    ServiceResult<import("@wollipog/protocol").CampaignSlotRelease> {
+    const root = this.db.getSession(rootId);
+    if (!root || principal.kind !== "human" || !this.db.isSessionOwner(principal, rootId)) return fail("campaign not found", 404);
+    const reason = typeof request?.reason === "string" ? request.reason.trim() : "";
+    if (!request || typeof request !== "object" || Array.isArray(request) ||
+        Object.keys(request).some((key) => key !== "sessionId" && key !== "generation" && key !== "reason") ||
+        typeof request.sessionId !== "string" || !request.sessionId || typeof request.generation !== "string" || !request.generation) {
+      return fail("Name the worker and the generation whose slot to release.", 400);
+    }
+    if (!reason || reason.length > CAMPAIGN_SLOT_RELEASE_REASON_MAX) {
+      return fail(`Say how you confirmed the worker's provider is gone, in at most ${CAMPAIGN_SLOT_RELEASE_REASON_MAX} characters.`, 400);
+    }
+    const before = this.db.getSession(rootId)!;
+    const result = this.db.campaignBudgets.releaseSlot(rootId, { sessionId: request.sessionId, generation: request.generation },
+      principal.userId, reason, Date.now());
+    if (!result.ok) return fail(result.error, result.status);
+    if (!result.replayed) {
+      this.log.info(JSON.stringify({ event: "campaign_slot_released", rootId, sessionId: request.sessionId,
+        generation: request.generation, heldReason: result.release.heldReason, releasedByUserId: principal.userId,
+        settlementSource: result.release.settlement.source }));
+      for (const id of [rootId, request.sessionId]) this.hub.sessionChangedById(id);
+      this.publishCampaignAttentionTransition(before);
+    }
+    return ok(result.release);
   }
 
   setCampaignFollowUpLimit(sessionId: string, request: SetCampaignFollowUpLimitRequest, principal: HumanPrincipal): ServiceResult<SessionView> {
@@ -22787,6 +22819,7 @@ export class SessionsService {
         if(owner?.runnerId!==runnerId) continue;
         // A runner too old to prove provider retirement keeps the generation's slot held (#3788).
         this.noteServingRunner(snap.id,runnerId);
+        this.db.campaignBudgets.noteRetirementHold(snap.id, runnerId, snap.campaignRetirementHold);
         if(isTerminal(snap.status) && snap.campaignBudgetCheckpoint) this.db.campaignBudgets.recordCheckpoint(snap.id,snap.campaignBudgetCheckpoint);
       }
       const unsupportedCostSessions = new Set(chunk.filter((snap) =>
@@ -23058,6 +23091,7 @@ export class SessionsService {
     if (!existing || existing.runnerId !== runnerId || this.db.isTombstoned(snapshot.id)) return;
     // A runner too old to prove provider retirement keeps the generation's slot held (#3788).
     this.noteServingRunner(snapshot.id, runnerId);
+    this.db.campaignBudgets.noteRetirementHold(snapshot.id, runnerId, snapshot.campaignRetirementHold);
     if(isTerminal(snapshot.status) && snapshot.campaignBudgetCheckpoint) this.db.campaignBudgets.recordCheckpoint(snapshot.id,snapshot.campaignBudgetCheckpoint);
     if (this.pendingMediaLifecycle(existing)) snapshot = { ...snapshot, status: existing.status };
     const unsupportedCost = this.unsupportedCostReconciliation(runnerId, snapshot);
@@ -23177,6 +23211,7 @@ export class SessionsService {
       // The single-snapshot path's writes before its update, in its order; none publishes.
       before: () => {
         this.noteServingRunner(sessionId, runnerId);
+        this.db.campaignBudgets.noteRetirementHold(sessionId, runnerId, snapshot.campaignRetirementHold);
         if (terminal && snapshot.campaignBudgetCheckpoint) {
           this.db.campaignBudgets.recordCheckpoint(sessionId, snapshot.campaignBudgetCheckpoint);
         }

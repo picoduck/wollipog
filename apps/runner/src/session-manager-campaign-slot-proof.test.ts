@@ -589,6 +589,52 @@ test("a fence recorded without process evidence is never lifted by a later runne
   } finally { first.shutdownAll(); restarted?.shutdownAll(); h.cleanup(); }
 });
 
+test("a fence no runner process can lift is reported, and only a person's release frees its slot, settling once (#4331)", async () => {
+  for (const [evidence, reason] of [[undefined, "unsupported_location"], [1003, "fence_without_evidence"]] as const) {
+    const h = harness();
+    const machine = host();
+    // The first runner process can record no evidence for the provider's location.
+    const first = h.manager(undefined, { current: () => undefined, abandoned: () => true });
+    let restarted: SessionManager | undefined;
+    try {
+      const provider = await h.launch(first);
+      provider.callbacks.onEvent({ kind: "token_usage", model: "claude-opus-5-5", inputTokens: 1, costUsd: 0.4 });
+      assert.ok(h.svc.stop("worker").ok);
+      first.stop("worker");
+      const meta = () => new SessionStore(h.dir).readMeta("worker")!;
+      assert.equal(first.snapshotForControlPlane(meta()).campaignRetirementHold, undefined,
+        "the process that set the fence may still prove it, so it reports no hold");
+
+      // A later process, which can (or can't) record evidence for this location, inherits the fence.
+      restarted = h.manager(undefined, evidence === undefined ? { current: () => undefined, abandoned: () => false } : machine.runner(evidence));
+      restarted.reconcileStore();
+      h.hub.isRunnerOnline = () => false; // This fake runner never answers a history request.
+      await h.reconnect(restarted);
+      const generation = h.db.campaignBudgets.dispatch("worker")!.generation;
+      assert.deepEqual(restarted.snapshotForControlPlane(meta()).campaignRetirementHold, { generation, reason });
+      const held = h.db.campaignBudgets.view("root")!.heldSlots;
+      assert.deepEqual(held?.map((slot) => [slot.sessionId, slot.generation, slot.reason]), [["worker", generation, reason]]);
+      assert.equal(h.occupied(), 1, "the report frees nothing by itself");
+      h.refused("and a replacement is still refused");
+
+      const released = h.db.campaignBudgets.releaseSlot("root", { sessionId: "worker", generation }, "usr_owner", "Rebooted the host", 5);
+      assert.ok(released.ok);
+      assert.equal(released.release.settlement.source, "recorded_usage", "no checkpoint ever arrived");
+      assert.equal(h.occupied(), 0);
+      h.child("replacement");
+      assert.equal(h.occupied(), 1, "a replacement is admitted");
+      assert.equal(h.settlements().length, 1);
+      // Nothing settles again: a replayed release, another reconnect, history reads.
+      assert.equal((h.db.campaignBudgets.releaseSlot("root", { sessionId: "worker", generation }, "usr_owner", "Again", 6) as { replayed: boolean }).replayed, true);
+      await h.reconnect(restarted);
+      const view = h.hydrate(0, 0);
+      assert.equal(h.settlements().length, 1, "the reservation settled exactly once");
+      assert.equal(view.heldSlots, undefined);
+      assert.deepEqual(view.slotReleases?.map((r) => [r.sessionId, r.reason, r.heldReason]), [["worker", "Rebooted the host", reason]]);
+    } finally { first.shutdownAll(); restarted?.shutdownAll(); h.cleanup(); }
+  }
+});
+
 test("every runner that ran a provider of a fenced generation must be proven gone before a later runner lifts the fence (#4256)", async () => {
   const h = harness();
   const machine = host();

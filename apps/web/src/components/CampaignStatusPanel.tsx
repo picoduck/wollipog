@@ -68,6 +68,7 @@ import { CampaignIssueScopePanel } from "./CampaignIssueScopePanel.js";
 import { CampaignAuthoritySummary } from "./CampaignAuthoritySummary.js";
 import { CampaignFollowUpLimit } from "./CampaignFollowUpLimit.js";
 import { CampaignCleanup, CampaignStuck } from "./CampaignCleanup.js";
+import { CampaignHeldSlots } from "./CampaignHeldSlots.js";
 import { useStoreSelector } from "../store.js";
 import { CampaignDecisions } from "./CampaignDecisions.js";
 import { CampaignDecisionModelChecks } from "./CampaignDecisionModelChecks.js";
@@ -310,6 +311,15 @@ function AvailableCampaignStatus({
                   now={now}
                   onOpen={(workItemId) => setMemory({ selectedItemId: workItemId, focusItemId: workItemId,
                     scrollTop: scrollRef.current?.scrollTop ?? memory.scrollTop })}
+                />
+              )}
+              {data.summary.campaign?.budget && (
+                <CampaignHeldSlots
+                  campaignId={availability.campaignSessionId}
+                  budget={data.summary.campaign.budget}
+                  canAct={availability.role === "campaign"}
+                  now={now}
+                  onOpenSession={sessionLink}
                 />
               )}
               <CampaignRecoveryAutomation campaign={data.summary.campaign} />

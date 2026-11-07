@@ -428,6 +428,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * (#3788, #4257, #4256). 307 is the first protocol on main that carries all three. An older
    * runner's checkpoint or absence never frees the generation's concurrency slot. */
   campaignProviderRetirementProof: 307,
+  /** v331 (#4331): the runner reports an evidence-less retirement fence in its session snapshots. */
+  campaignRetirementHold: 331,
   workflowDecisionActionAdmission: 151,
   workflowDecisionActionReconciliation: 153,
   /** v269 control plane withdraws a pending or approved, unconsumed workflow decision (#3917). */
@@ -8471,6 +8473,10 @@ export interface SideChatView {
 export interface SessionSnapshot {
   id: string;
   campaignBudgetCheckpoint?: import("./campaign-budget.js").CampaignBudgetUsageCheckpoint;
+  /** v331 (#4331): the current generation's retirement fence carries no process evidence and no
+   * provider of this runner process is still retiring it, so no later runner process can ever lift
+   * it. Only the campaign's owner can then release the slot. */
+  campaignRetirementHold?: import("./campaign-budget.js").CampaignRetirementHold;
   roleConversionReceipt?: SessionRoleConversionReceipt;
   /** Opaque CP launch identity echoed by runners that accepted a replacement start. */
   controlPlaneLaunchId?: string;
