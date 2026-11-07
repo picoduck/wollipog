@@ -1162,6 +1162,9 @@ const PULL_REQUEST_WATCH_OUTCOME_TEXT: Record<PullRequestWatchOutcome, string> =
   no_required_checks: "is not in the merge queue, and its base requires no checks",
 };
 
+/** The request ids of the server's merge closure reports (#4323), reserved for the server. */
+export const MERGE_CLOSURE_REPORT_REQUEST_PREFIX = "merge_closure_";
+
 /** How one ended merge-queue watch reads in its session's wake (#4071). Every line is single-line
  * by construction, so neither a reason nor a summary can forge a framing line. */
 export function pullRequestWatchWakeLines(watch: PullRequestWatchView & { summary: string | null }): string[] {
@@ -14036,20 +14039,24 @@ export class SessionsService {
     const rootId = this.db.campaignRootForMember(decision.sessionId) ?? this.db.campaignRootForMember(decision.controllingSessionId) ??
       (this.db.getSession(decision.controllingSessionId)?.orchestratorPolicy ? decision.controllingSessionId : null);
     const root = rootId ? this.db.getSession(rootId) : null;
-    const requestId = `merge_closure_${kind}_${decision.occurrenceId}`;
-    // Asked already (a retry after its answer was lost): that question is the report.
+    const requestId = `${MERGE_CLOSURE_REPORT_REQUEST_PREFIX}${kind}_${decision.occurrenceId}`;
+    const resourceKey = `merge_closure:${decision.resourceSnapshot.repository.toLowerCase()}#${decision.resourceSnapshot.pullRequest}`;
+    // Asked already (a retry after its answer was lost): that question is the report. The prefix is
+    // reserved for the server, and only an owner question for this pull request counts.
     const asked = root ? this.db.workflowDecisionByRequestId(root.id, requestId) : null;
-    if (asked) return { report: { occurrenceId: asked.occurrenceId, reportedAt }, delivered: true };
+    if (asked && asked.category === "owner_decision" && asked.resourceKey === resourceKey &&
+        asked.resourceSnapshot.category === "owner_decision" && asked.resourceSnapshot.kind === "question" && asked.authority === "human") {
+      return { report: { occurrenceId: asked.occurrenceId, reportedAt }, delivered: true };
+    }
     if (!root || isTerminal(root.status)) {
       this.log.warn(`merge closure report for ${decision.occurrenceId} is owed, and has no live campaign root yet`);
       return { report: { reportedAt, unreported: "The campaign's root Orchestrator has ended; the report is retried while it is owed." }, delivered: false };
     }
     if (runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "ownerQuestions")) {
       const created = this.createWorkflowDecision(root.id, {
-        requestId,
-        resourceKey: `merge_closure:${decision.resourceSnapshot.repository.toLowerCase()}#${decision.resourceSnapshot.pullRequest}`,
+        requestId, resourceKey,
         resourceSnapshot: { category: "owner_decision", kind: "question", question: text.question, material: text.material, options: text.options },
-      }, () => true, { trustedOwnerDecision: true });
+      }, () => true, { trustedOwnerDecision: true, trustedMergeClosureReport: true });
       if (created.ok && created.data) return { report: { occurrenceId: created.data.occurrenceId, reportedAt }, delivered: true };
       this.log.warn(`merge closure owner question for ${decision.occurrenceId} was refused: ${created.error}`);
     }
@@ -14078,6 +14085,8 @@ export class SessionsService {
       closingReferenceCheck?: PullRequestClosingReferenceCheck;
       /** A Full Control root's owner decision, checked by createOwnerDecision (#4064). */
       trustedOwnerDecision?: boolean;
+      /** The server's own report of a merge's closures (#4323): the only caller of its request ids. */
+      trustedMergeClosureReport?: boolean;
       /** #4104: the Decision Model's screen of an implementation question, taken by the async
        * route just before this call. Without one, a Full Control question waits for its owner. */
       credentialScreen?: CredentialScreenFact },
@@ -14085,6 +14094,11 @@ export class SessionsService {
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before requesting another decision", 409);
     if (!boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
       return fail("requestId and resourceKey are required bounded identifiers", 400);
+    }
+    // #4323: the server's merge closure reports are found again by their request id, so nobody else
+    // may claim one and stand in for a report.
+    if (request.requestId.startsWith(MERGE_CLOSURE_REPORT_REQUEST_PREFIX) && !internal?.trustedMergeClosureReport) {
+      return fail(`requestId may not start with ${MERGE_CLOSURE_REPORT_REQUEST_PREFIX}, which Wollipog reserves for its own reports`, 400);
     }
     const ownerRule = normalizeWorkflowDecisionOwnerRule(request.ownerRule);
     if (!ownerRule.ok) return fail(ownerRule.message, 400);

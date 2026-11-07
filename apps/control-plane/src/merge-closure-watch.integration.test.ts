@@ -368,6 +368,20 @@ test("a report owed when the control plane stopped is delivered exactly once aft
   assert.equal(f.watch(occurrenceId)!.reportPending, undefined);
 });
 
+test("no agent can claim a merge closure report's request id and stand in for the report (#4323)", async () => {
+  const f = fixture();
+  const { occurrenceId, forge } = f.consumedMerge(f.github(54));
+  const spoofed = f.svc.createWorkflowDecision("root", { requestId: `merge_closure_landed_${occurrenceId}`, resourceKey: "spoof",
+    resourceSnapshot: { category: "implementation_question", question: "Anything?", options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } });
+  assert.equal(spoofed.ok, false);
+  assert.match(spoofed.error!, /reserves for its own reports/u);
+  await f.pass();
+  forge.state = "merged";
+  forge.closures = [closure("owner/app#5", "Closes #5")];
+  await f.pass();
+  assert.equal(f.ownerQuestions().length, 1, "the real report reaches the owner");
+});
+
 test("watch targets put unstarted merges first, then the least recently updated, so none is starved (#4323)", async () => {
   const f = fixture();
   const ids = [f.consumedMerge(f.github(60)).occurrenceId, f.consumedMerge(f.github(61)).occurrenceId, f.consumedMerge(f.github(62)).occurrenceId];
