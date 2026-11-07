@@ -46,8 +46,13 @@ export type ForgeDecisionActionRefusalReason =
   /** The runner could not be asked. */
   | "runner_unavailable"
   /** A publication's fresh evidence or duplicate inspection no longer holds; nothing was created. */
-  | "publication_refused";
+  | "publication_refused"
+  /** #4120: the merge gained a cross-repository hold while it was being prepared; nothing was
+   * enqueued and the approval stands. Recorded by the control plane only, never by a runner, so it
+   * is not in `FORGE_DECISION_ACTION_REFUSAL_REASONS`. */
+  | "merge_held";
 
+/** The reasons a runner may report. */
 export const FORGE_DECISION_ACTION_REFUSAL_REASONS: readonly ForgeDecisionActionRefusalReason[] = [
   "tip_moved", "dependent_pull_request_open", "pull_request_mismatch", "closure_mismatch",
   "repository_mismatch", "forge_refused", "forge_unavailable", "runner_unavailable", "publication_refused",

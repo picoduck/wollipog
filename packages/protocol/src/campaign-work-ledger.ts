@@ -166,8 +166,9 @@ export interface CampaignMergeDependencyView {
   id: string;
   key: string;
   title: string | null;
-  /** The prerequisite's repository, lower-cased. */
-  repository: string;
+  /** The prerequisite's repository, lower-cased; null when none is known yet (#4120 then holds the
+   * dependent's merge in a campaign of several repositories). */
+  repository: string | null;
   status: CampaignMergeDependencyShownStatus;
   /** The pull requests the prerequisite names, each with its last observed state (`unknown` when
    * none can be shown). */
@@ -176,14 +177,22 @@ export interface CampaignMergeDependencyView {
 
 /** #4120: the fixed reason a merge is held on, naming the prerequisite and its pull request. The
  * approval stays valid; the requester consumes it again once the prerequisite merges. */
+/** #4120: why a merge is held. `outside`: the prerequisite names a pull request in no repository of
+ * the campaign, which no Location can read. */
+export type CampaignMergeHoldState = "open" | "closed" | "unobserved" | "none" | "cancelled" | "outside";
+
 export function campaignMergeHoldReason(hold: {
-  prerequisite: { key: string; repository: string };
+  prerequisite: { key: string; repository: string | null };
   pullRequest: CampaignPullRequestRef | null;
-  state: "open" | "closed" | "unobserved" | "none" | "cancelled";
+  state: CampaignMergeHoldState;
 }): string {
-  const item = `${hold.prerequisite.key} in ${hold.prerequisite.repository}`;
+  const item = `${hold.prerequisite.key} in ${hold.prerequisite.repository ?? "an unknown repository"}`;
   const pr = hold.pullRequest ? `${hold.pullRequest.repository}#${hold.pullRequest.number}` : null;
   switch (hold.state) {
+    case "outside":
+      return `Merge held: prerequisite pull request ${pr} (${item}) is in a repository outside this campaign's ` +
+        "repositories, so no Location of the campaign can observe it MERGED. The approval stays valid; report the hold " +
+        "to your Orchestrator, who can ask the owner to add that repository.";
     case "cancelled":
       return `Merge held: its prerequisite ${item} was cancelled or removed, so this merge is not attempted. ` +
         "The approval stays valid, but the work item is blocked; report it to your Orchestrator.";
