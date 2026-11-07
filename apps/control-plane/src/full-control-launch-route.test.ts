@@ -5731,7 +5731,9 @@ test("an owner/repo issue delivered by merged pull requests in owner/repo and ot
     f.hub.isRunnerOnline = (runnerId) => runnerId !== "r2" && online(runnerId);
     const refused = await f.sessions.executeGithubIssueClosure(id, decision.occurrenceId, decision.resourceDigest);
     assert.equal(refused.ok, false);
-    assert.match(refused.error!, /another campaign repository could not be confirmed merged/u);
+    assert.match(refused.error!, /could not be read; approval preserved/u);
+    assert.equal(f.sessions.workflowDecision(id, decision.occurrenceId).data?.status, "approved",
+      "an offline reader preserves the exact approval for retry");
     assert.deepEqual(closures.filter(({ message }) => message.operation !== "inspect"), [], "no closure was sent");
     f.hub.isRunnerOnline = online;
     reads.length = 0;
