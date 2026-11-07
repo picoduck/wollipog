@@ -150,6 +150,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.target_sha }}
+          # The protocol version ledger check compares HEAD with its first parent.
+          fetch-depth: 2
 
       - name: Verify Rolling Checkout
         if: inputs.target_sha != ''
@@ -246,6 +248,13 @@ jobs:
       - name: Verify Recommended Node Engine Boundary
         timeout-minutes: 1
         run: node scripts/check-node-engines.mjs "$RUNNER_TEMP/engine-pnpm-10/node_modules/pnpm/bin/pnpm.cjs" "$RUNNER_TEMP/engine-pnpm-current/node_modules/pnpm/bin/pnpm.cjs"
+
+      # #975: a protocol version this commit adds must be greater than the one it lands on. A pull
+      # request's merge commit, a merge-group commit and a rolling main commit each have that commit
+      # as their first parent, which the depth-2 checkout above provides. Commits without a claim pass.
+      - name: Check Protocol Version Ledger
+        timeout-minutes: 1
+        run: node scripts/protocol-version-ledger.mjs --base HEAD^1
 
       - name: Typecheck
         timeout-minutes: 6
