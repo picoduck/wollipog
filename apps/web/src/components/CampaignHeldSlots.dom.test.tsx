@@ -71,7 +71,7 @@ test("Held Slots names each held worker and why, and a release needs a confirmat
     assert.equal(open.textContent, "Release Slot");
     assert.ok(named(container, "Release Slot: s_worker_b"), "an untitled worker is named by its session");
     await act(async () => open.click());
-    assert.equal(container.querySelector("legend")?.textContent, "Release Slot for Implement #4145");
+    assert.equal(container.querySelector("legend")?.textContent, "Release Slot: Implement #4145");
     assert.match(container.textContent ?? "", /Releasing stops nothing: a provider that is still running keeps running outside the campaign's\s+concurrency allowance\./);
     assert.equal(container.querySelector("label span")?.textContent, "How You Checked");
     const input = container.querySelector<HTMLInputElement>("input[type=text]")!;

@@ -52,7 +52,7 @@ function ReleaseForm({ campaignId, slot, onDone, onCancel }: {
     }
   };
   return <fieldset className="field">
-    <legend>Release Slot for {name}</legend>
+    <legend>Release Slot: {name}</legend>
     <p>Release it only after you've checked that the worker's provider is gone, for example by rebooting its machine or
       removing its container. Releasing stops nothing: a provider that is still running keeps running outside the campaign's
       concurrency allowance. The worker's reservation settles at its final recorded usage.</p>
@@ -63,7 +63,7 @@ function ReleaseForm({ campaignId, slot, onDone, onCancel }: {
     </label>
     {error && <Notice tone="danger" role="alert" title="Couldn't Release the Slot">{error}</Notice>}
     <div>
-      <BusyButton className="btn sm danger" busy={busy} progress="Releasing slot…" onClick={() => void release()}
+      <BusyButton className="btn sm primary" busy={busy} progress="Releasing slot…" onClick={() => void release()}
         aria-label={`Release Slot: ${name}`}>Release Slot</BusyButton>{" "}
       <button className="btn ghost sm" type="button" disabled={busy} onClick={onCancel}>Cancel</button>
     </div>
