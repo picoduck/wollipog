@@ -947,10 +947,22 @@ test("a dependent verified delivered while its own pull request is open waits on
     assert.deepEqual(waiting.mergeDependencies!.map((dependency) => [dependency.status, dependency.pullRequests.map(({ ref }) => `${ref.repository}#${ref.number}`)]),
       [["unmerged", ["owner/api#7"]]]);
     assert.ok(unfinished().includes("app"));
+    // The wait after its verification counts as Waiting Time: an hour later, an hour more of it.
+    const HOUR_MS = 60 * 60_000;
+    const waitingAt = (at: number) => {
+      const metric = h.db.campaignWorkLedger.detail("root", h.item("app"), at)!.times!.waiting;
+      assert.notEqual(metric.availability, "unavailable");
+      return "value" in metric ? metric.value : NaN;
+    };
+    const verifiedAt = Date.now();
+    assert.equal(waitingAt(verifiedAt + HOUR_MS) - waitingAt(verifiedAt), HOUR_MS);
     // It closes without merging: blocked, and this item's merge is never attempted.
     h.forge.set("owner/api#7", pull("closed"));
     const blocked = await read();
     assert.deepEqual([blocked.primaryState, blocked.stateCauses], ["blocked", ["dependency_blocked"]]);
+    // Blocked counts as Waiting Time too.
+    const blockedAt = Date.now();
+    assert.equal(waitingAt(blockedAt + HOUR_MS) - waitingAt(blockedAt), HOUR_MS);
     // Its own pull request merged (here despite the hold, say by a person on the forge): delivered,
     // finished, whatever the prerequisite does.
     h.forge.set("owner/app#5", pull("merged"));

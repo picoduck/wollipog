@@ -571,7 +571,7 @@ only the open attempt.
 | Campaign Elapsed | Root creation to verified campaign completion, or now while unfinished. Never a sum of item durations: two concurrent ten-minute items take about ten minutes. |
 | Item Elapsed | First attempt start to the delivered verification, or now while unfinished, including intervening waits. Planned items without an attempt show their recorded age instead. |
 | Queue Time | Recorded intervals in which the item was `queued`. |
-| Waiting Time | Recorded intervals in which the item was `waiting` or `blocked`. |
+| Waiting Time | Recorded intervals in which the item was `waiting` or `blocked`. A verified item held on a merge dependency (#4120) counts from its verification while the hold lasts; once its own pull requests merge it reads delivered from its verification, since when the merge happened isn't recorded. |
 | Active Time | Recorded intervals within an attempt while its session was running. |
 
 Queue, Waiting, and Active Time come from durable intervals recorded by slice 6, kept independent

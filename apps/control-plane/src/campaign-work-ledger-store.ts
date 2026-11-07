@@ -526,6 +526,9 @@ interface LedgerSnapshot {
   handoffs: Map<string, HandoffRow>;
   deliveries: Map<string, DeliveryRow[]>;
   derived: Map<string, CampaignWorkItemDerivedState>;
+  /** #4120: items with a delivered verification whose state is not delivered, since their own pull
+   * requests have not merged and a merge dependency holds them. */
+  verifiedHeld: ReadonlySet<string>;
   /** #4120: each item's repository, and its prerequisites in other repositories. */
   repositories: Map<string, string | null>;
   mergePrerequisites: Map<string, CampaignMergePrerequisite[]>;
@@ -2094,6 +2097,9 @@ export class CampaignWorkLedgerStore {
         ...(mergePrerequisites.get(item.id)?.length ? { ownPullRequestsMerged: ownPullRequestsMerged(item.id) } : {}),
       };
     });
+    const derived = deriveCampaignWorkItemStates(records);
+    const verifiedHeld = new Set(records.filter((record) => record.latestAttempt?.delivered && !record.recordedDelivery &&
+      derived.get(record.id)?.state !== "delivered" && record.commitment === "committed").map((record) => record.id));
     return {
       revision: ledger?.revision ?? 0,
       planState: ledger?.plan_state ?? "not_recorded",
@@ -2104,7 +2110,8 @@ export class CampaignWorkLedgerStore {
       verifications,
       handoffs,
       deliveries,
-      derived: deriveCampaignWorkItemStates(records),
+      derived,
+      verifiedHeld,
       repositories,
       mergePrerequisites,
       prerequisitesOf,
@@ -2143,11 +2150,19 @@ export class CampaignWorkLedgerStore {
     now: number): CampaignWorkItemTimes {
     const transitions = this.accounting.itemTransitions(campaignId);
     const statuses = this.accounting.attemptStatuses(campaignId);
+    // #4120: a verified item held on a merge dependency since its verification (the live state says so).
+    const heldAfterDelivery = (id: string): "unmerged" | "failed" | undefined => {
+      const derived = snapshot.derived.get(id);
+      if (!derived || derived.state === "delivered") return undefined;
+      return derived.causes.includes("dependency_blocked") && derived.state === "blocked" && snapshot.verifiedHeld.has(id) ? "failed"
+        : derived.causes.includes("dependency_unmerged") && snapshot.verifiedHeld.has(id) ? "unmerged" : undefined;
+    };
     const timelines = campaignItemTimelines(snapshot.items.map((candidate) => ({
       id: candidate.id,
       createdAt: candidate.created_at,
       transitions: transitions.get(candidate.id) ?? [],
       dependsOn: snapshot.dependencies.get(candidate.id) ?? [],
+      ...(heldAfterDelivery(candidate.id) ? { heldAfterDelivery: heldAfterDelivery(candidate.id) } : {}),
       attempts: (snapshot.attempts.get(candidate.id) ?? []).map((attempt) => ({
         ordinal: attempt.ordinal,
         startedAt: attempt.started_at,
