@@ -280,11 +280,16 @@ function deliveryCandidates(db: ControlPlaneDb, root: SessionView, item: Campaig
   return [...candidates.values()];
 }
 
-/** Every pull request a completed closure of this issue would read, for an on-demand refresh. */
+/** Every pull request a completed closure of this issue would read, for an on-demand refresh. One in
+ * a repository outside the proof's (#4120) is left out: no runner holding a Location of that
+ * repository could read it, and the root's login never stands in. The proof still names it as a gap. */
 export function closureCandidateRefs(db: ControlPlaneDb, root: SessionView, issue: number,
   repository: string | undefined = root.orchestratorPolicy?.issueScope?.repository): CampaignPullRequestRef[] {
+  const proof = proofRepositories(root, repository?.toLowerCase());
   const refs = new Map<string, CampaignPullRequestRef>();
-  for (const item of issueWork(db, root, issue, repository)) for (const { ref } of deliveryCandidates(db, root, item, issue, repository)) refs.set(forgeRefKey(ref), ref);
+  for (const item of issueWork(db, root, issue, repository)) for (const { ref } of deliveryCandidates(db, root, item, issue, repository)) {
+    if (proof.has(ref.repository.toLowerCase())) refs.set(forgeRefKey(ref), ref);
+  }
   return [...refs.values()];
 }
 

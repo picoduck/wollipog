@@ -6370,12 +6370,16 @@ export class ControlPlaneDb {
           WHERE v.campaign_session_id=? AND v.work_item_id=? ORDER BY v.rowid DESC LIMIT 1`)
           .get(campaignId, item.id) as { outcome: "delivered" | "incomplete" } | undefined;
         if (verification?.outcome === "incomplete") unfinished = true;
+        // #4120: a verified item still listed unfinished, with no attempt open, is held by a merge
+        // dependency: its own pull requests haven't all merged. It stays unfinished until the ledger
+        // reads it delivered, whatever this loop could prove from one repository's merges; its pull
+        // requests still go through the loop below, so a repair they're eligible for is found.
+        if (verification?.outcome === "delivered" && !item.currentAttempt) unfinished = true;
         // A stale grant cannot establish delivery or admit a forge/review repair.
         // Only completion truth is retained; the existing admission still fences all effects.
         if (!boundaryCurrent) continue;
-        // Only items without a delivered verification reach here: a verified-delivered item is already
-        // finished, whichever campaign repository its pull request is in (#4120). An unverified item
-        // is finished only by a merge in its issue's own repository, never by another one's (#4119).
+        // An unverified item is finished only by a merge in its issue's own repository, never by
+        // another one's (#4119).
         const itemRepository = item.issue.repository.toLowerCase();
         const refs = item.stage?.pullRequests.filter(ref => ref.repository.toLowerCase() === itemRepository) ?? [];
         if (refs.length === 0) { unfinished = true; continue; }
@@ -6495,6 +6499,11 @@ export class ControlPlaneDb {
         return bound?.category === "campaign_follow_up_admission" ? this.bindCampaignFollowUp(campaignId, workItemId, bound.subject, content) : null;
       },
       forgePullRequests: (campaignId, refs, now) => this.campaignForgeObservations.facts(campaignId, refs, now),
+      consumedPullRequestMerges: (sessionIds) => this.consumedPullRequestMerges(sessionIds).flatMap((decision) => {
+        const gate = decision.resourceSnapshot;
+        return gate.category === "pr_merge" ? [{ sessionId: decision.sessionId, createdAt: decision.createdAt, repository: gate.repository,
+          pullRequest: gate.pullRequest, headSha: gate.headSha, ...(gate.intendedClosures ? { intendedClosures: gate.intendedClosures } : {}) }] : [];
+      }),
       sessionRepository: (campaignId, sessionId) => this.campaignSessionRepository(campaignId, sessionId),
       armedMerge: (sessionId) => this.stmt(`SELECT 1 FROM workflow_decisions WHERE session_id=? AND category='pr_merge'
         AND status='approved' AND action_kind='pr_merge_enqueue' AND action_armed_at IS NOT NULL LIMIT 1`).get(sessionId) !== undefined,

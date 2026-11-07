@@ -861,7 +861,7 @@ test("while a session's armed merge is held, Claude's policy hook denies its she
     await h.observer.readNow("root", [{ repository: "owner/api", number: 7 }]);
     const denied = hook("bash-2", "Bash");
     assert.equal(denied.data?.decision, "deny");
-    assert.match(denied.data?.reason ?? "", /^Merge held until prerequisite pull request owner\/api#7 \(api in owner\/api\) is observed MERGED; it is not freshly observed\..* Shell commands are blocked until then/su);
+    assert.match(denied.data?.reason ?? "", /^Merge held until prerequisite pull request owner\/api#7 \(api in owner\/api\) is observed MERGED; it is not freshly observed\..* Command tools are blocked while this session.s armed merge is held/su);
     const watch = h.db.pullRequestWatches.visibleFor("app")!;
     assert.deepEqual([watch.repository, watch.number, watch.state], ["owner/api", 7, "watching"], "parked on the prerequisite");
     // Every tool that can run a command is denied too; other tools are not affected, and the approval stays armed.
@@ -1096,6 +1096,9 @@ test("an armed merge held for good denies the session's command tools, and a new
     const denied = hook("bash-closed");
     assert.equal(denied.data?.decision, "deny");
     assert.match(denied.data?.reason ?? "", /^Merge held: prerequisite pull request owner\/api#7 \(api in owner\/api\) was closed without merging/u);
+    // It names the way out, through the MCP tool, since the CLI would need the denied shell.
+    assert.match(denied.data?.reason ?? "", /request a new pr_merge decision for the same pull request with the request_workflow_decision tool, which replaces the armed one\./u);
+    assert.match(denied.data?.reason ?? "", /\(the CLI needs the shell\)/u);
     // An armed merge can't be withdrawn, since its command may already have run...
     const withdrawn = h.svc.withdrawWorkflowDecision("app", merge.occurrenceId, { reason: "Its prerequisite closed" });
     assert.equal(withdrawn.status, 409);
@@ -1109,5 +1112,77 @@ test("an armed merge held for good denies the session's command tools, and a new
     const after = hook("bash-after").data;
     assert.notEqual(after?.decision, "deny", "no longer held: ordinary governance decides again");
     assert.doesNotMatch(after?.reason ?? "", /Merge held/u);
+  } finally { h.observer.dispose(); h.db.close(); }
+});
+
+/** #4120: verify the app child's delivery of its item, its report timed after `before` runs. */
+async function verifyAppDelivered(h: Awaited<ReturnType<typeof fixture>>, before: () => void = () => undefined) {
+  h.db.updateSessionStatus("app", "idle", Date.now());
+  before();
+  const report = h.db.appendEvent("app", { kind: "agent_message", text: "Merged.", final: true }, Date.now() + 1).seq;
+  const verified = h.svc.verifyCampaignChild("root", { childSessionId: "app", reportEventSeq: report, followUpsAccounted: true,
+    workItem: { id: h.item("app"), outcome: "delivered" } });
+  assert.ok(verified.ok, verified.error ?? "verified");
+}
+
+test("a dependent merged through a consumed gate is delivered even when its stage names no pull request, as closure proof reads it (#4120)", async () => {
+  const h = await fixture();
+  try {
+    h.forge.set("owner/api#7", pull("open"));
+    h.forge.set("owner/app#5", pull("merged"));
+    await verifyAppDelivered(h, () => {
+      // The app child's merge of owner/app#5 went through a consumed gate inside its attempt.
+      h.db.raw().prepare(`INSERT INTO workflow_decisions(request_id,occurrence_id,session_id,controlling_session_id,
+        category,resource_key,resource_snapshot,resource_digest,policy_revision,authority,status,created_at,resolved_at,consumed_at)
+        VALUES ('merge-5','merge-5','app','root','pr_merge','owner/app#5',?,'digest',1,'orchestrator','consumed',?,?,?)`)
+        .run(JSON.stringify({ category: "pr_merge", repository: "owner/app", pullRequest: 5, headSha: "e".repeat(40), reviewResult: "merge",
+          requiredChecks: { headSha: "e".repeat(40), status: "passed", checkedAt: Date.now(), checks: [{ name: "CI", state: "passed" }] } }),
+        Date.now(), Date.now(), Date.now());
+    });
+    await h.observer.readNow("root", [{ repository: "owner/app", number: 5 }, { repository: "owner/api", number: 7 }]);
+    assert.equal(h.detail("app").stage, null, "its stage names nothing");
+    assert.deepEqual([h.detail("app").primaryState, h.detail("app").stateCauses], ["delivered", []]);
+  } finally { h.observer.dispose(); h.db.close(); }
+});
+
+test("a dependent's closed, unmerged pull request doesn't count against it when another merged; an open one still does (#4120)", async () => {
+  const h = await fixture();
+  try {
+    h.forge.set("owner/api#7", pull("open"));
+    h.forge.set("owner/app#5", pull("merged"));
+    h.forge.set("owner/app#6", pull("closed"));
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item("app"), stage: { stage: "merged",
+      pullRequests: [{ repository: "owner/app", number: 5 }, { repository: "owner/app", number: 6 }] } }).ok);
+    await verifyAppDelivered(h);
+    const read = async () => { await h.observer.readNow("root", [{ repository: "owner/app", number: 5 }, { repository: "owner/app", number: 6 },
+      { repository: "owner/api", number: 7 }]); return h.detail("app"); };
+    assert.equal((await read()).primaryState, "delivered", "the closed one is set aside");
+    h.forge.set("owner/app#6", pull("open"));
+    const open = await read();
+    assert.deepEqual([open.primaryState, open.stateCauses], ["waiting", ["dependency_unmerged"]], "an open one still waits");
+  } finally { h.observer.dispose(); h.db.close(); }
+});
+
+test("a dependent's merge stays known when a later read fails, while a hold on an unreadable prerequisite still holds (#4120)", async () => {
+  const h = await fixture();
+  try {
+    h.forge.set("owner/api#7", pull("merged"));
+    h.forge.set("owner/app#5", pull("merged"));
+    h.stage("app", "owner/app", 5);
+    await verifyAppDelivered(h);
+    const both = [{ repository: "owner/app", number: 5 }, { repository: "owner/api", number: 7 }];
+    await h.observer.readNow("root", both);
+    assert.equal(h.detail("app").primaryState, "delivered");
+    // Both reads now fail: the stored merge of owner/app#5 still counts for the item...
+    h.forge.delete("owner/app#5");
+    h.forge.delete("owner/api#7");
+    await h.observer.readNow("root", both);
+    const [fact] = h.db.campaignForgeObservations.facts("root", [both[0]!], Date.now());
+    assert.equal(fact!.fact.availability, "unavailable");
+    assert.deepEqual([h.detail("app").primaryState, h.detail("app").stateCauses], ["delivered", []]);
+    // ...while a merge held on the unreadable prerequisite still holds, failing closed.
+    const held = await h.approvedMerge("app", "owner/app", 5).arm();
+    assert.equal(held.status, 409, held.error ?? "armed");
+    assert.match(held.error!, /owner\/api#7 \(api in owner\/api\) is observed MERGED; it is not freshly observed/u);
   } finally { h.observer.dispose(); h.db.close(); }
 });

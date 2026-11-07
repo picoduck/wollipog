@@ -3051,8 +3051,10 @@ export class SessionsService {
         if (this.db.pullRequestWatches.visibleFor(sessionId)?.state !== "watching") {
           this.mergeHeld(session, heldArmed.decision.occurrenceId, heldArmed.held);
         }
-        return ok({ decision: "deny", reason: `${campaignMergeHoldReason(heldArmed.held.hold)} Shell commands are blocked until then, ` +
-          "since this session's armed merge must not run." });
+        return ok({ decision: "deny", reason: `${campaignMergeHoldReason(heldArmed.held.hold)} Command tools are blocked while ` +
+          "this session's armed merge is held, since it must not run. If its prerequisite can never merge, request a new pr_merge " +
+          "decision for the same pull request with the request_workflow_decision tool (the CLI needs the shell), which replaces " +
+          "the armed one and lifts this." });
       }
     }
     if (!parsed.value.toolUseId) {

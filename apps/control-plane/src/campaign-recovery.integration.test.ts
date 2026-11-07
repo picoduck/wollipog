@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { BACKGROUND_JOB_STALL_MS, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
   type CampaignBudgetAuthority, type CampaignForgePullRequestObservation, type PendingApproval, type RunnerMetadata,
-  type SessionSnapshot } from "@wollipog/protocol";
+  type GithubIssueClosureSnapshot, type SessionSnapshot } from "@wollipog/protocol";
+import { closureDeliveryGaps } from "./campaign-issue-authority.js";
 import { ControlPlaneDb, RUNNER_REPORTED_STOP } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
@@ -1800,4 +1801,75 @@ test("pause, archive, revocation and denial still prevent replacing a stopped wo
       }
     } finally { h.db.close(); }
   }
+});
+
+/** #4120: team/api joins the boundary; the delivered item #2938 depends on a team/api item outside
+ * the issue scope, so only #2938 decides completion. */
+function heldDeliveryFixture() {
+  const h = mergedWorkVerificationFixture("delivered");
+  const policy = h.db.getSession("root")!.orchestratorPolicy!;
+  if (policy.control?.mode !== "full_control") throw new Error("fixture control expected");
+  policy.control.boundary.repositories = [{ repository: "picoduck/wollipog", locationIds: [] }, { repository: "team/api", locationIds: [] }];
+  // The campaign may prove its own closures, so the proof's gaps can be read.
+  const boundary = policy.control.boundary;
+  boundary.operations = [...new Set([...boundary.operations, "issue_closure" as const])];
+  boundary.issueAuthority = { ...(boundary.issueAuthority ?? { epics: [], relatedFollowUps: false, maxIssues: 10 }),
+    closureReasons: ["completed"] } as NonNullable<typeof boundary.issueAuthority>;
+  h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
+  const planned = h.svc.recordCampaignPlan("root", { planComplete: true, items: [{ key: "api:60", issue: { repository: "team/api", number: 60 } }] });
+  assert.ok(planned.ok, planned.error ?? "plan refused");
+  const prerequisite = planned.data!.items.find((item) => item.key === "api:60")!.workItemId;
+  assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.workItemId, dependsOn: [prerequisite] }).ok);
+  const completion = () => h.db.campaignRecoveryCompletion("root", h.now).state;
+  const detail = () => h.db.campaignWorkLedger.detail("root", h.workItemId, h.now)!;
+  return { ...h, prerequisite, completion, detail };
+}
+
+test("a verified item held on its own open pull request in another repository keeps the campaign unfinished (#4120)", () => {
+  const h = heldDeliveryFixture();
+  try {
+    // #2938 names its merged picoduck/wollipog#3068 and an open team/api#9; its prerequisite hasn't merged.
+    const api = { repository: "team/api", number: 9 };
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.workItemId, stage: { stage: "merged", pullRequests: [h.ref, api] } }).ok);
+    h.db.campaignForgeObservations.record("root", "r2", [{ ref: api, observation: { ...h.observation, state: "open", mergeCommitSha: null } }], h.now);
+    assert.deepEqual([h.detail().primaryState, h.detail().stateCauses], ["waiting", ["dependency_unmerged"]]);
+    assert.equal(h.completion(), "recovery_held", "its own-repository merge alone doesn't finish it");
+  } finally { h.db.close(); }
+});
+
+test("a merged item whose prerequisite failed, and whose latest read failed, is delivered: closure proof and completion agree (#4120)", () => {
+  const h = heldDeliveryFixture();
+  try {
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.prerequisite, commitment: { state: "cancelled", reason: "Dropped" } }).ok);
+    // The merged picoduck/wollipog#3068 is read again, and that read fails: the merge stands.
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref, failure: "forge_unreachable" }], h.now);
+    assert.equal(h.db.campaignForgeObservations.facts("root", [h.ref], h.now)[0]!.fact.availability, "unavailable");
+    assert.deepEqual([h.detail().primaryState, h.detail().stateCauses], ["delivered", []]);
+    const root = h.db.getSession("root")!;
+    const snapshot = { category: "issue_closure", repository: "picoduck/wollipog", issue: 2938, title: "Work",
+      url: "https://github.com/picoduck/wollipog/issues/2938", forgeDigest: "a".repeat(64), reason: "completed", explanation: "Merged.",
+      evidence: ["Merged."], openPullRequests: [], activeChildren: [], delivery: [] } as unknown as GithubIssueClosureSnapshot;
+    const gaps = closureDeliveryGaps(h.db, root, snapshot, { proven: false, commentSafe: true });
+    assert.ok(gaps, "the campaign may prove closures");
+    assert.ok(!gaps.some((gap) => gap.code === "work_item_not_delivered"), JSON.stringify(gaps));
+    // Once the read answers again, the campaign completes.
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref, observation: h.observation }], h.now);
+    assert.equal(h.completion(), "complete");
+  } finally { h.db.close(); }
+});
+
+test("a verified item held on a merge dependency still admits an independently eligible failed-check repair of its own pull request (#4120)", () => {
+  const h = heldDeliveryFixture();
+  try {
+    // Its own picoduck/wollipog#3068 is open again with failing checks; its prerequisite hasn't merged.
+    const checks = { state: "failing" as const, failing: 1, passing: 0, pending: 0 };
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref,
+      observation: { ...h.observation, state: "open", mergeCommitSha: null, checks, requiredChecks: checks } }], h.now);
+    assert.deepEqual([h.detail().primaryState, h.detail().stateCauses], ["waiting", ["dependency_unmerged"]]);
+    h.recovery.maintain(h.now);
+    const completion = h.db.campaignRecoveryCompletion("root", h.now);
+    assert.equal(completion.state, "recovery_ready");
+    assert.equal(completion.recoveryIds.length, 1);
+    assert.equal(h.db.campaignRecovery.activeRecords("root").find((record) => record.id === completion.recoveryIds[0])!.action, "repair_checks");
+  } finally { h.db.close(); }
 });

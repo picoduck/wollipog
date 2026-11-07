@@ -271,13 +271,21 @@ possible later work.
   merge. While a dependent with merge dependencies has its own pull requests unmerged, a verified
   report doesn't make it delivered: it reads **waiting** with `dependency_unmerged` while a
   prerequisite has yet to merge, and **blocked** with `dependency_blocked` once one can never merge.
-  Either way it stays unfinished, so campaign completion and its dependents wait for it. Once every
-  pull request it names is observed MERGED, it is delivered whatever its prerequisites do, as is an
-  item with a recorded delivery (#4070), which is itself a merge.
+  Either way it stays unfinished, so campaign completion and its dependents wait for it; the
+  completion loop keeps such an item unfinished rather than judging it from one repository's merges.
+  Once its own merge happened it is delivered whatever its prerequisites do, as is an item with a
+  recorded delivery (#4070), which is itself a merge. Its own merge is judged as closure proof judges
+  delivery: the candidates are the pull requests it names and those a delivered attempt merged
+  through a consumed `pr_merge` gate (at a head the gate approved); one closed without merging is set
+  aside, every other must have merged, and at least one must have. Unlike the proof it needs no fresh
+  read: a stored MERGED counts as it ages, and a later read that failed doesn't undo it. Holds still
+  fail closed on a stale or unreadable prerequisite.
 - **An armed merge held for good.** An armed `pr_merge` can't be withdrawn, since its command may
   already have run; one whose prerequisite can never merge keeps the session's command tools denied
   at Claude's policy hook. A new `pr_merge` request for the same pull request supersedes it, which
-  restores them; the new request is decided like any other.
+  restores them; the new request is decided like any other. The hold reason and the policy hook's
+  denial both name that way out, through the `request_workflow_decision` tool, since the CLI form
+  needs the denied shell.
 - **Display.** Each item lists its merge dependencies (`mergeDependencies`) with their repository
   (null when unknown, shown as Unknown Repository), status (`merged`, `unmerged`, `failed`) and pull
   requests. A merge already observed stays merged as its observation ages, since a forge never
@@ -291,8 +299,9 @@ possible later work.
   prerequisites, so a delivered prerequisite keeps being read until it merges or closes, and every
   prerequisite pull request a held merge is parked on, whatever state its items are in (a merge of a
   finished item's pull request is held too); a pull request outside the campaign's repositories is
-  never read. With no Location of the prerequisite's
-  repository online, its facts read `unavailable` and the hold stays.
+  never read, nor is one a closure's on-demand refresh would otherwise read through the root's login
+  (the proof still names it, as `pull_request_outside_repository`). With no Location of the
+  prerequisite's repository online, its facts read `unavailable` and the hold stays.
 
 The Orchestrator states "not safe to land alone" by recording the dependency; items without one
 merge independently, in any order.

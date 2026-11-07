@@ -5942,6 +5942,8 @@ test("an owner/repo issue's closure proof reads the real ledger, and another rep
     assert.equal(outside.data!.decision!.authority, "human", JSON.stringify(outside.data!.decision!.authorityEvaluation));
     const outsideGaps = (outside.data!.decision!.resourceSnapshot as GithubIssueClosureSnapshot).deliveryGaps;
     assert.deepEqual(outsideGaps?.map((gap) => [gap.code, gap.workItemId, gap.pullRequests]), [["pull_request_outside_repository", item("api"), [30]]]);
+    // The closure's refresh never asks any runner, the root's least of all, to read it (#4120).
+    assert.deepEqual(reads.filter((read) => read.refs.includes("third/repo#30")), [], "no forge request for a pull request outside the boundary");
     observer.dispose();
   } finally { await server.close(); f.db.close(); }
 });

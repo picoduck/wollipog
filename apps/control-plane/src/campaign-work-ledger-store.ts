@@ -421,6 +421,10 @@ export interface CampaignWorkLedgerHooks {
    * only; the read routes narrow it for readers who may not see the observing runner. */
   forgePullRequests?(campaignId: string, refs: readonly CampaignPullRequestRef[], now: number):
     NonNullable<CampaignWorkItemDetail["observed"]["pullRequests"]>;
+  /** #4120: the consumed `pr_merge` gates these sessions passed, as closure proof reads them
+   * (`deliveryCandidates`), so a dependent's own merge is judged the same way. */
+  consumedPullRequestMerges?(sessionIds: readonly string[]): Array<{ sessionId: string; createdAt: number; repository: string;
+    pullRequest: number; headSha: string; intendedClosures?: readonly string[] }>;
   /** #4120: the campaign repository whose Location this session is placed in, lower-cased, or null.
    * A server fact (#4119), never agent text. Reads rows only. */
   sessionRepository?(campaignId: string, sessionId: string): string | null;
@@ -2064,14 +2068,50 @@ export class CampaignWorkLedgerStore {
       for (const itemId of dependents) for (const record of prerequisitesOf(itemId, [pullRequest.repository.toLowerCase()])) found.set(record.id, record);
       return [...found.values()];
     };
-    // #4120: whether a dependent's own pull requests have merged, which decides whether a verified
-    // report is delivered or still waits on its prerequisites. A merge stays a merge as it ages; a
-    // pull request outside the campaign's repositories, or one no read has answered, is not known merged.
+    // #4120: whether a dependent's own merge happened, which decides whether a verified report is
+    // delivered or still waits on its prerequisites. It agrees with closure proof (`deliveryCandidates`,
+    // `itemDelivered` in campaign-issue-authority.ts): the candidates are the pull requests the item
+    // names and those a delivered attempt merged through a consumed gate; one closed without merging
+    // is set aside, any other must have merged (a gated one at a head its gate approved), and at least
+    // one must have. Unlike the proof it needs no fresh read: a merge stays a merge as it ages, and a
+    // read that failed since doesn't undo the merged value stored. In a repository outside the proof's,
+    // or never read, nothing is known merged.
     const ownPullRequestsMerged = (itemId: string): boolean => {
-      const refs = itemInputs.get(itemId)!.pullRequests;
-      if (!refs.length || refs.some((ref) => campaignRepositories.length && !campaignRepositories.includes(ref.repository.toLowerCase()))) return false;
+      const row = byId.get(itemId);
+      if (!row) return false;
+      const issue = issueOf(row.issue_repository, row.issue_number);
+      const proof = new Set([...campaignRepositories, ...(issue ? [issue.repository.toLowerCase()] : [])]);
+      const candidates = new Map<string, { ref: CampaignPullRequestRef; heads: string[] }>(
+        itemInputs.get(itemId)!.pullRequests.map((ref) => [forgeRefKeyOf(ref), { ref, heads: [] }]));
+      const itemAttempts = attempts.get(itemId) ?? [];
+      const windows = (verifications.get(itemId) ?? []).flatMap((verification) => {
+        const attempt = verification.outcome === "delivered" ? itemAttempts.find((candidate) => candidate.id === verification.attempt_id) : undefined;
+        const until = verification.report_ts ?? attempt?.ended_at;
+        return attempt?.session_id && attempt.session_id === verification.child_session_id && until !== null && until !== undefined
+          ? [{ sessionId: attempt.session_id, from: attempt.started_at, until }] : [];
+      });
+      const issueKey = issue ? `${issue.repository}#${issue.number}`.toLowerCase() : null;
+      for (const gate of windows.length ? this.hooks.consumedPullRequestMerges?.(windows.map((window) => window.sessionId)) ?? [] : []) {
+        if (!proof.has(gate.repository.toLowerCase()) ||
+            !windows.some((window) => window.sessionId === gate.sessionId && gate.createdAt >= window.from && gate.createdAt <= window.until) ||
+            gate.intendedClosures?.length && !gate.intendedClosures.some((closure) => closure.toLowerCase() === issueKey)) continue;
+        const ref = { repository: gate.repository, number: gate.pullRequest };
+        candidates.set(forgeRefKeyOf(ref), { ref, heads: [...(candidates.get(forgeRefKeyOf(ref))?.heads ?? []), gate.headSha] });
+      }
+      const refs = [...candidates.values()].map(({ ref }) => ref);
+      if (!refs.length || refs.some((ref) => proof.size && !proof.has(ref.repository.toLowerCase()))) return false;
       const facts = this.hooks.forgePullRequests?.(campaignId, refs, now) ?? [];
-      return facts.length === refs.length && facts.every(({ fact }) => fact.availability !== "unavailable" && fact.value.state === "merged");
+      if (facts.length !== refs.length) return false;
+      let merged = 0;
+      for (const { ref, fact } of facts) {
+        const value = fact.availability === "unavailable" ? fact.lastValue : fact.value;
+        if (!value) return false;
+        if (value.state === "closed") continue;
+        const heads = candidates.get(forgeRefKeyOf(ref))!.heads;
+        if (value.state !== "merged" || !value.mergeCommitSha || (heads.length && !heads.includes(value.headSha))) return false;
+        merged += 1;
+      }
+      return merged > 0;
     };
     const observations = new Map<string, CampaignAttemptSessionObservation | null>();
     const records = items.map((item) => {

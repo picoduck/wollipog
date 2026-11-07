@@ -175,12 +175,17 @@ export interface CampaignMergeDependencyView {
   pullRequests: Array<{ ref: CampaignPullRequestRef; state: "open" | "closed" | "merged" | "unknown" }>;
 }
 
-/** #4120: the fixed reason a merge is held on, naming the prerequisite and its pull request. The
- * approval stays valid; the requester consumes it again once the prerequisite merges. */
 /** #4120: why a merge is held. `outside`: the prerequisite names a pull request in no repository of
  * the campaign, which no Location can read. */
 export type CampaignMergeHoldState = "open" | "closed" | "unobserved" | "none" | "cancelled" | "outside";
 
+/** #4120: the way out of an armed merge held for good. An armed merge can't be withdrawn, and the CLI
+ * form needs the shell its hold denies, so this names the MCP tool. */
+const HELD_FOR_GOOD_EXIT = "If you already armed this merge, it stays held and your command tools stay blocked; " +
+  "request a new pr_merge decision for the same pull request with the request_workflow_decision tool, which replaces the armed one.";
+
+/** #4120: the fixed reason a merge is held on, naming the prerequisite and its pull request. The
+ * approval stays valid; the requester consumes it again once the prerequisite merges. */
 export function campaignMergeHoldReason(hold: {
   prerequisite: { key: string; repository: string | null };
   pullRequest: CampaignPullRequestRef | null;
@@ -192,13 +197,13 @@ export function campaignMergeHoldReason(hold: {
     case "outside":
       return `Merge held: prerequisite pull request ${pr} (${item}) is in a repository outside this campaign's ` +
         "repositories, so no Location of the campaign can observe it MERGED. The approval stays valid; report the hold " +
-        "to your Orchestrator, who can ask the owner to add that repository.";
+        `to your Orchestrator, who can ask the owner to add that repository. ${HELD_FOR_GOOD_EXIT}`;
     case "cancelled":
       return `Merge held: its prerequisite ${item} was cancelled or removed, so this merge is not attempted. ` +
-        "The approval stays valid, but the work item is blocked; report it to your Orchestrator.";
+        `The approval stays valid, but the work item is blocked; report it to your Orchestrator. ${HELD_FOR_GOOD_EXIT}`;
     case "closed":
       return `Merge held: prerequisite pull request ${pr} (${item}) was closed without merging, so this merge is not ` +
-        "attempted. The approval stays valid, but the work item is blocked; report it to your Orchestrator.";
+        `attempted. The approval stays valid, but the work item is blocked; report it to your Orchestrator. ${HELD_FOR_GOOD_EXIT}`;
     case "none":
       return `Merge held: prerequisite ${item} names no pull request yet, so it can't be observed MERGED. The approval ` +
         "stays valid; report the hold to your Orchestrator and consume it again once the prerequisite merges.";
