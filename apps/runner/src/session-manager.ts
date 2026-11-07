@@ -5,7 +5,7 @@ import { shellGuidance } from "./shell-guidance.js";
 import { restartResumeId } from "./restart-resume.js";
 import { campaignOperationEvidenceCurrent } from "./campaign-operation-evidence.js";
 import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
-import { type BackgroundFollowUpView, CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, isTerminal } from "@wollipog/protocol";
+import { type BackgroundFollowUpView, type CampaignRetirementHold, CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, isTerminal } from "@wollipog/protocol";
 import { CampaignIssueScopeRefusal, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
 import { launchOrchestratorMeta, nextCampaignControl, validControlRevision } from "./campaign-control-order.js";
 import { boundedIssueNumbers, campaignBoundaryRepository, campaignRepositoryLocation, parseFullControlAutomaticResponse, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
@@ -1685,6 +1685,9 @@ export class SessionManager {
   /** Fences an earlier runner process left for a generation this process has providers of again
    * (#3788). Nothing this process proves covers that earlier provider, so they are never lifted. */
   private readonly inheritedFences = new Map<string, string>();
+  /** Fences this runner process set itself (#4331): it may still prove them, at the latest when a
+   * shutdown reaps every provider tree, so they are never reported as a hold no process can lift. */
+  private readonly fencesSetHere = new Map<string, string>();
   /** The process evidence a fence records, and the proof that an earlier runner process is gone (#4256). */
   private retirementProof: RetirementProcessProof = leaseRetirementProcessProof();
   private earlierRunnerProofTimer: ReturnType<typeof setTimeout> | null = null;
@@ -6006,7 +6009,9 @@ export class SessionManager {
         protocolVersion,
       ), protocolVersion);
       const meta = runnerSupportsProtocol(protocolVersion, "backgroundFollowUp") ? this.store.readMeta(snapshot.id) : null;
-      return meta ? { ...projected, backgroundFollowUp: this.backgroundFollowUp(meta) } : projected;
+      // A reconnect is where an earlier process's fence is first reported (#4331).
+      const hold = meta && runnerSupportsProtocol(protocolVersion, "campaignRetirementHold") ? this.campaignRetirementHold(meta) : {};
+      return meta ? { ...projected, backgroundFollowUp: this.backgroundFollowUp(meta), ...hold } : projected;
     });
   }
 
@@ -6053,6 +6058,7 @@ export class SessionManager {
         ? { providerHomeWait: this.providerHomeWaits.get(meta.sessionId)?.view ?? null } : {}),
       ...(runnerSupportsProtocol(protocolVersion, "worktreeSwitchStatus")
         ? { worktreeSwitch: this.publishedWorktreeSwitches.get(meta.sessionId) ?? null } : {}),
+      ...(runnerSupportsProtocol(protocolVersion, "campaignRetirementHold") ? this.campaignRetirementHold(meta) : {}),
     };
   }
 
@@ -19348,6 +19354,20 @@ export class SessionManager {
     });
   }
 
+  /** The ended worker's fence that no runner process can ever lift (#4331): it names the current
+   * generation, records no process evidence, and was left by an earlier runner process, with nothing
+   * of this process still retiring that generation. Only the campaign's owner can then release the
+   * slot. A fence this process set may still be proven by this process, so it is never reported. */
+  private campaignRetirementHold(meta: SessionMeta): { campaignRetirementHold?: CampaignRetirementHold } {
+    const generation = meta.retiringProviderGeneration;
+    if (generation === undefined || generation !== meta.campaignBudgetDispatch?.generation ||
+        meta.retiringProviderRunners?.length || !isTerminal(meta.status) || this.active.has(meta.sessionId) ||
+        this.retirementOutstanding(meta.sessionId, generation) || this.fencesSetHere.get(meta.sessionId) === generation) return {};
+    // This host records evidence for the session's location, so the fence predates that evidence.
+    const reason = this.thisRetirementRunner(meta) ? "fence_without_evidence" : "unsupported_location";
+    return { campaignRetirementHold: { generation, reason } };
+  }
+
   /** Whether another of this process's providers of `generation` is still retiring or awaiting its
    * exit proof (#3788). */
   private retirementOutstanding(sessionId: string, generation: string): boolean {
@@ -19370,6 +19390,7 @@ export class SessionManager {
     } else {
       const runner = this.thisRetirementRunner(meta!);
       this.store.patchMeta(sessionId, { retiringProviderGeneration: generation, retiringProviderRunners: runner ? [runner] : undefined });
+      this.fencesSetHere.set(sessionId, generation);
     }
     return generation;
   }

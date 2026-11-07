@@ -55,10 +55,10 @@ function harness(path = ":memory:", authority: CampaignBudgetAuthority = concurr
   const enabled = svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #2940", operations: ["implementation_question"],
     delegatablePolicyIds: [], budgetAuthority: authority }, 1, principal);
   assert.ok(enabled.ok, enabled.error ?? "campaign control refused");
-  return { db, svc };
+  return { db, svc, principal };
 }
 
-type Harness = { db: ControlPlaneDb; svc: SessionsService };
+type Harness = { db: ControlPlaneDb; svc: SessionsService; principal?: HumanPrincipal };
 
 function spawn(h: Harness) {
   return h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude", config: { model: "claude-opus-5-5" },
@@ -399,4 +399,103 @@ test("a control-plane upgrade marks live members last served by a runner too old
       } finally { db.close(); }
     } finally { rmSync(dir, { recursive: true, force: true }); }
   }
+});
+
+const release = (h: Harness, sessionId: string, generation: string, reason = "Rebooted the host", principal = h.principal!) =>
+  h.svc.releaseCampaignSlot("root", { sessionId, generation, reason }, principal);
+
+test("the campaign's owner releases a slot an older runner holds, recorded, and its checkpoint settles exactly once (#4331)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "campaign-slot-release-"));
+  const path = join(dir, "cp.sqlite");
+  try {
+    const h = harness(path, { ...concurrencyOnly(2), toolCalls: 120 }, OLDER_RUNNER);
+    const held = spawned(h);
+    const running = spawned(h);
+    works(h, held, 0.5);
+    runnerEnds(h, held, 0.7, "failed");
+    h.svc.onSessionStatus(running, "running", undefined, undefined, "r");
+    const generation = h.db.campaignBudgets.dispatch(held)!.generation;
+    let view = h.db.campaignBudgets.view("root")!;
+    assert.deepEqual(view.heldSlots?.map((slot) => [slot.sessionId, slot.generation, slot.reason, slot.status]),
+      [[held, generation, "older_runner", "failed"]], "only the ended worker is offered; a running one never is");
+    assert.equal(view.occupied, 2);
+    assert.match(spawn(h).error ?? "", /concurrency allowance reached/u);
+
+    // Refusals change nothing.
+    const stranger: HumanPrincipal = { ...h.principal!, userId: "usr_someone_else", actorId: "usr_someone_else" };
+    assert.equal(release(h, held, generation, "Rebooted", stranger).status, 404, "only the campaign's owner may release");
+    assert.equal(release(h, held, generation, "   ").status, 400, "a reason is required");
+    assert.equal(release(h, held, "another-generation").status, 409, "a release names the generation it was shown");
+    assert.equal(release(h, running, h.db.campaignBudgets.dispatch(running)!.generation).status, 409, "a running worker is refused");
+    assert.equal(occupied(h), 2);
+    assert.deepEqual(settlements(h, held), []);
+
+    const released = release(h, held, generation, "  Checked the host: no provider process remains  ");
+    assert.ok(released.ok && released.data, String(released.error));
+    assert.deepEqual({ ...released.data, releasedAt: 0 }, { sessionId: held, title: released.data.title, generation,
+      releasedByUserId: h.principal!.userId, releasedByName: released.data.releasedByName, releasedAt: 0,
+      reason: "Checked the host: no provider process remains", heldReason: "older_runner",
+      settlement: { costUsd: 0.7, toolCalls: 1, source: "checkpoint" } }, "it records who, why, and settles from the runner's final usage");
+    view = h.db.campaignBudgets.view("root")!;
+    assert.equal(view.occupied, 1, "the slot is free");
+    assert.equal(view.heldSlots, undefined);
+    assert.deepEqual(view.slotReleases?.map((r) => r.sessionId), [held]);
+    assert.deepEqual(settlements(h, held), [{ cost: 0.7, tools: 1 }]);
+    assert.ok(spawned(h), "a replacement is admitted");
+
+    // A repeated release, and a proof arriving later, change nothing further.
+    const again = release(h, held, generation, "Second click");
+    assert.ok(again.ok);
+    assert.equal(again.data!.reason, "Checked the host: no provider process remains");
+    runnerEnds(h, held, 0.9, "failed");
+    assert.deepEqual(settlements(h, held), [{ cost: 0.7, tools: 1 }], "the reservation settled exactly once");
+    const actual = h.db.campaignBudgets.view("root")!.actual.costUsd;
+    h.db.close();
+
+    // A control-plane restart keeps the record and settles nothing again.
+    const db = ControlPlaneDb.open(path);
+    try {
+      const reopened = { db, svc: service(db, OLDER_RUNNER), principal: h.principal };
+      assert.deepEqual(db.campaignBudgets.view("root")!.slotReleases?.map((r) => [r.sessionId, r.reason]),
+        [[held, "Checked the host: no provider process remains"]]);
+      assert.equal(release(reopened, held, generation).data?.settlement.costUsd, 0.7);
+      assert.deepEqual(settlements(reopened, held), [{ cost: 0.7, tools: 1 }]);
+      assert.equal(db.campaignBudgets.view("root")!.actual.costUsd, actual);
+    } finally { db.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a person can't release a slot that is still stopping, already free, or awaiting a current runner's proof (#4331)", () => {
+  const h = harness(":memory:", concurrencyOnly(3));
+  try {
+    // Ended on a current runner without its proof yet: the runner may still send it.
+    const pending = spawned(h);
+    h.svc.onSessionStatus(pending, "running", undefined, undefined, "r");
+    h.svc.onSessionStatus(pending, "failed", "agent exited 3", undefined, "r");
+    assert.equal(h.db.campaignBudgets.view("root")!.heldSlots, undefined);
+    assert.equal(release(h, pending, h.db.campaignBudgets.dispatch(pending)!.generation).status, 409);
+    // Proven and freed.
+    const free = spawned(h);
+    works(h, free, 0.2);
+    runnerEnds(h, free, 0.2);
+    assert.equal(release(h, free, h.db.campaignBudgets.dispatch(free)!.generation).status, 409);
+    // Its runner reports a fence no process can lift, but a stop is still pending.
+    const stopping = spawned(h);
+    h.svc.onSessionStatus(stopping, "running", undefined, undefined, "r");
+    const generation = h.db.campaignBudgets.dispatch(stopping)!.generation;
+    assert.ok(h.svc.stop(stopping).ok);
+    h.db.campaignBudgets.noteRetirementHold(stopping, "r", { generation, reason: "unsupported_location" });
+    assert.equal(release(h, stopping, generation).status, 409, "a pending stop keeps it out");
+    // Once the stop is confirmed, the reported fence makes it the person's to release.
+    h.svc.onSessionStatus(stopping, "stopped", undefined, undefined, "r");
+    assert.deepEqual(h.db.campaignBudgets.view("root")!.heldSlots?.map((slot) => [slot.sessionId, slot.reason]),
+      [[stopping, "unsupported_location"]]);
+    const released = release(h, stopping, generation);
+    assert.ok(released.ok, String(released.error));
+    assert.equal(released.data!.settlement.source, "recorded_usage");
+    // A report from a runner that doesn't own the session is ignored.
+    h.db.campaignBudgets.noteRetirementHold(pending, "another-runner", { generation: h.db.campaignBudgets.dispatch(pending)!.generation,
+      reason: "fence_without_evidence" });
+    assert.equal(h.db.campaignBudgets.view("root")!.heldSlots, undefined);
+  } finally { h.db.close(); }
 });

@@ -1042,7 +1042,10 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      is never sent one, so the requester's login is never used instead.
 // 329: Issue-closure decisions expose durable approval provenance (#4301). Approved re-requests
 //      are refused with the executable occurrence and digest; older readers may ignore provenance.
-export const PROTOCOL_VERSION = 329;
+// 330: A runner reports a campaign worker's retirement fence that no later runner process can lift
+//      (`SessionSnapshot.campaignRetirementHold`, #4331), and the control plane lets the campaign's
+//      owner, never an agent, release such a held slot. Older runners report no hold.
+export const PROTOCOL_VERSION = 330;
 
 export * from "./campaign-authority.js";
 export * from "./decision-questions.js";
@@ -1446,6 +1449,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * (#3788, #4257, #4256). 307 is the first protocol on main that carries all three. An older
    * runner's checkpoint or absence never frees the generation's concurrency slot. */
   campaignProviderRetirementProof: 307,
+  /** v330 (#4331): the runner reports an evidence-less retirement fence in its session snapshots. */
+  campaignRetirementHold: 330,
   workflowDecisionActionAdmission: 151,
   workflowDecisionActionReconciliation: 153,
   /** v269 control plane withdraws a pending or approved, unconsumed workflow decision (#3917). */
@@ -9484,6 +9489,10 @@ export interface SideChatView {
 export interface SessionSnapshot {
   id: string;
   campaignBudgetCheckpoint?: import("./campaign-budget.js").CampaignBudgetUsageCheckpoint;
+  /** v330 (#4331): the current generation's retirement fence carries no process evidence and no
+   * provider of this runner process is still retiring it, so no later runner process can ever lift
+   * it. Only the campaign's owner can then release the slot. */
+  campaignRetirementHold?: import("./campaign-budget.js").CampaignRetirementHold;
   roleConversionReceipt?: SessionRoleConversionReceipt;
   /** Opaque CP launch identity echoed by runners that accepted a replacement start. */
   controlPlaneLaunchId?: string;
