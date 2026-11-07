@@ -612,6 +612,17 @@ another Location's path is declined. Its pull request gates (merge, extra review
 branch deletion) must name a pull request of its own repository and follow that repository's
 own checks, merge queue and instructions.
 
+An Orchestrator plans cross-repository work as one work item per repository, with the dependency
+recorded in `dependsOnKeys`, dispatches prerequisites first, and never asks one child to change two
+repositories. A dependency on an item in another repository is a merge dependency: a child whose
+work item has one sees its `pr_merge` refused with "Merge held until prerequisite pull request …
+is observed MERGED" until every pull request of the prerequisite is freshly observed MERGED on its
+forge, read through a Location of that repository. `delivered` and enqueued don't count. The
+approval stays valid and nothing is armed. The refusal parks the child on that pull request, so it
+ends its turn; Wollipog wakes it on the merge, and it consumes the same approval again. A
+prerequisite closed without merging, cancelled or removed holds the merge for good: the work item
+is blocked, and the child reports that to its Orchestrator.
+
 ## Private Session Artifacts
 
 Session artifacts let authorized users view screenshots and short videos remotely, including when

@@ -33,6 +33,11 @@ interface Row {
   continuation_command_id: string | null;
 }
 
+/** #4120: the "runner" of a watch the control plane keeps itself, on a cross-repository prerequisite
+ * a held merge waits for. No runner polls it (`watchingOn` is never asked for this id); the campaign's
+ * forge observation, read through a Location of the prerequisite's repository, settles it. */
+export const PREREQUISITE_MERGE_WATCH_RUNNER = "wollipog:prerequisite-merge";
+
 /** A watch whose wake is still owed: the session is parked on it, so its turn end owes the
  * Orchestrator nothing yet. */
 const PARKED = "(state='watching' OR continuation_state IN ('held','delivering'))";

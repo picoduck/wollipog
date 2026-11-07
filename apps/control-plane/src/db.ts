@@ -6491,6 +6491,15 @@ export class ControlPlaneDb {
         return bound?.category === "campaign_follow_up_admission" ? this.bindCampaignFollowUp(campaignId, workItemId, bound.subject, content) : null;
       },
       forgePullRequests: (campaignId, refs, now) => this.campaignForgeObservations.facts(campaignId, refs, now),
+      sessionRepository: (campaignId, sessionId) => this.campaignSessionRepository(campaignId, sessionId),
+      armedMerge: (sessionId) => this.stmt(`SELECT 1 FROM workflow_decisions WHERE session_id=? AND category='pr_merge'
+        AND status='approved' AND action_kind='pr_merge_enqueue' AND action_armed_at IS NOT NULL LIMIT 1`).get(sessionId) !== undefined,
+      // Controlled by the root or one of its nested Orchestrators; the controller index keeps it cheap.
+      armedMergeSessions: (campaignId) => (this.stmt(`SELECT DISTINCT session_id FROM workflow_decisions
+        WHERE controlling_session_id IN (SELECT value FROM json_each(?)) AND status='approved' AND category='pr_merge'
+          AND action_kind='pr_merge_enqueue' AND action_armed_at IS NOT NULL`)
+        .all(JSON.stringify([campaignId, ...this.campaignDescendantIds(campaignId)])) as Array<{ session_id: string }>)
+        .map((row) => row.session_id).filter((sessionId) => this.campaignRootForMember(sessionId) === campaignId),
     });
     return this.campaignWorkLedgerStore;
   }
@@ -17743,6 +17752,19 @@ export class ControlPlaneDb {
     if (this.campaignSharesRepositoryWorkspace(root, member)) return launch;
     if (!member.workspaceId || this.getAdHocWorkspacePath(member.id)) return null;
     return campaignLocationRepository(this, root, campaignScopeRepositories(root), member);
+  }
+
+  /** #4120: the campaign repository a session is placed in, by `campaignParticipantRepository`, read
+   * from rows: a session view embeds the campaign projection, which reads the ledger that asks this. */
+  campaignSessionRepository(campaignId: string, sessionId: string): string | null {
+    const read = (id: string) => this.stmt("SELECT id, runner_id, workspace_id, project_id, orchestrator_policy FROM sessions WHERE id=?").get(id) as
+      { id: string; runner_id: string; workspace_id: string | null; project_id: string | null; orchestrator_policy: string | null } | undefined;
+    const root = read(campaignId);
+    const member = read(sessionId);
+    if (!root || !member) return null;
+    const view = (row: NonNullable<typeof root>) => ({ id: row.id, runnerId: row.runner_id, workspaceId: row.workspace_id ?? undefined,
+      projectId: row.project_id ?? undefined, orchestratorPolicy: orchestratorCampaignPolicyFromJson(row.orchestrator_policy) ?? undefined });
+    return this.campaignParticipantRepository(view(root) as unknown as SessionView, view(member) as unknown as SessionView);
   }
 
   /** The newest Human decision on admitting this follow-up past the campaign's approval limit (#2940). */

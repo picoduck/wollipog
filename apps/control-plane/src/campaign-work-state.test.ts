@@ -92,6 +92,24 @@ test("undispatched items follow the recorded dispatch state and dependencies", (
     { state: "blocked", causes: ["recorded_blocker"] });
 });
 
+test("a merge dependency holds an idle child as waiting and blocks once it can never merge (#4120)", () => {
+  // Unmerged: an idle child waits for the prerequisite's merge, and its verification stays listed.
+  assert.deepEqual(deriveCampaignWorkItemState(item({ ...open({ status: "idle" }), mergeDependencies: ["merged", "unmerged"] }), []),
+    { state: "waiting", causes: ["dependency_unmerged", "attempt_awaiting_verification"] });
+  // A running child is still running; a merged prerequisite holds nothing.
+  assert.deepEqual(deriveCampaignWorkItemState(item({ ...open({ status: "running" }), mergeDependencies: ["unmerged"] }), []), { state: "running", causes: [] });
+  assert.deepEqual(deriveCampaignWorkItemState(item({ ...open({ status: "idle" }), mergeDependencies: ["merged"] }), []),
+    { state: "waiting", causes: ["attempt_awaiting_verification"] });
+  // Failed (closed without merging, cancelled or removed): blocked, with or without an attempt.
+  assert.deepEqual(deriveCampaignWorkItemState(item({ ...open({ status: "running" }), mergeDependencies: ["failed"] }), []),
+    { state: "blocked", causes: ["dependency_blocked"] });
+  assert.deepEqual(deriveCampaignWorkItemState(item({ dispatchState: "queued", mergeDependencies: ["failed"] }), ["delivered"]),
+    { state: "blocked", causes: ["dependency_blocked"] });
+  // Delivery still wins, and an undispatched item's other rules are unchanged.
+  assert.equal(deriveCampaignWorkItemState(item({ latestAttempt: { open: false, delivered: true }, mergeDependencies: ["failed"] }), []).state, "delivered");
+  assert.deepEqual(deriveCampaignWorkItemState(item({ dispatchState: "queued", mergeDependencies: ["unmerged"] }), ["delivered"]), { state: "queued", causes: [] });
+});
+
 test("campaign derivation resolves dependency chains and blocks cycles and missing items", () => {
   const states = deriveCampaignWorkItemStates([
     item({ id: "c", dependsOn: ["b"], dispatchState: "queued" }),

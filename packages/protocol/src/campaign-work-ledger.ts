@@ -145,7 +145,60 @@ export type CampaignWorkItemStateCause =
   | "attempt_session_unavailable"
   | "attempt_session_input_required"
   | "attempt_session_pending_decision"
-  | "attempt_awaiting_verification";
+  | "attempt_awaiting_verification"
+  /** #4120: the item's child is idle while a merge dependency (a prerequisite in another
+   * repository) has a pull request not yet observed MERGED. Its merge is held until then. */
+  | "dependency_unmerged";
+
+/** #4120: whether a merge dependency is met. `merged`: every pull request the prerequisite names
+ * reads MERGED. `failed`: one was closed without merging, or the prerequisite was cancelled or
+ * removed, so the dependent's merge is never attempted. `unmerged`: anything else, including a
+ * prerequisite that names no pull request yet and one whose pull requests can't be read. */
+export type CampaignMergeDependencyStatus = "merged" | "unmerged" | "failed";
+
+/** What a reader is shown: also `unknown` when the reader may not see the forge facts that decide
+ * the status (#4119's per-runner visibility). */
+export type CampaignMergeDependencyShownStatus = CampaignMergeDependencyStatus | "unknown";
+
+/** #4120: one prerequisite in another repository, as a dependent item shows it. A dependency within
+ * one repository is not a merge dependency and is not listed here. */
+export interface CampaignMergeDependencyView {
+  id: string;
+  key: string;
+  title: string | null;
+  /** The prerequisite's repository, lower-cased. */
+  repository: string;
+  status: CampaignMergeDependencyShownStatus;
+  /** The pull requests the prerequisite names, each with its last observed state (`unknown` when
+   * none can be shown). */
+  pullRequests: Array<{ ref: CampaignPullRequestRef; state: "open" | "closed" | "merged" | "unknown" }>;
+}
+
+/** #4120: the fixed reason a merge is held on, naming the prerequisite and its pull request. The
+ * approval stays valid; the requester consumes it again once the prerequisite merges. */
+export function campaignMergeHoldReason(hold: {
+  prerequisite: { key: string; repository: string };
+  pullRequest: CampaignPullRequestRef | null;
+  state: "open" | "closed" | "unobserved" | "none" | "cancelled";
+}): string {
+  const item = `${hold.prerequisite.key} in ${hold.prerequisite.repository}`;
+  const pr = hold.pullRequest ? `${hold.pullRequest.repository}#${hold.pullRequest.number}` : null;
+  switch (hold.state) {
+    case "cancelled":
+      return `Merge held: its prerequisite ${item} was cancelled or removed, so this merge is not attempted. ` +
+        "The approval stays valid, but the work item is blocked; report it to your Orchestrator.";
+    case "closed":
+      return `Merge held: prerequisite pull request ${pr} (${item}) was closed without merging, so this merge is not ` +
+        "attempted. The approval stays valid, but the work item is blocked; report it to your Orchestrator.";
+    case "none":
+      return `Merge held: prerequisite ${item} names no pull request yet, so it can't be observed MERGED. The approval ` +
+        "stays valid; report the hold to your Orchestrator and consume it again once the prerequisite merges.";
+    default:
+      return `Merge held until prerequisite pull request ${pr} (${item}) is observed MERGED; it is ` +
+        `${hold.state === "open" ? "not merged yet" : "not freshly observed"}. The approval stays valid. Wollipog wakes ` +
+        "this session when it merges: end your turn now, then consume the same approval again.";
+  }
+}
 
 export type CampaignResponsibleActor = "human" | "orchestrator" | "child" | "external";
 
@@ -623,6 +676,13 @@ export interface CampaignWorkItemSummary {
   blocker: CampaignWorkItemBlocker | null;
   /** v275 (#4070). Omitted by older control planes. */
   handoff?: CampaignWorkItemHandoff | null;
+  /** #4120: the repository the item works in, lower-cased: where its latest attempt's child is
+   * placed, else the repository of the first pull request it names, else its issue's. Null when
+   * none is known. Omitted by older control planes. */
+  repository?: string | null;
+  /** #4120: its prerequisites in other repositories, in dependency order. Omitted by older control
+   * planes and when there are none. */
+  mergeDependencies?: CampaignMergeDependencyView[];
   createdAt: number;
   updatedAt: number;
   /** Last ledger or observed-status change; drives the `activity` sort. */

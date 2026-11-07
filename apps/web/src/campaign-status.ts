@@ -300,6 +300,7 @@ const STATE_CAUSE_TEXT: Record<CampaignWorkItemStateCause, string> = {
   attempt_session_input_required: "The child session needs input.",
   attempt_session_pending_decision: "The child session is waiting for a decision.",
   attempt_awaiting_verification: "The Orchestrator has not verified delivery yet.",
+  dependency_unmerged: "Its merge waits until a prerequisite in another repository is merged.",
 };
 
 export function stateCauseText(cause: CampaignWorkItemStateCause): string {
