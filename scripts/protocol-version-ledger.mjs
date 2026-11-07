@@ -37,6 +37,11 @@ const HEADER = /^ {2}\/\/ (\d+): \S/u;
 const CONTINUATION = /^ {2}\/\/( |$)/u;
 const VERSION = /^ {2}(\d+),$/u;
 
+/** An entry's comment without indentation, so a ledger entry and a legacy one compare equal. */
+function entryText(lines) {
+  return lines.map((line) => line.trim()).join("\n");
+}
+
 /** Parse the ledger file. Every problem names the file line it concerns. */
 export function parseLedger(text) {
   const lines = text.split(/\r?\n/u);
@@ -86,7 +91,7 @@ export function parseLedger(text) {
         problems.push(`${LEDGER_PATH}:${at}: version ${version} must sit directly below its own \`// v${version} slot\` anchor.`);
       }
       if (slot) slot.filled = true;
-      entries.push({ version, line: at, anchored: slot !== null, text: (open?.comment ?? []).join("\n") });
+      entries.push({ version, line: at, anchored: slot !== null, text: entryText(open?.comment ?? []) });
       open = null;
     } else {
       problems.push(`${LEDGER_PATH}:${at}: unexpected line ${JSON.stringify(line.slice(0, 80))}; the ledger holds only entries and slot anchors.`);
@@ -119,8 +124,18 @@ export function parseLedger(text) {
 export function parseLegacyIndex(text) {
   const literal = /^export const PROTOCOL_VERSION = (\d+);\r?$/mu.exec(text);
   if (!literal) return null;
-  const history = text.slice(0, literal.index);
-  const entries = [...history.matchAll(/^\/\/ (\d+): /gmu)].map((match) => ({ version: Number(match[1]) }));
+  const entries = [];
+  let open = null; // the entry whose comment is being read, until the comment block ends
+  for (const line of text.slice(0, literal.index).split(/\r?\n/u)) {
+    const header = /^\/\/ (\d+): /u.exec(line);
+    if (header) entries.push(open = { version: Number(header[1]), comment: [line] });
+    else if (open && /^\/\/( |$)/u.test(line)) open.comment.push(line);
+    else open = null;
+  }
+  for (const entry of entries) {
+    entry.text = entryText(entry.comment);
+    delete entry.comment;
+  }
   return { entries, slots: [], problems: [], version: Number(literal[1]) };
 }
 
@@ -151,8 +166,15 @@ export function compareWithBase({ head, mergeBase, base, baseName }) {
       problems.push(`Protocol version ${version} is in ${baseName}'s ledger but not on this branch. A version that reached ${baseName} is never removed or renumbered; claim a new one instead.`);
     }
   }
-  const claims = [...present].filter((version) => !known.has(version)).sort((a, b) => a - b);
-  const taken = new Set(base.entries.map((entry) => entry.version));
+  // An entry identical to the base's is the base's own, merged in before the merge base caught up
+  // (a merge of main that is not committed yet, say): it is not this branch's claim.
+  const inherited = new Map(base.entries.map((entry) => [entry.version, entry.text]));
+  const claims = head.entries
+    .filter((entry) => !known.has(entry.version))
+    .filter((entry) => !inherited.has(entry.version) || inherited.get(entry.version) !== entry.text)
+    .map((entry) => entry.version)
+    .sort((a, b) => a - b);
+  const taken = new Set(inherited.keys());
   let next = base.version + 1;
   for (const claim of claims) {
     if (claim > base.version && !taken.has(claim)) continue;

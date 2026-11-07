@@ -105,7 +105,7 @@ test("a claim that is not greater than the base names both values and the next f
   const mergeBase = parseLedger(ledger(BASE));
   // Another change took 8 first; this branch claimed 7, which the base has moved past.
   const base = parseLedger(ledger(claim(BASE, 8)));
-  const head = parseLedger(ledger(claim(claim(BASE, 7), 8)));
+  const head = parseLedger(ledger(claim(claim(BASE, 7), 8, "this branch's other change.")));
   const { claims, problems } = compareWithBase({ head, mergeBase, base, baseName: "main" });
   assert.deepEqual(claims, [7, 8]);
   assert.equal(problems.length, 2);
@@ -113,6 +113,17 @@ test("a claim that is not greater than the base names both values and the next f
   assert.match(problems[0], /`\/\/ v9 slot`/u);
   // The same number written independently on both sides: still a claim, refused.
   assert.match(problems[1], /claims protocol version 8, but PROTOCOL_VERSION on main is already 8.*claim 10 instead/u);
+});
+
+test("the base's own entry, merged in before the merge base catches up, is not a claim", () => {
+  const mergeBase = parseLedger(ledger(BASE));
+  // A merge of main in progress: main took 8 (an old-format main, read through index.ts), and this
+  // branch carries that entry under its anchor, unchanged, plus its own claim of 9.
+  const legacyMain = parseLegacyIndex("// 4: first.\n//    more.\n// 6: second.\n// 8: change 8.\nexport const PROTOCOL_VERSION = 8;\n");
+  const head = parseLedger(ledger(claim(claim(BASE, 8), 9)));
+  assert.deepEqual(compareWithBase({ head, mergeBase, base: legacyMain, baseName: "main" }), { claims: [9], problems: [] });
+  const rewritten = parseLedger(ledger(claim(BASE, 8, "a different change.")));
+  assert.deepEqual(compareWithBase({ head: rewritten, mergeBase, base: legacyMain, baseName: "main" }).claims, [8]);
 });
 
 test("removing or renumbering a merged version is refused", () => {
