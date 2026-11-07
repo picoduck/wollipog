@@ -359,6 +359,32 @@ function pathsOverlap(left: string, right: string): boolean {
   return pathWithinOrEqual(left, right) || pathWithinOrEqual(right, left);
 }
 
+/** Why the managed bubblewrap boundary would refuse to launch a provider in this existing,
+ * canonical worktree, or null (#4138). A Location switch that reuses a worktree checks this before
+ * it retires the provider or moves the session, so a worktree the launch would refuse is refused
+ * while nothing has changed. These are the launch's own rules: a protected worktree's parent may
+ * not be the temporary directory (see `resolveExecutionIsolation`), and no extra writable root may overlap
+ * its Git directory or its parent, unless it is a separate sibling inside that parent (see
+ * `canonicalManagedWritableRoot`). */
+export function managedWorktreeLaunchRefusal(
+  worktree: string,
+  commonGitDir: string,
+  writableRoots: readonly string[],
+  temporaryDirectories: readonly string[] = [tmpdir()],
+): string | null {
+  const parent = posix.dirname(worktree);
+  if (parent === worktree || temporaryDirectories.includes(parent)) {
+    return `it sits directly in the temporary directory ${parent}, where the session's sandbox cannot protect it`;
+  }
+  for (const root of writableRoots) {
+    const separateSibling = pathWithinOrEqual(parent, root) && !pathsOverlap(root, worktree);
+    if (pathsOverlap(root, commonGitDir) || (pathsOverlap(root, parent) && !separateSibling)) {
+      return `it overlaps the shared writable directory ${root}, which the session's sandbox cannot grant beside it`;
+    }
+  }
+  return null;
+}
+
 async function managedLinuxCacheRoot(
   requested: string,
   protectedParent: string,
