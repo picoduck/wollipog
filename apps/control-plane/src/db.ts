@@ -6372,6 +6372,9 @@ export class ControlPlaneDb {
         // A stale grant cannot establish delivery or admit a forge/review repair.
         // Only completion truth is retained; the existing admission still fences all effects.
         if (!boundaryCurrent) continue;
+        // Only items without a delivered verification reach here: a verified-delivered item is already
+        // finished, whichever campaign repository its pull request is in (#4120). An unverified item
+        // is finished only by a merge in its issue's own repository, never by another one's (#4119).
         const itemRepository = item.issue.repository.toLowerCase();
         const refs = item.stage?.pullRequests.filter(ref => ref.repository.toLowerCase() === itemRepository) ?? [];
         if (refs.length === 0) { unfinished = true; continue; }
@@ -6495,11 +6498,17 @@ export class ControlPlaneDb {
       armedMerge: (sessionId) => this.stmt(`SELECT 1 FROM workflow_decisions WHERE session_id=? AND category='pr_merge'
         AND status='approved' AND action_kind='pr_merge_enqueue' AND action_armed_at IS NOT NULL LIMIT 1`).get(sessionId) !== undefined,
       // Controlled by the root or one of its nested Orchestrators; the controller index keeps it cheap.
-      armedMergeSessions: (campaignId) => (this.stmt(`SELECT DISTINCT session_id FROM workflow_decisions
+      armedMerges: (campaignId) => (this.stmt(`SELECT occurrence_id, session_id, resource_snapshot FROM workflow_decisions
         WHERE controlling_session_id IN (SELECT value FROM json_each(?)) AND status='approved' AND category='pr_merge'
           AND action_kind='pr_merge_enqueue' AND action_armed_at IS NOT NULL`)
-        .all(JSON.stringify([campaignId, ...this.campaignDescendantIds(campaignId)])) as Array<{ session_id: string }>)
-        .map((row) => row.session_id).filter((sessionId) => this.campaignRootForMember(sessionId) === campaignId),
+        .all(JSON.stringify([campaignId, ...this.campaignDescendantIds(campaignId)])) as Array<{ occurrence_id: string; session_id: string; resource_snapshot: string }>)
+        .filter((row) => this.campaignRootForMember(row.session_id) === campaignId)
+        .flatMap((row) => {
+          const snapshot = parseJson<WorkflowDecisionResourceSnapshot>(row.resource_snapshot);
+          return snapshot?.category === "pr_merge" ? [{ occurrenceId: row.occurrence_id, sessionId: row.session_id,
+            pullRequest: { repository: snapshot.repository, number: snapshot.pullRequest } }] : [];
+        }),
+      campaignRepositories: (campaignId) => this.campaignRepositoriesOf(campaignId),
     });
     return this.campaignWorkLedgerStore;
   }
@@ -17752,6 +17761,14 @@ export class ControlPlaneDb {
     if (this.campaignSharesRepositoryWorkspace(root, member)) return launch;
     if (!member.workspaceId || this.getAdHocWorkspacePath(member.id)) return null;
     return campaignLocationRepository(this, root, campaignScopeRepositories(root), member);
+  }
+
+  /** #4120: the campaign's repositories, lower-cased, launch repository first (`campaignScopeRepositories`),
+   * read from the root's row: a session view embeds the campaign projection, which reads the ledger. */
+  campaignRepositoriesOf(campaignId: string): string[] {
+    const row = this.stmt("SELECT orchestrator_policy FROM sessions WHERE id=?").get(campaignId) as { orchestrator_policy: string | null } | undefined;
+    const policy = orchestratorCampaignPolicyFromJson(row?.orchestrator_policy ?? null) ?? undefined;
+    return policy ? campaignScopeRepositories({ orchestratorPolicy: policy } as Pick<SessionView, "orchestratorPolicy">).map((entry) => entry.repository) : [];
   }
 
   /** #4120: the campaign repository a session is placed in, by `campaignParticipantRepository`, read

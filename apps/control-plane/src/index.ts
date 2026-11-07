@@ -1111,9 +1111,9 @@ const campaignWorkObservations = new CampaignWorkObservations({
 // embedded summary and the Campaign Status panel follow it.
 db.campaignWorkLedger.accounting.observeUsage((campaignSessionId) => campaignWorkObservations.usageChanged(campaignSessionId));
 
-// Slice 8 of #2417: GitHub status of the pull requests campaign work items name, read on the
-// runner hosting the root campaign through its own `gh` login, on demand and in a bounded
-// background pass. Changes ride the same coalesced revision as observed session changes.
+// Slice 8 of #2417: forge status of the pull requests campaign work items name, on demand and in
+// a bounded background pass. Each is read through one runner's own login: the root campaign's for
+// the launch repository, a Location's for another campaign repository (#4119). Changes ride the same coalesced revision as observed session changes.
 const campaignForgeObserver = new CampaignForgeObserver({
   observingRunner: (campaignId, repository) => db.campaignForgeObservingRunner(campaignId, repository, (runnerId) => hub.isRunnerOnline(runnerId)),
   requestFromRunner: (runnerId, requestId, message, timeoutMs) => hub.requestFromRunner(runnerId, requestId, message, timeoutMs),

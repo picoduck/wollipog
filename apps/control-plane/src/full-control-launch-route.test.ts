@@ -5552,8 +5552,10 @@ test("a worker the root launches for a child must share that child's repository,
     f.db.updateSessionStatus(childId, "running", Date.now());
 
     // Creating a review for that child in another repository's Location is refused outright, and in its own is not.
-    const review = { review: { policy: { requesterSessionId: childId } as never } };
+    const review = { review: { policy: { requesterSessionId: childId, pullRequest: { repository: "other/repo", number: 7 }, headSha: "d".repeat(40), harness: "codex" } as never } };
     assert.equal(launch("Misplaced Review", "b", review).error, "Full Control children must use a Location of a repository in the campaign's boundary");
+    const placed = launch("Placed Review", "a", review);
+    assert.equal(placed.ok, true, placed.error ?? "created");
 
     // A root-parented worker with nobody to serve may be anywhere in the boundary.
     const worker = launch("Worker", "b");
@@ -5573,6 +5575,7 @@ test("a worker the root launches for a child must share that child's repository,
     assert.equal(allowance.error, "campaign allowance requires a Location of the same boundary repository as the session it serves");
     const worker2 = f.sessions.campaignBudgetWorkerPreflight(c.rootId, { kind: "managed", sessionId: workerId });
     assert.equal(worker2.ok, false);
+    assert.equal(worker2.error, "review worker is not an active admitted participant in the current campaign boundary");
     const refused = reauthorize();
     assert.equal(refused.ok, false);
     assert.equal(refused.error, "campaign participants must run in a Location of a repository in the campaign's boundary");
@@ -5580,6 +5583,18 @@ test("a worker the root launches for a child must share that child's repository,
     // Serving the root alone stays free of that, as the root serves every repository.
     f.db.raw().prepare("UPDATE delegated_video_reviews SET record=? WHERE reviewer_session_id=?").run(JSON.stringify({ childSessionId: c.rootId }), workerId);
     assert.equal(allocate().ok, true, allocate().error ?? "");
+
+    // A review session the child requested serves that child: in another repository's Location it no longer qualifies.
+    f.db.raw().prepare("DELETE FROM delegated_video_reviews WHERE reviewer_session_id=?").run(workerId);
+    // The child's one active review is the placed one above; this record stands in for it.
+    f.db.raw().prepare("DELETE FROM review_sessions WHERE requester_session_id=?").run(childId);
+    f.db.reviewSessions.record({ reviewSessionId: workerId, requesterSessionId: childId, runnerId: "r2",
+      pullRequest: { repository: "other/repo", number: 7 }, headSha: "d".repeat(40), reviewer: "codex" }, Date.now());
+    const requested = allocate();
+    assert.equal(requested.ok, false);
+    assert.equal(requested.error, "campaign allowance requires a Location of the same boundary repository as the session it serves");
+    const requestedWorker = f.sessions.campaignBudgetWorkerPreflight(c.rootId, { kind: "managed", sessionId: workerId });
+    assert.equal(requestedWorker.error, "review worker is not an active admitted participant in the current campaign boundary");
   } finally { await c.server.close(); f.db.close(); }
 });
 
@@ -5805,6 +5820,105 @@ test("an owner/repo issue delivered by merged pull requests in owner/repo and ot
     assert.equal(stopped.ok, false);
     assert.match(stopped.error!, /excluded closed pull request could not be confirmed still closed/u);
     assert.equal(closures.filter(({ message }) => message.operation === "execute").length, executes, "no closure was sent");
+    observer.dispose();
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("an owner/repo issue's closure proof reads the real ledger, and another repository's gated merge counts only at its approved head (#4120)", async () => {
+  const { f, server, id } = await multiRepositoryCampaign();
+  try {
+    f.db.updateSessionStatus(id, "running", Date.now());
+    // r2 runs the API child in other/repo's Location.
+    f.db.registerRunner({ runnerId: "r2", hostname: "r2", os: "linux", version: "test", agents: SECOND_MACHINE_AGENTS, runtime: { ...runtime, campaignLaunchInspection: { version: 3 } },
+      workspaces: [{ id: "a", name: "r2 a", path: "/fixture/two/other" }, { id: "b", name: "r2 b", path: "/fixture/two/repository" }] }, Date.now(), PROTOCOL_VERSION);
+    const { closures } = closureRunners(f);
+    const approved = "b".repeat(40), other = "e".repeat(40), mergeCommit = "c".repeat(40);
+    const rollup = { state: "passing" as const, passing: 1, failing: 0, pending: 0 };
+    const merged = { state: "merged" as const, draft: false, headSha: approved, baseRef: "main", reviewDecision: "approved" as const, checks: rollup, requiredChecks: rollup, mergeQueue: null,
+      mergeCommitSha: mergeCommit, defaultBranch: "main" };
+    const forge = new Map<string, typeof merged>([["owner/repo#10", merged], ["other/repo#20", merged]]);
+    const reads: Array<{ runnerId: string; refs: string[] }> = [];
+    const send = f.hub.sendToRunner.bind(f.hub);
+    f.hub.sendToRunner = (runnerId, message) => {
+      if (message.type !== "campaign_forge_observe") return send(runnerId, message);
+      reads.push({ runnerId, refs: message.pullRequests.map((ref) => `${ref.repository}#${ref.number}`) });
+      queueMicrotask(() => f.hub.resolveRunnerRequest({ type: "campaign_forge_observe_result", requestId: message.requestId, sessionId: message.sessionId, observedAt: Date.now(), ok: true,
+        results: message.pullRequests.map((ref) => {
+          const value = forge.get(`${ref.repository}#${ref.number}`);
+          return value ? { ref, ok: true as const, observation: value } : { ref, ok: false as const, failure: "forge_not_found" as const };
+        }) }, runnerId));
+      return true;
+    };
+    let count = 0;
+    const observer = new CampaignForgeObserver({
+      observingRunner: (campaignId, repository) => f.db.campaignForgeObservingRunner(campaignId, repository, (runnerId) => f.hub.isRunnerOnline(runnerId)),
+      requestFromRunner: (runnerId, requestId, message, timeout) => f.hub.requestFromRunner(runnerId, requestId, message, timeout),
+      store: f.db.campaignForgeObservations, backgroundTargets: () => [], changed: () => undefined, warn: () => undefined, newRequestId: () => `forge_${++count}`,
+    });
+    f.sessions.campaignForgeRefresh = (campaignId, refs) => observer.refresh(campaignId, refs);
+    f.sessions.campaignForgeReadNow = (campaignId, refs) => observer.readNow(campaignId, refs);
+
+    // owner/repo#7 is tracked by two items in the real ledger: the app part, by a child in owner/repo,
+    // and the API part, by a child in other/repo's Location.
+    const child = (title: string, runnerId: string, workspaceId: string) => {
+      const created = f.sessions.createSession({ runnerId, workspaceId, agentId: "claude", title, prompt: "Work", useWorktree: false, config: { model: "claude-opus-5-5" } },
+        undefined, f.scope, false, false, false, { parentSessionId: id });
+      assert.equal(created.ok, true, created.error ?? "created");
+      f.db.updateSessionStatus(created.data!.id, "running", Date.now());
+      return created.data!.id;
+    };
+    const appChild = child("App", "r", "w"), apiChild = child("API", "r2", "a");
+    const plan = f.sessions.recordCampaignPlan(id, { planComplete: true, items: [
+      { key: "app", title: "Show Account Field", issue: { repository: "owner/repo", number: 7 } },
+      { key: "api", title: "Add Account Field", issue: { repository: "owner/repo", number: 7 } },
+    ] });
+    assert.equal(plan.ok, true, plan.error ?? "");
+    const item = (key: string) => plan.data!.items.find((entry) => entry.key === key)!.workItemId;
+    for (const [session, key, pull] of [[appChild, "app", { repository: "owner/repo", number: 10 }], [apiChild, "api", { repository: "other/repo", number: 20 }]] as const) {
+      const assigned = f.sessions.assignCampaignWorkItem(id, { workItemId: item(key), childSessionId: session });
+      assert.equal(assigned.ok, true, assigned.error ?? "");
+      const staged = f.sessions.updateCampaignWorkItem(id, { workItemId: item(key), stage: { stage: "merge_queued", pullRequests: [pull] } });
+      assert.equal(staged.ok, true, staged.error ?? "");
+    }
+    // The API child's merge of other/repo#20 went through a consumed pr_merge gate at the approved head, inside its attempt.
+    f.db.raw().prepare(`INSERT INTO workflow_decisions(request_id,occurrence_id,session_id,controlling_session_id,
+      category,resource_key,resource_snapshot,resource_digest,policy_revision,authority,status,created_at,resolved_at,consumed_at)
+      VALUES ('merge-20','merge-20',?,?,'pr_merge','other/repo#20',?,'digest',1,'orchestrator','consumed',?,?,?)`)
+      .run(apiChild, id, JSON.stringify({ category: "pr_merge", repository: "other/repo", pullRequest: 20, headSha: approved, reviewResult: "merge",
+        requiredChecks: { headSha: approved, status: "passed", checkedAt: Date.now(), checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" }] } }),
+      Date.now(), Date.now(), Date.now());
+    for (const [session, key] of [[appChild, "app"], [apiChild, "api"]] as const) {
+      f.db.updateSessionStatus(session, "idle", Date.now());
+      const report = f.db.appendEvent(session, { kind: "agent_message", text: "Merged.", final: true }, Date.now()).seq;
+      const verified = f.sessions.verifyCampaignChild(id, { childSessionId: session, reportEventSeq: report, followUpsAccounted: true,
+        workItem: { id: item(key), outcome: "delivered" } });
+      assert.equal(verified.ok, true, verified.error ?? "");
+    }
+    assert.deepEqual(f.db.consumedPullRequestMerges([apiChild]).map((decision) => decision.occurrenceId), ["merge-20"]);
+    const request = (requestId: string) => f.sessions.requestGithubIssueClosure(id, { requestId, issue: 7, reason: "completed", explanation: "Delivered", evidence: ["Merged in both repositories"] });
+
+    // (a) other/repo#20 merged at the approved head proves the API item, read through r2 and never r.
+    const proven = await request("close-7-gated");
+    assert.equal(proven.ok, true, proven.error ?? "");
+    const decision = proven.data!.decision!;
+    assert.equal(decision.authority, "orchestrator", JSON.stringify(decision.authorityEvaluation));
+    const snapshot = decision.resourceSnapshot as GithubIssueClosureSnapshot;
+    assert.deepEqual(snapshot.crossRepositoryDelivery, [{ repository: "other/repo", number: 20, headSha: approved, mergeCommitSha: mergeCommit }]);
+    assert.deepEqual(snapshot.delivery, [{ number: 10, headSha: approved, mergeCommitSha: mergeCommit }]);
+    assert.ok(reads.some((read) => read.runnerId === "r2" && read.refs.includes("other/repo#20")));
+    assert.ok(!reads.some((read) => read.runnerId === "r" && read.refs.includes("other/repo#20")), "the root's login never reads other/repo");
+    assert.deepEqual(closures.filter(({ message }) => message.operation === "inspect" && message.deliveryPullRequests).map(({ runnerId }) => runnerId), ["r"]);
+
+    // (b) Merged at another head than the one its gate approved, it proves nothing: a person decides.
+    forge.set("other/repo#20", { ...merged, headSha: other });
+    await observer.readNow(id, [{ repository: "other/repo", number: 20 }]);
+    const unapproved = await request("close-7-other-head");
+    assert.equal(unapproved.ok, true, unapproved.error ?? "");
+    assert.equal(unapproved.data!.decision!.authority, "human", JSON.stringify(unapproved.data!.decision!.authorityEvaluation));
+    const gaps = (unapproved.data!.decision!.resourceSnapshot as GithubIssueClosureSnapshot).deliveryGaps;
+    assert.deepEqual(gaps?.map((gap) => [gap.code, gap.workItemId, gap.pullRequests, gap.repository]),
+      [["delivery_not_verified_at_exact_head", item("api"), [20], "other/repo"]]);
+    assert.ok(!reads.some((read) => read.runnerId === "r" && read.refs.includes("other/repo#20")), "the root's login never reads other/repo");
     observer.dispose();
   } finally { await server.close(); f.db.close(); }
 });
