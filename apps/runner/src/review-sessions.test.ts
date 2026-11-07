@@ -16,6 +16,8 @@ import {
 } from "./review-sessions.js";
 import { configuredSessionWritableGrants, explainSessionWritableRefusal, SessionWritableRootError } from "./review-trust.js";
 import type { SessionMeta } from "./session-store.js";
+import { DiscoveryRecovery, DISCOVERY_RECOVERY_DELAY_MS } from "./discovery-recovery.js";
+import { probeClaudeCode, applyClaudeAgentEnvironment } from "./discovery/claude-code.js";
 
 const rootUid = statSync("/").uid;
 const CODEX = { driver: "codex-app-server", agentId: "codex", command: "codex" } as const;
@@ -287,6 +289,48 @@ test("review admission skips a signed-out implicit default even when explicit B 
   };
   assert.deepEqual(f.launcher.capability(agents, "linux")?.reviewers, [{ harness: "codex", agentId: "codex" }],
     "an implicit granted default remains reviewable when an earlier account is not granted");
+});
+
+test("reviewer discovery explains a retryable Claude probe failure despite authenticated credentials", (t) => {
+  const agents = [{ ...AGENTS[1]!, available: false, authStatus: "authenticated" as const,
+    claudeCode: { status: "unsupported", failure: { code: "probe_timeout", retryable: true,
+      message: "Claude Code capability discovery timed out." } } } ] as AgentDefinition[];
+  const f = fixture(t, { agents });
+  const capability = f.launcher.capability(agents, "linux")!;
+  assert.deepEqual(capability.reviewers, []);
+  assert.match(capability.unavailable?.["claude-code"] ?? "", /discovery timed out.*automatically.*retry/is);
+});
+
+test("automatic discovery recovery restores review admission without a manual Claude session", async (t) => {
+  const agents: AgentDefinition[] = [];
+  const f = fixture(t, { agents, requester: { driver: "codex-app-server" } });
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let passes = 0;
+  let pending: Promise<void> | undefined;
+  const recovery = new DiscoveryRecovery(() => { pending = discover(true); }, () => {});
+  t.after(() => recovery.dispose());
+  const discover = async (retry = false) => {
+    recovery.begin(retry);
+    const failing = ++passes === 1;
+    const claudeCode = await probeClaudeCode(async (args) => ({ code: failing && args[0] === "--help" ? 1 : 0,
+      stdout: args[0] === "--version" ? "2.1.299" : args[0] === "--help"
+        ? failing ? "" : '--input-format stream-json\n--output-format stream-json\n--permission-mode (choices: "acceptEdits")'
+        : JSON.stringify({ loggedIn: true }), stderr: "" }), "path");
+    // The real discovery pass separately observes the selected launch account's credentials.
+    agents.splice(0, agents.length, applyClaudeAgentEnvironment({ ...AGENTS[1]!, claudeCode,
+      args: [], env: {} }));
+    agents[0]!.authStatus = "authenticated";
+    recovery.complete(agents);
+  };
+  await discover();
+  assert.deepEqual(f.launcher.capability(agents, "linux")?.reviewers, []);
+  t.mock.timers.tick(DISCOVERY_RECOVERY_DELAY_MS);
+  await pending;
+  assert.deepEqual(f.launcher.capability(agents, "linux")?.reviewers, [{ harness: "claude-code", agentId: "claude" }]);
+  t.mock.timers.reset();
+  const prepared = await f.launcher.prepare("s_review", f.policy({ harness: "claude-code" }), CLAUDE, "Intent and checks.");
+  assert.ok(existsSync(prepared.checkout));
+  assert.equal(passes, 2);
 });
 
 test("long writer refusals stay within the control plane capability limit", () => {

@@ -8,6 +8,7 @@ import { ReviewWriterRegistry } from "./review-writers.js";
 import { ReviewSnapshotter } from "./review-snapshot.js";
 import { ReviewerSecurity } from "./reviewer-security.js";
 import { defaultReviewSessionDependencies, reviewLaunchArgs, reviewSessionDiscoveryReason, ReviewSessionLauncher } from "./review-sessions.js";
+import { DiscoveryRecovery } from "./discovery-recovery.js";
 import { PullRequestWatcher } from "./pull-request-watches.js";
 import { removeConfiguredWorkspace, WorkspaceRemovals } from "./workspace-removals.js";
 import { contextGhRunner } from "./campaign-forge-status.js";
@@ -2153,6 +2154,7 @@ async function authorizeDiscoveryLaunchHome(agent: AgentDefinition, env: Record<
 let discoveryDone = false;
 const DISCOVERY_REFRESH_MS = 5 * 60_000;
 let discoveryTimer: ReturnType<typeof setInterval> | null = null;
+const discoveryRecovery = new DiscoveryRecovery(() => void runDiscovery(false, false, true), log);
 
 function publishSubscriptionUsageInventory(refreshCodex: boolean): void {
   if (!shouldPublishSubscriptionUsageInventory(discoveryDone, controlPlaneProtocolVersion)) return;
@@ -2177,7 +2179,8 @@ function publishSubscriptionUsageInventory(refreshCodex: boolean): void {
 /** Probe installed agents, merge into the advertised list, and push to the control
  * plane if already registered. Safe to call repeatedly (e.g. on a rediscover) — a
  * call made while a pass is in flight is coalesced into a single trailing rerun. */
-async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = true): Promise<void> {
+async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = true, recovery = false): Promise<void> {
+  if (shuttingDown) return;
   if (discovering) {
     rediscoverPending = true;
     rediscoverRefreshModels ||= refreshModels;
@@ -2185,6 +2188,7 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
     return;
   }
   discovering = true;
+  discoveryRecovery.begin(recovery);
   try {
     const registryPromise = config.features.acpRegistry
       ? discoverRegistryAgents({
@@ -2289,6 +2293,7 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
       ...(refreshModels && metadata.executionTargets ? { executionTargets: metadata.executionTargets } : {}),
     };
     sendUp(update);
+    if (!shuttingDown) discoveryRecovery.complete(metadata.agents);
     // The agent list may have gained a Claude Code installation (or its reviewer key) since the
     // last proof; a changed attestation republishes agents without waiting for a reconnect.
     refreshMediaReviewers();
@@ -4552,6 +4557,7 @@ function shutdown(exitCode = 0): void {
     clearInterval(sessionCommandRecoveryTimer);
     clearInterval(credentialRegistrationRetryTimer);
     if (discoveryTimer) clearInterval(discoveryTimer);
+    discoveryRecovery.dispose();
     if (reconnectTimer) clearTimeout(reconnectTimer);
   });
   bestEffort("stop subscription usage", () => subscriptionUsage.shutdown());
