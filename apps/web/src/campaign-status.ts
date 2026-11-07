@@ -701,7 +701,7 @@ export function campaignRepositoryFilterOptions(repositories: readonly CampaignW
 }
 
 /** #4120: the loaded rows grouped by repository, in the order the control plane lists repositories,
- * each with that repository's counts. One group (or none known) means no grouping: null. */
+ * each with that repository's counts. Fewer than two known repositories means no grouping: null. */
 export interface CampaignWorkRepositoryGroup {
   repository: string | null;
   label: string;
@@ -711,7 +711,9 @@ export interface CampaignWorkRepositoryGroup {
 
 export function groupCampaignWorkByRepository(items: readonly CampaignWorkItemSummary[],
   repositories: readonly CampaignWorkRepositoryCounts[] | null | undefined): CampaignWorkRepositoryGroup[] | null {
-  if (!repositories || repositories.length < 2) return null;
+  // Two known repositories: items whose repository is unknown never make a one-repository campaign
+  // look like two, which would reorder its list.
+  if (!repositories || repositories.filter((entry) => entry.repository !== null).length < 2) return null;
   const order = repositories.map((entry) => entry.repository);
   const groups = new Map<string | null, CampaignWorkItemSummary[]>();
   for (const item of items) {

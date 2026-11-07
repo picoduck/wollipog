@@ -26,6 +26,10 @@ test("one repository, or an older control plane, keeps the list ungrouped and wi
   const items = [item("a", "owner/app"), item("b", "owner/app")];
   assert.equal(groupCampaignWorkByRepository(items, null), null);
   assert.equal(groupCampaignWorkByRepository(items, [counts("owner/app", { running: 2 })]), null);
+  // A one-repository campaign whose planned items name no repository yet is still one repository.
+  const withUnknown = [counts("owner/app", { running: 1 }), counts(null, { planned: 2 })];
+  assert.equal(groupCampaignWorkByRepository([item("a", "owner/app"), item("b", null), item("c", null)], withUnknown), null);
+  assert.deepEqual(campaignRepositoryFilterOptions(withUnknown, "all"), []);
   assert.deepEqual(campaignRepositoryFilterOptions(null, "all"), []);
   assert.deepEqual(campaignRepositoryFilterOptions([counts("owner/app", { running: 2 })], "all"), []);
 });
