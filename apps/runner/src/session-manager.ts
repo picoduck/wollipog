@@ -1718,12 +1718,14 @@ export class SessionManager {
   private readonly deletedExpiry = new Map<string, ReturnType<typeof setTimeout>>();
   /** Every start captures one generation; delete/restart invalidates all older async continuations. */
   private readonly launchGenerations = new Map<string, number>();
-  /** The issue numbers this runner applied from a first-message reading's grant, per session (#4269).
-   * The control plane never clears a Custom campaign's issue numbers without an issue scope, so a
-   * later launch spec carrying neither numbers nor a scope predates the grant: a launch rebuilding
-   * its metadata from such a spec re-applies these instead of losing them. In memory only: after a
-   * runner restart the control plane's next spec carries the stored grant. */
-  private readonly grantedIssueNumbers = new Map<string, number[]>();
+  /** The issue numbers this runner applied from a first-message reading's grant (#4269), remembered
+   * only for the launch generation that was already under way when the grant arrived. That launch
+   * was built from a spec predating the grant, so it may rebuild the session row without them; it,
+   * and only it, re-applies them. Any later launch gets its numbers from its own spec: a newer spec
+   * without them is the control plane's current authority and is never overridden. A new launch
+   * generation, any scope synchronization, the end of the launch, a stop and a deletion forget it.
+   * In memory only: after a runner restart the control plane's next spec carries the stored grant. */
+  private readonly grantedIssueNumbers = new Map<string, { launchGeneration: number; issueNumbers: number[] }>();
   /** The launch generation, per session, whose start asked to wait for a busy provider HOME
    * (#3240). Only that generation waits; a later launch of the same session does not. */
   private readonly providerHomeWaitLaunches = new Map<string, number>();
@@ -7439,7 +7441,7 @@ export class SessionManager {
             retiringProviderRunners: this.fenceRunnersWithThisProcess(prior.retiringProviderRunners, { context, executionTarget }) } : {}),
       projectMemory: spec.projectMemory ?? prior?.projectMemory,
       artifactUploads: spec.artifactUploads ?? prior?.artifactUploads ?? "manual",
-      orchestrator: this.withAppliedIssueGrant(spec.sessionId, launchOrchestratorMeta(prior?.orchestrator, spec.orchestrator)),
+      orchestrator: this.withAppliedIssueGrant(spec.sessionId, launchGeneration, launchOrchestratorMeta(prior?.orchestrator, spec.orchestrator)),
       ...(spec.uiEvidenceReviewer ? { uiEvidenceReviewer: { reviewId: spec.uiEvidenceReviewer.reviewId } } : {}),
       ...(spec.review ? { review: {
         ...spec.review, checkout: repoPath, launchOwner: this.lockOwner,
@@ -8325,6 +8327,9 @@ export class SessionManager {
     // and a deletion marker generation never records a path of its own to overwrite it.
     this.launchingWorktreePaths.delete(sessionId);
     this.providerHomeWaitLaunches.delete(sessionId);
+    // A grant that raced with the superseded launch belongs to it alone (#4269): this launch's
+    // spec, or a grant arriving while it prepares, decides its issue numbers.
+    this.forgetIssueGrant(sessionId);
     const generation = ++this.nextLaunchGeneration;
     this.launchGenerations.set(sessionId, generation);
     this.latestLaunchGenerations.set(sessionId, generation);
@@ -8332,6 +8337,7 @@ export class SessionManager {
   }
 
   private finishLaunchGeneration(sessionId: string, generation: number): void {
+    this.forgetIssueGrant(sessionId, generation);
     if (this.launchGenerations.get(sessionId) !== generation) return;
     this.launchGenerations.delete(sessionId);
     this.providerHomeWaitLaunches.delete(sessionId);
@@ -8355,6 +8361,7 @@ export class SessionManager {
     const queuedPreparation = this.cancelWorktreePreparationWait(sessionId);
     this.launchGenerations.delete(sessionId);
     this.providerHomeWaitLaunches.delete(sessionId);
+    this.forgetIssueGrant(sessionId);
     this.forgetLaunchingWorktreePath(sessionId, generation);
     this.syncWorktreeSwitch(sessionId);
     return activePreparation || queuedPreparation || setupActive;
@@ -9624,16 +9631,21 @@ export class SessionManager {
       if (meta.orchestrator && authoritativeScope && authoritativeScope.revision > (meta.orchestrator.issueScope?.revision ?? 0)) {
         meta.orchestrator.issueNumbers = [...authoritativeScope.issueNumbers];
         meta.orchestrator.issueScope = authoritativeScope;
-      } else if (meta.orchestrator && !meta.orchestrator.issueScope && !meta.orchestrator.issueNumbers?.length && !authoritativeScope) {
+      } else if (meta.orchestrator && !meta.orchestrator.issueScope && !meta.orchestrator.issueNumbers?.length && !authoritativeScope &&
+          meta.orchestrator.control?.mode !== "full_control" && stored?.control?.mode !== "full_control") {
         // Issue numbers a first-message reading granted while this launch prepared (#4269), stored
         // or (when a restart's metadata replacement rewrote the row from an older spec) applied. They
-        // only ever fill an empty grant, so a launch holding numbers or a scope never adopts them.
-        const granted = stored?.issueNumbers?.length ? stored.issueNumbers : this.grantedIssueNumbers.get(sessionId);
+        // only ever fill an empty grant, so a launch holding numbers, a scope or Full Control never
+        // adopts them. The stored row was written by this launch or after it, so its numbers are
+        // current; a remembered grant counts only when it raced with this exact launch.
+        const granted = stored?.issueNumbers?.length ? stored.issueNumbers : this.racedIssueGrant(sessionId, launchGeneration);
         if (granted?.length) {
           meta.orchestrator.issueNumbers = [...granted];
           if (stored && !stored.issueNumbers?.length) this.store.patchMeta(sessionId, { orchestrator: { ...stored, issueNumbers: [...granted] } });
         }
       }
+      // This launch has now taken any grant it raced with into its row and policy: forget it.
+      this.forgetIssueGrant(sessionId, launchGeneration);
       driverConstructionStarted = true;
       if (meta.review?.harness === "codex") {
         // Snapshot at the final synchronous launch boundary, after all preparation awaits.
@@ -17303,6 +17315,8 @@ export class SessionManager {
   }
 
   stop(sessionId: string): void {
+    // A stopped session's next launch takes its issue numbers from its own spec (#4269).
+    this.forgetIssueGrant(sessionId);
     this.flushTextDeltas(sessionId);
     // A review being judged reports its verdict and then stops its own provider; stopping it now
     // would report the session stopped before its outcome, which fails the review.
@@ -20163,6 +20177,9 @@ export class SessionManager {
   ): Promise<import("@wollipog/protocol").CampaignIssueScopeResultMessage> {
     const base = { type: "campaign_issue_scope_result" as const, requestId: message.requestId, sessionId: message.sessionId };
     if (message.operation === "grant_issue_numbers") return this.grantCampaignIssueNumbers(message);
+    // Any synchronization is newer authority than a remembered grant (#4269), even one refused
+    // below: the launch it raced with takes its numbers from the stored row and scope instead.
+    if (message.operation === "synchronize") this.forgetIssueGrant(message.sessionId);
     const meta = this.store.readMeta(message.sessionId);
     if (!meta?.orchestrator || !meta.repoPath) {
       return { ...base, ok: false, error: "Campaign issue scope requires a runner-local Orchestrator repository" };
@@ -20241,11 +20258,11 @@ export class SessionManager {
    * stored launch metadata, which the issue-closure checks read. The next launch carries the same
    * numbers from the control plane.
    *
-   * It only ever fills an empty grant: a session holding other numbers or any issue scope, one with
-   * no live or launching provider, and a grant for another campaign are refused, and the numbers it
-   * already holds are a no-op. It names no repository, revision or operation, so it can't widen a
-   * scope, change a repository or grant anything else. Only the authenticated control-plane channel
-   * sends it.
+   * It only ever fills an empty grant: a session holding other numbers, any issue scope or Full
+   * Control, one with no live or launching provider, and a grant for another campaign are refused,
+   * and the numbers it already holds are a no-op. It names no repository, revision or operation, so
+   * it can't widen a scope, change a repository or grant anything else. Only the authenticated
+   * control-plane channel sends it.
    */
   private grantCampaignIssueNumbers(
     message: Extract<import("@wollipog/protocol").CampaignIssueScopeMessage, { operation: "grant_issue_numbers" }>,
@@ -20265,9 +20282,13 @@ export class SessionManager {
     const meta = this.store.readMeta(sessionId);
     if (!meta?.orchestrator) return refuse("not_orchestrator", "Granted issue numbers require a runner-local Orchestrator");
     if (meta.orchestrator.issueScope) return refuse("issue_scope_held", "The session already holds an authorized issue scope");
+    // Full Control takes its issue numbers only from its synchronized issue scope.
+    const live = this.active.get(sessionId)?.orchestratorLaunchPolicy;
+    if (meta.orchestrator.control?.mode === "full_control" || live?.control?.mode === "full_control") {
+      return refuse("issue_scope_held", "A Full Control session takes its issue numbers from its issue scope");
+    }
     const granted = [...numbers].sort((a, b) => a - b);
     const held = [...(meta.orchestrator.issueNumbers ?? [])].sort((a, b) => a - b);
-    const live = this.active.get(sessionId)?.orchestratorLaunchPolicy;
     if (held.length) {
       // A duplicate or replayed delivery finds exactly what it would set: nothing changes.
       if (JSON.stringify(held) !== JSON.stringify(granted)) return refuse("issue_numbers_held", "The session already holds other issue numbers");
@@ -20285,18 +20306,41 @@ export class SessionManager {
     // The Claude auto-approval closure reads this exact object on each ask: update it in place. A
     // launch still preparing adopts the stored numbers at its last synchronous boundary.
     if (live) live.issueNumbers = [...granted];
-    // A restart already under way may rebuild the row from a spec that predates this grant.
-    this.grantedIssueNumbers.set(sessionId, [...granted]);
+    // A restart already under way may rebuild the row from a spec that predates this grant: only
+    // that launch generation re-applies it. With none under way there is nothing to remember.
+    const launchGeneration = launching ? this.launchGenerations.get(sessionId) : undefined;
+    if (launchGeneration === undefined) this.grantedIssueNumbers.delete(sessionId);
+    else this.grantedIssueNumbers.set(sessionId, { launchGeneration, issueNumbers: [...granted] });
     this.log(JSON.stringify({ event: "campaign_issue_numbers_granted", sessionId, issues: granted.length }));
     return { ...base, ok: true, issueNumbersGrant: "applied" };
   }
 
-  /** `orchestrator` with the issue numbers this runner applied from a grant (#4269), when it holds
-   * no issue numbers and no issue scope; otherwise unchanged. Never mutates its argument. */
-  private withAppliedIssueGrant<T extends SessionMeta["orchestrator"]>(sessionId: string, orchestrator: T): T {
-    const granted = this.grantedIssueNumbers.get(sessionId);
-    if (!orchestrator || !granted?.length || orchestrator.issueScope || orchestrator.issueNumbers?.length) return orchestrator;
-    return { ...orchestrator, issueNumbers: [...granted] };
+  /** The issue numbers a grant (#4269) that raced with launch `launchGeneration` leaves for it to
+   * re-apply: only while that exact generation is still the session's current launch. */
+  private racedIssueGrant(sessionId: string, launchGeneration: number): number[] | undefined {
+    const remembered = this.grantedIssueNumbers.get(sessionId);
+    if (!remembered || remembered.launchGeneration !== launchGeneration || !this.launchIsCurrent(sessionId, launchGeneration)) {
+      return undefined;
+    }
+    return remembered.issueNumbers.length ? [...remembered.issueNumbers] : undefined;
+  }
+
+  /** Forget a remembered grant (#4269); with `launchGeneration`, only one bound to that launch. */
+  private forgetIssueGrant(sessionId: string, launchGeneration?: number): void {
+    if (launchGeneration === undefined || this.grantedIssueNumbers.get(sessionId)?.launchGeneration === launchGeneration) {
+      this.grantedIssueNumbers.delete(sessionId);
+    }
+  }
+
+  /** `orchestrator` with the issue numbers a grant (#4269) that raced with launch `launchGeneration`
+   * applied, when it holds no issue numbers, no issue scope and no Full Control; otherwise unchanged.
+   * Never mutates its argument. */
+  private withAppliedIssueGrant<T extends SessionMeta["orchestrator"]>(sessionId: string, launchGeneration: number, orchestrator: T): T {
+    if (!orchestrator || orchestrator.issueScope || orchestrator.issueNumbers?.length || orchestrator.control?.mode === "full_control") {
+      return orchestrator;
+    }
+    const granted = this.racedIssueGrant(sessionId, launchGeneration);
+    return granted ? { ...orchestrator, issueNumbers: granted } : orchestrator;
   }
 
   /** Execute only trusted, human-approved closures, with a durable fence before mutation. */
