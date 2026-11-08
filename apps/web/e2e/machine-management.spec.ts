@@ -420,7 +420,7 @@ test("an SSH machine with two installations and a missing saved choice shows the
 const providerAccounts = (page: import("@playwright/test").Page) =>
   page.getByRole("region", { name: /^Provider Accounts/ });
 const accountRow = (page: import("@playwright/test").Page, label: string) =>
-  providerAccounts(page).locator(".surface > .row").filter({ has: page.locator(".row-title", { hasText: label }) });
+  providerAccounts(page).locator(".provider-accounts-list > .row").filter({ has: page.locator(".row-title", { hasText: label }) });
 /** A row's sign-in steps or ending, in the expansion under it (#2996). */
 const signInSteps = (page: import("@playwright/test").Page, label: string) =>
   accountRow(page, label).locator("xpath=following-sibling::*[1][contains(concat(' ', @class, ' '), ' provider-account-expansion ')]");
@@ -440,7 +440,7 @@ test("Provider Accounts show one status per account: Signed In, Sign-In Required
   await expect(accountRow(page, "Personal").locator(".status")).toHaveText("Sign-In Required");
   await expect(accountRow(page, "Personal").locator(".status")).toHaveClass(/t-warning/);
   await expect(accountRow(page, "Codex Team").locator(".status")).toHaveText("Signing In");
-  await expect(accountRow(page, "Personal").locator(".row-sub")).toHaveText("");
+  await expect(accountRow(page, "Personal").locator(".row-sub")).toHaveCount(0);
   await expect(accountRow(page, "Personal").getByRole("button", { name: "Sign In", exact: true })).toBeVisible();
   await expect(section).not.toContainText(/Logged In|Login Required/);
   await expect(signInSteps(page, "Codex Team").locator("ol.steps > li")).toHaveCount(2);
@@ -533,47 +533,33 @@ test("Viewers see each account's status only", async ({ page }) => {
   await section.screenshot({ path: "test-results/provider-accounts/viewer-desktop.png" });
 });
 
-test("Owners adopt and revoke provider profiles, confirming active sessions; members only see the state (#3239)", async ({ page }) => {
+test("Account Access explains restrictions and preserves consent and active-session removal checks", async ({ page }) => {
   await page.goto(`/machine-management-e2e.html?profiles&${DESIGN_WORKSTATION}`);
-  const sub = (label: string) => accountRow(page, label).locator(".row-sub");
-  const items = async (label: string) => {
-    const menu = await openAccountMenu(page, label);
-    const names = await menu.locator(".menu-item .menu-text").allTextContents();
-    await page.keyboard.press("Escape");
-    return names.filter((name) => name === "Adopt as Profile…" || name === "Revoke Access…");
-  };
-  await expect(sub("Work")).toHaveText("Profile");
-  await expect(sub("Personal")).toHaveText("Grant Pending");
-  await expect(sub("Codex Team")).toHaveText("Not Granted");
-  await expect(sub("Codex Solo")).toHaveText("");
-  await expect(accountRow(page, "Codex Solo").locator(".status")).toHaveCount(0);
-  expect(await items("Work")).toEqual(["Revoke Access…"]);
-  expect(await items("Personal")).toEqual(["Adopt as Profile…", "Revoke Access…"]);
-  await providerAccounts(page).screenshot({ path: "test-results/provider-accounts/profile-states.png" });
-
-  await (await openAccountMenu(page, "Codex Solo")).getByRole("menuitem", { name: "Adopt as Profile…" }).click();
-  const adoption = page.getByRole("dialog", { name: "Adopt as Profile" });
-  await expect(adoption).toContainText("only control planes granted this profile can use this account's HOME");
-  await page.screenshot({ path: "test-results/provider-accounts/adopt-profile-confirm.png", fullPage: true });
-  await adoption.getByRole("button", { name: "Adopt as Profile" }).click();
-  await expect(page.getByText("Account adopted as a profile.", { exact: true })).toBeVisible();
-  await expect(sub("Codex Solo")).toHaveText("Profile");
-
-  await (await openAccountMenu(page, "Work")).getByRole("menuitem", { name: "Revoke Access…" }).click();
-  await page.getByRole("dialog", { name: "Revoke Access" }).getByRole("button", { name: "Revoke Access" }).click();
+  await expect(accountRow(page, "Work").locator(".row-sub")).toHaveCount(0);
+  await expect(accountRow(page, "Personal").locator(".row-sub")).toHaveText("Grant Pending");
+  await expect(accountRow(page, "Codex Team").locator(".row-sub")).toHaveText("No Access Here");
+  await (await openAccountMenu(page, "Codex Solo")).getByRole("menuitem", { name: "Account Access…" }).click();
+  const access = page.getByRole("dialog", { name: "Account Access", exact: true });
+  await expect(access).toContainText("doesn't change the default account");
+  await access.getByRole("button", { name: "Limit Access to This Server…" }).click();
+  const consent = page.getByRole("dialog", { name: "Limit Access to This Server", exact: true });
+  await expect(consent).toContainText("only Wollipog servers with access can use this account");
+  await consent.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(access).toBeVisible();
+  await access.getByRole("button", { name: "Limit Access to This Server…" }).click();
+  await consent.getByRole("button", { name: "Limit Access", exact: true }).click();
+  await expect(page.getByText("Account access updated.", { exact: true })).toBeVisible();
+  await expect(access).toHaveCount(0);
+  await (await openAccountMenu(page, "Work")).getByRole("menuitem", { name: "Account Access…" }).click();
+  await access.getByRole("button", { name: "Remove This Server's Access…" }).click();
+  await page.getByRole("dialog", { name: "Revoke Access", exact: true }).getByRole("button", { name: "Revoke Access", exact: true }).click();
   const force = page.getByRole("dialog", { name: "Revoke Access from Active Sessions" });
   await expect(force).toContainText("3 active sessions use this account's profile.");
-  await expect(force).toContainText("Fix the half-cent rounding bug");
-  await expect(force).toContainText("and 1 more");
-  await page.screenshot({ path: "test-results/provider-accounts/revoke-profile-force-confirm.png", fullPage: true });
-  await force.getByRole("button", { name: "Revoke Access" }).click();
+  await force.getByRole("button", { name: "Revoke Access", exact: true }).click();
   await expect(page.getByText("Access revoked.", { exact: true })).toBeVisible();
-  await expect(sub("Work")).toHaveText("");
-
   await page.goto(`/machine-management-e2e.html?profiles&role=machine-owner&${DESIGN_WORKSTATION}`);
-  await expect(sub("Personal")).toHaveText("Grant Pending");
-  expect(await items("Personal")).toEqual([]);
-  expect(await items("Work")).toEqual([]);
+  const menu = await openAccountMenu(page, "Personal");
+  await expect(menu.getByRole("menuitem", { name: "Account Access…" })).toHaveCount(0);
 });
 
 test("Owners recover a stale provider HOME lease only where the machine can prove it abandoned (#3241)", async ({ page }) => {
@@ -587,7 +573,7 @@ test("Owners recover a stale provider HOME lease only where the machine can prov
   await expect(sub("Codex Team")).toHaveText("Recovery Needed");
   await expect(accountRow(page, "Codex Team").locator(".provider-account-lease"))
     .toHaveAttribute("title", "Wollipog can't safely unlock this account until this machine has restarted. Save your work, restart the machine, then recover the account in Connections.");
-  await expect(sub("Work")).toHaveText("");
+  await expect(sub("Work")).toHaveCount(0);
   await expect(await recoverItem("Codex Team")).toBeDisabled();
   await page.keyboard.press("Escape");
   await providerAccounts(page).screenshot({ path: "test-results/provider-accounts/stale-leases.png" });
@@ -598,7 +584,7 @@ test("Owners recover a stale provider HOME lease only where the machine can prov
   await page.screenshot({ path: "test-results/provider-accounts/recover-lease-confirm.png", fullPage: true });
   await recovery.getByRole("button", { name: "Recover Account" }).click();
   await expect(page.getByText("Account unlocked.", { exact: true })).toBeVisible();
-  await expect(sub("Personal")).toHaveText("");
+  await expect(sub("Personal")).toHaveCount(0);
   await providerAccounts(page).screenshot({ path: "test-results/provider-accounts/lease-recovered.png" });
 
   await page.goto(`/machine-management-e2e.html?leases&role=machine-owner&${DESIGN_WORKSTATION}`);
@@ -607,7 +593,7 @@ test("Owners recover a stale provider HOME lease only where the machine can prov
 });
 
 test("Machine owners can start both provider sign-in flow shapes", async ({ page }) => {
-  await providerAccounts(page).getByRole("button", { name: "Add Claude Account…" }).click();
+  await providerAccounts(page).getByRole("button", { name: "Add Account…" }).click();
   const claudeDialog = page.getByRole("dialog", { name: "Add Account" });
   await claudeDialog.getByLabel("Account Label").fill("Studio Claude");
   await claudeDialog.getByRole("button", { name: "Start Sign-In" }).click();
@@ -616,13 +602,13 @@ test("Machine owners can start both provider sign-in flow shapes", async ({ page
   // A new account's sign-in is a row at the end of the list, expanded into its steps (#2996).
   const claude = signInSteps(page, "Studio Claude");
   await expect(accountRow(page, "Studio Claude").locator(".status")).toHaveText("Signing In");
-  await expect(providerAccounts(page).locator(".provider-account-group").filter({ has: page.getByRole("heading", { name: "Claude", exact: true }) }).locator(".surface > .row").last()).toContainText("Studio Claude");
+  await expect(providerAccounts(page).locator(".provider-account-group").filter({ has: page.getByRole("heading", { name: "Claude", exact: true }) }).locator(".provider-accounts-list > .row").last()).toContainText("Studio Claude");
   await expect(claude.getByRole("link", { name: "Open Claude Sign-In" })).toBeVisible();
   await expect(claude.getByLabel("Paste the Code It Shows")).toHaveAttribute("type", "password");
   await page.screenshot({ path: "test-results/provider-login/claude-paste-code.png", fullPage: true });
 
   await accountRow(page, "Studio Claude").getByRole("button", { name: "Cancel" }).click();
-  await providerAccounts(page).getByRole("button", { name: "Add Claude Account…" }).click();
+  await providerAccounts(page).getByRole("button", { name: "Add Account…" }).click();
   const codexDialog = page.getByRole("dialog", { name: "Add Account" });
   await codexDialog.getByRole("radio", { name: "Codex" }).click();
   await codexDialog.getByLabel("Account Label").fill("Studio Codex");
@@ -639,7 +625,7 @@ test("Machine owners can start both provider sign-in flow shapes", async ({ page
 
 test("a sign-in runs inside its own row: Work is listed once with Cancel, and a rejected code is an error under the field (#2996)", async ({ page }) => {
   await page.goto(`/machine-management-e2e.html?signIn=rejected&${DESIGN_WORKSTATION}`);
-  await expect(providerAccounts(page).locator(".surface > .row").filter({ hasText: "Work" })).toHaveCount(1);
+  await expect(providerAccounts(page).locator(".provider-accounts-list > .row").filter({ hasText: "Work" })).toHaveCount(1);
   await expect(accountRow(page, "Work").locator(".status")).toHaveText("Signing In");
   await expect(accountRow(page, "Work").getByRole("button", { name: "Cancel" })).toBeVisible();
   await expect(providerAccounts(page).locator("article")).toHaveCount(0);
@@ -733,7 +719,7 @@ test("a hidden email's sign-in head and badge remain unclipped at 390px (#2996)"
   await page.addInitScript(() => localStorage.setItem("wollipog.hide-account-emails", "true"));
   for (const [fixture, title] of [["code", "Signing In to Claude"], ["device", "Signing In to Codex"]] as const) {
     await page.goto(`/machine-management-e2e.html?signIn=${fixture}&emailLabels&${DESIGN_WORKSTATION}`);
-    const row = providerAccounts(page).locator(".surface > .row").filter({ has: page.locator(".row-title", { hasText: title }) });
+    const row = providerAccounts(page).locator(".provider-accounts-list > .row").filter({ has: page.locator(".row-title", { hasText: title }) });
     const head = async () => row.evaluate((element) => {
       const name = element.querySelector<HTMLElement>(".row-title")!;
       const badge = element.querySelector<HTMLElement>(".status")!.getBoundingClientRect();
@@ -755,7 +741,7 @@ test("a hidden email's sign-in head and badge remain unclipped at 390px (#2996)"
 });
 
 test("Add Account refuses an empty or duplicate label under the field, and shows a request failure above the footer", async ({ page }) => {
-  await providerAccounts(page).getByRole("button", { name: "Add Claude Account…" }).click();
+  await providerAccounts(page).getByRole("button", { name: "Add Account…" }).click();
   const dialog = page.getByRole("dialog", { name: "Add Account" });
   await expect(dialog).toContainText("Design Workstation");
   await page.screenshot({ path: "test-results/provider-accounts/add-account-empty-desktop.png" });
@@ -1010,90 +996,92 @@ for (const width of [1440, 390]) {
   });
 }
 
-test("running-session switching is disclosed separately and preserves provider-terms confirmation", async ({ page }) => {
-  await providerAccounts(page).getByRole("button", { name: "Change Running Sessions" }).click();
-  const dialog = page.getByRole("dialog", { name: "Running Sessions", exact: true });
-  const toggle = dialog.getByRole("switch", { name: "Switch Accounts at a Usage Limit" });
+test("inline switching retains terms consent and cancellation, and disabling applies directly", async ({ page }) => {
+  const toggle = providerAccounts(page).getByRole("switch", { name: "Switch Accounts at a Usage Limit" });
   await expect(toggle).toHaveAttribute("aria-checked", "false");
   await toggle.click();
-  await dialog.getByRole("button", { name: "Save", exact: true }).click();
   const confirmation = page.getByRole("dialog", { name: "Turn On Automatic Switching" });
   await expect(confirmation.locator(".notice.t-warning")).toContainText("prohibit circumventing rate limits");
   await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
-  await expect(dialog).toBeVisible();
-  await expect(toggle).toHaveAttribute("aria-checked", "true");
-  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(toggle).toHaveAttribute("aria-checked", "false");
+  await toggle.click();
   await confirmation.getByRole("button", { name: "Turn On Automatic Switching" }).click();
-  await expect(dialog).toHaveCount(0);
-  await providerAccounts(page).getByRole("button", { name: "Change Running Sessions" }).click();
-  await expect(dialog.getByRole("switch")).toHaveAttribute("aria-checked", "true");
+  await expect(toggle).toHaveAttribute("aria-checked", "true");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-checked", "false");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
 });
 
-test("provider account editors save independent defaults and retain a missing choice", async ({ page }) => {
-  await openSettings(page);
-  await expect(settingsDialog(page).getByRole("group", { name: "Default Accounts" })).toHaveCount(0);
-  await settingsDialog(page).getByRole("button", { name: "Cancel", exact: true }).click();
+test("account menus save independent defaults and explicitly recover a missing default", async ({ page }) => {
   const accounts = providerAccounts(page);
   await expect(accounts.getByRole("combobox")).toHaveCount(0);
-  await expect(accounts.getByRole("radio")).toHaveCount(0);
-  for (const [provider, account] of [["Claude", "Personal"], ["Codex", "Codex Solo"]]) {
-    await accounts.getByRole("button", { name: "Change New " + provider + " Sessions" }).click();
-    const dialog = page.getByRole("dialog", { name: "New " + provider + " Sessions", exact: true });
-    const choice = dialog.getByRole("button", { name: /^Account:/u });
-    await expect(choice).toHaveAccessibleName(/No Saved Default/u);
-    await choice.click();
-    await page.getByRole("option", { name: new RegExp("^" + account + "$") }).click();
-    await dialog.getByRole("button", { name: "Save", exact: true }).click();
-    await expect(dialog).toHaveCount(0);
-    await expect(accounts).toContainText("New sessions use " + account + ".");
+  await expect(accounts.getByRole("button", { name: /^Change New/ })).toHaveCount(0);
+  for (const account of ["Personal", "Codex Solo"]) {
+    await (await openAccountMenu(page, account)).getByRole("menuitem", { name: "Set as Default", exact: true }).click();
+    await expect(accountRow(page, account).locator(".provider-default-marker")).toHaveText("Default");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
   }
   await (await openAccountMenu(page, "Personal")).getByRole("menuitem", { name: "Remove Account…" }).click();
   await page.getByRole("dialog", { name: "Remove Account", exact: true }).getByRole("button", { name: "Remove Account", exact: true }).click();
-  await accounts.getByRole("button", { name: "Change New Claude Sessions" }).click();
-  await expect(page.getByRole("dialog", { name: "New Claude Sessions" }).getByRole("button", { name: /^Account:/u }))
-    .toHaveAccessibleName(/Saved Account Not Found/u);
+  await expect(accounts).toContainText("The saved default account is missing.");
+  await accounts.getByRole("button", { name: "Clear Claude Default" }).click();
+  await expect(accounts.getByText("Default Account Unavailable")).toHaveCount(0);
+  await expect(accountRow(page, "Codex Solo").locator(".provider-default-marker")).toHaveText("Default");
 });
 
 for (const width of [390, 320]) {
-  test("at " + width + "px account settings disclose drafts, cancel safely, and show usage details", async ({ page }) => {
+  test("at " + width + "px Account Access is content-height and its consent returns safely", async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto("/machine-management-e2e.html?credentialImport&machine=native-t14s");
+    await (await openAccountMenu(page, "Work")).getByRole("menuitem", { name: "Account Access…" }).click();
+    const access = page.getByRole("dialog", { name: "Account Access", exact: true });
+    await expect(access).toContainText("doesn't change the default");
+    expect((await access.boundingBox())!.height).toBeLessThan(600);
+    await access.getByRole("button", { name: "Limit Access to This Server…", exact: true }).click();
+    const consent = page.getByRole("dialog", { name: "Limit Access to This Server", exact: true });
+    await expect(consent).toContainText("only Wollipog servers with access can use this account");
+    await consent.getByRole("button", { name: "Back to Account Access", exact: true }).click();
+    await expect(access).toBeVisible();
+    await access.getByRole("button", { name: "Close", exact: true }).last().click();
+    await expect(access).toHaveCount(0);
+    await expect(accountRow(page, "Work").getByRole("button", { name: "More Actions for Work", exact: true })).toBeFocused();
+    await page.goto("/machine-management-e2e.html?profiles&machine=native-t14s");
+    await (await openAccountMenu(page, "Work")).getByRole("menuitem", { name: "Account Access…" }).click();
+    await access.getByRole("button", { name: "Remove This Server's Access…", exact: true }).click();
+    const revoke = page.getByRole("dialog", { name: "Revoke Access", exact: true });
+    await revoke.getByRole("button", { name: "Back to Account Access", exact: true }).click();
+    await expect(access).toContainText("This server has access.");
+  });
+  test("at " + width + "px the compact list sets defaults directly and discloses usage", async ({ page }) => {
     await page.setViewportSize({ width, height: 844 });
     const accounts = providerAccounts(page);
-    await expect(accounts.getByRole("radio")).toHaveCount(0);
-    await accounts.getByRole("button", { name: "Change New Claude Sessions" }).click();
-    const dialog = page.getByRole("dialog", { name: "New Claude Sessions", exact: true });
-    await dialog.getByRole("button", { name: /^Account:/u }).click();
-    await page.getByRole("option", { name: "Work", exact: true }).click();
-    await expect(dialog).toContainText("Unsaved Changes");
-    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
-    const discard = page.getByRole("dialog", { name: "Discard Changes", exact: true });
-    await discard.getByRole("button", { name: "Discard Changes", exact: true }).click();
-    await expect(dialog).toHaveCount(0);
-    await accounts.getByRole("button", { name: /^Usage Details for Work/u }).click();
+    await expect(accounts.getByRole("button", { name: "Add Account…" })).toHaveCount(1);
+    expect((await accounts.boundingBox())!.height).toBeLessThan(500);
+    await (await openAccountMenu(page, "Work")).getByRole("menuitem", { name: "Set as Default", exact: true }).click();
+    await expect(accountRow(page, "Work").locator(".provider-default-marker")).toHaveText("Default");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(accountRow(page, "Work")).not.toContainText("Weekly Window");
+    const usage = accounts.getByRole("button", { name: /^Usage Details for Work/u });
+    expect((await usage.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    await usage.click();
     await expect(accountRow(page, "Work")).toContainText("Weekly Window");
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await (await openAccountMenu(page, "Work")).getByRole("menuitem", { name: "Clear Default", exact: true }).click();
+    await expect(accountRow(page, "Work").locator(".provider-default-marker")).toHaveCount(0);
   });
 }
 
-test("offline account preferences save now while sign-in stays unavailable", async ({ page }) => {
+test("offline default and switching actions save while adding/sign-in stay unavailable", async ({ page }) => {
   await setOffline(page);
   const accounts = providerAccounts(page);
-  await expect(accounts.getByRole("button", { name: "Add Claude Account…" })).toBeDisabled();
+  await expect(accounts.getByRole("button", { name: "Add Account…" })).toBeDisabled();
   await expect(accounts.getByRole("button", { name: /^Usage Details for Work/u })).toHaveAccessibleName(/Last Known/u);
-  await accounts.getByRole("button", { name: "Change New Claude Sessions" }).click();
-  const defaults = page.getByRole("dialog", { name: "New Claude Sessions", exact: true });
-  await expect(defaults).toContainText("Your choice saves now");
-  await defaults.getByRole("button", { name: /^Account:/u }).click();
-  await page.getByRole("option", { name: "Work", exact: true }).click();
-  await defaults.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(defaults).toHaveCount(0);
-  await expect(accounts).toContainText("New sessions use Work.");
-  await accounts.getByRole("button", { name: "Change Running Sessions" }).click();
-  const running = page.getByRole("dialog", { name: "Running Sessions", exact: true });
-  await running.getByRole("switch").click();
-  await running.getByRole("button", { name: "Save", exact: true }).click();
+  await (await openAccountMenu(page, "Work")).getByRole("menuitem", { name: "Set as Default", exact: true }).click();
+  await expect(accountRow(page, "Work").locator(".provider-default-marker")).toHaveText("Default");
+  const toggle = accounts.getByRole("switch", { name: "Switch Accounts at a Usage Limit" });
+  await toggle.click();
   await page.getByRole("dialog", { name: "Turn On Automatic Switching", exact: true }).getByRole("button", { name: "Turn On Automatic Switching", exact: true }).click();
-  await expect(running).toHaveCount(0);
-  await expect(accounts).toContainText("At a usage limit, the next turn can move to another account.");
+  await expect(toggle).toHaveAttribute("aria-checked", "true");
 });
 
 test("ordinary members can inspect Runner Capacity but cannot change it", async ({ page }) => {
@@ -1118,7 +1106,7 @@ test("a Machine owner can change capacity without receiving organization-wide co
   await expect(page.getByRole("button", { name: "Delete Machine…" })).toHaveCount(0);
   await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(providerAccounts(page).getByRole("button", { name: "Change New Claude Sessions" })).toHaveCount(0);
-  await expect(providerAccounts(page).getByRole("button", { name: "Change Running Sessions" })).toHaveCount(0);
+  await expect(providerAccounts(page).getByRole("switch", { name: "Switch Accounts at a Usage Limit" })).toBeDisabled();
 });
 
 test("Delete Machine… waits for an online native runner to stop, saying so, then confirms the deletion", async ({ page }) => {
@@ -1188,12 +1176,9 @@ test("at 390px Machine Settings is a bottom sheet: two 48px footer buttons, Dele
   await expect(last).toContainText("Stop the runner to delete.");
   // The confirmation replaces the sheet, with Back, rather than stacking a second one (§7.5).
   await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
-  await providerAccounts(page).getByRole("button", { name: "Change Running Sessions" }).click();
-  const running = page.getByRole("dialog", { name: "Running Sessions", exact: true });
-  await running.getByRole("switch").click();
-  await running.getByRole("button", { name: "Save", exact: true }).click();
+  await providerAccounts(page).getByRole("switch", { name: "Switch Accounts at a Usage Limit" }).click();
   const confirmation = page.getByRole("dialog", { name: "Turn On Automatic Switching" });
-  await expect(confirmation.getByRole("button", { name: "Back to Running Sessions" })).toBeVisible();
+  await expect(confirmation.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
   await expect(dialog).toBeHidden();
 });
 
@@ -1615,3 +1600,17 @@ for (const width of [1280, 390]) {
     await expect(dialog.getByRole("button", { name: "Reviewer Executable Policy: Strict", exact: true })).toBeVisible();
   });
 }
+
+test("keyboard default actions keep focus on the account menu after delayed saves", async ({ page }) => {
+  await page.goto("/machine-management-e2e.html?defaultSaveDelay&machine=native-t14s");
+  const row = accountRow(page, "Work");
+  const more = row.getByRole("button", { name: "More Actions for Work", exact: true });
+  await more.focus(); await page.keyboard.press("Enter");
+  await page.getByRole("menuitem", { name: "Set as Default", exact: true }).press("Enter");
+  await expect(row.locator(".provider-default-marker")).toHaveText("Default");
+  await expect(more).toBeFocused();
+  await more.press("Enter");
+  await page.getByRole("menuitem", { name: "Clear Default", exact: true }).press("Enter");
+  await expect(row.locator(".provider-default-marker")).toHaveCount(0);
+  await expect(more).toBeFocused();
+});

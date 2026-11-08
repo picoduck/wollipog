@@ -207,28 +207,25 @@ changes the account's recovery records to bypass that check. The authorization n
 
 ## Web Actions
 
-The Accounts list on a Machine shows each account's profile state from `profile.access`: **Profile**
-(`granted`), **Grant Pending** (`pending`) or **Not Granted** (`not_granted`); a legacy HOME has no
-badge. An Owner or Admin of the personal control-plane organization sees two actions on a v225
-runner, and nobody sees them on an older runner. A member who can manage the Machine, and an Owner or
-Admin of any other organization (whom the routes refuse; see
-[Authorization and Audit](#authorization-and-audit)), see only the badges:
+Provider Accounts shows exception states: **Grant Pending** (`pending`) and **No Access Here**
+(`not_granted`). A granted profile and an unrestricted legacy account have no redundant state tag.
+An Owner or Admin of the personal control-plane organization who can manage the machine sees
+**Account Access…** in each account menu on a v225 runner. Members and admins of other
+organizations do not receive profile actions; the existing authorization routes are unchanged.
 
-- **Adopt as Profile**, for an account without a profile, `not_granted`, or `pending` (a retry), while
-  the Machine is online. The confirmation says that after adoption only control planes granted the
-  profile can use the HOME, so other control planes sharing the Machine's account lose access, and
-  that existing sessions keep working while new sessions record the profile. Coded refusals, the
-  capability refusal and a 504 (the Machine did not confirm in time; the grant completes when it
-  reports the account again) are shown in the section.
-- **Revoke Access**, for `granted` or `pending`, also while the Machine is offline (the control plane
-  records the revocation; the runner drops the grant at its next registration). The confirmation
-  says sessions that use the profile cannot restart until access is granted again and that other
-  control planes are not affected. A `PROVIDER_PROFILE_HAS_ACTIVE_SESSIONS` refusal opens a second
-  confirmation, **Revoke Access from Active Sessions**, listing the sessions, which retries with
-  `force: true`.
+The content-height Account Access dialog explains which Wollipog servers can use the account.
+It offers **Limit Access to This Server…** for a legacy account, **Give This Server Access…**
+for `not_granted`, **Retry Access…** for `pending`, and **Remove This Server's Access…** for
+`granted` or `pending`. The underlying adopt and revoke APIs, acknowledgement, audit and
+active-session force confirmation are unchanged. Adding a grant preserves other recorded grants;
+creating the first marker restricts servers that have no grant. Existing sessions keep working.
+These actions are independent of choosing a default account.
 
-On a Windows Machine, **Adopt as Profile** is shown disabled with the reason: a Windows runner cannot
-verify a profile marker and refuses every adoption as `UNSUPPORTED_HOME`.
+Grant changes require an online compatible machine. On Windows the grant action is disabled with
+its existing explanation: the runner cannot verify a profile marker. Removal of this server's
+access remains available offline and is applied to the runner at registration. Coded failures and
+uncertain timeout results continue to appear in the section. Stale-lease recovery stays in the
+account menu, where urgent recovery remains visible without opening Account Access.
 
 ## Session Launch Refusals
 
@@ -466,8 +463,8 @@ older runners never receive an import request. Refusals carry a code
 A session that doesn't choose an account never takes one whose profile only other control planes
 may use (`profile.access` of `not_granted`): the control plane's implicit choice, and New Session's
 displayed preselection, skip it. Such an account can't be saved as the Machine's default either
-(409 `PROVIDER_PROFILE_NOT_GRANTED`); the Provider Accounts editor leaves it out of the choices unless it is the
-saved one, which says why. Naming the account explicitly is still the person's decision.
+(409 `PROVIDER_PROFILE_NOT_GRANTED`); Set as Default is disabled in its account menu with a reason. A previously saved unusable
+default stays visible with an explicit recovery warning and Clear Default action. Naming the account explicitly is still the person's decision.
 
 ## Registration and Use
 

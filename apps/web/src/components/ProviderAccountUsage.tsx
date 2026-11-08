@@ -39,6 +39,8 @@ export function ProviderAccountUsage({ account, runnerId, online, data }: {
   data: ReturnType<typeof useMachineAccountUsage>;
 }) {
   const [expanded, setExpanded] = useState(false);
+  // Keep an operated disclosure focusable even if a refresh temporarily has no buckets.
+  const [disclosureUsed, setDisclosureUsed] = useState(false);
   const id = useId();
   const privacy = useAccountEmailPrivacy();
   const source = data.response?.sources.filter(value => value.runnerId === runnerId &&
@@ -51,14 +53,12 @@ export function ProviderAccountUsage({ account, runnerId, online, data }: {
     (data.now - source.fetchedAt > (data.response?.staleAfterMs ?? 0) || buckets.some(bucket => bucket.resetsAt !== undefined && bucket.resetsAt <= data.now));
   const name = accountLabelText(account.label, undefined, privacy.hide);
   const summary = tightest ? `${usageLeftPercent(tightest)}% Left${stale ? " · Last Known" : ""}. ${tightest.label}${tightest.resetsAt !== undefined ? ` · ${subscriptionResetLabel(tightest.resetsAt, data.now)}` : ""}` : "Usage Not Reported";
+  const compact = tightest ? `${usageLeftPercent(tightest)}% Left${stale ? " · Last Known" : tightest.resetsAt !== undefined ? ` · ${subscriptionResetLabel(tightest.resetsAt, data.now)}` : ""}` : "Usage Not Reported";
   return <div className="provider-account-usage">
-    <button type="button" className="provider-usage-toggle" aria-expanded={expanded} aria-controls={id}
-      aria-label={`Usage Details for ${name}: ${summary}`} onClick={() => setExpanded(!expanded)}>
-      <span>{tightest ? <><span>{usageLeftPercent(tightest)}% Left{stale ? " · Last Known" : ""}</span>
-        <span className="provider-usage-reset">{tightest.label}{tightest.resetsAt !== undefined ? ` · ${subscriptionResetLabel(tightest.resetsAt, data.now)}` : ""}</span></>
-        : <span>Usage Not Reported</span>}</span>
-      <ChevronDownIcon />
-    </button>
+    {buckets.length > 0 || disclosureUsed ? <button type="button" className="provider-usage-toggle" aria-expanded={expanded} aria-controls={id}
+      aria-label={`Usage Details for ${name}: ${summary}`} onClick={() => { setDisclosureUsed(true); setExpanded(!expanded); }}>
+      <span>{compact}</span><ChevronDownIcon />
+    </button> : <span className="provider-usage-empty">{compact}</span>}
     {expanded && <div className="provider-usage-details" id={id}>
       {buckets.length > 0 ? <AccountUsageMeters buckets={buckets} stale={stale} /> : <p>No allowance reading is available for this account.</p>}
       {buckets.map(bucket => bucket.resetsAt !== undefined && <p key={bucket.id}>{bucket.label}: {subscriptionResetLabel(bucket.resetsAt, data.now)}</p>)}

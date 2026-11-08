@@ -10,7 +10,7 @@ if (evidenceDir) mkdirSync(evidenceDir, { recursive: true });
 const DESIGN_WORKSTATION = "machine=native-t14s";
 const providerAccounts = (page: Page) => page.getByRole("region", { name: /^Provider Accounts/ });
 const accountRow = (page: Page, label: string) =>
-  providerAccounts(page).locator(".surface > .row").filter({ has: page.locator(".row-title", { hasText: label }) });
+  providerAccounts(page).locator(".provider-accounts-list > .row").filter({ has: page.locator(".row-title", { hasText: label }) });
 const signInSteps = (page: Page, label: string) =>
   accountRow(page, label).locator("xpath=following-sibling::*[1][contains(concat(' ', @class, ' '), ' provider-account-expansion ')]");
 
@@ -59,7 +59,7 @@ for (const width of [390, 1280]) test(`Set Up Managed Profile opens Add Account 
   await expect(offer).toContainText("New Claude sessions on this machine that don't choose an account will use it.");
   await capture(page, `set-up-use-for-new-sessions-${width}`);
   await offer.getByRole("button", { name: "Use for New Sessions" }).click();
-  await expect(page.getByText("New Claude sessions on this machine use this account.")).toBeVisible();
+  await expect(page.getByText("Default Claude account updated. Running sessions aren't affected.")).toBeVisible();
   await expect(offer).toHaveCount(0);
 });
 
