@@ -39,6 +39,8 @@ export function ProviderAccountUsage({ account, runnerId, online, data }: {
   data: ReturnType<typeof useMachineAccountUsage>;
 }) {
   const [expanded, setExpanded] = useState(false);
+  // Keep an operated disclosure focusable even if a refresh temporarily has no buckets.
+  const [disclosureUsed, setDisclosureUsed] = useState(false);
   const id = useId();
   const privacy = useAccountEmailPrivacy();
   const source = data.response?.sources.filter(value => value.runnerId === runnerId &&
@@ -53,8 +55,8 @@ export function ProviderAccountUsage({ account, runnerId, online, data }: {
   const summary = tightest ? `${usageLeftPercent(tightest)}% Left${stale ? " · Last Known" : ""}. ${tightest.label}${tightest.resetsAt !== undefined ? ` · ${subscriptionResetLabel(tightest.resetsAt, data.now)}` : ""}` : "Usage Not Reported";
   const compact = tightest ? `${usageLeftPercent(tightest)}% Left${stale ? " · Last Known" : tightest.resetsAt !== undefined ? ` · ${subscriptionResetLabel(tightest.resetsAt, data.now)}` : ""}` : "Usage Not Reported";
   return <div className="provider-account-usage">
-    {buckets.length > 0 ? <button type="button" className="provider-usage-toggle" aria-expanded={expanded} aria-controls={id}
-      aria-label={`Usage Details for ${name}: ${summary}`} onClick={() => setExpanded(!expanded)}>
+    {buckets.length > 0 || disclosureUsed ? <button type="button" className="provider-usage-toggle" aria-expanded={expanded} aria-controls={id}
+      aria-label={`Usage Details for ${name}: ${summary}`} onClick={() => { setDisclosureUsed(true); setExpanded(!expanded); }}>
       <span>{compact}</span><ChevronDownIcon />
     </button> : <span className="provider-usage-empty">{compact}</span>}
     {expanded && <div className="provider-usage-details" id={id}>

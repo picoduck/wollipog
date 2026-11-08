@@ -28,12 +28,13 @@ export function RunningSessionAccountSettings({ runner, online, canEdit }: { run
   const supported = !online || runnerSupportsProtocol(runner.protocolVersion, "automaticProviderAccountSwitch");
   const save = async () => {
     if (inFlight.current || !canEdit || !supported) return;
-    inFlight.current = true; setSaving(true); setError(null);
+    inFlight.current = true; setError(null);
     const enabled = !current?.enabled;
     const expectedRevision = current?.revision ?? 0;
     try {
       if (enabled && !await confirm({ title: "Turn On Automatic Switching", message: "At a usage limit, the next turn moves to another account from the same provider.",
         details: <Notice tone="warning" compact>{TERMS}</Notice>, confirmLabel: "Turn On Automatic Switching" })) return;
+      setSaving(true);
       const { automaticAccountSwitching } = await api.updateMachineAutomaticAccountSwitching(runner.runnerId, { enabled, expectedRevision });
       setSaved(automaticAccountSwitching);
       showToast(online ? "Usage-limit switching updated." : "Switching setting saved. It takes effect when a compatible runner reconnects.", { tone: "success" });

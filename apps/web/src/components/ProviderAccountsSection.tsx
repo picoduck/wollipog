@@ -33,7 +33,7 @@ const ADOPTION_REFUSALS: Readonly<Record<string, string>> = {
     "It may be unreadable, belong to the other provider, or already list the maximum number of control planes.",
   HOME_IN_USE: "Another runner or control plane is using this account's HOME. Try again when it is no longer in use.",
   UNSUPPORTED_HOME: "This account's HOME cannot hold a provider profile. Windows Machines and WSL account homes are not supported.",
-  PROVIDER_PROFILE_GRANT_REVOKED: "Access was revoked while the account was being adopted. Adopt it again to grant access.",
+  PROVIDER_PROFILE_GRANT_REVOKED: "Access was revoked while this change was being made. Open Account Access and try again to grant access.",
 };
 
 /** Windows Machines cannot verify a profile marker, so their accounts never become profiles. */
@@ -104,16 +104,16 @@ export function providerProfileErrorMessage(cause: unknown, action: "adopt" | "r
     return cause.message;
   }
   if (action === "adopt" && cause.status === 504) {
-    return "The Machine did not confirm the adoption in time. It completes when the Machine reports the account again.";
+    return "The machine did not confirm the access change in time. It completes when the machine reports the account again.";
   }
   if (action === "adopt" && cause.status === 409 && cause.message === "runner is offline") {
-    return "The Machine is offline. Adopting an account needs the Machine to be online.";
+    return "The machine is offline. Changing account access needs the machine to be online.";
   }
   if (cause.status === 409 && cause.code && ADOPTION_REFUSALS[cause.code]) return ADOPTION_REFUSALS[cause.code]!;
   if (cause.status === 409 && cause.code === "PROVIDER_PROFILE_ADOPTION_FAILED") {
     // No code: the runner kept this authorization pending, so a retry reuses it.
     const detail = cause.message && cause.message !== ADOPTION_FAILED_DEFAULT ? ` ${cause.message}` : "";
-    return `The Machine could not adopt this account. Adopt it again to retry.${detail}`;
+    return `The machine could not change access to this account. Open Account Access and try again.${detail}`;
   }
   // The capability refusal ("This machine needs a newer runner…") and the other refusals are
   // already sentence-case copy from the control plane.
@@ -211,15 +211,18 @@ function AccountMenu({ name, heading, busy, items }: {
         ref={menu.triggerRef}
         type="button"
         className="icon-btn sm"
-        disabled={busy}
+        aria-disabled={busy || undefined}
         aria-busy={busy || undefined}
         title="More Actions"
         aria-label={`More Actions for ${name}`}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menu.menuId : undefined}
-        onClick={menu.toggle}
-        onKeyDown={menu.onTriggerKeyDown}
+        onClick={() => { if (!busy) menu.toggle(); }}
+        onKeyDown={event => {
+          if (busy) { if (event.key === "Enter" || event.key === " ") event.preventDefault(); return; }
+          menu.onTriggerKeyDown(event);
+        }}
       >
         <MoreHorizontalIcon />
       </button>
@@ -502,7 +505,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
       detailRows: accountRows(account),
       confirmLabel: "Revoke Access",
       tone: "danger",
-      back: backToMenu(reopen),
+      back: { label: "Back to Account Access", run: reopen },
     });
     if (!approved) return;
     setAccessAccountId(null);
@@ -651,7 +654,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
           accountId: account?.id ?? null,
           expectedRevision: defaults.find(value => value.provider === provider)?.revision ?? 0,
         });
-        setStarted(null);
+        if (account) setStarted(current => current?.accountId === account.id ? null : current);
         setSavedDefaults(current => [...current.filter(value => value.provider !== provider), providerAccountDefault]);
         showToast(account ? `Default ${providerName(provider)} account updated. Running sessions aren't affected.`
           : `Default ${providerName(provider)} account cleared. New sessions use the agent's configured account or the first available account.`, { tone: "success" });

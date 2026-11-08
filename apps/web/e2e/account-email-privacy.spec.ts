@@ -272,3 +272,21 @@ test("account default menus and access dialogs follow privacy across tabs withou
   await expect(access).not.toContainText("work@example.com");
   await management.close();
 });
+
+test("a Switch Account candidate selection preserves the keyboard reveal until the surface reopens", async ({ page, context }) => {
+  await page.goto("/settings-rows-e2e.html?section=behavior");
+  await page.getByRole("switch", { name: "Hide Account Emails" }).click();
+  const accounts = await context.newPage();
+  const picker = await openPicker(accounts);
+  await picker.getByRole("button", { name: "Show Emails" }).click();
+  const candidate = picker.getByRole("radio").nth(2);
+  await candidate.focus();
+  await accounts.keyboard.press("Space");
+  await expect(candidate).toBeChecked();
+  await expect(picker).toContainText("spare.me@example.org");
+  await expect(picker.getByRole("button", { name: "Hide Emails" })).toBeVisible();
+  await picker.getByRole("button", { name: "Cancel", exact: true }).click();
+  const reopened = await openPicker(accounts);
+  expect(await reopened.innerHTML()).not.toContain("@example.");
+  await accounts.close();
+});

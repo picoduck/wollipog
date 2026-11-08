@@ -1045,6 +1045,12 @@ for (const width of [390, 320]) {
     await access.getByRole("button", { name: "Close", exact: true }).last().click();
     await expect(access).toHaveCount(0);
     await expect(accountRow(page, "Work").getByRole("button", { name: "More Actions for Work", exact: true })).toBeFocused();
+    await page.goto("/machine-management-e2e.html?profiles&machine=native-t14s");
+    await (await openAccountMenu(page, "Work")).getByRole("menuitem", { name: "Account Access…" }).click();
+    await access.getByRole("button", { name: "Remove This Server's Access…", exact: true }).click();
+    const revoke = page.getByRole("dialog", { name: "Revoke Access", exact: true });
+    await revoke.getByRole("button", { name: "Back to Account Access", exact: true }).click();
+    await expect(access).toContainText("This server has access.");
   });
   test("at " + width + "px the compact list sets defaults directly and discloses usage", async ({ page }) => {
     await page.setViewportSize({ width, height: 844 });
@@ -1594,3 +1600,17 @@ for (const width of [1280, 390]) {
     await expect(dialog.getByRole("button", { name: "Reviewer Executable Policy: Strict", exact: true })).toBeVisible();
   });
 }
+
+test("keyboard default actions keep focus on the account menu after delayed saves", async ({ page }) => {
+  await page.goto("/machine-management-e2e.html?defaultSaveDelay&machine=native-t14s");
+  const row = accountRow(page, "Work");
+  const more = row.getByRole("button", { name: "More Actions for Work", exact: true });
+  await more.focus(); await page.keyboard.press("Enter");
+  await page.getByRole("menuitem", { name: "Set as Default", exact: true }).press("Enter");
+  await expect(row.locator(".provider-default-marker")).toHaveText("Default");
+  await expect(more).toBeFocused();
+  await more.press("Enter");
+  await page.getByRole("menuitem", { name: "Clear Default", exact: true }).press("Enter");
+  await expect(row.locator(".provider-default-marker")).toHaveCount(0);
+  await expect(more).toBeFocused();
+});

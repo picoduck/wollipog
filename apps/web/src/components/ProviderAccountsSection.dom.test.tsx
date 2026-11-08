@@ -1306,7 +1306,7 @@ test("a capability refusal and an adoption timeout are shown in the section's no
   for (const [failure, expected] of [
     [new ApiError(CAPABILITY_REFUSAL, 409, undefined, { error: CAPABILITY_REFUSAL, requiredRunnerProtocolVersion: PROFILES }), CAPABILITY_REFUSAL],
     [new ApiError("runner request timed out", 504, undefined, { status: "pending", grantId: "g" }),
-      "The Machine did not confirm the adoption in time. It completes when the Machine reports the account again."],
+      "The machine did not confirm the access change in time. It completes when the machine reports the account again."],
   ] as const) {
     const api = client({ adopt: async () => { throw failure; } });
     const ui = await render({ api: api.client });
@@ -1327,12 +1327,12 @@ test("coded adoption refusals read as sentences, and uncoded ones keep the runne
   assert.match(adopt(409, "PROFILE_EXISTS"), /^This account's HOME already has a profile record/);
   assert.match(adopt(409, "HOME_IN_USE"), /^Another runner or control plane is using this account's HOME\./);
   assert.match(adopt(409, "UNSUPPORTED_HOME"), /Windows Machines and WSL account homes are not supported\.$/);
-  assert.equal(adopt(409, "PROVIDER_PROFILE_GRANT_REVOKED"), "Access was revoked while the account was being adopted. Adopt it again to grant access.");
+  assert.equal(adopt(409, "PROVIDER_PROFILE_GRANT_REVOKED"), "Access was revoked while this change was being made. Open Account Access and try again to grant access.");
   assert.equal(adopt(409, "PROVIDER_PROFILE_ADOPTION_FAILED", "The configuration could not be written."),
-    "The Machine could not adopt this account. Adopt it again to retry. The configuration could not be written.");
+    "The machine could not change access to this account. Open Account Access and try again. The configuration could not be written.");
   assert.equal(adopt(409, "PROVIDER_PROFILE_ADOPTION_FAILED", "The provider profile could not be adopted."),
-    "The Machine could not adopt this account. Adopt it again to retry.");
-  assert.equal(adopt(409, undefined, "runner is offline"), "The Machine is offline. Adopting an account needs the Machine to be online.");
+    "The machine could not change access to this account. Open Account Access and try again.");
+  assert.equal(adopt(409, undefined, "runner is offline"), "The machine is offline. Changing account access needs the machine to be online.");
   assert.equal(providerProfileErrorMessage(new ApiError("This provider account has no profile access to revoke.", 404), "revoke"),
     "This provider account has no profile access to revoke.");
 });
@@ -1593,7 +1593,7 @@ test("once the sign-in it started records its account, an Owner can use it for n
     ...base.client,
     updateMachineProviderAccountDefault: async (runnerId: string, provider: string, body: unknown) => {
       saved.push({ runnerId, provider, body });
-      return { providerAccountDefault: { provider, accountId: "codex-new", revision: 4 } };
+      return { providerAccountDefault: { provider, accountId: (body as { accountId: string }).accountId, revision: provider === "codex" ? 4 : 1 } };
     },
   } as unknown as ApiClient;
   const defaults = [{ provider: "codex" as const, accountId: null, revision: 3 }];
@@ -1612,9 +1612,12 @@ test("once the sign-in it started records its account, an Owner can use it for n
     const offer = ui.container.querySelector<HTMLElement>('[aria-label="Use for New Sessions"]');
     assert.ok(offer, "offered once the sign-in recorded the account");
     assert.match(offer.textContent ?? "", /New Codex sessions on this machine that don't choose an account will use it\./);
+    await ui.choose("Granted Work", "Set as Default");
+    assert.ok(ui.container.querySelector('[aria-label="Use for New Sessions"]'), "another provider's default does not dismiss this offer");
     await act(async () => { ui.button(offer, "Use for New Sessions").click(); });
     await ui.settle();
-    assert.deepEqual(saved, [{ runnerId: "runner-1", provider: "codex", body: { accountId: "codex-new", expectedRevision: 3 } }]);
+    assert.equal(saved.length, 2);
+    assert.deepEqual(saved.slice(1), [{ runnerId: "runner-1", provider: "codex", body: { accountId: "codex-new", expectedRevision: 3 } }]);
     assertNoDomNode(ui.container.querySelector('[aria-label="Use for New Sessions"]'), "the offer ends once saved");
   } finally {
     await ui.unmount();
@@ -1977,6 +1980,7 @@ test("usage-limit switching waits for terms consent, cancellation writes nothing
     await act(async () => toggle.click()); await ui.settle();
     assert.match(ui.dialog()!.querySelector(".notice.t-warning")?.textContent ?? "", /prohibit circumventing rate limits/);
     assert.equal(toggle.getAttribute("aria-checked"), "false");
+    assert.equal(toggle.getAttribute("aria-busy"), null, "waiting for consent is not saving");
     await act(async () => ui.button(ui.dialog()!, "Cancel").click()); await ui.settle();
     assert.deepEqual(writes, []);
     await act(async () => toggle.click()); await ui.settle();
@@ -1986,5 +1990,30 @@ test("usage-limit switching waits for terms consent, cancellation writes nothing
     await act(async () => toggle.click()); await ui.settle();
     assertNoDomNode(ui.dialog());
     assert.deepEqual(writes[1], { enabled: false, expectedRevision: 1 });
+  } finally { await ui.unmount(); }
+});
+
+test("an expanded usage row keeps its disclosure during a failed reconnect refresh and remains collapsible", async () => {
+  let reads = 0;
+  const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: {
+    ...client().client, subscriptionUsage: async () => {
+      if (reads++ > 0) throw new Error("Usage unavailable");
+      return { sources: [{ sourceId: "work", runnerId: "runner-1", runnerName: "Machine", runnerStatus: "online", agentId: "claude", agentName: "Claude",
+        provider: "claude", providerAccountId: "work", state: "available", freshness: "fresh", fetchedAt: Date.now(),
+        buckets: [{ id: "session", label: "Session Window", remainingPercent: 36 }] }], staleAfterMs: 600_000, generatedAt: Date.now() };
+    },
+  } });
+  try {
+    const toggle = ui.row("Work").querySelector<HTMLButtonElement>('[aria-label^="Usage Details"]')!;
+    await act(async () => { toggle.focus(); toggle.click(); });
+    await ui.rerender({ online: false });
+    assert.equal(toggle.isConnected, true);
+    assert.equal(toggle.getAttribute("aria-expanded"), "true");
+    assert.match(toggle.textContent ?? "", /Usage Not Reported/);
+    assert.match(ui.row("Work").textContent ?? "", /No allowance reading is available/);
+    await act(async () => toggle.click());
+    assert.equal(toggle.getAttribute("aria-expanded"), "false");
+    assert.equal(toggle.isConnected, true, "collapsing does not remove the operated control");
+    assertNoDomNode(ui.row("Work").querySelector(".provider-usage-details"));
   } finally { await ui.unmount(); }
 });

@@ -595,6 +595,7 @@ const client = {
     provider: "claude" | "codex",
     body: { accountId: string | null; expectedRevision: number },
   ) => {
+    if (fixtureParams.has("defaultSaveDelay")) await new Promise(resolve => setTimeout(resolve, 250));
     if (!runner) throw new Error("runner not found");
     const current = runner.providerAccountDefaults?.find((choice) => choice.provider === provider);
     if (body.expectedRevision !== (current?.revision ?? 0)) throw new Error("Default Provider Account changed in another client");
