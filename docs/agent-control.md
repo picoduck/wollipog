@@ -454,6 +454,21 @@ is spawned with, and the runner re-checks the exact authorized agent and command
 review contract and output schema (version 2) are ported from the cross-model-review skill
 (Apache-2.0, attributed).
 
+Native Claude discovery failures marked retryable (capability timeout, failed help, or an
+unverified version) schedule up to two additional discovery passes, each after a 10-second delay
+from the previous completed pass. CLI probes keep their existing timeouts; the full discovery
+pass also includes other installed harnesses. After the retry budget is exhausted, normal
+five-minute discovery continues. A successful fresh probe republishes reviewer capability; no
+ordinary Claude session needs to be opened. Retry a refused review request after recovery.
+Authentication, installation selection, account grants and reviewer trust still have to pass;
+an earlier successful probe never substitutes for current proof.
+
+Runner logs record `provider_discovery_observation` with a pass ID, entry point, observation time,
+agent ID, fixed failure code, recovery attempt and next retry delay. A later successful pass
+records `recovered`. These events omit provider output, credentials and account identities.
+Configured review refusals preserve the runner's discovery/account/trust diagnosis and distinguish
+an unsupported model/effort pair, so transient failures do not ask users to restore a healthy CLI.
+
 A review session is exempt from every session limit: it takes no runner slot, per-agent limit or
 active turn, and it is not a child, so it takes no delegation slot or charge and gives the requester
 no descendant authority. The requester's original human cost ceiling, if it has one, bounds its

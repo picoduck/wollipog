@@ -2073,6 +2073,25 @@ test("configured reviews refuse unavailable models, same-family selection withou
   }
 });
 
+test("configured review refusals preserve discovery and trust reasons rather than asking to restore a healthy reviewer", () => {
+  for (const reason of ["Claude Code capability discovery timed out. Discovery will retry automatically.",
+    "The selected provider account is not signed in.", "The reviewer installation is writable by a session."]) {
+    const h = harness({ configuration: true, driver: "codex-app-server", reviewSession: {
+      configuration: true, reviewers: [], unavailable: { "claude-code": reason },
+    } });
+    try {
+      h.db.reviewSettings.set(h.db.localIdentityContext().userId, null, { version: 1, roundBudget: 4, reviewers: [{
+        implementer: { agentId: "codex", driver: "codex-app-server", context: { kind: "native" } },
+        harness: "claude-code", model: "claude-opus-5-5", effort: "high", allowSameFamily: false,
+      }] });
+      const result = h.svc.requestReviewSession("s1", request());
+      assert.equal(result.ok, false);
+      assert.ok(result.error?.includes(reason), result.error ?? "expected an admission refusal");
+      assert.equal(h.starts().length, 0);
+    } finally { h.db.close(); }
+  }
+});
+
 test("personal project rules replace user rules at review admission and shared sessions retain their launching user", () => {
   const h = harness({ configuration: true });
   try {

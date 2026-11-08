@@ -425,6 +425,25 @@ function reviewerAgent(agents: readonly AgentDefinition[], harness: SessionRevie
     candidate.installation?.selection !== "other" && candidate.harnessSelectionBlocked !== true);
 }
 
+/** Use the selected installation's diagnosis instead of conflating discovery with sign-in. */
+function missingReviewerReason(agents: readonly AgentDefinition[], harness: SessionReviewHarness): string {
+  const candidate = agents.find((agent) => agent.driver === REVIEWER_DRIVERS[harness] &&
+    (agent.context?.kind ?? "native") === "native" && agent.installation?.selection !== "other");
+  if (!candidate) return "no available native agent uses this harness";
+  if (candidate.harnessSelectionBlocked) return "Select a verified harness installation in machine settings before requesting a review.";
+  const readiness = candidate.providerAccountReadiness;
+  if (readiness && (readiness.defaultAuthStatus !== "authenticated" ||
+      !readiness.defaultAccountId || !readiness.readyAccountIds.includes(readiness.defaultAccountId))) {
+    return readiness.defaultAuthStatus === "unauthenticated"
+      ? "The selected provider account is not signed in. Sign in to that account before retrying the review."
+      : "The selected provider account is not ready for automatic launch. Review its setup and ownership details.";
+  }
+  const failure = candidate.claudeCode?.failure;
+  if (failure) return reviewSessionDiscoveryReason(`${failure.message}${failure.retryable
+    ? " Discovery retries automatically; retry this review request without starting another session." : ""}`);
+  return reviewSessionDiscoveryReason(candidate.unavailableReason ?? "no available native agent uses this harness");
+}
+
 /** What the session manager needs to launch and retire a review session. */
 export interface ReviewSessionHooks {
   /** Durable intent, recorded before any slow preparation, cleared by `release`. */
@@ -505,7 +524,7 @@ export class ReviewSessionLauncher {
       const agent = reviewerAgent(agents, harness);
       if (!agent) {
         this.discoveryFailures.delete(harness);
-        unavailable[harness] = "no available native agent uses this harness";
+        unavailable[harness] = missingReviewerReason(agents, harness);
         continue;
       }
       try {

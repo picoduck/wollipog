@@ -195,15 +195,20 @@ export function configuredReview(db: ControlPlaneDb, session: SessionView, runne
   }
   const reviewerId = runner.runtime.reviewSession.reviewers.find(r => r.harness === harness)?.agentId;
   const reviewer = runner.agents.find(a => a.id === reviewerId && agentAvailableForImplicitLaunch(a));
+  if (!reviewer) {
+    const reason = runner.runtime.reviewSession.unavailable?.tools ?? runner.runtime.reviewSession.unavailable?.[harness]
+      ?? "No launch-ready native installation is advertised. Wait for discovery to finish and retry the review request.";
+    throw new ReviewSettingsError(`The configured ${harness} reviewer (${requestedModel ?? "default model"}, ${effort} effort) is unavailable on this session's machine: ${reason}`, 409);
+  }
   // Use the same concrete-model resolution as createSession. The catalog's "default" entry is a
   // UI placeholder, never an immutable launch model that the runner can compare with its spec.
-  const resolved = resolveModelEffort({ ...(requestedModel ? { model: requestedModel } : {}), effort }, reviewer?.capabilities,
+  const resolved = resolveModelEffort({ ...(requestedModel ? { model: requestedModel } : {}), effort }, reviewer.capabilities,
     harness === "codex" ? "codex-app-server" : "claude-code");
   const model = resolved.value?.model;
-  if (!reviewer || resolved.error || !model ||
+  if (resolved.error || !model ||
       requestedModel != null && !reviewModelSupported(reviewer.capabilities, requestedModel, effort) ||
       !reviewModelSupported(reviewer.capabilities, model, effort)) {
-    throw new ReviewSettingsError(`The configured ${harness} reviewer (${requestedModel ?? "default model"}, ${effort} effort) is unavailable on this session's machine. ${snapshot ? "Restore it or launch a new child with an updated review policy." : "Restore it or change Settings → Reviews."}`, 409);
+    throw new ReviewSettingsError(`The configured ${harness} reviewer (${requestedModel ?? "default model"}, ${effort} effort) is unavailable on this session's machine: the discovered installation does not support the requested model and effort. ${snapshot ? "Launch a new child with an updated review policy." : "Choose a discovered model and effort in Settings → Reviews."}`, 409);
   }
   const allowSameFamily = rule?.harness === harness && rule.allowSameFamily;
   if (!allowSameFamily && sameReviewFamily(session.driver, session.model, harness, model)) {
