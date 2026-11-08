@@ -543,7 +543,7 @@ test("Account Access explains restrictions and preserves consent and active-sess
   await expect(access).toContainText("doesn't change the default account");
   await access.getByRole("button", { name: "Limit Access to This Server…" }).click();
   const consent = page.getByRole("dialog", { name: "Limit Access to This Server", exact: true });
-  await expect(consent).toContainText("servers without access cannot use it");
+  await expect(consent).toContainText("only Wollipog servers with access can use this account");
   await consent.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(access).toBeVisible();
   await access.getByRole("button", { name: "Limit Access to This Server…" }).click();
@@ -1039,7 +1039,7 @@ for (const width of [390, 320]) {
     expect((await access.boundingBox())!.height).toBeLessThan(600);
     await access.getByRole("button", { name: "Limit Access to This Server…", exact: true }).click();
     const consent = page.getByRole("dialog", { name: "Limit Access to This Server", exact: true });
-    await expect(consent).toContainText("servers without access cannot use it");
+    await expect(consent).toContainText("only Wollipog servers with access can use this account");
     await consent.getByRole("button", { name: "Back to Account Access", exact: true }).click();
     await expect(access).toBeVisible();
     await access.getByRole("button", { name: "Close", exact: true }).last().click();

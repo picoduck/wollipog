@@ -899,8 +899,19 @@ test("while one account is removed only its ⋯ is busy; the other rows stay usa
     await act(async () => { ui.button(ui.dialog()!, "Remove Account").click(); });
     await ui.settle();
     assert.equal(ui.more("Work")?.getAttribute("aria-busy"), "true");
-    assert.equal(ui.more("Mystery")?.disabled, false);
+    assert.equal(ui.more("Mystery")?.getAttribute("aria-busy"), null);
     assert.equal(ui.button(ui.row("Personal"), "Sign In").disabled, false);
+    const trigger = ui.more("Work")!;
+    await act(async () => { trigger.click(); });
+    await ui.settle();
+    assertNoDomNode(ui.menu(), "a busy account's menu cannot open by click");
+    for (const key of ["Enter", " ", "ArrowDown"]) {
+      await act(async () => {
+        trigger.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true }) as unknown as Event);
+      });
+      await ui.settle();
+      assertNoDomNode(ui.menu(), `a busy account's menu cannot open with ${key}`);
+    }
     await act(async () => { finish(); });
     await ui.settle();
     assert.equal(ui.more("Work")?.getAttribute("aria-busy"), null);
@@ -1199,9 +1210,9 @@ test("Adopt as Profile explains the strict grant and adopts after confirmation",
     assert.ok(dialog);
     const text = dialog.textContent ?? "";
     assert.match(text, /Limit Access to This Server/);
-    assert.match(text, /Only Wollipog servers with access can use this account/);
-    assert.match(text, /servers without access cannot use it/);
-    assert.match(text, /Sessions already running keep working. New sessions record this access\./);
+    assert.match(text, /This server gets access/);
+    assert.match(text, /only Wollipog servers with access can use this account/);
+    assert.match(text, /Existing access grants and running sessions are unchanged; new sessions record this access\./);
     assert.match(text, /Legacy Work/);
     await act(async () => { ui.button(dialog, "Cancel").click(); });
     await ui.settle();
@@ -1227,7 +1238,7 @@ test("while adoption runs only that row's ⋯ is busy; the other rows stay usabl
     await act(async () => { ui.button(ui.dialog()!, "Limit Access").click(); });
     await ui.settle();
     assert.equal(ui.more("Legacy Work")?.getAttribute("aria-busy"), "true");
-    assert.equal(ui.more("Granted Work")?.disabled, false);
+    assert.equal(ui.more("Granted Work")?.getAttribute("aria-busy"), null);
     await act(async () => { finish(); });
     await ui.settle();
     assert.equal(ui.more("Legacy Work")?.getAttribute("aria-busy"), null);
@@ -1296,7 +1307,7 @@ test("declining the force confirmation revokes nothing more", async () => {
     assertNoDomNode(ui.dialog());
     assert.deepEqual(api.calls, [{ kind: "revoke", accountId: "pending", force: false }]);
     assert.equal(ui.error(), null);
-    assert.equal(ui.more("Pending Work")?.disabled, false);
+    assert.equal(ui.more("Pending Work")?.getAttribute("aria-busy"), null);
   } finally {
     await ui.unmount();
   }

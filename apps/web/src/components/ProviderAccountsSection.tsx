@@ -482,9 +482,8 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
     const alreadyRestricted = !!account.profile;
     const approved = await confirm({
       title: alreadyRestricted ? "Give This Server Access" : "Limit Access to This Server",
-      message: "Only Wollipog servers with access can use this account on this machine. This server gets access. " +
-        "Other servers that already have access keep it; servers without access cannot use it. " +
-        "Sessions already running keep working. New sessions record this access.",
+      message: "This server gets access, and only Wollipog servers with access can use this account on this machine. " +
+        "Existing access grants and running sessions are unchanged; new sessions record this access.",
       detailRows: accountRows(account),
       confirmLabel: alreadyRestricted ? "Give Access" : "Limit Access",
       back: { label: "Back to Account Access", run: reopen },
@@ -897,7 +896,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
           {(!online || runner.os === "windows") && <p className="field-helper" id={`${headingId}-access-reason`}>
             {runner.os === "windows" ? PROFILES_UNSUPPORTED_ON_WINDOWS : OFFLINE}</p>}
         </>}
-        {(accessAccount.profile?.access === "granted" || accessAccount.profile?.access === "pending") && <button type="button" className="btn danger"
+        {(accessAccount.profile?.access === "granted" || accessAccount.profile?.access === "pending") && <button type="button" className="btn danger ghost"
           disabled={busy[accessAccount.id] !== undefined} onClick={() => void revoke(accessAccount, () => setAccessAccountId(accessAccount.id))}>
           Remove This Server's Access…
         </button>}
