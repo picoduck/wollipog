@@ -126,7 +126,7 @@ async function render(props: RenderProps) {
   await act(async () => draw(props));
   await settle();
   const body = domWindow.document.body as unknown as HTMLElement;
-  const dialog = () => body.querySelector('[role="dialog"]') as HTMLElement | null;
+  const dialog = () => [...body.querySelectorAll<HTMLElement>('[role="dialog"]')].at(-1) ?? null;
   const rows = () => [...container.querySelectorAll<HTMLElement>(".provider-accounts-list > .row")];
   const row = (label: string) => {
     const match = rows().find((candidate) => candidate.querySelector(".row-title")?.textContent?.includes(label));
@@ -157,12 +157,14 @@ async function render(props: RenderProps) {
     reason: item.querySelector(".menu-desc")?.textContent ?? null,
   }));
   const choose = async (label: string, item: string) => {
+    if (dialog()?.querySelector(".modal-title")?.textContent === "Account Access") { await act(async () => button(dialog()!, "Close").click()); await settle(); }
     const opened = await openMenu(label);
+    const accessAction = /^(Limit Access|Give This Server Access|Retry Access|Remove This Server)/.test(item);
     const match = [...opened.querySelectorAll<HTMLButtonElement>(".menu-item")].find((candidate) =>
-      candidate.querySelector(".menu-text")?.textContent === item);
-    assert.ok(match, `expected ${item} in ${label}'s menu`);
-    await act(async () => { match.click(); });
-    await settle();
+      candidate.querySelector(".menu-text")?.textContent === (accessAction ? "Account Access…" : item));
+    assert.ok(match, `expected ${item} in ${label}'s actions`);
+    await act(async () => { match.click(); }); await settle();
+    if (accessAction) { await act(async () => button(dialog()!, item).click()); await settle(); }
   };
   const closeMenu = async () => {
     const backdrop = body.querySelector<HTMLElement>(".menu-backdrop");
@@ -210,50 +212,33 @@ test("offline account defaults save now and switching conflicts reload the serve
     },
   } });
   try {
-    await act(async () => ui.container.querySelector<HTMLButtonElement>('[aria-label="Change New Claude Sessions"]')!.click());
-    await ui.settle();
-    let dialog = ui.dialog()!;
-    assert.match(dialog.textContent ?? "", /choice saves now/);
-    await act(async () => dialog.querySelector<HTMLButtonElement>('[aria-haspopup="listbox"]')!.click());
-    await ui.settle();
-    await act(async () => [...ui.body.querySelectorAll<HTMLButtonElement>('[role="option"]')].find(option => option.textContent?.startsWith("Work"))!.click());
-    await act(async () => ui.button(dialog, "Save").click());
-    await ui.settle();
+    await ui.choose("Work", "Set as Default");
+    assertNoDomNode(ui.dialog(), "setting a default needs no editor");
     assert.deepEqual(writes, [{ accountId: "work", expectedRevision: 0 }]);
-    await act(async () => ui.container.querySelector<HTMLButtonElement>('[aria-label="Change Running Sessions"]')!.click());
-    await ui.settle(); dialog = ui.dialog()!;
-    await act(async () => dialog.querySelector<HTMLButtonElement>('[role="switch"]')!.click());
-    await act(async () => ui.button(dialog, "Save").click());
-    await ui.settle();
+    const toggle = ui.container.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    await act(async () => toggle.click()); await ui.settle();
     assert.deepEqual(writes[1], { enabled: false, expectedRevision: 4 });
-    assert.equal(ui.button(dialog, "Save").disabled, true);
-    await act(async () => ui.button(dialog, "Reload Saved Choice").click());
-    assert.equal(dialog.querySelector('[role="switch"]')?.getAttribute("aria-checked"), "false");
-    assert.equal(ui.button(dialog, "Save").disabled, true, "server revision reload is unchanged, despite stale props");
-    const add = ui.button(ui.container, "Add Claude Account…");
+    assert.equal(toggle.getAttribute("aria-checked"), "false", "a conflict shows the server's current value despite stale props");
+    assert.match(ui.container.textContent ?? "", /switch now shows the saved value/);
+    const add = ui.button(ui.container, "Add Account…");
     assert.equal(add.disabled, true);
     assert.equal(ui.container.querySelector(`#${add.getAttribute("aria-describedby")}`)?.textContent, "This machine is offline.");
   } finally { await ui.unmount(); }
 });
 
-test("non-revision refusals keep Save available for a corrected account choice", async () => {
+test("a refused default action shows its reason and can be retried from another account", async () => {
+  const writes: unknown[] = [];
   const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: { ...client().client,
-    updateMachineProviderAccountDefault: async () => { throw new ApiError("This account isn't granted here.", 409, "PROVIDER_PROFILE_NOT_GRANTED"); },
+    updateMachineProviderAccountDefault: async (_runner, _provider, input) => {
+      writes.push(input); throw new ApiError("This account isn't granted here.", 409, "PROVIDER_PROFILE_NOT_GRANTED");
+    },
   } });
   try {
-    await act(async () => ui.container.querySelector<HTMLButtonElement>('[aria-label="Change New Claude Sessions"]')!.click());
-    await ui.settle(); const dialog = ui.dialog()!;
-    const select = async (name: string) => {
-      await act(async () => dialog.querySelector<HTMLButtonElement>('[aria-haspopup="listbox"]')!.click());
-      await ui.settle();
-      await act(async () => [...ui.body.querySelectorAll<HTMLButtonElement>('[role="option"]')].find(option => option.textContent?.startsWith(name))!.click());
-    };
-    await select("Work");
-    await act(async () => ui.button(dialog, "Save").click()); await ui.settle();
-    assert.match(dialog.textContent ?? "", /This account isn't granted here/);
-    assert.equal([...dialog.querySelectorAll("button")].find(button => button.textContent === "Reload Saved Choice"), undefined);
-    await select("Personal");
-    assert.equal(ui.button(dialog, "Save").disabled, false);
+    await ui.choose("Work", "Set as Default");
+    assert.match(ui.error() ?? "", /This account isn't granted here/);
+    assertNoDomNode(ui.dialog());
+    await ui.choose("Personal", "Set as Default");
+    assert.deepEqual(writes, [{ accountId: "work", expectedRevision: 0 }, { accountId: "personal", expectedRevision: 0 }]);
   } finally { await ui.unmount(); }
 });
 
@@ -268,7 +253,7 @@ test("cached usage refreshes on account inventory and connection changes, and pl
   } } });
   try {
     assert.equal(reads, 1);
-    await act(async () => ui.row("Work").querySelector<HTMLButtonElement>('[aria-label^="Usage Details for Work"]')!.click());
+    assertNoDomNode(ui.row("Work").querySelector('[aria-label^="Usage Details for Work"]'));
     assertNoDomNode(ui.row("Work").querySelector("time"));
     await ui.rerender({ online: false }); assert.equal(reads, 2);
     await ui.rerender({ online: true }); assert.equal(reads, 3);
@@ -277,76 +262,86 @@ test("cached usage refreshes on account inventory and connection changes, and pl
   } finally { await ui.unmount(); }
 });
 
-test("an unusable saved profile is explained, and alias-only editors have no email reveal", async () => {
-  await withHiddenEmails(async () => {
-    const ui = await render({ runner: runnerView({ providerAccountDefaults: [{ provider: "codex", accountId: "other", revision: 1 }] }) });
-    try {
-      assert.match(ui.container.textContent ?? "", /saved default cannot be used here/);
-      await act(async () => ui.container.querySelector<HTMLButtonElement>('[aria-label="Change New Codex Sessions"]')!.click());
-      await ui.settle();
-      assertNoDomNode(ui.dialog()!.querySelector('[aria-label="Show Emails"]'));
-    } finally { await ui.unmount(); }
-  });
+test("an unavailable default stays explicit, and its menu can clear it without granting access", async () => {
+  const writes: unknown[] = [];
+  const ui = await render({ runner: runnerView({ providerAccountDefaults: [{ provider: "codex", accountId: "other", revision: 3 }] }), api: {
+    ...client().client, updateMachineProviderAccountDefault: async (_runner, provider, input) => {
+      writes.push(input); return { providerAccountDefault: { provider, accountId: input.accountId, revision: 4 } };
+    },
+  } });
+  try {
+    assert.match(ui.container.textContent ?? "", /saved default needs access/);
+    await ui.choose("Other Work", "Clear Default");
+    assert.deepEqual(writes, [{ accountId: null, expectedRevision: 3 }]);
+    const menu = await ui.openMenu("Other Work");
+    assert.equal(ui.menuItems(menu).find(item => item.label === "Set as Default")?.disabled, true);
+    assert.match(ui.menuItems(menu).find(item => item.label === "Set as Default")?.reason ?? "", /needs access/);
+  } finally { await ui.unmount(); }
 });
 
-test("provider settings are progressively disclosed and a saved default updates only its provider", async () => {
+test("account menus set and clear independent provider defaults without a dropdown or editor", async () => {
   const writes: unknown[] = [];
   const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: {
     ...client().client,
     updateMachineProviderAccountDefault: async (runnerId, provider, input) => {
       writes.push([runnerId, provider, input]);
-      return { providerAccountDefault: { provider, accountId: input.accountId, revision: 1 } };
+      return { providerAccountDefault: { provider, accountId: input.accountId, revision: input.expectedRevision + 1 } };
     },
   } });
   try {
     const groups = [...ui.container.querySelectorAll(".provider-account-group")];
     assert.deepEqual(groups.map(group => group.querySelector("h4")?.textContent), ["Claude", "Codex"]);
     assertNoDomNode(ui.container.querySelector('[role="combobox"], [role="radio"], select'));
-    assert.equal(groups[0]!.querySelectorAll(".row").length, 2);
-    assert.equal(groups[1]!.querySelectorAll(".row").length, 1);
-    await act(async () => ui.container.querySelector<HTMLButtonElement>('[aria-label="Change New Claude Sessions"]')!.click());
-    await ui.settle();
-    const dialog = ui.dialog()!;
-    assert.equal(dialog.querySelector(".modal-title")?.textContent, "New Claude Sessions");
-    await act(async () => dialog.querySelector<HTMLButtonElement>('[aria-haspopup="listbox"]')!.click());
-    await ui.settle();
-    const option = [...ui.body.querySelectorAll<HTMLButtonElement>('[role="option"]')].find(node => node.textContent?.startsWith("Work"))!;
-    assert.ok(option);
-    await act(async () => option.click());
-    await act(async () => ui.button(dialog, "Save").click());
-    await ui.settle();
+    assertNoDomNode(ui.container.querySelector('[aria-label^="Change New"]'));
+    await ui.choose("Work", "Set as Default");
     assert.deepEqual(writes, [["runner-1", "claude", { accountId: "work", expectedRevision: 0 }]]);
     assertNoDomNode(ui.dialog());
-    assert.match(groups[0]!.textContent ?? "", /New sessions use Work\./);
     assert.equal(ui.row("Work").querySelector(".provider-default-marker")?.textContent, "Default");
-    assert.doesNotMatch(groups[1]!.textContent ?? "", /New sessions use Work/);
+    assertNoDomNode(ui.row("Mystery").querySelector(".provider-default-marker"));
+    await ui.choose("Mystery", "Set as Default");
+    await ui.choose("Work", "Clear Default");
+    assert.deepEqual(writes.slice(1), [["runner-1", "codex", { accountId: "mystery", expectedRevision: 0 }],
+      ["runner-1", "claude", { accountId: null, expectedRevision: 1 }]]);
+    assertNoDomNode(ui.row("Work").querySelector(".provider-default-marker"));
+    assert.equal(ui.row("Mystery").querySelector(".provider-default-marker")?.textContent, "Default");
   } finally { await ui.unmount(); }
 });
 
-test("a default editor retains its draft after a conflict and reloads the newly reported saved choice", async () => {
+test("a conflicting menu action displays the current default and requires a fresh explicit choice", async () => {
   const machine = runnerView({ providerAccounts: SIGN_IN_ACCOUNTS, providerAccountDefaults: [{ provider: "claude", accountId: "work", revision: 5 }] });
   const writes: unknown[] = [];
   const ui = await render({ runner: machine, api: { ...client().client,
-    updateMachineProviderAccountDefault: async (_runner, _provider, input) => {
-      writes.push(input); throw new ApiError("The default changed in another client.", 409, undefined,
+    updateMachineProviderAccountDefault: async (_runner, provider, input) => {
+      writes.push(input);
+      if (writes.length === 1) throw new ApiError("The default changed in another client.", 409, undefined,
         { current: { provider: "claude", accountId: null, revision: 6 } });
+      return { providerAccountDefault: { provider, accountId: input.accountId, revision: 7 } };
     },
   } });
   try {
-    await act(async () => ui.container.querySelector<HTMLButtonElement>('[aria-label="Change New Claude Sessions"]')!.click());
-    await ui.settle();
-    const dialog = ui.dialog()!;
-    await act(async () => dialog.querySelector<HTMLButtonElement>('[aria-haspopup="listbox"]')!.click());
-    await ui.settle();
-    await act(async () => [...ui.body.querySelectorAll<HTMLButtonElement>('[role="option"]')].find(node => node.textContent?.startsWith("Personal"))!.click());
-    await act(async () => ui.button(dialog, "Save").click());
-    await ui.settle();
+    await ui.choose("Personal", "Set as Default");
     assert.deepEqual(writes, [{ accountId: "personal", expectedRevision: 5 }]);
-    assert.match(dialog.textContent ?? "", /Personal/);
-    assert.equal(ui.button(dialog, "Save").disabled, true);
-    await act(async () => ui.button(dialog, "Reload Saved Choice").click());
-    assert.match(dialog.textContent ?? "", /No Saved Default/);
-    assert.equal(ui.button(dialog, "Save").disabled, true, "reload is unchanged, not a new write");
+    assert.match(ui.error() ?? "", /Review the Default badge, then choose again/);
+    assertNoDomNode(ui.row("Work").querySelector(".provider-default-marker"));
+    assertNoDomNode(ui.row("Personal").querySelector(".provider-default-marker"));
+    await ui.choose("Personal", "Set as Default");
+    assert.deepEqual(writes[1], { accountId: "personal", expectedRevision: 6 });
+    assert.equal(ui.row("Personal").querySelector(".provider-default-marker")?.textContent, "Default");
+  } finally { await ui.unmount(); }
+});
+
+test("a missing saved account can be explicitly cleared without choosing a replacement", async () => {
+  const writes: unknown[] = [];
+  const ui = await render({ runner: runnerView({ providerAccounts: [], providerAccountDefaults: [{ provider: "claude", accountId: "gone", revision: 9 }] }),
+    api: { ...client().client, updateMachineProviderAccountDefault: async (_runner, provider, input) => {
+      writes.push(input); return { providerAccountDefault: { provider, accountId: input.accountId, revision: 10 } };
+    } },
+  });
+  try {
+    assert.match(ui.container.textContent ?? "", /saved default account is missing/);
+    await act(async () => ui.button(ui.container, "Clear Claude Default").click()); await ui.settle();
+    assert.deepEqual(writes, [{ accountId: null, expectedRevision: 9 }]);
+    assert.doesNotMatch(ui.container.textContent ?? "", /Default Account Unavailable/);
   } finally { await ui.unmount(); }
 });
 
@@ -356,6 +351,9 @@ test("a machine manager outside the personal-organization admin scope sees accou
     const change = ui.container.querySelector<HTMLButtonElement>('[aria-label="Change New Claude Sessions"]');
     assertNoDomNode(change);
     assertNoDomNode(ui.container.querySelector('[aria-label="Change Running Sessions"]'));
+    assert.equal(ui.container.querySelector<HTMLButtonElement>('[role="switch"]')!.disabled, true);
+    const menu = await ui.openMenu("Work");
+    assert.ok(!ui.menuItems(menu).some(item => item.label === "Set as Default" || item.label === "Clear Default"));
   } finally { await ui.unmount(); }
 });
 
@@ -462,7 +460,7 @@ test("with no accounts the section shows its intro and Add Account…; offline, 
     assert.equal(add.disabled, true);
     const reason = ui.container.querySelector(`#${add.getAttribute("aria-describedby")}`);
     assert.equal(reason?.textContent, "This machine is offline.");
-    assert.equal(ui.container.querySelectorAll(".provider-account-group").length, 2);
+    assert.equal(ui.container.querySelectorAll(".provider-account-group").length, 0);
   } finally {
     await ui.unmount();
   }
@@ -503,7 +501,7 @@ test("while Work signs in, Work appears once, expanded, with Signing In, Cancel 
     assert.equal(ui.badge("Work")?.textContent, "Signing In");
     const expansion = ui.row("Work").nextElementSibling as HTMLElement;
     assert.ok(expansion.classList.contains("provider-account-expansion"), "the steps expand Work's own row");
-    assert.ok(expansion.parentElement?.classList.contains("surface"), "inside the accounts surface");
+    assert.ok(expansion.closest(".provider-accounts-surface") !== null, "inside the accounts surface");
     assert.deepEqual([...expansion.querySelectorAll("ol.steps > li")].length, 2);
     assert.equal(ui.container.querySelectorAll("article, .provider-login-card").length, 0, "no separate card");
     assertNoDomNode(ui.container.querySelector(".provider-accounts-list")?.nextElementSibling ?? null, "nothing renders below the list");
@@ -810,8 +808,8 @@ test("under Hide Account Emails an email label stays masked in the row, the menu
 });
 
 for (const [item, title] of [
-  ["Adopt as Profile…", "Adopt as Profile"],
-  ["Revoke Access…", "Revoke Access"],
+  ["Retry Access…", "Give This Server Access"],
+  ["Remove This Server's Access…", "Revoke Access"],
   ["Remove Account…", "Remove Account"],
 ] as const) {
   test(`${title}: the label stays a live identifier, masked when the preference turns on and revealable when it is on`, async () => {
@@ -820,13 +818,15 @@ for (const [item, title] of [
       providerAccounts: [{ id: "mail", label: email, provider: "claude", authStatus: "authenticated", profile: { id: "p", access: "pending" } }],
     });
     const openConfirmation = async (ui: Awaited<ReturnType<typeof render>>) => {
+      if (ui.dialog()?.querySelector(".modal-title")?.textContent === "Account Access") { await act(async () => ui.button(ui.dialog()!, "Close").click()); await ui.settle(); }
       const trigger = ui.rows()[0]!.querySelector<HTMLButtonElement>('button[aria-label^="More Actions for"]')!;
       await act(async () => { trigger.click(); });
       await ui.settle();
       const match = [...ui.menu()!.querySelectorAll<HTMLButtonElement>(".menu-item")].find((candidate) =>
-        candidate.querySelector(".menu-text")?.textContent === item)!;
+        candidate.querySelector(".menu-text")?.textContent === (item === "Remove Account…" ? item : "Account Access…"))!;
       await act(async () => { match.click(); });
       await ui.settle();
+      if (item !== "Remove Account…") { await act(async () => ui.button(ui.dialog()!, item).click()); await ui.settle(); }
       const dialog = ui.dialog()!;
       assert.equal(dialog.querySelector(".modal-title, h2")?.textContent, title);
       return dialog;
@@ -952,7 +952,7 @@ test("removal refusals read as one sentence, the raw error behind Show Details",
 // --- Add Account ---
 
 async function openAdd(ui: Awaited<ReturnType<typeof render>>) {
-  await act(async () => { ui.button(ui.container, "Add Claude Account…").click(); });
+  await act(async () => { ui.button(ui.container, "Add Account…").click(); });
   await ui.settle();
   const dialog = ui.dialog()!;
   assert.ok(dialog);
@@ -1083,9 +1083,9 @@ test("under Hide Account Emails a duplicate email label stays masked in the fiel
 test("each profile access state is line-2 meta within its provider group", async () => {
   const ui = await render({ canManageProfiles: false });
   try {
-    assert.deepEqual(ui.sub("Granted Work"), ["Profile"]);
+    assert.deepEqual(ui.sub("Granted Work"), []);
     assert.deepEqual(ui.sub("Pending Work"), ["Grant Pending"]);
-    assert.deepEqual(ui.sub("Other Work"), ["Not Granted"]);
+    assert.deepEqual(ui.sub("Other Work"), ["No Access Here"]);
     assert.deepEqual(ui.sub("Legacy Work"), []);
     for (const label of ["Granted Work", "Other Work"]) assertNoDomNode(ui.badge(label));
   } finally {
@@ -1094,39 +1094,40 @@ test("each profile access state is line-2 meta within its provider group", async
 });
 
 const profileItems = async (ui: Awaited<ReturnType<typeof render>>, label: string) => {
-  const opened = await ui.openMenu(label);
-  const names = ui.menuItems(opened).map((item) => item.label).filter((name) => name === "Adopt as Profile…" || name === "Revoke Access…");
-  await ui.closeMenu();
+  await ui.choose(label, "Account Access…");
+  const dialog = ui.dialog()!;
+  assert.doesNotMatch(dialog.textContent ?? "", /Adopt as Profile/);
+  const names = ui.buttons(dialog).filter(name => name && name !== "Close");
+  await act(async () => ui.button(dialog, "Close").click()); await ui.settle();
   return names;
 };
 
-test("Owners and Admins get Adopt as Profile… and Revoke Access… by access state on a v225 runner", async () => {
+test("Account Access explains each state and discloses clear actions while removal stays last", async () => {
   const ui = await render({});
   try {
-    assert.deepEqual(await profileItems(ui, "Granted Work"), ["Revoke Access…"]);
-    assert.deepEqual(await profileItems(ui, "Pending Work"), ["Adopt as Profile…", "Revoke Access…"], "a pending grant can be retried or revoked");
-    assert.deepEqual(await profileItems(ui, "Other Work"), ["Adopt as Profile…"]);
-    assert.deepEqual(await profileItems(ui, "Legacy Work"), ["Adopt as Profile…"]);
+    assert.deepEqual(await profileItems(ui, "Granted Work"), ["Remove This Server's Access…"]);
+    assert.deepEqual(await profileItems(ui, "Pending Work"), ["Retry Access…", "Remove This Server's Access…"]);
+    assert.deepEqual(await profileItems(ui, "Other Work"), ["Give This Server Access…"]);
+    assert.deepEqual(await profileItems(ui, "Legacy Work"), ["Limit Access to This Server…"]);
     const opened = await ui.openMenu("Pending Work");
-    assert.deepEqual(ui.menuItems(opened).map((item) => item.label),
-      ["Sign In Again…", "Adopt as Profile…", "Revoke Access…", "Remove Account…"], "Remove Account… stays last");
+    assert.deepEqual(ui.menuItems(opened).map(item => item.label), ["Set as Default", "Sign In Again…", "Account Access…", "Remove Account…"]);
     await ui.closeMenu();
-  } finally {
-    await ui.unmount();
-  }
+    await ui.choose("Other Work", "Account Access…");
+    assert.match(ui.dialog()!.textContent ?? "", /server doesn't have access/);
+    assert.match(ui.dialog()!.textContent ?? "", /doesn't change the default/);
+  } finally { await ui.unmount(); }
 });
 
-test("a Windows Machine explains that its accounts can't be adopted, and still offers Revoke Access… (#3240)", async () => {
+test("Windows access restrictions show their reason while revocation stays available", async () => {
   const ui = await render({ runner: runnerView({ os: "windows" }) });
   try {
-    const opened = await ui.openMenu("Legacy Work");
-    assert.deepEqual(ui.menuItems(opened).filter((item) => item.label === "Adopt as Profile…"),
-      [{ label: "Adopt as Profile…", disabled: true, reason: PROFILES_UNSUPPORTED_ON_WINDOWS }]);
-    await ui.closeMenu();
-    assert.deepEqual(await profileItems(ui, "Granted Work"), ["Revoke Access…"]);
-  } finally {
-    await ui.unmount();
-  }
+    await ui.choose("Legacy Work", "Account Access…");
+    const action = ui.button(ui.dialog()!, "Limit Access to This Server…");
+    assert.equal(action.disabled, true);
+    assert.equal(ui.body.querySelector(`#${action.getAttribute("aria-describedby")}`)?.textContent, PROFILES_UNSUPPORTED_ON_WINDOWS);
+    await act(async () => ui.button(ui.dialog()!, "Close").click()); await ui.settle();
+    assert.deepEqual(await profileItems(ui, "Granted Work"), ["Remove This Server's Access…"]);
+  } finally { await ui.unmount(); }
 });
 
 test("a menu whose every item is unavailable takes focus and closes on Escape (#3240)", async () => {
@@ -1134,10 +1135,12 @@ test("a menu whose every item is unavailable takes focus and closes on Escape (#
   const ui = await render({
     runner: runnerView({
       os: "windows",
+      protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccountRemoval,
       providerAccounts: SIGN_IN_ACCOUNTS,
       providerLogins: [{ ...runningLogin("work", "Work"), provider: "codex", userCode: "WOLL-IPOGS",
         verificationUrl: "https://auth.openai.com/codex/device" }],
     }),
+    canManageProfiles: false,
   });
   try {
     const opened = await ui.openMenu("Work");
@@ -1165,7 +1168,7 @@ test("a member with manage rights, or a runner below v225, gets no profile actio
       const opened = await ui.openMenu("Legacy Work");
       const names = ui.menuItems(opened).map((item) => item.label);
       await ui.closeMenu();
-      assert.ok(!names.includes("Adopt as Profile…"), JSON.stringify(props));
+      assert.ok(!names.includes("Account Access…"), JSON.stringify(props));
       assert.ok(!names.includes("Revoke Access…"), JSON.stringify(props));
       assert.ok(names.includes("Remove Account…"), "account removal is still offered to a manager");
     } finally {
@@ -1174,43 +1177,41 @@ test("a member with manage rights, or a runner below v225, gets no profile actio
   }
 });
 
-test("offline, adoption waits for the Machine while revocation stays available", async () => {
+test("offline access changes explain the connection requirement while removal of access stays available", async () => {
   const ui = await render({ online: false, runner: runnerView({ status: "offline" }) });
   try {
-    const legacy = await ui.openMenu("Legacy Work");
-    assert.deepEqual(ui.menuItems(legacy).find((item) => item.label === "Adopt as Profile…"),
-      { label: "Adopt as Profile…", disabled: true, reason: "This machine is offline." });
-    await ui.closeMenu();
-    const granted = await ui.openMenu("Granted Work");
-    assert.equal(ui.menuItems(granted).find((item) => item.label === "Revoke Access…")?.disabled, false);
-    await ui.closeMenu();
-  } finally {
-    await ui.unmount();
-  }
+    await ui.choose("Legacy Work", "Account Access…");
+    const action = ui.button(ui.dialog()!, "Limit Access to This Server…");
+    assert.equal(action.disabled, true);
+    assert.equal(ui.body.querySelector(`#${action.getAttribute("aria-describedby")}`)?.textContent, "This machine is offline.");
+    await act(async () => ui.button(ui.dialog()!, "Close").click()); await ui.settle();
+    await ui.choose("Granted Work", "Account Access…");
+    assert.equal(ui.button(ui.dialog()!, "Remove This Server's Access…").disabled, false);
+  } finally { await ui.unmount(); }
 });
 
 test("Adopt as Profile explains the strict grant and adopts after confirmation", async () => {
   const api = client();
   const ui = await render({ api: api.client });
   try {
-    await ui.choose("Legacy Work", "Adopt as Profile…");
+    await ui.choose("Legacy Work", "Limit Access to This Server…");
     const dialog = ui.dialog();
     assert.ok(dialog);
     const text = dialog.textContent ?? "";
-    assert.match(text, /Adopt as Profile/);
-    assert.match(text, /only control planes granted this profile can use this account's HOME/);
-    assert.match(text, /other control planes that share this Machine's account lose access to it/);
-    assert.match(text, /Existing sessions keep working as before; new sessions record the profile\./);
+    assert.match(text, /Limit Access to This Server/);
+    assert.match(text, /Only Wollipog servers with access can use this account/);
+    assert.match(text, /servers without access cannot use it/);
+    assert.match(text, /Sessions already running keep working. New sessions record this access\./);
     assert.match(text, /Legacy Work/);
     await act(async () => { ui.button(dialog, "Cancel").click(); });
     await ui.settle();
     assert.deepEqual(api.calls, [], "Cancel adopts nothing");
 
-    await ui.choose("Legacy Work", "Adopt as Profile…");
-    await act(async () => { ui.button(ui.dialog()!, "Adopt as Profile").click(); });
+    await ui.choose("Legacy Work", "Limit Access to This Server…");
+    await act(async () => { ui.button(ui.dialog()!, "Limit Access").click(); });
     await ui.settle();
     assert.deepEqual(api.calls, [{ kind: "adopt", accountId: "legacy" }]);
-    assert.match(domWindow.document.body.textContent ?? "", /Account adopted as a profile\./);
+    assert.match(domWindow.document.body.textContent ?? "", /Account access updated\./);
     assert.equal(ui.error(), null);
   } finally {
     await ui.unmount();
@@ -1222,8 +1223,8 @@ test("while adoption runs only that row's ⋯ is busy; the other rows stay usabl
   const api = client({ adopt: () => new Promise((resolve) => { finish = () => resolve({ status: "active", profileId: "p", grantId: "g" }); }) });
   const ui = await render({ api: api.client });
   try {
-    await ui.choose("Legacy Work", "Adopt as Profile…");
-    await act(async () => { ui.button(ui.dialog()!, "Adopt as Profile").click(); });
+    await ui.choose("Legacy Work", "Limit Access to This Server…");
+    await act(async () => { ui.button(ui.dialog()!, "Limit Access").click(); });
     await ui.settle();
     assert.equal(ui.more("Legacy Work")?.getAttribute("aria-busy"), "true");
     assert.equal(ui.more("Granted Work")?.disabled, false);
@@ -1250,7 +1251,7 @@ test("Revoke Access confirms, and active sessions get a second confirmation that
   });
   const ui = await render({ api: api.client });
   try {
-    await ui.choose("Granted Work", "Revoke Access…");
+    await ui.choose("Granted Work", "Remove This Server's Access…");
     const first = ui.dialog()!;
     assert.match(first.textContent ?? "", /This control plane stops using this account's profile, and sessions that use it cannot restart until access is granted again\./);
     assert.match(first.textContent ?? "", /Other control planes' access is not affected\./);
@@ -1286,7 +1287,7 @@ test("declining the force confirmation revokes nothing more", async () => {
   });
   const ui = await render({ api: api.client });
   try {
-    await ui.choose("Pending Work", "Revoke Access…");
+    await ui.choose("Pending Work", "Remove This Server's Access…");
     await act(async () => { ui.button(ui.dialog()!, "Revoke Access").click(); });
     await ui.settle();
     assert.match(ui.dialog()!.textContent ?? "", /1 active session uses this account's profile\./);
@@ -1310,8 +1311,8 @@ test("a capability refusal and an adoption timeout are shown in the section's no
     const api = client({ adopt: async () => { throw failure; } });
     const ui = await render({ api: api.client });
     try {
-      await ui.choose("Other Work", "Adopt as Profile…");
-      await act(async () => { ui.button(ui.dialog()!, "Adopt as Profile").click(); });
+      await ui.choose("Other Work", "Give This Server Access…");
+      await act(async () => { ui.button(ui.dialog()!, "Give Access").click(); });
       await ui.settle();
       assert.equal(ui.error(), expected);
     } finally {
@@ -1395,11 +1396,11 @@ test("an Owner or Admin sees a stale lease as line-2 meta, with Recover Account�
   try {
     assert.deepEqual([...api.inspected].sort(), ["granted", "legacy", "other", "pending"]);
     assert.deepEqual(ui.sub("Pending Work"), ["Grant Pending", "Recovery Needed"]);
-    assert.deepEqual(ui.sub("Other Work"), ["Not Granted", "Recovery Needed"]);
+    assert.deepEqual(ui.sub("Other Work"), ["No Access Here", "Recovery Needed"]);
     assert.equal(ui.row("Other Work").querySelector(".provider-account-lease")?.getAttribute("title"), NO_REBOOT,
       "the reason a recovery would be refused is the label's tooltip");
     assert.match(ui.row("Pending Work").querySelector(".provider-account-lease")?.getAttribute("title") ?? "", /Choose Recover Account/);
-    assert.deepEqual(ui.sub("Granted Work"), ["Profile"]);
+    assert.deepEqual(ui.sub("Granted Work"), []);
     assert.deepEqual(ui.sub("Legacy Work"), []);
 
     const pending = await ui.openMenu("Pending Work");
@@ -1942,4 +1943,48 @@ test("under Hide Account Emails two email sources stay distinct and revealable, 
       await again.unmount();
     }
   });
+});
+
+test("a default write blocks a second choice for that provider while another provider remains independent", async () => {
+  const writes: unknown[] = [];
+  const finish: Array<() => void> = [];
+  const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: {
+    ...client().client, updateMachineProviderAccountDefault: async (_runner, provider, input) => {
+      writes.push([provider, input]);
+      return await new Promise<Awaited<ReturnType<ApiClient["updateMachineProviderAccountDefault"]>>>(resolve => finish.push(() => resolve({ providerAccountDefault: { provider, accountId: input.accountId, revision: 1 } })));
+    },
+  } });
+  try {
+    await ui.choose("Work", "Set as Default");
+    const menu = await ui.openMenu("Personal");
+    assert.equal(ui.menuItems(menu).find(item => item.label === "Set as Default")?.disabled, true);
+    await ui.closeMenu();
+    await ui.choose("Mystery", "Set as Default");
+    assert.deepEqual(writes, [["claude", { accountId: "work", expectedRevision: 0 }], ["codex", { accountId: "mystery", expectedRevision: 0 }]]);
+    await act(async () => finish.forEach(resolve => resolve())); await ui.settle();
+    assert.equal(ui.row("Work").querySelector(".provider-default-marker")?.textContent, "Default");
+    assert.equal(ui.row("Mystery").querySelector(".provider-default-marker")?.textContent, "Default");
+  } finally { await ui.unmount(); }
+});
+
+test("usage-limit switching waits for terms consent, cancellation writes nothing, and turning off needs no dialog", async () => {
+  const writes: unknown[] = [];
+  const ui = await render({ api: { ...client().client, updateMachineAutomaticAccountSwitching: async (_runner, input) => {
+    writes.push(input); return { automaticAccountSwitching: { enabled: input.enabled, revision: input.expectedRevision + 1 } };
+  } } });
+  try {
+    const toggle = ui.container.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    await act(async () => toggle.click()); await ui.settle();
+    assert.match(ui.dialog()!.querySelector(".notice.t-warning")?.textContent ?? "", /prohibit circumventing rate limits/);
+    assert.equal(toggle.getAttribute("aria-checked"), "false");
+    await act(async () => ui.button(ui.dialog()!, "Cancel").click()); await ui.settle();
+    assert.deepEqual(writes, []);
+    await act(async () => toggle.click()); await ui.settle();
+    await act(async () => ui.button(ui.dialog()!, "Turn On Automatic Switching").click()); await ui.settle();
+    assert.deepEqual(writes, [{ enabled: true, expectedRevision: 0 }]);
+    assert.equal(toggle.getAttribute("aria-checked"), "true");
+    await act(async () => toggle.click()); await ui.settle();
+    assertNoDomNode(ui.dialog());
+    assert.deepEqual(writes[1], { enabled: false, expectedRevision: 1 });
+  } finally { await ui.unmount(); }
 });

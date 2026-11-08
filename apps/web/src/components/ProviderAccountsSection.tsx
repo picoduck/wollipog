@@ -8,14 +8,14 @@ import { useApi } from "../api-context.js";
 import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { agentDisplayName } from "../agent-presentation.js";
 import { accountLabelText, maskedAccountTitles } from "../personal-identifiers.js";
-import { runnerDisplay } from "../runners.js";
+import { machineSettingsMutationError, runnerDisplay } from "../runners.js";
 import type { MachineAccountsIntent } from "../navigation.js";
 import { providerHomeBlockingProcessCopy, providerHomeRecoveryCauseCopy } from "../provider-home-refusal.js";
 import { statusMeta } from "../status-meta.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { activeSessionConflict } from "./active-session-conflict.js";
-import { AccountIdentifier, AccountLabel } from "./AccountIdentifier.js";
-import { ProviderAccountSettingsDialog, RunningSessionAccountSettings } from "./ProviderAccountSettings.js";
+import { AccountIdentifier } from "./AccountIdentifier.js";
+import { conflictCurrent, RunningSessionAccountSettings } from "./ProviderAccountSettings.js";
 import { Modal } from "./common.js";
 import { AddProviderAccountDialog, providerLoginRunning, providerName, type ProviderCredentialImportOffer } from "./AddProviderAccountDialog.js";
 import { MoreHorizontalIcon, SignInIcon } from "./Icons.js";
@@ -38,7 +38,7 @@ const ADOPTION_REFUSALS: Readonly<Record<string, string>> = {
 
 /** Windows Machines cannot verify a profile marker, so their accounts never become profiles. */
 export const PROFILES_UNSUPPORTED_ON_WINDOWS =
-  "Provider profiles aren't available on Windows Machines, so this account can't be adopted.";
+  "Limiting account access isn't available on Windows machines because this runner can't verify the access record.";
 
 const ADOPTION_FAILED_DEFAULT = "The provider profile could not be adopted.";
 
@@ -172,9 +172,9 @@ function accountStatus(account: ProviderAccountDefinition, signingIn: boolean): 
 }
 
 const PROFILE_ACCESS: Readonly<Record<NonNullable<ProviderAccountDefinition["profile"]>["access"], string>> = {
-  granted: "Profile",
+  granted: "",
   pending: "Grant Pending",
-  not_granted: "Not Granted",
+  not_granted: "No Access Here",
 };
 
 type BusyAction = "sign_in" | "cancel" | "remove" | "adopt" | "revoke" | "recover" | "default";
@@ -291,14 +291,14 @@ function ProviderAccountRow({ identity, label, hiddenTitle, profile, lease, stat
             {isDefault && <span className="provider-default-marker">Default</span>}
             {meta && <StatusBadge meta={meta} />}
           </span>
-          <span className="row-sub provider-account-sub">
+          {(hiddenTitle || profile || lease) && <span className="row-sub provider-account-sub">
             {hiddenTitle ? <span>Email hidden</span> : (
               <>
                 {profile && <span>{profile}</span>}
               </>
             )}
             {lease && <span className="provider-account-lease" title={lease.title}>{lease.label}</span>}
-          </span>
+          </span>}
         </span>
         {usage}
         {actions && <span className="provider-account-actions">{actions}</span>}
@@ -340,10 +340,11 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   // A sign-in this section started: once it records its account, Use for New Sessions is offered.
   const [started, setStarted] = useState<{ operationId: string; accountId: string; provider: ProviderAccountDefinition["provider"] } | null>(null);
   const sectionRef = useRef<HTMLElement>(null);
+  const [accessAccountId, setAccessAccountId] = useState<string | null>(null);
   const [recoveryDetails, setRecoveryDetails] = useState<{ runnerId: string; accountId: string } | null>(null);
   const [busy, setBusy] = useState<Readonly<Record<string, BusyAction>>>({});
   const [notice, setNotice] = useState<SectionNotice | null>(null);
-  const [editingProvider, setEditingProvider] = useState<ProviderAccountDefinition["provider"] | null>(null);
+  const defaultWrites = useRef(new Set<ProviderAccountDefinition["provider"]>());
   const [savedDefaults, setSavedDefaults] = useState<NonNullable<RunnerView["providerAccountDefaults"]>>([]);
   const usage = useMachineAccountUsage(runner, online);
   const defaults = (["claude", "codex"] as const).flatMap(provider => {
@@ -352,13 +353,14 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
     const value = saved && saved.revision >= (live?.revision ?? 0) ? saved : live;
     return value ? [value] : [];
   });
-  const settingsRunner = { ...runner, providerAccountDefaults: defaults };
   const supported = runnerSupportsProtocol(runner.protocolVersion, "providerLogin");
   const removalSupported = runnerSupportsProtocol(runner.protocolVersion, "providerAccountRemoval");
   const canManage = runner.canManage === true;
+  const canEditDefaults = canManageProfiles && canManage && runnerSupportsProtocol(runner.protocolVersion, "providerAccounts");
   const profileActions = canManageProfiles && runnerSupportsProtocol(runner.protocolVersion, "providerProfiles");
   const machine = machineName ?? runnerDisplay(runner, undefined).name;
   const accounts = runner.providerAccounts ?? [];
+  const accessAccount = accounts.find(account => account.id === accessAccountId);
   const logins = (runner.providerLogins ?? []).filter((login) =>
     login.status !== "succeeded" && login.status !== "cancelled");
   const accountIds = new Set(accounts.map((account) => account.id));
@@ -457,7 +459,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
         await run();
       } catch (cause) {
         setNotice({
-          title: action === "adopt" ? <>Couldn't Adopt {identifier(account)}</>
+          title: action === "adopt" ? <>Couldn't Change Access to {identifier(account)}</>
             : action === "revoke" ? <>Couldn't Revoke Access to {identifier(account)}</>
             : <>Couldn't Recover the Lease for {identifier(account)}</>,
           body: providerProfileErrorMessage(cause, action),
@@ -474,18 +476,21 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   }];
 
   const adopt = async (account: ProviderAccountDefinition, reopen: () => void) => {
+    const alreadyRestricted = !!account.profile;
     const approved = await confirm({
-      title: "Adopt as Profile",
-      message: "After adoption, only control planes granted this profile can use this account's HOME, so other control planes " +
-        "that share this Machine's account lose access to it. Existing sessions keep working as before; new sessions record the profile.",
+      title: alreadyRestricted ? "Give This Server Access" : "Limit Access to This Server",
+      message: "Only Wollipog servers with access can use this account on this machine. This server gets access. " +
+        "Other servers that already have access keep it; servers without access cannot use it. " +
+        "Sessions already running keep working. New sessions record this access.",
       detailRows: accountRows(account),
-      confirmLabel: "Adopt as Profile",
-      back: backToMenu(reopen),
+      confirmLabel: alreadyRestricted ? "Give Access" : "Limit Access",
+      back: { label: "Back to Account Access", run: reopen },
     });
     if (!approved) return;
+    setAccessAccountId(null);
     await runProfileAction(account, "adopt", async () => {
       await api.adoptProviderProfile(runner.runnerId, account.id);
-      showToast("Account adopted as a profile.", { tone: "success" });
+      showToast("Account access updated.", { tone: "success" });
     });
   };
 
@@ -500,6 +505,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
       back: backToMenu(reopen),
     });
     if (!approved) return;
+    setAccessAccountId(null);
     await runProfileAction(account, "revoke", async () => {
       try {
         await api.revokeProviderProfileAccess(runner.runnerId, account.id, false);
@@ -634,35 +640,53 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   const defaultOffer = startedAccount && canManageProfiles && canManage &&
     runnerSupportsProtocol(runner.protocolVersion, "providerAccounts") && savedDefault?.accountId !== startedAccount.id
     ? startedAccount : undefined;
-  const useForNewSessions = (account: ProviderAccountDefinition) => track(account.id, "default", async () => {
-    setNotice(null);
-    try {
-      const { providerAccountDefault } = await api.updateMachineProviderAccountDefault(runner.runnerId, account.provider, {
-        accountId: account.id,
-        expectedRevision: savedDefault?.revision ?? 0,
-      });
-      setStarted(null);
-      setSavedDefaults(current => [...current.filter(value => value.provider !== account.provider), providerAccountDefault]);
-      showToast(`New ${providerName(account.provider)} sessions on this machine use this account.`, { tone: "success" });
-    } catch (cause) {
-      setNotice({ title: <>Couldn't Make {identifier(account)} the Default</>, body: (cause as Error).message });
-    }
-  });
+  const saveDefault = async (provider: ProviderAccountDefinition["provider"], account: ProviderAccountDefinition | null) => {
+    if (!canEditDefaults || defaultWrites.current.has(provider) || account?.profile?.access === "not_granted") return;
+    defaultWrites.current.add(provider);
+    const key = account?.id ?? defaults.find(value => value.provider === provider)?.accountId ?? `default:${provider}`;
+    await track(key, "default", async () => {
+      setNotice(null);
+      try {
+        const { providerAccountDefault } = await api.updateMachineProviderAccountDefault(runner.runnerId, provider, {
+          accountId: account?.id ?? null,
+          expectedRevision: defaults.find(value => value.provider === provider)?.revision ?? 0,
+        });
+        setStarted(null);
+        setSavedDefaults(current => [...current.filter(value => value.provider !== provider), providerAccountDefault]);
+        showToast(account ? `Default ${providerName(provider)} account updated. Running sessions aren't affected.`
+          : `Default ${providerName(provider)} account cleared. New sessions use the agent's configured account or the first available account.`, { tone: "success" });
+      } catch (cause) {
+        const current = conflictCurrent(cause);
+        const valid = current?.provider === provider && (current.accountId === null || typeof current.accountId === "string");
+        if (valid) setSavedDefaults(values => [...values.filter(value => value.provider !== provider), {
+          provider, accountId: current.accountId as string | null, revision: current.revision as number,
+        }]);
+        setNotice({ title: "Couldn't Update the Default", body: valid
+          ? "The default changed in another client. Review the Default badge, then choose again."
+          : machineSettingsMutationError(cause) });
+      } finally { defaultWrites.current.delete(provider); }
+    });
+  };
 
   const menuItems = (account: ProviderAccountDefinition, signingIn: boolean): RowMenuItem[] => {
     if (!canManage) return [];
     const offline = online ? {} : { disabled: true, description: OFFLINE };
     const items: RowMenuItem[] = [];
+    if (canEditDefaults) {
+      const isDefault = defaults.find(value => value.provider === account.provider)?.accountId === account.id;
+      const blocked = !isDefault && account.profile?.access === "not_granted";
+      const saving = defaultWrites.current.has(account.provider);
+      items.push({ label: isDefault ? "Clear Default" : "Set as Default",
+        ...(saving ? { disabled: true, description: "Saving the default account…" }
+          : blocked ? { disabled: true, description: "This control plane needs access to the account first." } : {}),
+        onClick: () => void saveDefault(account.provider, isDefault ? null : account),
+      });
+    }
     if (supported && account.authStatus !== "unauthenticated" && !signingIn) {
       items.push({ label: "Sign In Again…", ...offline, onClick: () => signIn(account) });
     }
-    if (profileActions && account.profile?.access !== "granted") {
-      // A Windows runner refuses every adoption as UNSUPPORTED_HOME (#3240): say so before asking.
-      const unsupported = runner.os === "windows" ? { disabled: true, description: PROFILES_UNSUPPORTED_ON_WINDOWS } : offline;
-      items.push({ label: "Adopt as Profile…", ...unsupported, onClick: (reopen) => void adopt(account, reopen) });
-    }
-    if (profileActions && (account.profile?.access === "granted" || account.profile?.access === "pending")) {
-      items.push({ label: "Revoke Access…", danger: true, onClick: (reopen) => void revoke(account, reopen) });
+    if (profileActions) {
+      items.push({ label: "Account Access…", onClick: () => setAccessAccountId(account.id) });
     }
     const lease = leases[account.id];
     if (leaseActions && lease?.state === "stale") {
@@ -732,7 +756,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
         <h3 id={headingId} className="section-title">
           Provider Accounts <span className="count">{accounts.length}</span>
         </h3>
-        {canAdd && count === 0 && (
+        {canAdd && (
           <div className="actions">
             <button type="button" className="btn sm" disabled={!online} aria-describedby={online ? undefined : offlineId}
               onClick={() => setAdding("claude")}>
@@ -760,7 +784,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
           actions={(
             <>
               <BusyButton className="btn primary sm" busy={busy[defaultOffer.id] === "default"} progress="Saving the default…"
-                disabled={!online} onClick={() => void useForNewSessions(defaultOffer)}>
+                disabled={defaultWrites.current.has(defaultOffer.provider)} onClick={() => void saveDefault(defaultOffer.provider, defaultOffer)}>
                 Use for New Sessions
               </BusyButton>
               <button type="button" className="btn sm" onClick={() => setStarted(null)}>Not Now</button>
@@ -769,24 +793,24 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
           New {providerName(defaultOffer.provider)} sessions on this machine that don't choose an account will use it.
         </Notice>
       )}
+      {count > 0 || defaults.some(value => value.accountId) ? <div className="surface provider-accounts-surface">
       {(["claude", "codex"] as const).filter(provider => accounts.some(account => account.provider === provider) ||
-        newLogins.some(login => login.provider === provider) || defaults.some(value => value.provider === provider) || canAdd).map(provider => {
+        newLogins.some(login => login.provider === provider) || defaults.some(value => value.provider === provider && value.accountId)).map(provider => {
         const choice = defaults.find(value => value.provider === provider);
         const selected = accounts.find(account => account.id === choice?.accountId && account.provider === provider);
-        const canEdit = canManageProfiles && canManage && runnerSupportsProtocol(runner.protocolVersion, "providerAccounts");
-        let summary: ReactNode = "New sessions use each agent's configured account or the first available account.";
-        if (choice?.accountId) {
-          if (!selected) summary = "Saved account not found. Choose another account.";
-          else if (selected.profile?.access === "not_granted") summary = "The saved default cannot be used here. Choose another account or grant access.";
-          else summary = <>New sessions use <AccountLabel value={selected.label} />.</>;
-        }
+        const unavailable = !!choice?.accountId && (!selected || selected.profile?.access === "not_granted");
         return <div className="provider-account-group" key={provider}>
           <div className="provider-settings-heading">
-            <div><h4>{providerName(provider)}</h4><p className="section-note">{summary}</p></div>
-            {canEdit && <button type="button" className="btn" aria-label={`Change New ${providerName(provider)} Sessions`}
-              onClick={() => setEditingProvider(provider)}>Change…</button>}
+            <h4>{providerName(provider)}</h4>
+            {!choice?.accountId && <span className="section-note">No Default</span>}
           </div>
-          <div className="surface provider-accounts-list">
+          {unavailable && <Notice compact tone="warning" title="Default Account Unavailable"
+            actions={canEditDefaults && <button type="button" className="btn sm" disabled={defaultWrites.current.has(provider)}
+              onClick={() => void saveDefault(provider, null)}>Clear {providerName(provider)} Default</button>}>
+            {selected ? "The saved default needs access to this control plane. Grant access or choose another account from its menu."
+              : "The saved default account is missing. Choose another account from its menu or clear the default."}
+          </Notice>}
+          <div className="provider-accounts-list">
           {accounts.filter(account => account.provider === provider).map((account) => {
             const login = loginFor(account.id);
             const signingIn = login !== undefined && providerLoginRunning(login);
@@ -846,16 +870,35 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
               </ProviderAccountRow>
             );
           })}
-          {canAdd && <div className="provider-account-add">
-            <button type="button" className="btn ghost" disabled={!online} aria-describedby={online ? undefined : offlineId} onClick={() => setAdding(provider)}>Add {providerName(provider)} Account…</button>
-          </div>}
           </div>
         </div>;
       })}
+      </div> : null}
       <RunningSessionAccountSettings key={runner.runnerId} runner={runner} online={online} canEdit={canManageProfiles && canManage} />
-      {editingProvider && canManageProfiles && canManage && <ProviderAccountSettingsDialog key={`${runner.runnerId}:${editingProvider}`} runner={settingsRunner}
-        provider={editingProvider} onClose={() => setEditingProvider(null)}
-        onSaved={value => setSavedDefaults(current => [...current.filter(entry => entry.provider !== value.provider), value])} />}
+      {accessAccount && profileActions && canManage && <Modal title="Account Access" description={identifier(accessAccount)} size="sm"
+        onClose={() => setAccessAccountId(null)} footer={<button type="button" className="btn" onClick={() => setAccessAccountId(null)}>Close</button>}>
+        <p>{accessAccount.profile?.access === "granted"
+          ? "Only Wollipog servers with access can use this account. This server has access."
+          : accessAccount.profile?.access === "not_granted"
+            ? "Another Wollipog server limits this account, and this server doesn't have access."
+            : accessAccount.profile?.access === "pending"
+              ? "This server's access is still being confirmed with the machine."
+              : "Any Wollipog server connected to this machine can use this account."}</p>
+        <p className="field-helper">This controls which Wollipog servers may use the account. It doesn't change the default account for new sessions.</p>
+        {accessAccount.profile?.access !== "granted" && <>
+          <button type="button" className="btn" disabled={!online || runner.os === "windows" || busy[accessAccount.id] !== undefined}
+            aria-describedby={!online || runner.os === "windows" ? `${headingId}-access-reason` : undefined}
+            onClick={() => void adopt(accessAccount, () => setAccessAccountId(accessAccount.id))}>
+            {accessAccount.profile?.access === "pending" ? "Retry Access…" : accessAccount.profile ? "Give This Server Access…" : "Limit Access to This Server…"}
+          </button>
+          {(!online || runner.os === "windows") && <p className="field-helper" id={`${headingId}-access-reason`}>
+            {runner.os === "windows" ? PROFILES_UNSUPPORTED_ON_WINDOWS : OFFLINE}</p>}
+        </>}
+        {(accessAccount.profile?.access === "granted" || accessAccount.profile?.access === "pending") && <button type="button" className="btn danger"
+          disabled={busy[accessAccount.id] !== undefined} onClick={() => void revoke(accessAccount, () => setAccessAccountId(accessAccount.id))}>
+          Remove This Server's Access…
+        </button>}
+      </Modal>}
       {leaseActions && detailsAccount && detailsLease && (
         <Modal title="Account Recovery Details" description={masked(detailsAccount.label)} size="sm"
           onClose={() => setRecoveryDetails(null)}

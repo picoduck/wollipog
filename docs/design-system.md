@@ -2174,9 +2174,13 @@ A Dialog whose fields save through separate endpoints still has one Save Changes
 revision, in the form's order. When one fails, the dialog stays open, every field that saved becomes
 the new baseline, and a danger Notice above the footer names what wasn't saved ("Capacity Limit
 wasn't saved.") with the server's words behind Show Details; Save Changes then retries only those.
-Account preferences live in Provider Accounts, with one focused editor per provider and a separate
-Running Sessions editor. A change that needs consent (turning on automatic account switching) asks in a stacked,
-non-destructive confirmation before anything is sent.
+Provider Accounts uses one shared surface, short provider labels, and compact account rows.
+Set as Default and Clear Default are immediate per-account menu actions, with a Default badge;
+one Add Account… opens the provider-aware add dialog. Usage window names and reset detail stay
+behind Usage Details. Account Access… opens a content-height dialog explaining server access.
+Usage-limit switching is an independent inline SwitchRow. Turning it on asks for provider-terms
+consent before anything is sent; turning it off saves directly. Conditional-write conflicts show
+the current saved value and require another explicit action.
 
 The editor save bar is `.save-bar` (`SaveBar`): sticky at the bottom of its region, `--bg-elev`,
 1px `--border-strong`, `--radius-md`, `--elev-2`, padding 12px 16px, gap 8px, and rendered only

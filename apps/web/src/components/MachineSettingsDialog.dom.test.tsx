@@ -9,7 +9,6 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
-import { ProviderAccountSettingsDialog, RunningSessionAccountSettings } from "./ProviderAccountSettings.js";
 import { MachineSettingsDialog } from "./MachineSettingsDialog.js";
 import type { MachineSettingsTarget } from "../machine-settings.js";
 
@@ -102,13 +101,11 @@ afterEach(async () => {
 
 async function mount(runner: RunnerView | undefined, {
   box,
-  surface = "machine",
   canManageMachines = true,
   at,
   client: overrides = {},
 }: {
   box?: BoxView;
-  surface?: "machine" | "claude" | "codex" | "running";
   canManageMachines?: boolean;
   at?: MachineSettingsTarget;
   client?: Partial<ApiClient>;
@@ -143,17 +140,14 @@ async function mount(runner: RunnerView | undefined, {
   const render = (next: RunnerView | undefined) => (
     <ApiProvider client={client}>
       <FeedbackProvider>
-        {surface === "claude" || surface === "codex" ? <ProviderAccountSettingsDialog runner={next!} provider={surface}
-          onClose={() => { closed += 1; }} onSaved={() => undefined} />
-          : surface === "running" ? <RunningSessionAccountSettings runner={next!} online={next?.status === "online"} canEdit />
-          : <MachineSettingsDialog
+        <MachineSettingsDialog
           runner={next}
           {...(box ? { box } : {})}
           canManageMachines={canManageMachines}
           {...(at ? { at } : {})}
           onClose={() => { closed += 1; }}
           onDelete={async () => undefined}
-        />}
+        />
       </FeedbackProvider>
     </ApiProvider>
   );
@@ -165,8 +159,7 @@ async function mount(runner: RunnerView | undefined, {
     mountPoint.remove();
   };
   unmounts.add(unmount);
-  if (surface === "running") await press(body.querySelector<HTMLButtonElement>('[aria-label="Change Running Sessions"]'));
-  const title = surface === "machine" ? "Machine Settings" : surface === "running" ? "Running Sessions" : surface === "claude" ? "New Claude Sessions" : "New Codex Sessions";
+  const title = "Machine Settings";
   const dialog = () => [...body.querySelectorAll<HTMLElement>('[role="dialog"]')]
     .find((element) => element.querySelector(".modal-title")?.textContent === title) ?? null;
   return {
@@ -312,39 +305,6 @@ test("on an older runner Capacity Limit is disabled and account settings are abs
   assertNoDomNode(dialog.querySelector('[role="switch"]'));
 });
 
-test("turning switching on asks first with a primary Turn On Automatic Switching; cancelling saves nothing, and turning it off does not ask", async () => {
-  const view = await mount(machine(), { surface: "running" });
-  const dialog = view.dialog()!;
-  const toggle = dialog.querySelector<HTMLButtonElement>('[role="switch"]')!;
-  assert.match(toggle.textContent ?? "", /^Switch Accounts at a Usage Limit/u);
-  await press(toggle);
-  assert.equal(toggle.getAttribute("aria-checked"), "true");
-  await save(dialog);
-  const confirmation = [...body.querySelectorAll<HTMLElement>('[role="dialog"]')]
-    .find((element) => element.querySelector(".modal-title")?.textContent === "Turn On Automatic Switching")!;
-  assert.ok(confirmation, "the confirmation stacks on Machine Settings");
-  const confirmButton = buttonNamed(confirmation, "Turn On Automatic Switching")!;
-  assert.ok(confirmButton.classList.contains("primary") && !confirmButton.classList.contains("danger"), "a primary button");
-  assertNoDomNode(confirmation.querySelector(".modal-tone-icon"), "no danger icon");
-  assert.ok(confirmation.querySelector(".notice.t-warning")?.textContent?.includes("Provider terms"), "the terms are a warning notice");
-  await press(buttonNamed(confirmation, "Cancel"));
-  assert.deepEqual(view.calls, [], "cancelling saves nothing");
-
-
-  await save(dialog);
-  const again = [...body.querySelectorAll<HTMLElement>('[role="dialog"]')]
-    .find((element) => element.querySelector(".modal-title")?.textContent === "Turn On Automatic Switching")!;
-  await press(buttonNamed(again, "Turn On Automatic Switching"));
-  assert.deepEqual(view.calls, [["updateMachineAutomaticAccountSwitching", "studio", { enabled: true, expectedRevision: 4 }]]);
-  await view.unmount();
-
-  const on = await mount(machine({ automaticAccountSwitching: { enabled: true, revision: 5 } }), { surface: "running" });
-  await press(on.dialog()!.querySelector<HTMLButtonElement>('[role="switch"]'));
-  await save(on.dialog()!);
-  assert.deepEqual(on.calls, [["updateMachineAutomaticAccountSwitching", "studio", { enabled: false, expectedRevision: 5 }]],
-    "turning it off needs no confirmation");
-});
-
 test("two installations of one harness are one radio group, and a missing saved choice is a disabled row", async () => {
   const view = await mount(machine({
     agents: [codex("codex", "system", "/usr/bin/codex"), codex("codex-local", "local", "/home/me/.local/bin/codex", { version: "0.210.0" })],
@@ -373,61 +333,6 @@ test("two installations of one harness are one radio group, and a missing saved 
   assert.ok(row.classList.contains("is-disabled"), "the missing choice is disabled");
   assert.equal(row.querySelector("input")?.getAttribute("aria-disabled"), "true");
   assert.match(row.textContent ?? "", /Saved choice not found\. Choose another installation\./u);
-});
-
-test("Default Accounts read Signed In, Sign-In Required or Status Unknown, and No Default; never Logged In", async () => {
-  const view = await mount(machine(), { surface: "claude" });
-  const dialog = view.dialog()!;
-  assert.equal(dialog.querySelector(".modal-title")?.textContent, "New Claude Sessions");
-  const claude = dialog.querySelector<HTMLButtonElement>('[aria-label^="Account"]')!;
-  assert.ok(claude, "a Select per provider");
-  assertNoDomNode(dialog.querySelector('[aria-label^="Default Codex Account"]'));
-  assert.match(dialog.textContent ?? "", /Running sessions aren't affected/u);
-  await press(claude);
-  const options = [...body.querySelectorAll<HTMLElement>('[role="listbox"] [role="option"]')].map((option) => option.textContent);
-  assert.deepEqual(options, [
-    "No Saved DefaultUses the agent's configured account, or the first available account.",
-    "WorkSigned In",
-    "PersonalSign-In Required",
-  ]);
-  assert.doesNotMatch(body.textContent ?? "", /Logged In|Login Required|Login Unknown/u);
-});
-
-test("Default Accounts leave out a profile only other control planes may use, unless it is the saved one (#3240)", async () => {
-  const theirs = { id: "theirs", label: "Theirs", provider: "claude" as const, authStatus: "authenticated" as const,
-    profile: { id: "p-theirs", access: "not_granted" as const } };
-  const accounts = [
-    { id: "work", label: "Work", provider: "claude" as const, authStatus: "authenticated" as const },
-    theirs,
-  ];
-  const offered = async (overrides: Parameters<typeof machine>[0]) => {
-    const view = await mount(machine(overrides), { surface: "claude" });
-    await press(view.dialog()!.querySelector<HTMLButtonElement>('[aria-label^="Account"]')!);
-    const options = [...body.querySelectorAll<HTMLElement>('[role="listbox"] [role="option"]')].map((option) => option.textContent);
-    await view.unmount();
-    return options;
-  };
-  assert.deepEqual(await offered({ providerAccounts: accounts }), [
-    "No Saved DefaultUses the agent's configured account, or the first available account.",
-    "WorkSigned In",
-  ]);
-  assert.deepEqual(await offered({ providerAccounts: accounts,
-    providerAccountDefaults: [{ provider: "claude", accountId: "theirs", revision: 2 }] }), [
-    "No Saved DefaultUses the agent's configured account, or the first available account.",
-    "WorkSigned In",
-    "TheirsIts profile isn't granted to this control plane.",
-  ]);
-});
-
-test("a saved default account the machine no longer lists keeps its not-found option", async () => {
-  const view = await mount(machine({ providerAccountDefaults: [{ provider: "claude", accountId: "removed", revision: 3 }] }), { surface: "claude" });
-  const claude = view.dialog()!.querySelector<HTMLButtonElement>('[aria-label^="Account"]')!;
-  assert.match(claude.getAttribute("aria-label") ?? "", /Saved Account Not Found/u);
-  await press(claude);
-  await press([...body.querySelectorAll<HTMLButtonElement>('[role="listbox"] [role="option"]')]
-    .find((option) => option.textContent?.startsWith("Work"))!);
-  await save(view.dialog()!);
-  assert.deepEqual(view.calls, [["updateMachineProviderAccountDefault", "studio", "claude", { accountId: "work", expectedRevision: 3 }]]);
 });
 
 test("an online native runner's Delete Machine… is disabled with its reason as visible text", async () => {
@@ -484,30 +389,6 @@ test("a machine that reports new facts while the dialog is open keeps the person
   assert.equal(inputLabelled(dialog, "Capacity Limit")!.value, "24");
   await save(dialog);
   assert.deepEqual(view.calls, [["updateMachineCapacity", "studio", { configuredUnits: 24, expectedRevision: 2 }]]);
-});
-
-test("a provider that appears after opening keeps the revision it was edited at, so another client's change conflicts (CR-1.1)", async () => {
-  const claudeOnly = machine({ providerAccounts: [{ id: "work", label: "Work", provider: "claude", authStatus: "authenticated" }] });
-  const view = await mount(claudeOnly, { surface: "codex" });
-  const dialog = view.dialog()!;
-  assert.ok(dialog.querySelector('[aria-label^="Account"]'));
-  const withCodex = machine({ providerAccounts: [
-    { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
-    { id: "solo", label: "Codex Solo", provider: "codex", authStatus: "authenticated" },
-    { id: "team", label: "Codex Team", provider: "codex", authStatus: "authenticated" },
-  ] });
-  await view.rerender(withCodex);
-  await press(dialog.querySelector<HTMLButtonElement>('[aria-label^="Account"]'));
-  await press([...body.querySelectorAll<HTMLButtonElement>('[role="listbox"] [role="option"]')]
-    .find((option) => option.textContent?.startsWith("Codex Solo"))!);
-  // Another client saves Codex Team as the default while this one is still editing.
-  await view.rerender({ ...withCodex, providerAccountDefaults: [
-    { provider: "claude", accountId: null, revision: 3 },
-    { provider: "codex", accountId: "team", revision: 1 },
-  ] });
-  await save(dialog);
-  assert.deepEqual(view.calls, [["updateMachineProviderAccountDefault", "studio", "codex", { accountId: "solo", expectedRevision: 0 }]],
-    "the write carries the revision the person edited, so the server refuses it as a conflict");
 });
 
 test("a capacity typed as 024 is not resent after the reviewer-policy save fails", async () => {
