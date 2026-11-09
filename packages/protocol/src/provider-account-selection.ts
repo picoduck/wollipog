@@ -382,10 +382,11 @@ function resolvePriority(input: ProviderAccountSelectionInput, revision: number)
   const refuse = (refusal: ProviderAccountSelectionRefusal): ProviderAccountSelectionResult =>
     ({ ...base, status: "choice_required", source: "none", refusal, candidates });
   if (!input.policySupported) return refuse("runner_update_required");
-  if (input.accountSpecificMemory) return refuse("account_memory");
   if (order.length === 0) return refuse("empty_order");
   const chosen = chooseEligibleCandidate("priority", candidates.filter((candidate) => candidate.eligible));
   if (!chosen) return refuse("no_eligible_account");
+  // After eligibility, as a launch finds it: memory only matters once there is an account to move it to.
+  if (input.accountSpecificMemory) return refuse("account_memory");
   chosen.selected = true;
   return { ...base, status: "selected", source: "priority", accountId: chosen.accountId, candidates };
 }
@@ -539,6 +540,19 @@ export function providerAccountChoiceRequiredSentence(
 }
 
 const SIGN_IN_REASONS: ReadonlySet<ProviderAccountSkipReason> = new Set(["signed_out", "sign_in_unknown"]);
+
+/** What an agent's credential receives of a refusal. Account ids contain account labels, so it gets
+ * no candidates; `get_provider_account_selection` lists the accounts it may name as references. */
+export function providerAccountChoiceRequiredForAgent(choice: ProviderAccountChoiceRequired): Omit<ProviderAccountChoiceRequired, "candidates"> {
+  const { candidates: _candidates, ...narrowed } = choice;
+  return narrowed;
+}
+
+/** What an agent's credential receives of a preview: references and reason codes, never an account id. */
+export function providerAccountSelectionPreviewForAgent(preview: ProviderAccountSelectionPreview): Omit<ProviderAccountSelectionPreview, "accountId" | "candidates"> {
+  const { accountId: _accountId, candidates: _candidates, ...narrowed } = preview;
+  return narrowed;
+}
 
 /** The structured form of a refusal: what an unattended caller can do next. */
 export function providerAccountChoiceRequired(result: ProviderAccountSelectionResult): ProviderAccountChoiceRequired {

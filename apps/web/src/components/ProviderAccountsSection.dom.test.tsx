@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
@@ -2007,7 +2007,131 @@ test("usage-limit switching waits for terms consent, cancellation writes nothing
   } finally { await ui.unmount(); }
 });
 
-test("an expanded usage row keeps its disclosure during a failed reconnect refresh and remains collapsible", async () => {
+/** Runs the section's minute polls by hand, against a clock the test moves (#4353). */
+function installMinuteClock(t: TestContext, start: number) {
+  let time = start;
+  t.mock.method(Date, "now", () => time);
+  const timers = new Map<number, () => void>();
+  let nextTimer = 1;
+  const original = { set: domWindow.setInterval, clear: domWindow.clearInterval };
+  domWindow.setInterval = ((run: () => void, ms: number) => {
+    const id = nextTimer++;
+    if (ms === 60_000) timers.set(id, run);
+    return id;
+  }) as unknown as typeof domWindow.setInterval;
+  domWindow.clearInterval = ((id: number) => { timers.delete(id); }) as unknown as typeof domWindow.clearInterval;
+  t.after(() => { domWindow.setInterval = original.set; domWindow.clearInterval = original.clear; });
+  return { tickTo: async (next: number, settle: () => Promise<unknown>) => {
+    time = next;
+    await act(async () => { for (const run of timers.values()) run(); });
+    await settle();
+  } };
+}
+
+const usageReading = (at: number, buckets: Array<{ id: string; label: string; remainingPercent: number; resetsAt?: number }>) => ({
+  sources: [{ sourceId: "work", runnerId: "runner-1", runnerName: "Machine", runnerStatus: "online" as const, agentId: "claude", agentName: "Claude",
+    provider: "claude" as const, providerAccountId: "work", state: "available" as const, freshness: "fresh" as const, fetchedAt: at, buckets }],
+  staleAfterMs: 600_000, generatedAt: at,
+});
+
+test("the minute tick counts a reset down, and a passed reset reads as Last Known (#4353)", async (t) => {
+  const start = 1_800_000_000_000;
+  const clock = installMinuteClock(t, start);
+  let reads = 0;
+  const reading = usageReading(start, [{ id: "session", label: "Session Window", remainingPercent: 36, resetsAt: start + 150_000 }]);
+  const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: { ...client().client,
+    subscriptionUsage: async () => { reads += 1; return reading; } } });
+  try {
+    const text = () => ui.row("Work").querySelector(".provider-account-usage")?.textContent ?? "";
+    assert.match(text(), /36% Left · Resets in 3 minutes/);
+    const before = reads;
+    await clock.tickTo(start + 60_000, ui.settle);
+    assert.equal(reads, before + 1, "each tick reads again");
+    assert.match(text(), /36% Left · Resets in 2 minutes/);
+    await clock.tickTo(start + 150_001, ui.settle);
+    assert.match(text(), /36% Left · Last Known/, "nothing has confirmed what the window holds after its reset");
+    assert.doesNotMatch(text(), /Resets in/);
+  } finally { await ui.unmount(); }
+});
+
+test("a reading ages into Last Known when later reads fail, and a new one replaces it (#4353)", async (t) => {
+  const start = 1_800_000_000_000;
+  const clock = installMinuteClock(t, start);
+  let answer: () => ReturnType<typeof usageReading> = () => usageReading(start, [{ id: "session", label: "Session Window", remainingPercent: 36 }]);
+  const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: { ...client().client,
+    subscriptionUsage: async () => answer() } });
+  try {
+    const text = () => ui.row("Work").querySelector(".provider-account-usage")?.textContent ?? "";
+    assert.match(text(), /^36% Left/);
+    assert.doesNotMatch(text(), /Last Known/);
+    answer = () => { throw new Error("Usage unavailable"); };
+    await clock.tickTo(start + 60_000, ui.settle);
+    assert.match(text(), /^36% Left/, "a failed read keeps a reading still inside its freshness window");
+    assert.doesNotMatch(text(), /Last Known/, "and doesn't call it old before it is");
+    await clock.tickTo(start + 600_001, ui.settle);
+    assert.match(text(), /36% Left · Last Known/, "it ages at the reading's own limit");
+    answer = () => usageReading(start + 660_000, [{ id: "session", label: "Session Window", remainingPercent: 80 }]);
+    await clock.tickTo(start + 660_000, ui.settle);
+    assert.match(text(), /^80% Left/);
+    assert.doesNotMatch(text(), /Last Known/);
+  } finally { await ui.unmount(); }
+});
+
+test("a kept reading never crosses to another Machine or an account whose access changed (#4353)", async () => {
+  const start = Date.now();
+  let reads = 0;
+  const api = { ...client().client, subscriptionUsage: async () => {
+    if (reads++ > 0) throw new Error("Usage unavailable");
+    return usageReading(start, [{ id: "session", label: "Session Window", remainingPercent: 36 }]);
+  } };
+  const granted = SIGN_IN_ACCOUNTS.map((account) => account.id === "work" ? { ...account, profile: { id: "p1", access: "granted" as const } } : account);
+  const ui = await render({ api, runner: runnerView({ providerAccounts: granted }) });
+  try {
+    const text = () => ui.row("Work").querySelector(".provider-account-usage")?.textContent ?? "";
+    assert.match(text(), /36% Left/);
+    await ui.rerender({ runner: runnerView({ providerAccounts: granted.map((account) => ({ ...account, authStatus: "unauthenticated" as const })) }) });
+    assert.match(text(), /36% Left/, "a changed sign-in state is the same account");
+    await ui.rerender({ runner: runnerView({ providerAccounts: [...granted, { id: "added", label: "Added", provider: "claude", authStatus: "authenticated" }] }) });
+    assert.match(text(), /36% Left/, "an inventory refresh that adds an account keeps the others'");
+    await ui.rerender({ runner: runnerView({ providerAccounts: granted.map((account) => account.id === "work"
+      ? { ...account, profile: { id: "p1", access: "not_granted" as const } } : account) }) });
+    assert.match(text(), /Usage Not Reported/, "lost server access drops what was read under it");
+    await ui.rerender({ runner: runnerView({ runnerId: "runner-2", providerAccounts: granted }) });
+    assert.match(text(), /Usage Not Reported/, "another Machine starts with nothing");
+  } finally { await ui.unmount(); }
+});
+
+test("Use for New Sessions stays available when the machine goes offline after a sign-in (#4353)", async () => {
+  const saved: unknown[] = [];
+  const base = client({ login: async () => ({ login: { ...runningLogin("codex-new", "Codex New"), provider: "codex" } }) });
+  const api = { ...base.client,
+    updateMachineProviderAccountDefault: async (_runnerId: string, provider: string, body: unknown) => {
+      saved.push(body);
+      return { providerAccountDefault: { provider, accountId: (body as { accountId: string }).accountId, revision: 4 } };
+    },
+  } as unknown as ApiClient;
+  const defaults = [{ provider: "codex" as const, accountId: null, revision: 3 }];
+  const ui = await render({ api, runner: runnerView({ providerAccountDefaults: defaults }),
+    intent: { kind: "add_account", provider: "codex", activationId: 1 } });
+  try {
+    const dialog = ui.dialog()!;
+    await typeAccountLabel(dialog, "Codex New");
+    await act(async () => { ui.button(dialog, "Start Sign-In").click(); });
+    await ui.settle();
+    await ui.rerender({ online: false, runner: runnerView({ status: "offline", providerAccountDefaults: defaults, providerAccounts: [...ACCOUNTS,
+      { id: "codex-new", label: "Codex New", provider: "codex", authStatus: "authenticated", profile: { id: "p9", access: "granted" } }] }) });
+    const offer = ui.container.querySelector<HTMLElement>('[aria-label="Use for New Sessions"]');
+    assert.ok(offer, "a preference saves offline, so it stays offered");
+    const button = ui.button(offer, "Use for New Sessions");
+    assert.equal(button.disabled, false);
+    await act(async () => { button.click(); });
+    await ui.settle();
+    assert.deepEqual(saved, [{ accountId: "codex-new", expectedRevision: 3 }]);
+    assertNoDomNode(ui.container.querySelector('[aria-label="Use for New Sessions"]'), "the offer ends once saved");
+  } finally { await ui.unmount(); }
+});
+
+test("an expanded usage row keeps its reading and disclosure during a failed reconnect refresh and remains collapsible", async () => {
   let reads = 0;
   const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: {
     ...client().client, subscriptionUsage: async () => {
@@ -2023,8 +2147,12 @@ test("an expanded usage row keeps its disclosure during a failed reconnect refre
     await ui.rerender({ online: false });
     assert.equal(toggle.isConnected, true);
     assert.equal(toggle.getAttribute("aria-expanded"), "true");
-    assert.match(toggle.textContent ?? "", /Usage Not Reported/);
-    assert.match(ui.row("Work").textContent ?? "", /No allowance reading is available/);
+    assert.match(toggle.textContent ?? "", /36% Left · Last Known/, "the last reading stays, marked for what it is");
+    assert.doesNotMatch(ui.row("Work").textContent ?? "", /No allowance reading is available/);
+    assert.match(ui.row("Work").textContent ?? "", /Last known reading/);
+    await ui.rerender({ online: true });
+    assert.ok(reads > 2, "reconnecting reads again");
+    assert.match(toggle.textContent ?? "", /36% Left/, "and a read that fails then changes nothing");
     await act(async () => toggle.click());
     assert.equal(toggle.getAttribute("aria-expanded"), "false");
     assert.equal(toggle.isConnected, true, "collapsing does not remove the operated control");

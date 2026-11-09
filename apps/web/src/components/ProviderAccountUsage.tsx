@@ -7,29 +7,44 @@ import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { AccountUsageMeters, usageLeftPercent } from "./AccountChoice.js";
 import { ChevronDownIcon } from "./Icons.js";
 
+type AccountAccess = ReadonlyMap<string, string | undefined>;
+
+function accountAccess(runner: RunnerView): AccountAccess {
+  return new Map(runner.providerAccounts?.map(account => [account.id, account.profile?.access]));
+}
+
 /** Read cached usage, never probe credentials from the account overview. The response is already
- * permission-scoped; a failed read leaves usage unknown instead of borrowing another account's. */
+ * permission-scoped. A failed read keeps the last reading for this API and Machine, which ages into
+ * Last Known, rather than saying nothing was ever reported. It never carries to another API or Machine,
+ * or to an account whose server access has changed since it was read. */
 export function useMachineAccountUsage(runner: RunnerView, online: boolean) {
   const api = useApi();
-  const [data, setData] = useState<SubscriptionUsageResponse | null>(null);
+  const [reading, setReading] = useState<{ api: unknown; runnerId: string; access: AccountAccess; response: SubscriptionUsageResponse } | null>(null);
   const [now, setNow] = useState(Date.now);
   const accountKey = JSON.stringify(runner.providerAccounts?.map(account => [account.id, account.provider, account.authStatus, account.profile?.access]));
   useEffect(() => {
     let current = true;
-    let reading = false;
-    setData(null);
+    let inFlight = false;
     const load = async () => {
-      if (reading) return;
-      reading = true;
-      try { const next = await api.subscriptionUsage(); if (current) setData(next); }
-      catch { /* Unknown usage does not prevent account management. */ }
-      finally { reading = false; }
+      if (inFlight) return;
+      inFlight = true;
+      const access = accountAccess(runner);
+      try {
+        const response = await api.subscriptionUsage();
+        if (current) setReading({ api, runnerId: runner.runnerId, access, response });
+      } catch { /* Unknown usage does not prevent account management. */ }
+      finally { inFlight = false; }
     };
     void load();
     const timer = window.setInterval(() => { setNow(Date.now()); void load(); }, 60_000);
     return () => { current = false; window.clearInterval(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `accountKey` carries what `runner` adds
   }, [api, runner.runnerId, accountKey, online]);
-  return { response: data, now: Math.max(now, Date.now()) };
+  const access = accountAccess(runner);
+  const response = reading && reading.api === api && reading.runnerId === runner.runnerId ? { ...reading.response,
+    sources: reading.response.sources.filter(source => !source.providerAccountId ||
+      access.get(source.providerAccountId) === reading.access.get(source.providerAccountId)) } : null;
+  return { response, now: Math.max(now, Date.now()) };
 }
 
 export function ProviderAccountUsage({ account, runnerId, online, data }: {
