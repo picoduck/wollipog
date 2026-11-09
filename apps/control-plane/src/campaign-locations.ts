@@ -90,6 +90,8 @@ export class CampaignLocations {
     const { db } = this.deps;
     // A Custom campaign whose own Location was unread at creation reads it again (#4319).
     const awaiting = this.deps.reestablish ? this.forRoots(db.customRootsAwaitingLaunchRead(runnerId), (root) => this.deps.reestablish!(root.id)) : Promise.resolve([]);
+    // What each campaign's ordinary retry reads here, so the unread retry below doesn't read it twice.
+    const retriedBy = new Map<string, Set<string>>();
     const retried = this.forRoots([...db.campaignRepositoryRoots({ runnerId }), ...db.customCampaignRepositoryRoots(runnerId)], (root) => {
       const custom = root.orchestratorPolicy?.control?.mode !== "full_control";
       const retry = (root.orchestratorPolicy?.excludedLocations ?? [])
@@ -98,9 +100,39 @@ export class CampaignLocations {
         .filter((location): location is ProjectLocationView => Boolean(location && location.runnerId === runnerId &&
           location.projectId === root.projectId && location.availability !== "runner_removed" &&
           (!custom || this.customSurveyLists(root, location))));
+      retriedBy.set(root.id, new Set(retry.map((location) => location.id)));
       return retry.length ? this.inspectAndRecord(root, retry, "runner_reconnected") : Promise.resolve();
     });
-    return Promise.all([awaiting, retried]).then(() => undefined);
+    // Then every unread Location on this runner that retry didn't read (#4319): one whose exclusion a
+    // revoke, a re-authorization or a revival dropped, a stale record a rollback left, or one of a
+    // stopped root whose members still run. Its runner's update and restart is what the refusal asks
+    // for, so that is what reads it again.
+    const unread = retried.then(() => this.forRoots(db.campaignRootsRereadingUnread(runnerId), (root) =>
+      this.rereadUnread(root, runnerId, retriedBy.get(root.id) ?? new Set())));
+    return Promise.all([awaiting, unread]).then(() => undefined);
+  }
+
+  /** Reads a campaign's unread Locations on one runner only to name their repository (#4319): it never
+   * joins one. One already in an entry, as an older control plane may have left it, is resolved
+   * without a read. Its own Location is left to `reestablish`, the one way a root's own Location is unread. */
+  private async rereadUnread(root: SessionView, runnerId: string, skip: ReadonlySet<string>): Promise<void> {
+    const { db } = this.deps;
+    const standing = db.unnamedBelowGatesLocations(root)
+      .map((item) => db.getProjectLocation(item.locationId))
+      .filter((location): location is ProjectLocationView => Boolean(location && location.runnerId === runnerId && location.id !== root.projectLocationId &&
+        location.projectId === root.projectId && location.availability !== "runner_removed" && !skip.has(location.id)));
+    if (!standing.length) return;
+    const locations = standing.filter((location) => !this.inBoundary(root, location.id));
+    const before = locations.map((location) => ({ id: location.id, name: location.name, runnerId: location.runnerId, workspaceId: location.workspaceId,
+      addedBy: db.projectLocationAddedBy(location.id) }));
+    const results = await Promise.all(locations.map((location) => inspectProjectLocation(this.deps, location.id, {
+      projectId: root.projectId ?? undefined, timeoutMs: this.deps.inspectionTimeoutMs, joinsCampaign: true })));
+    const now = Date.now();
+    const revoked = db.recordUnreadLocationReads(root.id, before.map((location, index) => ({ location, result: results[index]! })), now);
+    const owner = this.owner(root) ?? db.campaignOwnerForRoot(root.id, root.orchestratorPolicy);
+    // A lift that isn't a join revokes what the refusal covered, and that leaves its pauses (#4319).
+    if (revoked.length && owner) this.deps.settle(root, revoked, owner, now);
+    else this.deps.hub.sessionChangedById(root.id);
   }
 
   /** Nobody reviews a Custom campaign's list, so only what its survey would list joins it: a Location
