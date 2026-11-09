@@ -125,7 +125,13 @@ for (const width of [1440, 390]) {
       await dialog(page).getByRole("radio", { name: "Run a Workflow" }).click();
       await dialog(page).getByRole("textbox", { name: "Task" }).fill("Build and review the account setup");
       await chooseProject(page, "Wollipog");
-      await expect(reason(page)).toHaveText(/^Choose an account for .* Agent to continue\.$/u);
+      await expect(reason(page)).toHaveText("Choose an account for Builder and Remediator Agent to continue.");
+      // A long role name wraps the reason. It must not push the buttons apart.
+      const cancel = await dialog(page).getByRole("button", { name: "Cancel", exact: true }).boundingBox();
+      const primary = await dialog(page).getByRole("button", { name: "Start Workflow", exact: true }).boundingBox();
+      expect(primary!.y, "Cancel and Start Workflow share one row").toBe(cancel!.y);
+      expect(primary!.height).toBe(cancel!.height);
+      await expect(reason(page)).toBeInViewport();
       await page.waitForTimeout(600);
       await page.screenshot({ path: `playwright-report/provider-accounts/new-run-workflow-account-${width}.png`, fullPage: true });
       await dialog(page).getByRole("button", { name: /^Account for /u }).click();

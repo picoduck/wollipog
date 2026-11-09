@@ -7682,9 +7682,9 @@ body.shell-dock-dragging * {
   color: var(--text-dim);
   font: var(--type-small);
 }
-/* Snooze's footer also holds Remove Reminder, and Orchestrator Policy's holds Reset to Defaults, so its reason takes the room left beside the three
-   buttons and wraps there, rather than pushing the primary onto a second row. */
-.modal-foot > :is(.snooze-blocked-reason, .orchestrator-policy-reason) { flex: 1 1 0; }
+/* Snooze's footer also holds Remove Reminder, and Orchestrator Policy's holds Reset to Defaults, and New Multi-Agent Run's reason can name a long role, so the reason takes the room left
+   beside the buttons and wraps there, rather than pushing the primary onto a second row. */
+.modal-foot > :is(.snooze-blocked-reason, .orchestrator-policy-reason, .new-run-reason) { flex: 1 1 0; }
 @media (max-width: 760px) {
   .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .pod-turns-reason, .pod-merge-reason, .run-follow-up-reason, .outbound-subscription-dialog-count, .new-pod-reason, .pod-member-reason, .new-run-reason, .budget-history-reason) { flex-basis: 100%; }
 }
