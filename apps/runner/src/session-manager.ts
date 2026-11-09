@@ -15046,6 +15046,16 @@ export class SessionManager {
           worktrees: fresh.worktrees ?? [], switchedAt: Date.now(), toWorkspaceId: pending.workspaceId,
         };
         const setup = this.detachedWorktreeSetups.get(worktree);
+        // A worktree this attempt made is new at its id, even on a path the session used before, so
+        // what it records replaces anything an earlier worktree left there, including with nothing.
+        const worktreeHooks = { ...fresh.worktreeHooks };
+        const worktreeProcessMarkers = { ...fresh.worktreeProcessMarkers };
+        if (reservation.record) {
+          delete worktreeHooks[worktree.id];
+          delete worktreeProcessMarkers[worktree.id];
+          if (setup?.hooks) worktreeHooks[worktree.id] = setup.hooks;
+          if (setup?.processMarker) worktreeProcessMarkers[worktree.id] = setup.processMarker;
+        }
         const moved = this.store.patchMeta(sessionId, {
           workspaceId: pending.workspaceId,
           repoPath: pending.repoPath,
@@ -15055,9 +15065,7 @@ export class SessionManager {
           launchWorktreeProof: undefined,
           // Hook snapshots and process markers are keyed by worktree id, so the earlier Location's
           // stay for its worktrees' eventual teardown. Setup's join them with this write.
-          ...(setup?.hooks ? { worktreeHooks: { ...fresh.worktreeHooks, [worktree.id]: setup.hooks } } : {}),
-          ...(setup?.processMarker
-            ? { worktreeProcessMarkers: { ...fresh.worktreeProcessMarkers, [worktree.id]: setup.processMarker } } : {}),
+          ...(reservation.record ? { worktreeHooks, worktreeProcessMarkers } : {}),
           worktreeRecovery: undefined,
           locationHistory: [...(fresh.locationHistory ?? []), left],
           pendingLocationSwitch: undefined,

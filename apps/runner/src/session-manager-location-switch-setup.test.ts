@@ -741,6 +741,35 @@ test("a worktree remade on a path this session used before takes no teardown fro
   });
 });
 
+test("a worktree remade with no setup keeps no teardown or marker from the worktree that was on that path", async () => {
+  await withSession("remade-no-setup", async (h) => {
+    const teardownLog = join(h.root, "teardown-log");
+    const earlier = await inSetUpWorktree(h, teardownLog);
+    git(h.app, "branch", "away");
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message({ workspaceId: "app", workspacePath: h.app, repository: "acme/app",
+      locationName: "App", occurrenceId: "occurrence-away", recoverBranch: "away" })), { ok: true });
+    await waitFor(() => h.providers[2]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move away did not finish");
+    git(h.docs, "worktree", "remove", "--force", earlier.path);
+    git(h.docs, "checkout", "--quiet", "fix/install-link");
+    git(h.docs, "rm", "--quiet", ".wollipog.json");
+    git(h.docs, "commit", "--quiet", "-m", "no setup any more");
+    git(h.docs, "checkout", "--quiet", "main");
+
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message({ occurrenceId: "occurrence-back" })), { ok: true });
+    await waitFor(() => h.providers[3]?.prompts.length === 1, "the move back did not finish");
+    const meta = h.store.readMeta(h.sessionId)!;
+    assert.equal(meta.worktreePath, earlier.path, "the new worktree is on the same path");
+    assert.equal(meta.worktreeHooks?.[earlier.id], undefined, "the old worktree's teardown is not this one's");
+    assert.notEqual(meta.worktreeProcessMarkers?.[earlier.id], earlier.marker);
+    assert.deepEqual(journal(h), []);
+
+    h.manager.stop(h.sessionId);
+    await h.manager.delete(h.sessionId);
+    await waitFor(() => !existsSync(earlier.path), "the worktree was not removed with the session");
+    assert.equal(existsSync(teardownLog), false, "no teardown from the old worktree ran on the new one");
+  });
+});
+
 test("the worktree is claimed and on record before Git makes it, so no crash or other session finds it unaccounted for", async () => {
   await withSession("write-ahead", async (h) => {
     const internals = h.manager as unknown as {
