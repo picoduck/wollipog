@@ -3110,6 +3110,44 @@ test("a keep that lands while a deletion ends a worktree's processes runs no tea
   });
 });
 
+test("deleting a session whose pending rollback names a worktree another session attached frees what the session held there", async () => {
+  await withSession("delete-pending-attached", async (h) => {
+    git(h.docs, "checkout", "--quiet", "-b", "config-base");
+    writeFileSync(join(h.docs, ".wollipog.json"), JSON.stringify({ version: 1, setup: [LOG_STEP(h)] }));
+    git(h.docs, "add", ".wollipog.json");
+    git(h.docs, "commit", "--quiet", "-m", "setup");
+    git(h.docs, "checkout", "--quiet", "main");
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    const internals = internalsOf(h);
+    const activate = internals.activateWorktreeWithNotice.bind(h.manager);
+    internals.activateWorktreeWithNotice = async () => { throw new Error("activation failed"); };
+    const removal = stickRemoval(h);
+    const failing = h.manager.requestWorktree(h.sessionId, { baseRef: "config-base", branch: "fix/other" });
+    await answerTrust(h, "trust");
+    await assert.rejects(failing, /activation failed/u);
+    internals.activateWorktreeWithNotice = activate;
+    const [rollback] = journal(h);
+    const slot = rollback!.worktreePath;
+    const owner = `${h.sessionId}\0${rollback!.worktreeId}`;
+    assert.ok(internals.worktreePortAllocator.get(owner), "setup gave the request a port block");
+    // Another session attaches that worktree, then this one is deleted.
+    const meta = h.store.readMeta(h.sessionId)!;
+    h.store.create({ ...meta, sessionId: "s_attached_elsewhere", worktreePath: slot, worktreeBranch: "fix/other",
+      worktrees: [{ id: "attached-elsewhere", path: slot, branch: "fix/other", source: "attached" }], locationHistory: undefined,
+      keptWorktreePaths: undefined, worktreeHooks: undefined, worktreeProcessMarkers: undefined });
+    const before = files(slot);
+    removal.free();
+    await h.manager.delete(h.sessionId);
+    assert.deepEqual(files(slot), before, "the worktree stays with the session that attached it");
+    assert.equal(internalsOf(h).worktreePortAllocator.get(owner), undefined, "the deleted session's port block is given back");
+    assert.deepEqual(journal(h), []);
+    h.restart();
+    assert.equal(internalsOf(h).worktreePortAllocator.get(owner), undefined, "and stays given back after a restart");
+    assert.deepEqual(files(slot), before);
+  });
+});
+
 test("deleting a session while its request's rollback is still pending lets that rollback decide, so hand edits are kept", async () => {
   await withSession("delete-pending-rollback", async (h) => {
     git(h.docs, "checkout", "--quiet", "-b", "config-base");
@@ -3148,8 +3186,9 @@ test("a kept mark goes once the runner itself removes that worktree", async () =
     const moved = h.store.readMeta(h.sessionId)!.worktreePath!;
     const { worktree } = await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/plain" });
     await h.manager.selectWorktree(h.sessionId, moved);
-    await waitFor(() => h.store.readMeta(h.sessionId)?.worktreePath === moved && h.store.readMeta(h.sessionId)?.status !== "running",
-      "the session did not go back to its first worktree");
+    // Until the relaunch into the first worktree is done, the provider still runs in this one.
+    await waitFor(() => h.store.readMeta(h.sessionId)?.worktreePath === moved && h.providers.at(-1)?.cwd === moved &&
+      h.store.readMeta(h.sessionId)?.status === "idle", "the session did not go back to its first worktree");
     (h.manager as unknown as { markWorktreeKept: (sessionId: string, path: string) => void }).markWorktreeKept(h.sessionId, worktree.path);
     assert.ok(h.store.readMeta(h.sessionId)?.keptWorktreePaths?.includes(worktree.path));
     // What was kept there has since been dealt with, and the worktree holds nothing of anyone's.

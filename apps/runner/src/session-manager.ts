@@ -18717,6 +18717,13 @@ export class SessionManager {
     if (auxiliaryRollback && this.rollbackAttemptIsLive(record)) return;
     if (auxiliaryRollback && this.creationRollbackTargetInUse(record)) {
       this.log(`worktree rollback for ${boundedSessionIdForLog(record.sessionId)} dropped: a session now uses that worktree`);
+      // The worktree is another session's to keep. A deleted session's rollback still owes what that
+      // session held there, its setup's processes and its port block, since nothing else will ever
+      // give them back (#4209). A live session still has them on its own row.
+      if (!this.store.has(record.sessionId)) {
+        await this.endRollbackUnremoved(record);
+        return;
+      }
       this.removeWorktreeCleanupRecord(record);
       return;
     }
