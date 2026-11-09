@@ -54,7 +54,8 @@ for (let i = 0; i < args.length - 1; i++) {
   }
   settings.push({ value, contents });
 }
-const record = join(process.env.HOOK_LAUNCH_DIR, String(process.hrtime.bigint()));
+// Padded so name order is launch order when the host's uptime in nanoseconds gains a digit.
+const record = join(process.env.HOOK_LAUNCH_DIR, String(process.hrtime.bigint()).padStart(20, "0"));
 writeFileSync(record + ".part", JSON.stringify({ args, env: process.env, settings }));
 renameSync(record + ".part", record + ".json");
 const flag = Math.max(args.indexOf("--session-id"), args.indexOf("--resume"));

@@ -432,6 +432,7 @@ for (const viewport of [
     await page.addInitScript(() => localStorage.setItem("wollipog.question-response-style", "interactive"));
     await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
     const card = page.getByRole("region", { name: "Agent Questions" });
+    await page.locator(".request-dock").waitFor();
     await openMobileQuestion(page);
     await expect(card.locator(".request-card-kind")).toHaveText("Async Question");
     if (evidenceDir) {
@@ -457,10 +458,12 @@ for (const viewport of [
     await expect(card.locator(".request-card-kind")).toHaveText("Async Question");
     await beat(3000);
     await page.reload();
+    await page.locator(".request-dock").waitFor();
     await openMobileQuestion(page);
     await expect(card.locator(".request-card-kind")).toHaveText("Async Question");
     await stack.restart();
     await page.reload();
+    await page.locator(".request-dock").waitFor();
     await openMobileQuestion(page);
     await expect(card.locator(".request-card-kind")).toHaveText("Async Question");
     if (evidenceDir) {
