@@ -88,6 +88,8 @@ import {
   isPolicyApproval,
   isTerminal,
   isOwnerQuestionSnapshot,
+  isChildQuestionSnapshot,
+  isWorkflowQuestionSnapshot,
   pendingRequests,
   removePendingRequest,
   sessionHolds,
@@ -23865,13 +23867,14 @@ export class ControlPlaneDb {
     actor?: GovernanceActor,
   ): WorkflowDecisionView | null {
     const owed = oweResume ? ", resume_state='held', resume_command_id=NULL, resume_updated_at=?" : "";
+    const questionAnswer = outcome === "approved" && isChildQuestionSnapshot(this.workflowDecisionByOccurrence(occurrenceId)?.resourceSnapshot);
     const result = this.stmt(
-      `UPDATE workflow_decisions SET status=?, selected_option_id=?, evidence_reviewed=?,
+      `UPDATE workflow_decisions SET status=?, consumed_at=?, selected_option_id=?, evidence_reviewed=?,
        rationale_digest=?, child_message=?, delegated_video_evidence=?, delegated_image_review=?, resolved_at=?,
        closure_approval=CASE WHEN category='issue_closure' AND ?='approved' THEN ? ELSE closure_approval END${owed}
        WHERE occurrence_id=? AND status='pending' AND authority=?`,
     ).run(
-      outcome, selectedOptionId ?? null, evidenceReviewed ? JSON.stringify(evidenceReviewed) : null,
+      questionAnswer ? "consumed" : outcome, questionAnswer ? now : null, selectedOptionId ?? null, evidenceReviewed ? JSON.stringify(evidenceReviewed) : null,
       rationaleDigest ?? null, childMessage ?? null, delegatedVideoEvidence ? JSON.stringify(delegatedVideoEvidence) : null,
       delegatedImageReview ? JSON.stringify(delegatedImageReview) : null, now,
       outcome, actor ? JSON.stringify({ actor, at: now }) : null, ...(oweResume ? [now] : []), occurrenceId, expectedAuthority,
@@ -24028,6 +24031,7 @@ export class ControlPlaneDb {
       ORDER BY created_at ASC, occurrence_id ASC LIMIT ${CAMPAIGN_OWNER_DECISIONS_LIMIT}`).all(...params) as unknown[])
       .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null)
       .map((decision) => ({ occurrenceId: decision.occurrenceId, sessionId: decision.sessionId, category: decision.category,
+        ...(isWorkflowQuestionSnapshot(decision.resourceSnapshot) ? { kind: "question" as const } : {}),
         summary: ownerDecisionSummary(decision.resourceSnapshot), handedOff: decision.ownerHandoff !== undefined,
         ...(decision.ownerRule ? { ownerRule: decision.ownerRule } : {}), createdAt: decision.createdAt }));
     return { total, items };

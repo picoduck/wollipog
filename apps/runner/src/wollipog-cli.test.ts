@@ -1502,6 +1502,27 @@ test("CLI typed-decision help is discoverable and malformed or cross-session com
   }
 });
 
+test("CLI child questions refuse an older control plane before submitting the snapshot (#4359)", async () => {
+  let version = RUNNER_CAPABILITY_MIN_PROTOCOL.childQuestions - 1;
+  const calls: Array<{ url: string; body?: string }> = [];
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, body: init?.body });
+    return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+      ? { protocolVersion: version } : { status: "pending" }) };
+  };
+  const resourceSnapshot = { category: "implementation_question", kind: "question", question: "Which?", options: [] };
+  const invoke = () => runWollipogCli(["node", "cli.js", "--wollipog-cli", "decision", "request", "--request-id", "q",
+    "--resource-key", "q", "--snapshot", JSON.stringify(resourceSnapshot), "--json"],
+  { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token", WOLLIPOG_SESSION_ID: "child" },
+  { stdout() {}, stderr() {} }, fetch);
+  assert.equal(await invoke(), 1);
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0]!.url.endsWith("/api/compatibility"));
+  version++;
+  assert.equal(await invoke(), 0);
+  assert.deepEqual(JSON.parse(calls.at(-1)!.body!).resourceSnapshot, resourceSnapshot);
+});
+
 test("CLI typed decisions fail closed before their protocol capability", async () => {
   let stdout = "";
   let calls = 0;

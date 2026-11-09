@@ -166,7 +166,7 @@ import type {
 } from "./campaign-work-ledger.js";
 export type { ConversationHandoffDraft, InPlaceHandoffTurn } from "./conversation-handoff.js";
 import { pendingRequests, prioritizedPendingRequests } from "./worker-attention.js";
-import { isOwnerQuestionCard, isOwnerQuestionRequest } from "./owner-question.js";
+import { isChildQuestionSnapshot, isOwnerQuestionCard, isOwnerQuestionRequest } from "./owner-question.js";
 export {
   attentionRequestRank,
   pendingRequests,
@@ -442,6 +442,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * the control plane by the runner, because an older control plane would ignore the field and ask
    * the question as an approval, and against the root's runner by the control plane. */
   ownerQuestions: 303,
+  /** v332 (#4359): explicit child clarifications, with free text and no consumable action grant. */
+  childQuestions: 332,
   /** v308 (#4282): structured scope proposals, `proposal` on request_campaign_issue_scope_change.
    * Checked against the control plane by the runner, and against the root's runner by the control
    * plane, which sends an older runner's proposal to the owner. */
@@ -2377,6 +2379,8 @@ export const CAMPAIGN_HANDOFFS_LIMIT = 50;
 /** One pending decision the campaign's owner kept (#4064), as Campaign Status lists it. */
 export interface CampaignOwnerDecision {
   occurrenceId: string;
+  /** v332: a question is presented as input, never as an action approval. */
+  kind?: "question";
   /** The session whose request it is: the root for an owner decision, else the requester. */
   sessionId: string;
   category: WorkflowDecisionCategory;
@@ -4231,7 +4235,9 @@ function singleSessionAttentionStatus(
     return {
       kind: "input_required",
       label: "Needs Your Input",
-      description: "The Orchestrator asked you a question and keeps working while it waits for your answer.",
+      description: isChildQuestionSnapshot(pending?.workflowDecision?.resourceSnapshot)
+        ? "This session asked you a question. Answer it to continue."
+        : "The Orchestrator asked you a question and keeps working while it waits for your answer.",
     };
   }
   if (pending?.kind === "question" && pending.recoveryReason === "provider_restart") {
@@ -5016,6 +5022,8 @@ export type WorkflowDecisionResourceSnapshot =
   | CampaignFollowUpAdmissionSnapshot
   | {
       category: "implementation_question";
+      /** v332: a clarification, never an action approval. Absent preserves legacy approvals. */
+      kind?: "question";
       question: string;
       options: WorkflowDecisionOption[];
       recommendedOptionId?: string;
@@ -5290,7 +5298,8 @@ export interface ResolveWorkflowDecisionRequest {
   /** Audit-only: never retained, never shown to the child; only its digest reaches audit. */
   rationale?: string;
   /** v166: retained on the decision for the child to read and delivered as the prompt that resumes
-   * it. At most WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS; audit records only its digest. */
+   * it. At most WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS, or WORKFLOW_QUESTION_ANSWER_MAX_CHARS
+   * for an explicit child question's answer and note; audit records only its digest. */
   childMessage?: string;
 }
 

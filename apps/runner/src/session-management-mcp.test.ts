@@ -743,6 +743,20 @@ test("declared merge closures fail closed against a control plane that would dro
   assert.equal(current.calls.length, 1, "a GitLab merge that declares no closure is still requested");
 });
 
+test("child questions never reach a control plane that would discard their question kind (#4359)", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 201, body: { status: "pending", authority: "human" } }));
+  const resourceSnapshot = { category: "implementation_question", kind: "question", question: "Which approach?", options: [] };
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.childQuestions - 1;
+  const old = await callTool(deps, "request_workflow_decision", { requestId: "q", resourceKey: "q", resourceSnapshot });
+  assert.equal(old.isError, true);
+  assert.equal(calls.length, 0);
+  assert.match(resultJson(old).error, /Do not retry as an approval/u);
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.childQuestions;
+  const current = await callTool(deps, "request_workflow_decision", { requestId: "q", resourceKey: "q", resourceSnapshot });
+  assert.equal(current.isError, undefined);
+  assert.deepEqual((calls[0]!.body as { resourceSnapshot: unknown }).resourceSnapshot, resourceSnapshot);
+});
+
 test("an owner rule is forwarded, and fails closed against a control plane that would drop it (#4137)", async () => {
   const rule = { source: "~/.claude/skills/issue-workflow/SKILL.md", quote: "Ask the user before merging." };
   const snapshot = { category: "implementation_question", question: "Which?", options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] };

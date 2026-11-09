@@ -1352,6 +1352,10 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   //      change first claimed 330, which another change took.)
   331,
   // v332 slot
+  // 332: child implementation questions explicitly carry kind: "question" (#4359). They use
+  //      normal question forms and return free text without leaving a consumable action grant.
+  //      Absent kind retains legacy approval semantics; older peers refuse new question requests.
+  332,
   // v333 slot
   // v334 slot
   // v335 slot

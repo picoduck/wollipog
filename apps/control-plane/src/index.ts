@@ -6471,10 +6471,12 @@ app.post("/api/sessions/:id/answer", async (req, reply) => {
     return reply.code(400).send({ error: "requestId and answers are required; action must be submit or dismiss" });
   }
   const action = body.action ?? (Object.keys(body.answers).length > 0 ? "submit" : "dismiss");
+  const human = requestHuman(req);
   return respond(reply, svc.answerQuestion(id, body.requestId, body.answers, {
     kind: "human",
     id: humanActorId(req),
-  }, action, undefined, body.occurrenceId));
+  }, action, undefined, body.occurrenceId, undefined,
+  (sessionId) => human ? db.canAccessSession(human, sessionId) : false));
 });
 
 // Git/PR workflow: run a git action (status/commit/open_pr) in the session's

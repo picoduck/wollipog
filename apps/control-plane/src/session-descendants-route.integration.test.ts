@@ -10,6 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import {
   DEFAULT_ORCHESTRATOR_DEFAULTS,
+  HUMAN_ONLY_PARENT_CONTROL_POLICY,
   PROTOCOL_VERSION,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   type GovernancePolicy,
@@ -33,10 +34,11 @@ test("HTTP agent management scopes descendants and composes governance policy vi
   try {
     const local = seed.localIdentityContext();
     seed.createIdentityMember({ userId: "other-user", displayName: "Other", organizationId: local.organizationId, role: "operator", now: 1 });
+    seed.createIdentityMember({ userId: "question-reader", displayName: "Question Reader", organizationId: local.organizationId, role: "operator", now: 1 });
     seed.createIdentityMember({ userId: "policy-admin", displayName: "Policy Admin", organizationId: local.organizationId, role: "admin", now: 1 });
     seed.createIdentityMember({ userId: "inactive-user", displayName: "Inactive", organizationId: local.organizationId, role: "operator", now: 1 });
     seed.updateIdentityMember({ userId: "inactive-user", displayName: "Inactive", organizationId: local.organizationId, role: "operator", status: "suspended", now: 2 });
-    for (const userId of [local.userId, "policy-admin", "other-user"]) {
+    for (const userId of [local.userId, "policy-admin", "other-user", "question-reader"]) {
       seed.createDevice({ id: `device-${userId}`, name: "Policy Test", tokenHash: hashToken(`device-${userId}`), userId, organizationId: local.organizationId, now: 2 });
     }
     for (const [policyId, ownerUserId, organizationId, question] of [
@@ -88,6 +90,23 @@ test("HTTP agent management scopes descendants and composes governance policy vi
       },
       now: 2,
     });
+    // A person may read a child without sharing the controller's audience (#4359 review).
+    for (const [id, owner] of [["question-hidden-root", "other-user"], ["question-visible-child", "question-reader"]]) {
+      seed.createSession({ id: id!, runnerId: "r", workspaceId: null, agentId: null, title: id!, useWorktree: false,
+        driver: "claude-code", config: {}, now: 2,
+        ...(id === "question-hidden-root" ? { role: "orchestrator" as const,
+          parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
+          orchestratorPolicy: resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default") }
+          : { parentSessionId: "question-hidden-root" }),
+        scope: { organizationId: local.organizationId, owner: { kind: "user", userId: owner! } } });
+      seed.updateSessionStatus(id!, "running", 3);
+    }
+    const question = seed.createWorkflowDecision({ requestId: "restricted-question", occurrenceId: "restricted-question",
+      sessionId: "question-visible-child", controllingSessionId: "question-hidden-root", category: "implementation_question",
+      resourceKey: "restricted-question", resourceSnapshot: { category: "implementation_question", kind: "question",
+        question: "Which approach?", options: [] }, resourceDigest: "a".repeat(64), authority: "human", policyRevision: 1, createdAt: 4 })!;
+    seed.setPendingApproval("question-visible-child", { requestId: "restricted-question", occurrenceId: "restricted-question",
+      kind: "workflow_decision", title: "Question", options: [], workflowDecision: question.decision });
     childReportSeq = seed.appendEvent("orchestrator-child", {
       kind: "agent_message", text: "Campaign route report", final: true,
     }, 4).seq;
@@ -114,7 +133,7 @@ test("HTTP agent management scopes descendants and composes governance policy vi
     }
     assert.ok(healthy, logs);
     liveDb = ControlPlaneDb.attach(database);
-    for (const mode of ["normal", "orchestrator", "orchestrator-provider", "orchestrator-child", "policy-agent"]) {
+    for (const mode of ["normal", "orchestrator", "orchestrator-provider", "orchestrator-child", "policy-agent", "question-hidden-root", "question-visible-child"]) {
       liveDb.updateSessionStatus(mode, "running", Date.now());
       assert.equal(liveDb.setAgentControlCredential(mode, "r", hashToken(`token-${mode}`), Date.now()), true);
     }
@@ -144,6 +163,21 @@ test("HTTP agent management scopes descendants and composes governance policy vi
     const ownerDb = ControlPlaneDb.attach(database, { readOnly: true });
     const ownerId = ownerDb.localIdentityContext().userId;
     ownerDb.close();
+    const headers = { authorization: "Bearer device-question-reader", "content-type": "application/json" };
+    const visible = await fetch(`http://127.0.0.1:${port}/api/sessions/question-visible-child`, { headers });
+    assert.equal(visible.status, 200);
+    const hidden = await fetch(`http://127.0.0.1:${port}/api/sessions/question-hidden-root`, { headers });
+    assert.equal(hidden.status, 404);
+    for (const [route, body] of [
+      ["approve", { requestId: "restricted-question", optionId: null }],
+      ["answer", { requestId: "restricted-question", occurrenceId: "restricted-question",
+        action: "submit", answers: { owner_question_answer: "Use a third approach." } }],
+    ] as const) {
+      const response = await fetch(`http://127.0.0.1:${port}/api/sessions/question-visible-child/${route}`,
+        { method: "POST", headers, body: JSON.stringify(body) });
+      assert.equal(response.status, 404, `${route} must also require access to the controller`);
+      assert.equal(liveDb.workflowDecisionByOccurrence("restricted-question")!.status, "pending");
+    }
     // #1448: steering recovery reads and mutations have prompt's descendant scope, even when
     // the caller can otherwise see the unrelated session. Offline recovery stays durably pending.
     for (const sessionId of ["normal-child", "orchestrator-child", "orchestrator-grandchild", "normal", "orchestrator"]) {

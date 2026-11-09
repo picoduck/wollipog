@@ -89,6 +89,13 @@ only as prose:
   words, the answer grants nothing, and no scope, boundary or policy change revokes the question.
 - Nobody, child or root, ends a turn with such a gate only in prose.
 
+Children ask clarifications, preferences and design choices with `request_workflow_decision`,
+`category: "implementation_question"`, `kind: "question"` (protocol v332). These use normal question
+forms with 0–12 suggested options and free text. The existing policy still decides who answers,
+including owner-kept rules and credential screening. Answers grant no action authority and are not
+consumed as approvals. Legacy requests without `kind` retain their original approval semantics.
+Never retry an unsupported question as a legacy approval.
+
 No campaign grants authentication/sign-in, secret disclosure, persistent grants or provider access
 expansion. Under Custom they come to the human. Under Full Control the server declines each one
 automatically and records content-safe blocked work in Campaign Status: continue without it and

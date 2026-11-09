@@ -1575,6 +1575,26 @@ test("decisions the owner kept are listed as waiting for them, and each opens it
   }
 });
 
+test("Campaign Status labels a child clarification as a Question (#4359)", async () => {
+  harnessRequests.descendants = [pendingRequest("s_child", "occ_question")];
+  const { client } = fakeClient(() => ({ revision: 1, items: [], nextCursor: null }), {});
+  const root = session({ orchestratorCampaign: campaignProjection(workSummary(), {
+    status: "waiting_human",
+    ownerDecisions: { total: 1, items: [{ occurrenceId: "occ_question", sessionId: "s_child", category: "implementation_question",
+      kind: "question", summary: "Which approach should the child use?", handedOff: false,
+      ownerRule: { source: "AGENTS.md", quote: "Ask the owner about design choices." }, createdAt: NOW }] },
+  }) });
+  const panel = await mount({ initial: root, client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    const section = [...panel.container.querySelectorAll("section")]
+      .find((candidate) => candidate.querySelector("h3")?.textContent === "Waiting for You")!;
+    assert.deepEqual([...section.querySelectorAll("dt")].map((term) => term.textContent), ["Question", "Rule Source", "Rule"]);
+    assert.ok(section.querySelector("button[aria-label='Open Request: Which approach should the child use?']"));
+  } finally { await panel.dispose(); }
+});
+
 test("a decision an owner rule kept is waiting for you with the rule's source and quote, as plain text (#4137)", async () => {
   harnessRequests.descendants = [pendingRequest("s_child", "occ_kept")];
   const { client } = fakeClient(() => ({ revision: 1, items: [], nextCursor: null }), {});

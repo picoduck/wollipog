@@ -9,6 +9,9 @@ import {
   type MouseEvent,
 } from "react";
 import {
+  presentOwnerQuestionRequest,
+  isOwnerQuestionRequest,
+  isChildQuestionSnapshot,
   type DescendantRequestView,
   type PendingApproval,
   type SessionView,
@@ -79,7 +82,7 @@ function itemKey(sessionId: string, occurrenceId: string): string {
 }
 
 export function requestTypeLabel(request: PendingApproval): string {
-  if (request.kind === "question") return "Question";
+  if (request.kind === "question" || isOwnerQuestionRequest(request)) return "Question";
   if (request.kind === "authentication") return "Authentication";
   if (request.kind === "workflow_decision") {
     const category = request.workflowDecision?.category;
@@ -103,6 +106,8 @@ export function requestTypeLabel(request: PendingApproval): string {
 
 /** A row's first line: the request's own title, or a question's words where its title is generic. */
 function rowTitle(request: PendingApproval): string {
+  const snapshot = request.workflowDecision?.resourceSnapshot;
+  if (isChildQuestionSnapshot(snapshot)) return snapshot.question.trim() || request.title;
   return request.kind === "question" ? request.questions?.[0]?.question.trim() || request.title : request.title;
 }
 
@@ -176,7 +181,7 @@ export function SessionRequestPanel({
     createdAt: item.createdAt,
     responseOwner: item.responseOwner,
     occurrenceId: item.occurrenceId,
-    request: item.request,
+    request: presentOwnerQuestionRequest(item.request),
     descendant: item,
   })).sort((left, right) => left.responseOwner === right.responseOwner
     ? 0
