@@ -5631,7 +5631,7 @@ export class SessionsService {
           delivery.automationOrigin.automationId !== scheduled.automationId ||
           occurrence?.automationId !== scheduled.automationId || occurrence.status !== "dispatching" ||
           occurrence.specSnapshot?.action.kind !== "create_session" || !occurrence.specSnapshot.action.request.campaign ||
-          this.db.automationSoleHumanAuthor(scheduled.automationId) !== creationContext.defaultOwnerUserId ||
+          this.db.automationSoleHumanAuthor(scheduled.automationId, true) !== creationContext.defaultOwnerUserId ||
           parentSessionId || !orchestratorPolicy) return fail("Scheduled campaign admission is invalid", 409);
     }
     if (humanLaunch) {
@@ -5826,6 +5826,9 @@ export class SessionsService {
             if (config.maxToolCalls !== undefined) this.db.updateSessionMaxToolCalls(id, config.maxToolCalls, now);
             if (config.costCheckpointsUsd?.length) this.db.updateSessionCostCheckpoints(id, config.costCheckpointsUsd, now);
             this.db.campaignBudgets.authorize(id, scheduled.budget);
+            const allocation = this.db.campaignBudgets.allocation(id)!;
+            if (allocation.costUsd !== undefined) this.db.updateSessionCostBudget(id, allocation.costUsd, now);
+            if (allocation.toolCalls !== undefined) this.db.updateSessionMaxToolCalls(id, allocation.toolCalls, now);
           }
           const allocated = this.db.getSession(created.id)!;
           config.costBudgetUsd = allocated.costBudgetUsd ?? undefined;
@@ -5939,7 +5942,8 @@ export class SessionsService {
     if (!capture) this.log.info(`session created ${id} on ${req.runnerId} (${req.agentId} @ ${req.workspaceId})`);
     if (!capture && session.reviewPolicy) this.log.info(JSON.stringify({ event: "campaign_child_review_policy_snapshot",
       entryPoint: "create_session", sessionId: id, parentSessionId, ...session.reviewPolicy }));
-    if (!capture && session.orchestratorPolicy?.issueScopeSeed?.state === "pending") this.startCampaignIssueScopeSeed(id, requestedText, delivery ? "unattributed" : "launch_request");
+    if (!capture && session.orchestratorPolicy?.issueScopeSeed?.state === "pending") this.startCampaignIssueScopeSeed(id, requestedText,
+      delivery && !scheduled ? "unattributed" : "launch_request");
     if (!capture && session.orchestratorPolicy && !session.parentSessionId && session.projectId && session.orchestratorPolicy.control?.mode !== "full_control") {
       void this.establishCustomCampaignRepositories(id).catch((error: unknown) =>
         this.log.warn(`Could not read the Project's repositories for campaign ${id}: ${error instanceof Error ? error.message : String(error)}`));

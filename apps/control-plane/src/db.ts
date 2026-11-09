@@ -17478,14 +17478,17 @@ export class ControlPlaneDb {
    * or trigger credential would otherwise make the creator answer for sessions whose instructions or
    * callers they never authorized. Read from the audit trail rather than an execution's schedule,
    * which a trigger invocation attributes to its trigger. */
-  automationSoleHumanAuthor(automationId: string): string | null {
+  automationSoleHumanAuthor(automationId: string, allowInstallationPins = false): string | null {
     const created = this.stmt(`SELECT actor_id FROM automation_events WHERE automation_id=? AND kind='created'
         AND actor_kind='human' AND actor_id IS NOT NULL ORDER BY event_id LIMIT 1`).get(automationId) as
       { actor_id: string } | undefined;
     if (!created) return null;
     const changed = this.stmt(`SELECT 1 FROM automation_events WHERE automation_id=?
         AND kind IN ('updated','enabled','disabled','trigger_created','trigger_rotated')
-        AND (actor_kind<>'human' OR actor_id IS NOT ?) LIMIT 1`).get(automationId, created.actor_id);
+        AND (actor_kind<>'human' OR actor_id IS NOT ?)
+        AND NOT (?=1 AND kind='updated' AND actor_kind='system' AND actor_id IS ('automation:' || automation_id)
+          AND COALESCE(json_extract(detail,'$.installationPinned'),0)=1)
+        LIMIT 1`).get(automationId, created.actor_id, allowInstallationPins ? 1 : 0);
     return changed ? null : created.actor_id;
   }
 

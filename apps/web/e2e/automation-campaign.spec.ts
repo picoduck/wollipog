@@ -4,6 +4,8 @@ import { join } from "node:path";
 for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
   test(`scheduled campaign settings and recurring child tasks survive editing at ${width}px in ${theme}`, async ({ page }) => {
     await page.setViewportSize({ width, height: 1000 });
+    // Non-secure remote HTTP installations do not expose crypto.randomUUID.
+    await page.addInitScript(() => Object.defineProperty(crypto, "randomUUID", { value: undefined }));
     const route = `/automations/~${Buffer.from("automation-nightly-sweep", "utf16le").toString("base64url")}/edit`;
     await page.goto(`/automations-e2e.html?campaign&theme=${theme}&route=${encodeURIComponent(route)}`);
     await expect(page.getByRole("heading", { name: /^Edit Nightly/ })).toBeVisible();

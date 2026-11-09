@@ -12,6 +12,7 @@ import { SessionsService } from "./sessions.js";
 import { OrchestratorSettings } from "./orchestrator-settings.js";
 import { AutomationsService, validateAutomationSpec } from "./automations.js";
 import { ScheduledCampaignRuntime, scheduledCampaignPrompt } from "./scheduled-campaigns.js";
+import { signAutomationTrigger } from "./automation-trigger-ingress.js";
 
 function fixture() {
   const db = ControlPlaneDb.open(":memory:");
@@ -87,6 +88,10 @@ for (const mode of ["custom", "full_control"] as const) test(`${mode} occurrence
     const command = f.db.listAutomationCommands(execution.executionId)[0]!;
     const payload = JSON.parse(command.payloadJson);
     assert.equal(payload.spec.campaignBudgetDispatch.rootSessionId, root.id);
+    assert.ok(root.costBudgetUsd! > 0);
+    assert.ok(root.maxToolCalls! > 0);
+    assert.ok(payload.spec.config.costBudgetUsd > 0);
+    assert.ok(payload.spec.config.maxToolCalls > 0);
     f.service.onDurableCommandReceipt("r", { type: "durable_session_command_update", commandId: command.commandId,
       sessionId: root.id, state: "started", revision: 1 }, Date.now());
     assert.match(payload.initialPrompt, /Investigate stale flags/);
@@ -124,6 +129,88 @@ for (const mode of ["custom", "full_control"] as const) test(`${mode} occurrence
     const wrong = f.sessions.createSession({ runnerId: "r", workspaceId: "w", agentId: "parent", prompt: "Wrong harness" },
       undefined, undefined, false, false, false, { parentSessionId: root.id });
     assert.equal(wrong.ok, false, "Fixed child settings are enforced rather than falling back to the parent harness");
+  } finally { f.db.close(); }
+});
+
+async function start(f: ReturnType<typeof fixture>, input = f.spec()) {
+  const saved = f.service.create(input, f.actor);
+  assert.equal(saved.ok, true, saved.error ?? "Schedule created");
+  f.service.tick(saved.data!.nextFireAt!);
+  await f.drain();
+  const execution = f.db.listAutomationExecutions(saved.data!.automationId)[0]!;
+  assert.notEqual(execution.status, "failed", execution.error ?? "Campaign started");
+  const root = f.db.getSession(execution.sessionId!)!;
+  const command = f.db.listAutomationCommands(execution.executionId)[0]!;
+  f.db.updateSessionStatus(root.id, "running", Date.now());
+  f.service.onDurableCommandReceipt("r", { type: "durable_session_command_update", commandId: command.commandId,
+    sessionId: root.id, state: "started", revision: 1 }, execution.createdAt + 1);
+  return { saved: saved.data!, execution, root, command };
+}
+
+function createChild(f: ReturnType<typeof fixture>, rootId: string) {
+  const item = f.db.raw().prepare("SELECT id FROM campaign_work_items WHERE campaign_session_id=? LIMIT 1").get(rootId)!;
+  const child = f.sessions.createSession({ runnerId: "r", workspaceId: "w", agentId: "child", prompt: "Investigate stale flags.",
+    config: { model: "codex-fixture-model", effort: "medium", permissionMode: "auto-review" }, campaignWorkItemId: String(item.id) },
+  undefined, undefined, false, false, false, { parentSessionId: rootId });
+  assert.equal(child.ok, true, child.error ?? "Child created");
+  return child.data!;
+}
+
+test("a validated governance pause holds the campaign overlap lock while a child is unfinished", async t => {
+  const f = fixture();
+  try {
+    const { saved, execution, root, command } = await start(f);
+    t.mock.method(Date, "now", () => execution.createdAt + 10);
+    createChild(f, root.id);
+    const threshold = f.db.getSession(root.id)!.costBudgetUsd!;
+    assert.equal(f.sessions.onGovernanceTripped("r", { type: "governance_tripped", sessionId: root.id,
+      tripId: "root-allocation", kind: "cost_budget", threshold, observed: threshold + 1, commandId: command.commandId }), true);
+    f.service.onGovernanceTripped(root.id, Date.now());
+    f.service.tick(saved.nextFireAt! + 60_000);
+    await f.drain();
+    assert.equal(f.db.getAutomationExecution(execution.executionId)!.status, "running");
+    assert.equal(f.db.listSessions().length, 2, "a waiting root and live child keep one campaign");
+  } finally { f.db.close(); }
+});
+
+for (const status of ["completed", "failed", "stopped"] as const) test(`a ${status} root with unfinished tasks and no live children fails the occurrence`, async () => {
+  const f = fixture();
+  try {
+    const { execution, root } = await start(f);
+    if (status === "stopped") f.db.updateSessionStatus(root.id, status, Date.now(), { cause: "guardrail" });
+    else f.db.updateSessionStatus(root.id, status, Date.now());
+    f.service.tick(execution.createdAt + 2);
+    assert.equal(f.db.getAutomationExecution(execution.executionId)!.status, "failed");
+    assert.match(f.db.getAutomationExecution(execution.executionId)!.error!, /before verified completion/);
+  } finally { f.db.close(); }
+});
+
+test("Custom success requires finished ledger work even when the legacy projection says verified complete", async () => {
+  const f = fixture();
+  try {
+    const { execution, root } = await start(f, f.spec("custom"));
+    const projection = f.db.campaignProjection.bind(f.db);
+    f.db.campaignProjection = id => { const value = projection(id); return value ? { ...value, status: "verified_complete" } : value; };
+    f.db.updateSessionStatus(root.id, "idle", Date.now());
+    f.service.tick(execution.createdAt + 2);
+    assert.equal(f.db.getAutomationExecution(execution.executionId)!.status, "running");
+    const rows = f.db.raw().prepare("SELECT id FROM campaign_work_items WHERE campaign_session_id=?").all(root.id);
+    for (const row of rows) assert.equal(f.db.campaignWorkLedger.updateItem(root.id, root.id, { workItemId: String(row.id),
+      commitment: { state: "cancelled", reason: "The owner no longer needs this check" } }, Date.now()).ok, true);
+    f.service.tick(execution.createdAt + 3);
+    assert.equal(f.db.getAutomationExecution(execution.executionId)!.status, "succeeded");
+  } finally { f.db.close(); }
+});
+
+test("generated UUID task keys do not hold Custom delegation behind an issue-scope reading", async () => {
+  const f = fixture();
+  try {
+    const input = f.spec("custom");
+    if (input.action.kind !== "create_session") assert.fail();
+    input.action.request.campaign!.tasks[0]!.key = "a1b2-c3";
+    const { root } = await start(f, input);
+    assert.equal(root.orchestratorPolicy!.issueScopeSeed?.state, "none");
+    createChild(f, root.id);
   } finally { f.db.close(); }
 });
 
@@ -168,6 +255,81 @@ test("repository drift refuses authority and starts no provider", async () => {
     assert.match(execution.error!, /approved repository/);
     assert.equal(f.db.listSessions().length, 0);
     assert.equal(f.sent.some(m => m.type === "durable_session_command"), false);
+  } finally { f.db.close(); }
+});
+
+test("trusted installation pinning retains campaign authorization while another author's edit refuses conversion", async () => {
+  const f = fixture();
+  try {
+    const input = f.spec();
+    const saved = f.service.create(input, f.actor).data!;
+    assert.ok(f.db.pinLegacyAutomationSpec(saved, input, Date.now()));
+    assert.equal(f.db.automationSoleHumanAuthor(saved.automationId), null, "ordinary attribution retains its existing rule");
+    assert.equal(f.db.automationSoleHumanAuthor(saved.automationId, true), f.human.userId);
+    const updated = f.service.update(saved.automationId, input, f.actor);
+    assert.equal(updated.ok, true, updated.error ?? "Same-author campaign update");
+    f.service.tick(updated.data!.nextFireAt!);
+    await f.drain();
+    assert.notEqual(f.db.listAutomationExecutions(saved.automationId)[0]!.status, "failed");
+
+    const ordinary = f.spec();
+    if (ordinary.action.kind !== "create_session") assert.fail();
+    delete ordinary.action.request.campaign;
+    delete ordinary.action.request.orchestrator;
+    delete ordinary.action.request.role;
+    const other = f.service.create(ordinary, f.actor).data!;
+    f.db.updateAutomation({ automationId: other.automationId, spec: ordinary, nextFireAt: other.nextFireAt ?? null,
+      actor: { kind: "human", id: "another-author" }, now: Date.now() });
+    const refused = f.service.update(other.automationId, input, f.actor);
+    assert.equal(refused.ok, false);
+    assert.match(refused.error!, /Recreate/);
+  } finally { f.db.close(); }
+});
+
+test("revoked-owner recovery rejects the staged command and stops its materialized root", async () => {
+  const f = fixture();
+  try {
+    const saved = f.service.create(f.spec(), f.actor).data!;
+    const activate = f.db.activateAutomationCommands.bind(f.db);
+    f.db.activateAutomationCommands = () => { throw new Error("Synthetic crash before activation"); };
+    f.service.tick(saved.nextFireAt!);
+    await f.drain();
+    const execution = f.db.listAutomationExecutions(saved.automationId)[0]!;
+    assert.equal(f.db.listAutomationCommands(execution.executionId)[0]!.state, "staged");
+    f.db.raw().prepare("UPDATE identity_memberships SET role='viewer' WHERE user_id=? AND organization_id=?")
+      .run(f.human.userId, f.human.organizationId);
+    f.db.activateAutomationCommands = activate;
+    new AutomationsService(f.db, f.hub, f.sessions, { info() {}, warn() {} }, undefined, f.runtime).recover();
+    await f.drain();
+    assert.equal(f.db.listAutomationCommands(execution.executionId)[0]!.state, "rejected");
+    assert.equal(f.db.getAutomationExecution(execution.executionId)!.status, "failed");
+    assert.equal(f.db.getSession(execution.sessionId!)!.status, "stopped");
+    assert.equal(f.sent.some(message => message.type === "durable_session_command"), false);
+  } finally { f.db.close(); }
+});
+
+test("signed triggers launch the approved campaign and retain its history marker without accepting prompt replacement", async () => {
+  const f = fixture();
+  try {
+    const saved = f.service.create(f.spec(), f.actor).data!;
+    assert.equal(f.service.createTrigger(saved.automationId, { kind: "webhook", name: "Unsafe",
+      deliveryPolicy: { allowPrompt: true, parameterNames: [], missingReferences: "reject" } }, f.actor).ok, false);
+    const credential = f.service.createTrigger(saved.automationId, { kind: "webhook", name: "Run Campaign" }, f.actor).data!;
+    const now = Date.now();
+    const body = Buffer.from('{"eventId":"campaign-trigger"}');
+    const timestamp = String(Math.floor(now / 1000));
+    const nonce = "campaign_nonce_12345";
+    const result = f.service.receiveTrigger(credential.trigger.triggerId, { timestamp, nonce,
+      signature: signAutomationTrigger(credential.secret, credential.trigger.triggerId, timestamp, nonce, body) }, body, now);
+    assert.equal(result.ok, true, result.error ?? "Trigger accepted");
+    await f.drain();
+    const execution = f.service.get(saved.automationId).data!.executions[0]!;
+    assert.notEqual(execution.status, "failed", execution.error ?? "Campaign started");
+    assert.equal(execution.campaignSessionId, execution.sessionId);
+    assert.equal(f.db.getSession(execution.sessionId!)!.role, "orchestrator");
+    const ledger = f.db.campaignWorkLedger.page(execution.sessionId!, { state: "unfinished", limit: 10 }, now);
+    assert.ok(ledger.ok);
+    assert.equal(ledger.data.items.length, 2);
   } finally { f.db.close(); }
 });
 

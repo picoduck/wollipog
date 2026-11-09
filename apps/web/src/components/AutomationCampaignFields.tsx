@@ -5,6 +5,7 @@ import {
   type OrchestratorSettingsView, type RunnerView,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
+import { browserRandomUUID } from "../browser-crypto.js";
 import type { FormState } from "../automation-form.js";
 import { evaluateOrchestratorPolicy, policyDraftFromDefaults, policySummaryFacts, type OrchestratorPolicyDraft } from "../orchestrator-policy.js";
 import { OrchestratorPolicyDialog } from "./OrchestratorPolicyDialog.js";
@@ -119,7 +120,7 @@ export function AutomationCampaignFields({ form, runner, onChange }: {
           onClick={() => onChange({ ...form, campaign: { ...campaign, tasks: campaign.tasks.filter(t => t.key !== task.key) } })}>Remove Task</button>
       </fieldset>)}
       <button type="button" className="btn" disabled={campaign.tasks.length >= 100} onClick={() => onChange({ ...form,
-        campaign: { ...campaign, tasks: [...campaign.tasks, { key: crypto.randomUUID(), title: "", prompt: "" }] } })}>Add Child Task</button>
+        campaign: { ...campaign, tasks: [...campaign.tasks, { key: browserRandomUUID(), title: "", prompt: "" }] } })}>Add Child Task</button>
       {editing && context && <OrchestratorPolicyDialog context={context} draft={draft} returnFocusRef={customizeRef}
         onApply={apply} onClose={() => setEditing(false)} />}
     </>}

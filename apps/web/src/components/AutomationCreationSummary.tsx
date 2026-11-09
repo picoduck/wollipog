@@ -23,6 +23,9 @@ export function AutomationCreationSummary({ snapshot }: { snapshot: AutomationCr
         <div><dt>Orchestrator Control</dt><dd>{action.request.campaign.controlMode === "full_control" ? "Full Control" : "Custom"}</dd></div>
         <div><dt>Campaign Repository</dt><dd>{action.request.campaign.repository}</dd></div>
         <div><dt>Campaign Settings</dt><dd><div className="code-well"><pre>{JSON.stringify(action.request.orchestrator, null, 2)}</pre></div></dd></div>
+        <div><dt>Full Control Overrides</dt><dd><div className="code-well"><pre>{JSON.stringify(action.request.campaign.fullControl ?? {}, null, 2)}</pre></div></dd></div>
+        <div><dt>Provider Account</dt><dd>{action.request.providerAccountId ?? "Default"}</dd></div>
+        <div><dt>Execution Target</dt><dd>{action.request.executionTargetId ?? "Host"}</dd></div>
         <div><dt>Recurring Child Tasks</dt><dd>{action.request.campaign.tasks.map(task => <div key={task.key}>
           <strong>{task.title}</strong><pre>{task.prompt}</pre>
         </div>)}</dd></div>

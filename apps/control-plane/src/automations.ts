@@ -666,6 +666,10 @@ export class AutomationsService {
     const parsed = validateAutomationSpec(input);
     if (!parsed.ok) return fail(parsed.error ?? "automation request is malformed", parsed.status);
     const spec = pinAutomationSpec(this.db, parsed.data!, previous);
+    if (spec.enabled && spec.action.kind === "create_session" && spec.action.request.campaign &&
+        (actor.kind !== "human" || this.db.automationSoleHumanAuthor(automationId, true) !== actor.id)) {
+      return fail("This schedule has another author or an untrusted edit. Recreate it to authorize a campaign with these settings.", 409);
+    }
     const campaignError = spec.enabled ? this.campaignError(spec, actor) : null;
     if (campaignError) return fail(campaignError, 409);
     // Always allow disabling so capability drift cannot trap a failing automation in the enabled state.
@@ -943,15 +947,16 @@ export class AutomationsService {
           error = "target session no longer exists";
         } else if (session.orchestratorPolicy && execution.specSnapshot?.action.kind === "create_session" &&
             execution.specSnapshot.action.request.campaign) {
-          if (session.orchestratorCampaign?.status === "verified_complete") terminal = "succeeded";
-          else if (session.status === "failed" || session.status === "stopped") {
+          const unfinished = this.db.campaignWorkLedger.page(session.id, { state: "unfinished", limit: 1 }, now);
+          if (session.orchestratorCampaign?.status === "verified_complete" && unfinished.ok && unfinished.data.items.length === 0) terminal = "succeeded";
+          else if (session.status === "failed" || session.status === "stopped" || session.status === "completed") {
             const unfinishedChildren = this.db.campaignDescendantIds(session.id).some(id => {
               const child = this.db.getSession(id);
               return child && !child.archived && !["completed", "failed", "stopped"].includes(child.status);
             });
             if (!unfinishedChildren) {
               terminal = "failed";
-              error = `campaign root ${session.status}`;
+              error = `campaign root ${session.status} before verified completion`;
             }
           }
         } else if (session.status === "idle" || session.status === "completed") terminal = "succeeded";
@@ -1016,6 +1021,9 @@ export class AutomationsService {
   }
 
   private pauseForGovernance(execution: AutomationExecution, now: number, onlySessionId?: string): boolean {
+    // A root allocation is only one share of a campaign allowance. Its pause is a live campaign
+    // decision, not the end of the occurrence; keep wait/skip held through children and cleanup.
+    if (execution.specSnapshot?.action.kind === "create_session" && execution.specSnapshot.action.request.campaign) return false;
     const commands = this.db.listAutomationCommands(execution.executionId);
     const sources = [
       ...commands.filter((command) => command.supersededBy === undefined)
@@ -1737,6 +1745,14 @@ export class AutomationsService {
       if (result.ok) {
         this.log.info(JSON.stringify({ event: "automation_campaign_admitted", executionId: execution.executionId,
           automationId: automation.automationId, sessionId: `s_auto_${execution.executionId}`, durationMs: Math.round(performance.now() - startedAt) }));
+        this.reconcileExecution(execution.executionId, Date.now());
+        return;
+      }
+      const staged = this.db.listAutomationCommands(execution.executionId);
+      if (staged.length) {
+        for (const command of staged) if (command.state === "staged") {
+          this.db.rejectAutomationCommand(command.commandId, result.error ?? "Scheduled campaign launch refused", Date.now());
+        }
         this.reconcileExecution(execution.executionId, Date.now());
         return;
       }

@@ -26,6 +26,18 @@ test("automation human card exposes exact configuration and escaped prompt", () 
   assert.ok(!html.includes("Inspect CI. <literal>"));
 });
 
+test("campaign approval exposes authority overrides and account placement before collapsed configuration", () => {
+  const snapshot = structuredClone(fixture);
+  if (snapshot.spec.action.kind !== "create_session") assert.fail();
+  Object.assign(snapshot.spec.action.request, { role: "orchestrator", providerAccountId: "selected-account",
+    executionTargetId: "selected-target", campaign: { controlMode: "full_control", repository: "example/repo",
+      fullControl: { issues: { maxIssues: 7 }, budget: { acceptedFollowUps: 3 } }, tasks: [{ key: "daily", title: "Daily Review", prompt: "Review findings." }] } });
+  const facts = renderToStaticMarkup(<AutomationCreationSummary snapshot={snapshot} />).split("<details>")[0]!;
+  for (const expected of ["Full Control Overrides", "maxIssues", "acceptedFollowUps", "selected-account", "selected-target", "Review findings."]) {
+    assert.ok(facts.includes(expected), expected);
+  }
+});
+
 test("slash commands, workflow identity and inherited settings are readable before opening full configuration", () => {
   const prompt = structuredClone(fixture);
   prompt.spec.action = { kind: "prompt_session", sessionId: "target", request: { text: "", slashCommand: "/inspect-ci" } };
