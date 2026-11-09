@@ -12347,9 +12347,7 @@ export class SessionManager {
     if (entry.running || entry.providerInitiatedTurnActive) return null;
     const waiting = entry.queue.filter((prompt) => !prompt.syntheticRecovery);
     if (waiting.length === 0) return null;
-    const kind: SessionQueueHoldKind | null = entry.pendingProviderAccountSwitch
-      ? "provider_account_switch"
-      : entry.pendingWorktreeRebind ? "worktree_rebind" : null;
+    const kind = this.handoffHoldKind(sessionId, entry);
     if (!kind) return null;
     const meta = this.store.readMeta(sessionId);
     if (!meta) return null;
@@ -12416,14 +12414,21 @@ export class SessionManager {
     };
   }
 
+  /** The handoff a queued prompt would wait behind. A retirement relaunch that stands aside for a
+   * live process's background work is none: that process takes the prompt (#4210). */
+  private handoffHoldKind(sessionId: string, entry: ActiveSession): SessionQueueHoldKind | null {
+    if (entry.pendingProviderAccountSwitch) return "provider_account_switch";
+    if (!entry.pendingWorktreeRebind) return null;
+    return this.retirementRebindPending(entry) && this.retiredBindWaitsForLiveWork(sessionId, entry)
+      ? null : "worktree_rebind";
+  }
+
   /** Forget a wait once it is over: the handoff applied, the prompts left, or the background work
    * stopped holding it back. A hold that forms again after that is a new wait. */
   private settleHandoffWaitStart(sessionId: string, entry: ActiveSession | undefined): void {
     const start = this.handoffWaitStarts.get(sessionId);
     if (!start) return;
-    const kind: SessionQueueHoldKind | null = entry?.pendingProviderAccountSwitch
-      ? "provider_account_switch"
-      : entry?.pendingWorktreeRebind ? "worktree_rebind" : null;
+    const kind = entry ? this.handoffHoldKind(sessionId, entry) : null;
     const meta = this.store.readMeta(sessionId);
     const stillWaiting = kind === start.kind && entry!.queue.some((prompt) => !prompt.syntheticRecovery) &&
       (!!meta?.backgroundWorkState || !!meta?.pendingBackgroundTaskIds?.length) &&
@@ -13262,10 +13267,18 @@ export class SessionManager {
    * | Idle                                            | Rebind at once                              |
    * | Runner turn running                             | Wait; rebind when the turn ends             |
    * | Provider-initiated turn, with or without an ask | Wait; its settlement wakes the rebind       |
-   * | Unfinished background work                      | Bounded handoff hold, then rebind           |
+   * | Live process, selected worktree, background work| No hold: prompts run; rebind once work ends |
+   * | Dead process with unfinished background work    | Handoff hold, then rebind                   |
    * | Worktree gone but its row still recorded        | Requested by the next drain, then as above  |
    * | Conversation cannot resume, or lock is held     | Fail once: one error, never requested again | */
   private requestRetiredWorktreeRebind(sessionId: string, entry: ActiveSession): boolean {
+    if (entry.pendingWorktreeRebind && !this.retirementRebindPending(entry)) return true;
+    if (this.retiredBindWaitsForLiveWork(sessionId, entry)) {
+      // Requested before the work started: stand down, so nothing reads it as a move still owed.
+      entry.pendingWorktreeRebind = undefined;
+      entry.retiredWorktreeRebind = undefined;
+      return false;
+    }
     if (entry.pendingWorktreeRebind) return true;
     if (entry.retiredWorktreeRebindFailed || !this.boundWorktreeRetired(sessionId, entry)) return false;
     const selection = this.store.readMeta(sessionId)?.worktreePath;
@@ -13277,6 +13290,24 @@ export class SessionManager {
 
   private retirementRebindPending(entry: ActiveSession): boolean {
     return !!entry.retiredWorktreeRebind && entry.retiredWorktreeRebind === entry.pendingWorktreeRebind;
+  }
+
+  /**
+   * Whether a relaunch that would only drop a retired sibling waits for the live process's background
+   * work (#4210). It moves nothing: the provider already runs in its selected worktree. A retired bind
+   * breaks only the next spawn from this generation's stored bind list (#3402), and a live process
+   * takes prompts without one, so prompts run there and no hold names the worktree it is already in.
+   * Holding them instead also never settled for a session that starts a watcher each turn, and its
+   * release ended work the relaunch did not need to end. Once the work ends, the wake in
+   * `resumeDeferredHandoff` relaunches. A process known to be gone, or one with orphaned work, has
+   * nothing to protect and needs that spawn, so it keeps the established order, as does a real move.
+   */
+  private retiredBindWaitsForLiveWork(sessionId: string, entry: ActiveSession): boolean {
+    const meta = this.store.readMeta(sessionId);
+    if (!meta?.worktreePath || !sameWorktreePath(entry.context, entry.cwd, meta.worktreePath)) return false;
+    if (!meta.backgroundWorkState && !meta.pendingBackgroundTaskIds?.length) return false;
+    if (meta.orphanedWork || meta.backgroundWorkState === "orphaned") return false;
+    return entry.client.providerProcessLive?.() !== false;
   }
 
   /**
@@ -14981,8 +15012,10 @@ export class SessionManager {
 
   private resumeDeferredHandoff(sessionId: string): void {
     const entry = this.active.get(sessionId);
+    // A retirement relaunch that stood aside for background work has no pending field to find (#4210).
     if ((entry?.pendingWorktreeRebind || entry?.pendingProviderAccountSwitch || entry?.pendingLocationSwitch ||
-        entry && this.projectMemoryChanged(sessionId, entry)) && !entry.running) {
+        entry && (this.projectMemoryChanged(sessionId, entry) || this.boundWorktreeRetired(sessionId, entry))) &&
+        !entry.running) {
       setImmediate(() => this.scheduleDrain(sessionId));
     }
   }
