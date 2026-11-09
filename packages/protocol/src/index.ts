@@ -5214,6 +5214,9 @@ export interface WorkflowDecisionView {
   resolvedAt?: number;
   /** v329 (#4301): durable issue-closure approval provenance; informational, never a grant. */
   approval?: { actor: GovernanceActor; at: number };
+  /** (#4332) An applied scope change: exactly the decisions it revoked, which a person's Full Control
+   * approval decides when it happens, so its request's `affectedDecisions` can differ. Sorted. */
+  scopeRevokedDecisions?: string[];
   consumedAt?: number;
   actionAdmission?: WorkflowDecisionActionAdmission;
   /** v284 (#4067): what Wollipog did when it performed this approved forge action itself. */
@@ -5666,6 +5669,8 @@ export interface GovernanceAuditEntry {
     publicationAuthority?: { authorizedByUserId: string; objectiveDigest: string };
     /** #3916: on a server revocation, why, and who acted when it happened. */
     revocation?: WorkflowDecisionRevocation;
+    /** #4332: on the record consuming a scope change, exactly the decisions it revoked. */
+    revokedDecisions?: string[];
   };
   timestamp: number;
 }

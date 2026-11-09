@@ -2120,6 +2120,87 @@ async function selectionCampaign(f: ReturnType<typeof fixture>, server: Awaited<
   return { id, message, revision, propose, apply, ownerRequests };
 }
 
+/** A live child the ledger proves unrelated to every issue a later proposal adds (#4332). */
+function unrelatedCampaignChild(f: ReturnType<typeof fixture>, rootId: string) {
+  const child = `${rootId}_unrelated`;
+  f.db.createSession({ id: child, runnerId: "r", workspaceId: "w", agentId: "claude", title: "Unrelated", parentSessionId: rootId,
+    driver: "claude-code", config: {}, useWorktree: false, now: Date.now() });
+  f.db.updateSessionStatus(child, "running", Date.now());
+  f.db.appendEvent(child, { kind: "user_message", text: "Deliver the unrelated work" }, Date.now());
+  assert.equal(f.sessions.recordCampaignPlan(rootId, { items: [{ key: "unrelated" }], planComplete: true }).ok, true);
+  const page = f.db.campaignWorkLedger.page(rootId, { state: "all", limit: 100 }, Date.now());
+  assert.ok(page.ok);
+  const assigned = f.sessions.assignCampaignWorkItem(rootId, { workItemId: page.data.items.find((item) => item.key === "unrelated")!.id, childSessionId: child });
+  assert.equal(assigned.ok, true, assigned.error ?? "");
+  const ask = async (requestId: string) => {
+    const asked = await f.sessions.createWorkflowDecisionWithVideo(child, { requestId, resourceKey: requestId, resourceSnapshot: {
+      category: "implementation_question", question: "Which parser should the campaign use?",
+      options: [{ optionId: "a", label: "The existing one" }, { optionId: "b", label: "A new one" }] } });
+    assert.equal(asked.ok, true, asked.error ?? "");
+    assert.equal(asked.data!.authority, "orchestrator");
+    return asked.data!.occurrenceId;
+  };
+  /** Answers one with its Orchestrator, then spends the answer. */
+  const consume = async (occurrenceId: string) => {
+    const answered = f.sessions.resolveWorkflowDecision(rootId, child, occurrenceId, { outcome: "approve", selectedOptionId: "a" }, "orchestrator",
+      { kind: "agent", id: rootId }, () => true);
+    assert.equal(answered.ok, true, answered.error ?? "");
+    const spent = await f.sessions.consumeWorkflowDecision(child, occurrenceId, { resourceSnapshot: answered.data!.resourceSnapshot });
+    assert.equal(spent.ok, true, spent.error ?? "");
+  };
+  return { child, ask, consume };
+}
+
+for (const route of ["grant review", "constraint check"] as const) {
+  test(`a ${route} owner request stays approvable through an unrelated child's decisions, and records exactly what it revoked (#4332)`, async () => {
+    const f = fixture();
+    const { server } = await app(f);
+    try {
+      const shape = route === "grant review"
+        ? await (async () => {
+          const c = await selectionCampaign(f, server, 5);
+          const admitted = await c.propose([30]);
+          assert.equal(c.apply(admitted.data!.occurrenceId).ok, true);
+          return { id: c.id, propose: () => {
+            f.decision.state.review = () => reviewVerdict("uncertain", "The owner's criteria don't say whether UI issues count.");
+            return c.propose([31]);
+          }, approve: (occurrenceId: string) => f.sessions.resolveWorkflowDecision(c.id, c.id, occurrenceId, { outcome: "approve" }, "human", { kind: "human", id: f.human.userId }, () => true) };
+        })()
+        : await (async () => {
+          const c = await proposalCampaign(f, server, "Find the 5 highest-priority open issues and fix them.");
+          const admitted = await c.propose([chosen(30)], { requestedCount: 5, constraints: ["open"] });
+          assert.equal(admitted.data!.authority, "orchestrator");
+          assert.equal(c.apply(admitted.data!.occurrenceId).ok, true);
+          return { id: c.id, propose: () => {
+            f.decision.state.check = uncertainCheck;
+            return c.propose([chosen(31)], { requestedCount: 5, constraints: ["open"] });
+          }, approve: () => c.answer({ scope_proposal_answer: "Approve Scope" }) };
+        })();
+      const { ask, consume } = unrelatedCampaignChild(f, shape.id);
+      const listedStays = await ask("listed-stays");
+      const listedConsumed = await ask("listed-consumed");
+      const proposed = await shape.propose();
+      assert.equal(proposed.ok, true, proposed.error ?? "");
+      assert.equal(proposed.data!.authority, "human");
+      const snapshot = proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot;
+      assert.ok(route === "grant review" ? snapshot.grantReview : snapshot.scopeProposal?.route === "owner", "it took the owner's route");
+      assert.deepEqual(snapshot.affectedDecisions, [listedStays, listedConsumed].sort());
+
+      await consume(listedConsumed);
+      const later = await ask("created-after");
+      const approved = shape.approve(proposed.data!.occurrenceId);
+      assert.equal(approved.ok, true, approved.error ?? "");
+      assert.deepEqual(f.db.getSession(shape.id)!.orchestratorPolicy!.issueScope!.issueNumbers, [30, 31]);
+      const stored = f.db.workflowDecisionByOccurrence(proposed.data!.occurrenceId)!;
+      assert.equal(stored.status, "consumed");
+      assert.deepEqual(stored.scopeRevokedDecisions, [listedStays, later].sort());
+      assert.equal(f.db.workflowDecisionByOccurrence(listedStays)!.status, "revoked");
+      assert.equal(f.db.workflowDecisionByOccurrence(later)!.status, "revoked");
+      assert.equal(f.db.workflowDecisionByOccurrence(listedConsumed)!.status, "consumed");
+    } finally { await server.close(); f.db.close(); }
+  });
+}
+
 test("with a healthy Decision Model, five selection admissions need no prompt and a sixth is refused by the count floor without a model call (#4103)", async () => {
   const f = fixture();
   const { server } = await app(f);

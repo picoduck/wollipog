@@ -7569,6 +7569,8 @@ export class ControlPlaneDb {
       "superseded_by TEXT",
       // #4301: approval survives supersession and later terminal transitions.
       "closure_approval TEXT",
+      // #4332: exactly what an applied scope change revoked, written in its own transaction.
+      "scope_revoked_decisions TEXT",
       // #4064: the root handed this Orchestrator-owned occurrence to the campaign's owner.
       "owner_handoff TEXT",
       // #4137: the installed or user-authored rule that kept this occurrence for a person.
@@ -18334,6 +18336,10 @@ export class ControlPlaneDb {
         this.retireWorkflowDecisionResume(stale.occurrenceId, now);
         this.revokeUiEvidenceReviewReceipts(stale.occurrenceId, now);
       }
+      // The approval's own record of what it revoked (#4332), which can differ from what its request
+      // listed: a person's Full Control approval revokes whatever is outstanding now.
+      this.stmt("UPDATE workflow_decisions SET scope_revoked_decisions=? WHERE occurrence_id=?")
+        .run(JSON.stringify(revoked.map((stale) => stale.occurrenceId).sort()), occurrenceId);
       this.db.exec("COMMIT");
       return { decision: this.workflowDecisionByOccurrence(occurrenceId)!, revoked };
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
@@ -25271,8 +25277,9 @@ export class ControlPlaneDb {
     ).all(decision.controllingSessionId, decision.controllingSessionId, revocations[0]!.created_at, revocations[0]!.created_at,
       decision.policyRevision) as unknown[]).map(workflowDecisionFromRow);
     const scope = scopes.length === 1 ? scopes[0] : null;
-    return scope?.resourceSnapshot.category === "campaign_issue_scope" && scope.resourceSnapshot.affectedDecisions.includes(decision.occurrenceId)
-      ? scope : null;
+    // The approval's record of what it revoked; one applied before that record reads what it listed.
+    return scope?.resourceSnapshot.category === "campaign_issue_scope" &&
+      (scope.scopeRevokedDecisions ?? scope.resourceSnapshot.affectedDecisions).includes(decision.occurrenceId) ? scope : null;
   }
 
   /** Atomically claim one reconciliation proof and consume either a live approval or the narrowly
@@ -35494,6 +35501,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     withdrawal?: string | null;
     superseded_by?: string | null;
     closure_approval?: string | null;
+    scope_revoked_decisions?: string | null;
     owner_handoff?: string | null;
     owner_rule?: string | null;
     issue_closure_result?: string | null;
@@ -35571,6 +35579,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     ...(row.child_message ? { childMessage: row.child_message } : {}),
     ...(row.withdrawal ? { withdrawal: parseJson<NonNullable<WorkflowDecisionView["withdrawal"]>>(row.withdrawal) ?? undefined } : {}),
     ...(row.closure_approval ? { approval: parseJson<NonNullable<WorkflowDecisionView["approval"]>>(row.closure_approval) ?? undefined } : {}),
+    ...(row.scope_revoked_decisions ? { scopeRevokedDecisions: parseJson<string[]>(row.scope_revoked_decisions) ?? undefined } : {}),
     ...(row.status === "superseded" && row.superseded_by ? { supersededBy: row.superseded_by } : {}),
     ...(row.owner_handoff ? { ownerHandoff: parseJson<NonNullable<WorkflowDecisionView["ownerHandoff"]>>(row.owner_handoff) ?? undefined } : {}),
     ...(row.owner_rule ? { ownerRule: parseJson<NonNullable<WorkflowDecisionView["ownerRule"]>>(row.owner_rule) ?? undefined } : {}),

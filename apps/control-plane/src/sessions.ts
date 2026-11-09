@@ -62,7 +62,7 @@ import { scopeGrantDigest, scopeReviewInputDigest, scopeReviewInputs, scopeRevie
 import { boundedIssueNumbers, validCampaignIssueFacts, type CampaignIssueFacts, type CampaignScopeGrantReview, type CampaignScopeOwnerReview, type DecisionErrorClass, type FullControlScopeGrant } from "@wollipog/protocol";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
-  everyOutstandingScopeDecision, campaignAwaitsInitialScope, campaignScopeIsProposed, participantScope, participantScopeRefusal, repositoryOutsideBoundary, scopeRequestOutsideBoundary } from "./campaign-issue-scope.js";
+  everyOutstandingScopeDecision, outstandingDecisionsBearOnScopeRequest, campaignAwaitsInitialScope, campaignScopeIsProposed, participantScope, participantScopeRefusal, repositoryOutsideBoundary, scopeRequestOutsideBoundary } from "./campaign-issue-scope.js";
 import { boundedDecisionString, issueClosureRequestInvalid, issueClosureRequestInvalidFields, issueClosureScopeRefusal } from "./issue-closure-request-refusal.js";
 import { needsCampaignIssueScopeSeed } from "./campaign-issue-scope-seed.js";
 import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, heldCampaignIssues, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureCrossRepositoryDelivery, closureCrossRepositoryPullRequests, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
@@ -15265,9 +15265,12 @@ export class SessionsService {
       if (latest && snapshot.grantReview) latest.grantReview = snapshot.grantReview;
       if (latest && snapshot.selectionReview) latest.selectionReview = snapshot.selectionReview;
       if (latest && snapshot.ownerReview) latest.ownerReview = snapshot.ownerReview;
-      if (latest && authority === "human" && currentChild.orchestratorPolicy?.control?.mode === "full_control") {
-        latest.affectedDecisions = everyOutstandingScopeDecision(this.db, childSessionId);
-      }
+      // A person's Full Control approval revokes every decision outstanding when it happens and records
+      // exactly those (#4332), so their list isn't compared; only a change that bears on this request
+      // makes it stale. The rest of the snapshot, the additions, removals and active children included,
+      // must still match what was requested.
+      const personFullControl = authority === "human" && currentChild.orchestratorPolicy?.control?.mode === "full_control";
+      if (latest && personFullControl) latest.affectedDecisions = [...snapshot.affectedDecisions];
       if (snapshot.verifiedPublications?.some((p) => this.db.admittedCampaignPublicationIssue(childSessionId, p.publicationOccurrenceId) !== null)) return fail("Publication lineage was already admitted; refresh the scope proposal", 409);
       const boundary = issueBoundary(currentChild);
       const reserved = reservedPublicationSlots(this.db, currentChild, snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined);
@@ -15314,6 +15317,7 @@ export class SessionsService {
           "Orchestrator Controls, then Enable Full Control to authorize a larger scope.", 409);
       }
       if (!latest || auditDigest(latest) !== decision.resourceDigest ||
+          (personFullControl && outstandingDecisionsBearOnScopeRequest(this.db, childSessionId, snapshot)) ||
           (currentChild.orchestratorPolicy?.issueScope?.revision ?? 0) !== snapshot.expectedRevision) {
         this.revokeWorkflowDecision(decision, { reason: "approval_refused_stale", triggeredBy: actor });
         return fail("Campaign scope or affected work changed. Refresh Campaign Status and request approval of a new exact proposal.", 409);
@@ -18210,6 +18214,7 @@ export class SessionsService {
           : {}),
         ...(publicationAuthority ? { publicationAuthority } : {}),
         ...(revocation ? { revocation } : {}),
+        ...(outcome === "consumed" && decision.scopeRevokedDecisions ? { revokedDecisions: decision.scopeRevokedDecisions } : {}),
       },
       timestamp: now,
     });

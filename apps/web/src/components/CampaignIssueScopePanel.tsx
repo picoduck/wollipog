@@ -44,7 +44,7 @@ export function CampaignIssueScopeSummary({ snapshot }: { snapshot: CampaignIssu
       <div><dt>Active Child Work</dt><dd>{snapshot.activeChildren.length ? snapshot.activeChildren.map((child) => `${child.title}: ${child.sessionId}`).join(", ") : "None"}</dd></div>
       <div><dt>Decisions to Revoke</dt><dd>{snapshot.affectedDecisions.length ? snapshot.affectedDecisions.join(", ") : "None"}</dd></div>
     </dl>
-    <p>Approval changes campaign authority. Active children may hold issue work even when no ledger assignment is recorded. Existing assignments keep their history; work outside the new scope needs a separate scope approval. Outstanding decisions listed above are revoked. Issue closure still requires its own human approval.</p>
+    <p>Approval changes campaign authority. Active children may hold issue work even when no ledger assignment is recorded. Existing assignments keep their history; work outside the new scope needs a separate scope approval. Outstanding decisions listed above are revoked. Under Full Control, approving revokes every decision outstanding at that moment, including any filed after this request, and the approval's record lists each one. Issue closure still requires its own human approval.</p>
   </>;
 }
 
