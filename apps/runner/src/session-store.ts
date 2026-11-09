@@ -236,6 +236,11 @@ export interface SessionMeta {
   worktreeHooks?: Record<string, WorktreeHookSnapshot>;
   /** Runner-private durable POSIX descendant markers keyed by stable worktree id. */
   worktreeProcessMarkers?: Record<string, string>;
+  /** (#4209) Runner-private paths of worktrees the runner kept rather than removed because they may
+   * hold a person's work, in any Location this session has been in. Deleting the session leaves them
+   * where they are. A path leaves the list once the runner removes the worktree there, or makes a new
+   * one there. */
+  keptWorktreePaths?: string[];
   /** Provider-neutral placement captured at launch. Optional for pre-v60 session metadata. */
   executionTarget?: ExecutionTargetRef;
   executionHandoffRequest?: ExecutionHandoffRequest;

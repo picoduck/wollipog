@@ -868,7 +868,7 @@ test("a rollback proof holds only in the worktree it was written in, and in no l
     renameSync(handle.path, pruned);
     execFileSync("git", ["-C", fixture.repo, "worktree", "prune"]);
     renameSync(pruned, handle.path);
-    assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-1", options), "mismatch");
+    assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-1", options), "unregistered");
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
