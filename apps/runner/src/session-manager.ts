@@ -1806,6 +1806,12 @@ export class SessionManager {
     worktreePath: string;
     environment: Record<string, string>;
   }>();
+  /** A Location switch's target worktree while its setup runs (#4209). Until the move's one metadata
+   * write the session belongs to its old Location, so what setup would record there is held here. */
+  private readonly detachedWorktreeSetups = new WeakMap<SessionWorktreeView, {
+    hooks?: WorktreeHookSnapshot;
+    processMarker?: string;
+  }>();
   private readonly worktreeSetupApprovals = new Map<string, (
     decision: "trusted" | "declined" | "dismissed" | "cancelled",
     resolvedBy?: PermissionResolver,
@@ -2644,6 +2650,8 @@ export class SessionManager {
 
   private ensureWorktreeProcessMarker(meta: SessionMeta, worktree: SessionWorktreeView): string | undefined {
     if (worktree.source === "attached") return undefined;
+    const detached = this.detachedWorktreeSetups.get(worktree);
+    if (detached) return detached.processMarker ??= randomUUID();
     // Setup and shell-open callers may have crossed awaits with an older SessionMeta object. Merge
     // against the latest durable map so one worktree can never erase another worktree's marker.
     const latest = this.store.readMeta(meta.sessionId) ?? meta;
@@ -2682,6 +2690,11 @@ export class SessionManager {
     worktree: SessionWorktreeView,
     snapshot: WorktreeHookSnapshot,
   ): void {
+    const detached = this.detachedWorktreeSetups.get(worktree);
+    if (detached) {
+      detached.hooks = structuredClone(snapshot);
+      return;
+    }
     const latest = this.store.readMeta(sessionId);
     if (!latest) return;
     this.store.patchMeta(sessionId, {
@@ -2923,6 +2936,7 @@ export class SessionManager {
     state: WorktreeSetupState,
   ): void {
     worktree.setup = state;
+    if (this.detachedWorktreeSetups.has(worktree)) return;
     const latest = this.store.readMeta(sessionId);
     if (!latest) return;
     const worktrees = this.attributedWorktrees(latest)
@@ -2933,6 +2947,7 @@ export class SessionManager {
   }
 
   private persistWorktreeView(sessionId: string, worktree: SessionWorktreeView): void {
+    if (this.detachedWorktreeSetups.has(worktree)) return;
     const latest = this.store.readMeta(sessionId);
     if (!latest) return;
     const worktrees = this.attributedWorktrees(latest)
@@ -4575,7 +4590,10 @@ export class SessionManager {
     if (record.preserveBranch) {
       try {
         await beforeRemove();
-        await releaseRecoveredWorktree(record.repoPath, record.worktreePath, { context: record.context });
+        // A rollback removes what this runner just checked out, and what setup then left in it. The
+        // branch stays, and nothing else has worked there (#4209).
+        await releaseRecoveredWorktree(record.repoPath, record.worktreePath, { context: record.context },
+          { force: record.trigger === "creation_rollback" });
         return { removed: true };
       } catch {
         return { removed: false, reason: "unavailable" };
@@ -14761,9 +14779,63 @@ export class SessionManager {
     ];
   }
 
+  /** Run the target repository's worktree setup as a requested worktree does, gated by the same
+   * trust approval (#4209). The old provider is still live and nothing records the target yet.
+   * Returns why the switch cannot go on, or nothing if it can: completed, declined or no setup. */
+  private async prepareLocationSwitchSetup(
+    target: SessionMeta,
+    worktree: SessionWorktreeView,
+    locationName: string,
+  ): Promise<string | undefined> {
+    this.detachedWorktreeSetups.set(worktree, {});
+    const announced = new Set<SessionWorktreeProgressPhase>();
+    const report = (phase: SessionWorktreeProgressPhase) => {
+      if (announced.has(phase)) return;
+      const text = phase === "awaiting_setup_trust"
+        ? `The switch to Location "${locationName}" is waiting for a decision on this repository's worktree setup ` +
+          "configuration. Approving the switch does not approve its setup."
+        : phase === "running_setup" ? `Running worktree setup before this session moves to Location "${locationName}".` : undefined;
+      if (!text) return;
+      announced.add(phase);
+      this.emitEvent(target.sessionId, { kind: "stderr", text });
+    };
+    let setup: Awaited<ReturnType<SessionManager["prepareWorktreeSetup"]>>;
+    try {
+      setup = await this.prepareWorktreeSetup(target, worktree, report, target.sessionId, true);
+    } catch (error) {
+      return `the target's worktree setup could not run: ${errText(error)}`;
+    }
+    if (setup === "cancelled") return "the target's worktree setup was canceled";
+    if (setup === "invalid") {
+      return `the target's worktree setup configuration is invalid: ${worktree.setupConfig?.status === "invalid"
+        ? worktree.setupConfig.error : "it could not be read"}`;
+    }
+    if (setup === "failed") return `the target's required worktree setup failed: ${worktree.setup?.error ?? "a required step failed"}`;
+    return undefined;
+  }
+
+  /** Give back a target worktree that setup ran in, through the journal a removal takes, so its
+   * processes end and its teardown runs even if the runner stops here (#4209). */
+  private async rollBackLocationSwitchWorktree(
+    target: SessionMeta,
+    worktree: SessionWorktreeView,
+    setup: { hooks?: WorktreeHookSnapshot; processMarker?: string },
+  ): Promise<void> {
+    const meta: SessionMeta = {
+      ...target,
+      worktreeHooks: { [worktree.id]: setup.hooks! },
+      ...(setup.processMarker ? { worktreeProcessMarkers: { [worktree.id]: setup.processMarker } } : {}),
+    };
+    const cleanup = this.cleanupRecordForWorktree(meta, worktree, "creation_rollback", "force");
+    cleanup.auxiliaryWorktreeRollback = true;
+    this.cleanupJournal.add(cleanup);
+    await this.reapCreationRollback(cleanup, meta);
+  }
+
   /**
    * Move the live session into its approved Location (#4138), at a turn boundary:
-   *  1. verify the target again and check out its worktree, while the old provider idles;
+   *  1. verify the target again, check out its worktree and run its setup (#4209), while the old
+   *     provider idles;
    *  2. retire the old provider, then copy its conversation where the new working directory's
    *     provider will look for it;
    *  3. switch every repository-bound field in one metadata write, archiving the old Location;
@@ -14805,17 +14877,20 @@ export class SessionManager {
         : await createRequestedWorktree(repoPath, sessionId,
           { baseRef: (await fetchRemoteDefaultBase(repoPath, options)).ref, branch: `agent/${sessionId}` }, options);
       reused = created.reusedInPlace;
+      // Checked again and claimed with no await in between, so two switches never both take one
+      // worktree while each is still verifying it. That covers one this switch just checked out too:
+      // Git registers it before its checkout ends, so another switch can find it free and claim it
+      // first. Its files are then that session's, and this switch neither sets up nor removes them.
+      // Setup can run for minutes while no record names this worktree, so the claim stays (#4209).
+      const holder = this.worktreeHolder(sessionId, meta.context, created.path);
+      if (holder && (reused || holder.sessionId !== sessionId)) {
+        throw new Error(`branch ${created.branch} is checked out in worktree ${created.path}, which session ` +
+          `${holder.sessionId} took while it was being verified; continue the task in that session instead, so the work ` +
+          "and its pull request stay with it");
+      }
+      this.reusedWorktreeClaims.set(created.path, sessionId);
+      claim.path = created.path;
       if (reused) {
-        // Checked again and claimed with no await in between, so two switches never both take one
-        // worktree while each is still verifying it.
-        const holder = this.worktreeHolder(sessionId, meta.context, created.path);
-        if (holder) {
-          throw new Error(`branch ${created.branch} is checked out in worktree ${created.path}, which session ` +
-            `${holder.sessionId} took while it was being verified; continue the task in that session instead, so the work ` +
-            "and its pull request stay with it");
-        }
-        this.reusedWorktreeClaims.set(created.path, sessionId);
-        claim.path = created.path;
         // On native Linux the provider relaunches inside the managed bubblewrap boundary, whose
         // launch refuses some worktree placements. Refuse those now, while nothing has moved:
         // after the move each retry would retire the provider and fail the launch again.
@@ -14848,14 +14923,41 @@ export class SessionManager {
         : `the target worktree could not be prepared: ${errText(error)}`);
       return;
     }
+    const target: SessionMeta = {
+      ...meta, workspaceId: pending.workspaceId, repoPath: pending.repoPath, worktreePath: worktree.path,
+      worktreeBranch: worktree.branch, worktrees: [worktree], worktreeRecovery: undefined, launchWorktreeProof: undefined,
+    };
     const release = async () => {
       // A reused worktree was never this switch's to give back: it stays exactly where it was.
       if (reused) return;
-      await (pending.recoverBranch
-        ? releaseRecoveredWorktree(pending.repoPath, worktree.path, options)
-        : removeWorktree(pending.repoPath, { path: worktree.path, branch: worktree.branch }, options)).catch((error) =>
-        this.log(`session ${sessionId} could not release its unused Location switch worktree: ${errText(error)}`));
+      const setup = this.detachedWorktreeSetups.get(worktree);
+      try {
+        // Trusted setup may have started: its processes, teardown and files go with the worktree.
+        if (setup?.hooks) {
+          await this.rollBackLocationSwitchWorktree(target, worktree, setup);
+          return;
+        }
+        this.worktreePortAllocator.release(this.worktreePortOwner(sessionId, worktree.id));
+        await (pending.recoverBranch
+          ? releaseRecoveredWorktree(pending.repoPath, worktree.path, options)
+          : removeWorktree(pending.repoPath, { path: worktree.path, branch: worktree.branch }, options));
+      } catch (error) {
+        this.log(`session ${sessionId} could not release its unused Location switch worktree: ${errText(error)}`);
+      }
     };
+    // A worktree reused in place belongs to someone else and stays exactly as it was, so it never
+    // runs setup. Everything else is prepared before the old provider retires (#4209).
+    if (!reused) {
+      const setupFailure = await this.prepareLocationSwitchSetup(target, worktree, pending.locationName);
+      if (setupFailure) {
+        await release();
+        // A runner going down cancels setup too. That is no decision about the switch, which stays
+        // durable and runs again once the runner is back.
+        if (this.shuttingDown) return;
+        this.failLocationSwitch(sessionId, entry, pending, setupFailure);
+        return;
+      }
+    }
     // Preparation awaited: a Stop, Delete, Restart, or a turn that began meanwhile owns the session
     // now, and replacing the provider would override it. Give the worktree back; the switch stays
     // durable, so the session's next provider carries it out at its own turn boundary.
@@ -14882,6 +14984,7 @@ export class SessionManager {
           worktreePath: fresh.worktreePath, ...(fresh.worktreeBranch ? { worktreeBranch: fresh.worktreeBranch } : {}),
           worktrees: fresh.worktrees ?? [], switchedAt: Date.now(), toWorkspaceId: pending.workspaceId,
         };
+        const setup = this.detachedWorktreeSetups.get(worktree);
         const moved = this.store.patchMeta(sessionId, {
           workspaceId: pending.workspaceId,
           repoPath: pending.repoPath,
@@ -14890,7 +14993,10 @@ export class SessionManager {
           worktrees: [worktree],
           launchWorktreeProof: undefined,
           // Hook snapshots and process markers are keyed by worktree id, so the earlier Location's
-          // stay for its worktrees' eventual teardown.
+          // stay for its worktrees' eventual teardown. Setup's join them with this write.
+          ...(setup?.hooks ? { worktreeHooks: { ...fresh.worktreeHooks, [worktree.id]: setup.hooks } } : {}),
+          ...(setup?.processMarker
+            ? { worktreeProcessMarkers: { ...fresh.worktreeProcessMarkers, [worktree.id]: setup.processMarker } } : {}),
           worktreeRecovery: undefined,
           locationHistory: [...(fresh.locationHistory ?? []), left],
           pendingLocationSwitch: undefined,

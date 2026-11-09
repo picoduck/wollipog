@@ -2800,10 +2800,17 @@ export async function discardWorktreeIfSafe(
 }
 
 /** Remove a worktree this runner just checked out on an existing branch, keeping the branch. Git
- * refuses (and the worktree stays) if anything in it changed. */
-export async function releaseRecoveredWorktree(repoPath: string, path: string, options: WorktreeOptions = {}): Promise<void> {
+ * refuses (and the worktree stays) if anything in it changed, unless `force` says those changes are
+ * the runner's own: a setup that ran there before the worktree was given back (#4209). */
+export async function releaseRecoveredWorktree(
+  repoPath: string,
+  path: string,
+  options: WorktreeOptions = {},
+  { force = false }: { force?: boolean } = {},
+): Promise<void> {
   const context = options.context ?? nativeContext;
-  await command(context, repoPath, ["worktree", "remove", safeGitArgument(path, "worktree path")], 120_000);
+  await command(context, repoPath,
+    ["worktree", "remove", ...(force ? ["--force"] : []), safeGitArgument(path, "worktree path")], 120_000);
 }
 
 /** Remove the linked worktree, its branch, and stale administrative records. */
