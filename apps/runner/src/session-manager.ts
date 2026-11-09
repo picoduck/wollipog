@@ -43,6 +43,7 @@ import { transferCodexAccountTranscript } from "./codex-account-transcript.js";
 import type { ClaudeLiveUsage } from "./drivers/claude-usage-accounting.js";
 import type { PoisonedProviderHistory } from "./drivers/poisoned-provider-history.js";
 import { UnclassifiedRejectionJournal } from "./drivers/unclassified-rejection-journal.js";
+import { PROVIDER_ACCOUNT_SKIP_TEXT, providerAccountLaunchIneligibility, type ProviderAccountBilling } from "@wollipog/protocol";
 import type {
   AgentCapabilities,
   AgentContext,
@@ -1732,6 +1733,8 @@ export class SessionManager {
     : transferCodexAccountTranscript(context, id, source, target);
   /** Turn-boundary provider-account handoffs share the worktree handoff's replacement guarantees
    * but keep a distinct lane so neither operation can accidentally consume the other's target. */
+  /** Tells the control plane an account's selection cooldown changed (#4353). */
+  onProviderAccountCooldown: (() => void) | undefined;
   private readonly providerAccountSwitches = new Map<string, {
     entry: ActiveSession;
     promise: Promise<void>;
@@ -5709,6 +5712,21 @@ export class SessionManager {
    * the account chosen in authentication recovery), recording the profile id the runner verified
    * for its HOME when the configuration lacks one (#3239). Existing bindings never pass here. */
   private resolveNewProviderAccountBinding(spec: SessionLaunchSpec): BoundProviderAccount | undefined {
+    // #4353: a policy chose this account at dispatch, maybe a while ago. If it can't be used now the
+    // launch stops and says why, rather than running on it or quietly choosing another. A retry of
+    // an accepted launch never reaches here: `bindSessionProviderAccount` keeps its recorded account.
+    // This precedes the lookup below, whose errors name the account.
+    if (spec.providerAccountId && spec.providerAccountSelection?.revalidateAtLaunch) {
+      const accountId = spec.providerAccountId;
+      const reason = providerAccountLaunchIneligibility(
+        this.providerAccounts().find((candidate) => candidate.id === accountId),
+        { usage: this.subscriptionUsageInventory().find((snapshot) => snapshot.providerAccountId === accountId), now: Date.now() },
+      );
+      if (reason) {
+        throw new Error(`The account chosen for this session ${PROVIDER_ACCOUNT_SKIP_TEXT[reason]} now. ` +
+          "Start the session again to choose again, or pick an account.");
+      }
+    }
     const account = this.resolveProviderAccount?.(spec);
     if (!account || account.profileId !== undefined) return account;
     const profileId = this.providerProfileForBinding(account);
@@ -5780,6 +5798,7 @@ export class SessionManager {
   async probeProviderAccountAuthentication(
     agent: AgentDefinition,
     env: Record<string, string>,
+    observed?: (observation: { billing?: ProviderAccountBilling }) => void,
   ): Promise<"authenticated" | "unauthenticated" | "unknown"> {
     const driver = agent.driver ?? "acp";
     const context = agent.context ?? { kind: "native" as const };
@@ -5817,7 +5836,9 @@ export class SessionManager {
     const processes: Promise<boolean>[] = [];
     try {
       if (this.shuttingDown) return "unknown";
-      return (await controller.revalidate(meta, { onProcess: (proof) => processes.push(proof) })).status;
+      const observation = await controller.revalidate(meta, { onProcess: (proof) => processes.push(proof) });
+      observed?.(observation);
+      return observation.status;
     } finally {
       await this.settleProviderProcessReference(reference, processes);
     }
@@ -14408,6 +14429,7 @@ export class SessionManager {
     this.store.flush(sessionId);
     this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
     entry.pendingProviderAccountSwitch = target;
+    this.onProviderAccountCooldown?.();
     return true;
   }
 

@@ -1753,6 +1753,24 @@ test("child creation revalidates a pair after advisory capability discovery", as
   ]);
 });
 
+test("a launch with no eligible account tells the agent what it can do, without naming accounts (#4353)", async () => {
+  const { deps } = makeDeps(() => ({ status: 409, body: {
+    error: "No Claude account in this machine's Priority Order can start this session.",
+    code: "PROVIDER_ACCOUNT_CHOICE_REQUIRED",
+    providerAccountSelection: {
+      provider: "claude", mode: "priority", policyRevision: 2, refusal: "no_eligible_account",
+      actions: ["choose_account", "wait"], retryAt: 1_800_000_000_000,
+      candidates: [{ accountId: "person-example-com-1234", position: 1, eligible: false, reason: "usage_exhausted" }],
+    },
+  } }));
+  const created = await callTool(deps, "create_session", { runnerId: "r1", agentId: "claude", workspaceId: "ws" });
+  assert.equal(created.isError, true);
+  const text = resultText(created);
+  assert.match(text, /No Claude account/u);
+  assert.match(text, /PROVIDER_ACCOUNT_CHOICE_REQUIRED refusal=no_eligible_account actions=choose_account, wait retryAt=2027-/u);
+  assert.ok(!text.includes("person-example-com"), text);
+});
+
 test("list_sessions -> GET /api/sessions (+?archived=true), mapped with pendingApproval title only", async () => {
   const { deps, calls } = makeDeps(() => ({
     status: 200,

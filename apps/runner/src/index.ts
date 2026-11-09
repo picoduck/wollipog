@@ -196,6 +196,7 @@ import {
   providerAccountEnvironment,
   providerForDriver,
   probeProviderAccountsForDiscovery,
+  providerAccountCooldownUntil,
   projectProviderAccountDiscoveryReadiness,
   selectProviderAccount,
   selectProviderAccountForDiscovery,
@@ -702,6 +703,10 @@ function withMediaReviewerCapabilities<T extends AgentDefinition>(agents: T[]): 
 }
 
 const providerAccountAuthStatus = new Map<string, ProviderAccountDefinition["authStatus"]>();
+/** How each account's provider status check says it bills, from its latest probe (#4353). */
+const providerAccountBilling = new Map<string, import("@wollipog/protocol").ProviderAccountBilling>();
+/** Assigned once the session store opens; an inventory sent before then has no cooldowns to report. */
+let providerAccountSessionStore: Pick<SessionStore, "listSessions"> | undefined;
 
 function providerAccountsForControlPlane() {
   // A v225 control plane sees each account's profile and its access; an older one never sees a
@@ -711,7 +716,16 @@ function providerAccountsForControlPlane() {
     ...(providerAccountAuthStatus.has(account.id)
       ? { authStatus: providerAccountAuthStatus.get(account.id)! }
       : {}),
+    ...(providerAccountBilling.has(account.id) ? { billing: providerAccountBilling.get(account.id)! } : {}),
+    ...selectionCooldownField(account.id),
   }));
+}
+
+/** Read from the session store, which is ready before the first inventory reaches the control plane. */
+function selectionCooldownField(accountId: string): { selectionCooldownUntil?: number } {
+  if (!providerAccountSessionStore) return {};
+  const until = providerAccountCooldownUntil(providerAccountSessionStore.listSessions(), accountId, Date.now());
+  return until === undefined ? {} : { selectionCooldownUntil: until };
 }
 
 /** Re-send the account inventory after a profile change; before discovery completes the next
@@ -1000,6 +1014,7 @@ const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSuperv
 // This process holds the data-directory lease, so it is the one store allowed to recover a writer-lock
 // guard abandoned by a process that died inside its guard section.
 const store = new SessionStore(resolve(config.dataDir, "sessions"), undefined, undefined, true);
+providerAccountSessionStore = store;
 // Full Control screens resolved targets against the directories this runner knows hold
 // credentials (#2940). Read on each request, so accounts added at runtime are covered.
 setCampaignCredentialRoots(() => {
@@ -1322,6 +1337,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
   () => subscriptionUsage.inventory(),
   attestation.instanceId,
 );
+sessions.onProviderAccountCooldown = publishProviderAccountInventory;
 const sharedDirectoryForbiddenRoots = [parsed.configPath,
   ...(tokenFile ? [tokenFile] : []), ...config.providerAccounts.map((account) => account.directory)];
 sessions.configureSharedDirectories(config.workspaces, sharedDirectoryForbiddenRoots);
@@ -2253,7 +2269,9 @@ async function discoverAndPublish(refreshModels: boolean, refreshSubscriptionUsa
   const accountStatus = await probeProviderAccountsForDiscovery({ accounts: config.providerAccounts, agents: metadata.agents,
     usable: (account) => providerProfileGrants.usable(account),
     environment: (agent) => runnerLocalAgentEnv(agent.id, agent.driver ?? "acp", agent.context ?? { kind: "native" }),
-    probe: (agent, env) => sessions.probeProviderAccountAuthentication(agent, env),
+    probe: (agent, env, account) => sessions.probeProviderAccountAuthentication(agent, env, ({ billing }) => {
+      if (billing) providerAccountBilling.set(account.id, billing);
+    }),
     failed: (account) => log(`${account.provider} provider-account authentication probe failed`),
   });
   for (const [accountId, status] of accountStatus) providerAccountAuthStatus.set(accountId, status);

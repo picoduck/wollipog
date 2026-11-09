@@ -1,4 +1,5 @@
 export * from "./shared-predicates.js";
+export * from "./provider-account-selection.js";
 import { isProviderHomeRecoveryCause, PROVIDER_HOME_RECOVERY_CAUSE_CODES, type ProviderHomeRecoveryCause, type ProviderHomeBlockingProcess } from "./provider-home-recovery.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, type OrchestratorReviewPolicy } from "./orchestrator-review-policy.js";
 export * from "./orchestrator-review-policy.js";
@@ -294,6 +295,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v180 current-identity inspection and account selection from an Authentication Required card. */
   providerAuthenticationAccountRecovery: 180,
   providerAccounts: 170,
+  /** v334 (#4353): a runner reports each account's billing and cooldown and rechecks a policy-chosen
+   * account at launch, so the control plane may enforce a non-fixed account selection policy. */
+  providerAccountSelectionPolicy: 334,
   providerLogin: 171,
   providerAccountRemoval: 188,
   accountScopedAgentSkills: 172,
@@ -2994,6 +2998,12 @@ export interface ProviderAccountDefinition {
    * plane may use it. Absent means a legacy, unadopted HOME. Older control planes never receive
    * it, nor any profile-bearing account they are not granted. */
   profile?: ProviderAccountProfileView;
+  /** Protocol v334 (#4353): how this account's provider status check says it bills. Only
+   * `subscription` qualifies for automatic selection; absent or `unknown` is unverified. */
+  billing?: import("./provider-account-selection.js").ProviderAccountBilling;
+  /** Protocol v334 (#4353): an automatic switch left this account at a usage limit, so automatic
+   * selection passes over it until this time (epoch milliseconds). */
+  selectionCooldownUntil?: number;
 }
 
 /** `pending`: the runner holds this control plane's grant but the control plane has not yet
@@ -3492,12 +3502,24 @@ export interface RunnerAutomaticAccountSwitchConfiguration {
   revision: number;
 }
 
-/** Control-plane-owned default for new host sessions on one Machine and provider. */
+/** Control-plane-owned account policy for new host sessions on one Machine and provider. It holds
+ * account references and policy metadata only, never credentials. Every write advances `revision`,
+ * which detects conflicting edits across all of its fields. */
 export interface RunnerProviderAccountDefault {
   provider: ProviderAccountDefinition["provider"];
-  /** Null restores the existing agent/default-order behavior without losing the revision. */
+  /** The fixed default, as older clients read it: null under any other mode, so none of them shows a
+   * default the Machine isn't using. Null also restores the existing agent/default-order behavior
+   * without losing the revision. */
   accountId: string | null;
   revision: number;
+  /** Absent from a control plane before #4353, meaning `fixed`. */
+  mode?: import("./provider-account-selection.js").ProviderAccountStoredPolicyMode;
+  schemaVersion?: number;
+  /** The saved default, kept under any mode so returning to Default Account restores it. */
+  fixedAccountId?: string | null;
+  /** Rank order for Priority Order, kept under any mode. May name an account no longer on the
+   * Machine, which stays visible until a person removes it. */
+  priorityAccountIds?: string[];
 }
 
 export interface RunnerCapacityDimension {
@@ -8270,6 +8292,9 @@ export interface SessionView {
   providerAccountLabel?: string;
   /** True when the current binding was chosen by the Machine's opt-in automatic policy. */
   providerAccountAutomaticallySelected?: boolean;
+  /** Protocol v334 (#4353): why this session started on its account. Fixed at creation, so a later
+   * policy change or usage-limit switch leaves it describing the launch. Names no account. */
+  providerAccountSelection?: import("./provider-account-selection.js").ProviderAccountSelectionRecord;
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView;
   /** (#4138) An approved Location switch waiting for the provider's turn to end, or one that failed
    * and left the session in its previous Location. */
@@ -10609,6 +10634,8 @@ export interface SessionLaunchSpec {
   campaignBudgetDispatch?: import("./campaign-budget.js").CampaignBudgetDispatch;
   artifactUploads?: ArtifactUploadPreference;
   projectMemory?: SessionProjectMemory;
+  /** Protocol v334 (#4353): why the control plane chose `providerAccountId`. Never names an account. */
+  providerAccountSelection?: import("./provider-account-selection.js").ProviderAccountSelectionRecord;
   sessionId: string;
   /** Opaque identity used to prove that an ambiguous replacement start reached the runner. */
   controlPlaneLaunchId?: string;
