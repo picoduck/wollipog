@@ -4,7 +4,7 @@ import Fastify from "fastify";
 import {
   CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CONTROLLED_REVIEW_PROFILE, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, WORKFLOW_DECISION_CATEGORIES,
   campaignScopeHolds, campaignWorkflowOwner, SCOPE_GRANT_DEFAULT_SELECTION_COUNT, SCOPE_PROPOSAL_ANSWER_ID, SCOPE_PROPOSAL_APPROVE_LABEL,
-  type CampaignIssueFacts, type CampaignIssueScopeRequest, type CampaignIssueScopeSnapshot, type FullControlScopeGrant, type CampaignLaunchInspectionResult, type CampaignLaunchPreflight, type CampaignLaunchProposal, type ControlledReviewCapability,
+  type OrchestratorCampaignPolicy, type CampaignIssueFacts, type CampaignIssueScopeRequest, type CampaignIssueScopeSnapshot, type FullControlScopeGrant, type CampaignLaunchInspectionResult, type CampaignLaunchPreflight, type CampaignLaunchProposal, type ControlledReviewCapability,
   isOwnerQuestionRequest, pendingRequests, presentOwnerQuestionRequest, scopeProposalMaterial, scopeProposalOfRequest,
   type CampaignWorkItemDetail, type ControlPlaneToRunner, type ExecutionTargetDefinition, type CreateSessionRequest, type FullControlFirstMessageScope, type FullControlLaunchRequest, type GithubIssueClosureSnapshot, type RunnerMetadata, type RunnerRuntimeInfo,
   type WorkflowDecisionResourceSnapshot,
@@ -32,7 +32,7 @@ import { registerCampaignStatusRoutes } from "./campaign-status-routes.js";
 import { inspectCampaignWorkspace, inspectProjectLocation } from "./project-location-inspection.js";
 import { CampaignRepositoryAdditions } from "./campaign-repository-additions.js";
 import { CampaignLocations, registerCampaignLocationRoutes } from "./campaign-locations.js";
-import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, PROJECT_LOCATION_INSPECTION_FAILURES, campaignBoundaryEpics, campaignBoundaryRepositories, validCampaignControl, type CampaignControl,
+import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL, PROJECT_LOCATION_INSPECTION_FAILURES, campaignBoundaryEpics, campaignBoundaryRepositories, validCampaignControl, type CampaignControl,
   type CampaignAuthorityBoundary, type CampaignRepositoryAdditionRequest } from "@wollipog/protocol";
 import type { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
@@ -3531,7 +3531,7 @@ test("a launch builds one boundary entry per verified Project repository and exc
     const excluded = Object.fromEntries(checked!.summary.excludedLocations!.map((item) => [item.locationId, item]));
     assert.deepEqual(Object.keys(excluded).sort(), [p.plain.id, p.offline.id, p.old.id, p.v2.id].sort());
     assert.deepEqual([excluded[p.plain.id]!.failure, excluded[p.offline.id]!.failure, excluded[p.old.id]!.failure, excluded[p.v2.id]!.failure],
-      ["not_repository", "runner_offline", "runner_too_old", "runner_too_old"]);
+      ["not_repository", "runner_offline", "runner_below_gates", "runner_too_old"]);
     for (const item of Object.values(excluded)) assert.equal(item.reason, PROJECT_LOCATION_INSPECTION_FAILURES[item.failure]);
     // Each Location is inspected in its own path, with no issue read; failing runners are never asked.
     const inspected = f.sent.filter((message) => message.type === "campaign_launch_inspect") as Array<Extract<ControlPlaneToRunner, { type: "campaign_launch_inspect" }>>;
@@ -4278,7 +4278,7 @@ test("a Custom campaign starts with its Project's verified repositories, and a p
       { repository: "other/repo", locationIds: [p.other.id] },
     ]);
     assert.deepEqual(policy.excludedLocations!.map((item) => [item.locationId, item.failure]).sort(), [[p.plain.id, "not_repository"], [p.offline.id, "runner_offline"],
-      [p.old.id, "runner_too_old"], [p.v2.id, "runner_too_old"]].sort());
+      [p.old.id, "runner_below_gates"], [p.v2.id, "runner_too_old"]].sort());
     // Each is read in its own path; a failing runner is never asked.
     const inspected = f.sent.filter((message) => message.type === "campaign_launch_inspect") as Array<Extract<ControlPlaneToRunner, { type: "campaign_launch_inspect" }>>;
     assert.deepEqual(inspected.map((message) => message.workspacePath).sort(), ["/fixture/plain-folder", "/fixture/repository", "/fixture/two/other", "/fixture/two/repository"]);
@@ -4743,8 +4743,10 @@ test("a Custom campaign's Locations that change while its own inspection is pend
   assert.doesNotMatch(JSON.stringify(moved.policy.excludedLocations), new RegExp(moved.p.twin.id), "a Location out of reach is not named");
 
   // With the other repository's only Location gone, one repository is left, so nothing is recorded.
-  const removed = await run((f, p) => { f.db.removeProjectLocation(p.other.id); });
+  // (A Location excluded for its runner's version is the exception, so this fixture's old one goes too.)
+  const removed = await run((f, p) => { f.db.removeProjectLocation(p.other.id); f.db.removeProjectLocation(p.old.id); });
   assert.equal(removed.policy.repositories, undefined);
+  assert.ok(removed.policy.excludedLocations === undefined, "the exclusions it found aren't recorded either");
 
   // The campaign's own Location repointed: what was read isn't what it is now.
   const own = await run((f) => {
@@ -7240,7 +7242,7 @@ test("enabling Full Control on an existing campaign builds its boundary from eve
       { repository: "other/repo", locations: [{ locationId: p.other.id, name: "r2 a" }] },
     ]);
     const excluded = Object.fromEntries(reviewed.summary.excludedLocations!.map((item) => [item.locationId, item.failure]));
-    assert.deepEqual(excluded, { [p.plain.id]: "not_repository", [p.offline.id]: "runner_offline", [p.old.id]: "runner_too_old", [p.v2.id]: "runner_too_old" });
+    assert.deepEqual(excluded, { [p.plain.id]: "not_repository", [p.offline.id]: "runner_offline", [p.old.id]: "runner_below_gates", [p.v2.id]: "runner_too_old" });
     const enabled = await server.inject({ method: "POST", url: `/api/sessions/${rootId}/orchestrator-campaign/full-control`,
       headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: reviewed.digest } });
     assert.equal(enabled.statusCode, 200, enabled.body);
@@ -7253,6 +7255,415 @@ test("enabling Full Control on an existing campaign builds its boundary from eve
     assert.deepEqual(policy.excludedLocations, reviewed.summary.excludedLocations);
     assert.ok(campaignBoundaryCurrent(f.db.getSession(rootId)!));
   } finally { await server.close(); f.db.close(); }
+});
+
+/** A machine whose only folder is the only Location of `below/repo` (#4319), below the gates' floor
+ * unless told otherwise. Registering it again is how its version changes, as with a real update. */
+function registerBelow(f: ReturnType<typeof fixture>, protocolVersion = CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1): void {
+  f.db.registerRunner({ runnerId: "below", hostname: "below", os: "linux", version: "test", agents: [], runtime: { ...runtime, campaignLaunchInspection: { version: 4 } },
+    workspaces: [{ id: "z", name: "below z", path: "/fixture/below" }] }, Date.now(), protocolVersion);
+}
+function answerBelow(f: ReturnType<typeof fixture>): void {
+  const inspect = f.state.inspect;
+  f.state.inspect = (message) => message.workspacePath === "/fixture/below"
+    ? { type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId, ok: true, repository: "below/repo",
+      issueNumbers: message.issueNumbers, digest: "d".repeat(64) }
+    : inspect(message);
+}
+const askedBelow = (f: ReturnType<typeof fixture>) => f.sent.filter((message) => message.type === "campaign_launch_inspect" && message.workspacePath === "/fixture/below").length;
+const belowExclusion = (locationId: string, name = "below z") => ({ locationId, name, failure: "runner_below_gates" as const,
+  reason: `The Location's runner can't perform this campaign's gates. Update and restart it to protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer.` });
+
+test("a launch excludes a Location its runner can't perform the gates for, shows the version in the preflight, and never asks that runner (#4319)", async () => {
+  const f = fixture();
+  const p = multiRepositoryProject(f);
+  answerBelow(f);
+  registerBelow(f);
+  const below = f.db.addProjectLocation(p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+  const { server } = await app(f);
+  try {
+    const { preflight: checked } = await preflight(server, p.body);
+    assert.equal(checked!.ready, true, "one old runner doesn't block a launch");
+    assert.deepEqual(checked!.summary.excludedLocations!.find((item) => item.locationId === below.id), belowExclusion(below.id));
+    assert.deepEqual(checked!.summary.repositories!.map((entry) => entry.repository), ["owner/repo", "other/repo"],
+      "a repository whose only Location is excluded has no entry");
+    assert.equal(askedBelow(f), 0, "its runner is never asked to inspect anything");
+
+    // The floor is exact: a runner on it joins, and that is a different reviewed launch.
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    const { preflight: current } = await preflight(server, p.body);
+    assert.deepEqual(current!.summary.repositories!.map((entry) => entry.repository).sort(), ["below/repo", "other/repo", "owner/repo"]);
+    assert.equal(current!.summary.excludedLocations!.some((item) => item.locationId === below.id), false);
+    assert.notEqual(current!.digest, checked!.digest);
+
+    registerBelow(f);
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...p.body, requestId: "below-gates", preflightDigest: checked!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    assert.deepEqual(f.db.getSession(admitted.json().id)!.orchestratorPolicy!.excludedLocations!.find((item) => item.locationId === below.id), belowExclusion(below.id));
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a root runner below the gates' floor keeps its own Location, whose gates run in its own checkout, and every other Location on it is excluded (#4319)", async () => {
+  const f = fixture({ protocolVersion: CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1 });
+  const p = multiRepositoryProject(f);
+  const { server } = await app(f);
+  try {
+    const { preflight: checked } = await preflight(server, p.body);
+    assert.ok(checked!.summary.repositories![0]!.locations.some((location) => location.locationId === p.launchLocation.id), "the launch Location stays");
+    assert.equal(checked!.summary.excludedLocations!.some((item) => item.locationId === p.launchLocation.id), false);
+    assert.deepEqual(checked!.summary.excludedLocations!.find((item) => item.locationId === p.plain.id), belowExclusion(p.plain.id, p.plain.name));
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a Location added mid-campaign on an old runner is excluded with its version, then joins at a new revision when the runner updates, with its repository (#4319)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  answerBelow(f);
+  registerBelow(f);
+  try {
+    const revision = c.boundary().revision;
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(below.id, f.human);
+    assert.deepEqual(c.policy().excludedLocations!.find((item) => item.locationId === below.id), belowExclusion(below.id));
+    assert.equal(c.boundary().revision, revision, "an exclusion changes no authority");
+    // Reconnecting without updating changes nothing, and still asks it nothing.
+    await c.locations.runnerReconnected("below");
+    assert.deepEqual(c.policy().excludedLocations!.find((item) => item.locationId === below.id), belowExclusion(below.id));
+    assert.equal(c.boundary().revision, revision);
+    assert.equal(askedBelow(f), 0);
+
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    await c.locations.runnerReconnected("below");
+    assert.deepEqual(c.boundary().repositories!.find((entry) => entry.repository === "below/repo"), { repository: "below/repo", locationIds: [below.id] });
+    assert.equal(c.boundary().revision, revision + 1);
+    assert.equal(c.policy().excludedLocations!.some((item) => item.locationId === below.id), false);
+    assert.equal(c.policy().locationJoins!.find((join) => join.locationId === below.id)?.source, "runner_reconnected");
+    assert.equal(askedBelow(f), 1, "it is inspected in its own path before it joins");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("an offline runner reads as offline, not too old, and what it reports on reconnecting decides what happens next (#4319)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  answerBelow(f);
+  registerBelow(f);
+  const online = f.hub.isRunnerOnline;
+  try {
+    f.hub.isRunnerOnline = (runnerId) => runnerId !== "below" && online(runnerId);
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(below.id, f.human);
+    const exclusion = () => c.policy().excludedLocations!.find((item) => item.locationId === below.id);
+    assert.equal(exclusion()?.failure, "runner_offline", "its recorded version may be out of date");
+    // It comes back still old: the reason changes to what is now known.
+    f.hub.isRunnerOnline = online;
+    await c.locations.runnerReconnected("below");
+    assert.deepEqual(exclusion(), belowExclusion(below.id));
+    // Going offline again changes nothing until it registers again.
+    f.hub.isRunnerOnline = (runnerId) => runnerId !== "below" && online(runnerId);
+    assert.deepEqual(exclusion(), belowExclusion(below.id));
+    f.hub.isRunnerOnline = online;
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    await c.locations.runnerReconnected("below");
+    assert.ok(c.boundary().repositories!.some((entry) => entry.repository === "below/repo"));
+  } finally { f.hub.isRunnerOnline = online; await c.server.close(); f.db.close(); }
+});
+
+test("an update never brings in someone else's Location by itself: it waits for Include in Campaign, which is also refused by version while the runner is old (#4319)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  answerBelow(f);
+  registerBelow(f);
+  try {
+    const revision = c.boundary().revision;
+    const other: HumanPrincipal = { ...f.human, userId: "usr_other", actorId: "usr_other" };
+    const theirs = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: other.userId });
+    await c.locations.locationAdded(theirs.id, other);
+    assert.ok(c.policy().pendingLocations!.some((item) => item.locationId === theirs.id));
+    assert.deepEqual(await c.locations.include(c.rootId, theirs.id, f.human), { ok: true, data: { joined: false, revision } });
+    assert.deepEqual(c.policy().excludedLocations!.find((item) => item.locationId === theirs.id), belowExclusion(theirs.id));
+
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    await c.locations.runnerReconnected("below");
+    assert.equal(c.boundary().revision, revision, "nothing joins on a reconnect alone");
+    assert.ok(c.policy().pendingLocations!.some((item) => item.locationId === theirs.id));
+    assert.deepEqual(await c.locations.include(c.rootId, theirs.id, f.human), { ok: true, data: { joined: true, revision: revision + 1 } });
+    assert.ok(c.boundary().repositories!.some((entry) => entry.repository === "below/repo"));
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a re-authorization and a reviewed enable keep every repository and Location the campaign holds, whatever its runner's version (#4319)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  const { server } = await app(f);
+  try {
+    const held = structuredClone(c.boundary().repositories);
+    assert.deepEqual(held!.map((entry) => entry.repository), ["owner/repo", "other/repo"]);
+    // The second machine holds other/repo's only Location, and is now below the floor.
+    const r2 = f.db.getRunner("r2")!;
+    f.db.registerRunner({ runnerId: "r2", hostname: "r2", os: "linux", version: "test", agents: r2.agents, runtime: { ...runtime, campaignLaunchInspection: { version: 3 } },
+      workspaces: r2.workspaces }, Date.now(), CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1);
+
+    const reauthorized = f.sessions.setCampaignControl(c.rootId, reauthorization(c.boundary()), f.db.getSession(c.rootId)!.parentControlPolicy!.revision, f.human);
+    assert.equal(reauthorized.ok, true, reauthorized.error ?? "");
+    assert.deepEqual(c.boundary().repositories, held);
+
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${c.rootId}/orchestrator-campaign/full-control/preflight`, headers: { authorization: "Bearer human" }, payload: {} });
+    assert.equal(checked.statusCode, 200, checked.body);
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    assert.equal(reviewed.ready, true, JSON.stringify(reviewed.summary.blockers));
+    const heldIds = held!.flatMap((entry) => entry.locationIds);
+    assert.equal(reviewed.summary.excludedLocations!.some((item) => heldIds.includes(item.locationId)), false, "what it holds is never listed as excluded");
+    const enabled = await server.inject({ method: "POST", url: `/api/sessions/${c.rootId}/orchestrator-campaign/full-control`, headers: { authorization: "Bearer human" },
+      payload: { expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    assert.deepEqual(c.boundary().repositories!.map((entry) => [entry.repository, [...entry.locationIds].sort()]),
+      held!.map((entry) => [entry.repository, [...entry.locationIds].sort()]));
+  } finally { await server.close(); await c.server.close(); f.db.close(); }
+});
+
+test("an Orchestrator can't ask to add a repository through a Location on an old runner, and the refusal names the version (#4319)", async () => {
+  const f = fixture();
+  const c = await repositoryAdditionCampaign(f);
+  try {
+    const r2 = f.db.getRunner("r2")!;
+    const register = (protocolVersion: number) => f.db.registerRunner({ runnerId: "r2", hostname: "r2", os: "linux", version: "test", agents: r2.agents,
+      runtime: { ...runtime, campaignLaunchInspection: { version: 3 } }, workspaces: r2.workspaces }, Date.now(), protocolVersion);
+    register(CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1);
+    const refused = await c.request("add-old");
+    assert.equal(refused.ok, false);
+    assert.match(refused.error!, new RegExp(`can't be added: .*protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer`, "u"));
+    register(PROTOCOL_VERSION);
+    const requested = await c.request("add-current");
+    assert.equal(requested.status, 201, requested.error ?? "");
+    assert.equal(c.resolve(requested.data!.occurrenceId, "approve", { kind: "human", id: f.human.userId }).ok, true);
+    // Approved, and then the runner is old again: carrying it out checks the floor too.
+    register(CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1);
+    const executed = await c.additions.execute(c.rootId, requested.data!.occurrenceId, requested.data!.resourceDigest, c.orchestrator);
+    assert.equal(executed.ok, false);
+    assert.match(executed.error!, /no longer verifies/u);
+    assert.equal(c.boundary().repositories!.some((entry) => entry.repository === "third/repo"), false);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("in Custom, an addition from a root below the gates' floor still reads its own Location, which is never joining (#4319)", async () => {
+  const f = fixture();
+  const c = await repositoryAdditionCampaign(f);
+  try {
+    assert.equal(f.sessions.setCampaignControl(c.rootId, { mode: "custom" }, f.db.getSession(c.rootId)!.parentControlPolicy!.revision, f.human).ok, true);
+    const decision = (await c.request("custom-old-root")).data!;
+    assert.equal(c.resolve(decision.occurrenceId, "approve", { kind: "human", id: f.human.userId }).ok, true);
+    const root = f.db.getRunner("r")!;
+    f.db.registerRunner({ runnerId: "r", hostname: "r", os: "linux", version: "test", agents: root.agents, runtime: root.runtime, workspaces: root.workspaces },
+      Date.now(), CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1);
+    const executed = await c.additions.execute(c.rootId, decision.occurrenceId, decision.resourceDigest, c.orchestrator);
+    assert.equal(executed.ok, true, executed.error ?? "");
+    assert.deepEqual(f.db.getSession(c.rootId)!.orchestratorPolicy!.repositories!.map((entry) => entry.repository), ["owner/repo", "third/repo"]);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+/** A new Custom campaign in a Project of the launch Location and one on an old runner (#4319). */
+async function customBesideOldRunner(f: ReturnType<typeof fixture>) {
+  answerBelow(f);
+  registerBelow(f);
+  const project = f.db.createProject({ name: "Custom Below", scope: f.scope });
+  const launchLocation = f.db.addProjectLocation(project.id, { runnerId: "r", workspaceId: "w", addedByUserId: f.human.userId });
+  const below = f.db.addProjectLocation(project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+  const created = f.sessions.createSession({ ...request, projectId: project.id, projectLocationId: launchLocation.id }, undefined, f.scope);
+  assert.ok(created.ok && created.data, created.error ?? "created");
+  const id = created.data.id;
+  for (let attempt = 0; attempt < 200 && !f.db.getSession(id)!.orchestratorPolicy!.repositories; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  const policy = () => f.db.getSession(id)!.orchestratorPolicy!;
+  const locations = new CampaignLocations({ db: f.db, hub: f.hub, synchronize: () => { throw new Error("a Custom list has no boundary to synchronize"); },
+    settle: () => { throw new Error("a Custom list revokes nothing"); }, log: { warn(message) { throw new Error(message); } } });
+  return { id, project, launchLocation, below, policy, locations };
+}
+
+test("a Custom campaign beside an old runner shows the exclusion, and the owner's Location joins its list when that runner updates (#4319)", async () => {
+  const f = fixture();
+  try {
+    const c = await customBesideOldRunner(f);
+    assert.deepEqual(c.policy().repositories, [{ repository: "owner/repo", locationIds: [c.launchLocation.id] }]);
+    assert.deepEqual(c.policy().excludedLocations, [belowExclusion(c.below.id)]);
+    assert.deepEqual(f.db.campaignRepositoryBoundaryView(c.id, c.policy())!.excludedLocations, [belowExclusion(c.below.id)], "Campaign Status lists it");
+    await c.locations.runnerReconnected("below");
+    assert.deepEqual(c.policy().excludedLocations, [belowExclusion(c.below.id)], "still old");
+    assert.equal(askedBelow(f), 0);
+
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    await c.locations.runnerReconnected("below");
+    assert.deepEqual(c.policy().repositories, [{ repository: "owner/repo", locationIds: [c.launchLocation.id] }, { repository: "below/repo", locationIds: [c.below.id] }]);
+    assert.equal(c.policy().excludedLocations, undefined);
+    assert.deepEqual(c.policy().locationJoins!.map((join) => [join.locationId, join.revision, join.source]), [[c.below.id, 0, "runner_reconnected"]]);
+  } finally { f.db.close(); }
+});
+
+test("enabling Full Control on a Custom campaign keeps a Location its list holds after that runner goes old again (#4319)", async () => {
+  const f = fixture();
+  saveBudget(f, savedBudget);
+  const { server } = await app(f);
+  try {
+    const c = await customBesideOldRunner(f);
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    await c.locations.runnerReconnected("below");
+    registerBelow(f);
+    // As `customCampaign` does: an enable compares against the campaign's stored control policy.
+    f.db.raw().prepare("UPDATE sessions SET parent_control_policy=? WHERE id=?").run(JSON.stringify({ ...HUMAN_ONLY_PARENT_CONTROL_POLICY }), c.id);
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${c.id}/orchestrator-campaign/full-control/preflight`, headers: { authorization: "Bearer human" }, payload: {} });
+    assert.equal(checked.statusCode, 200, checked.body);
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    assert.equal(reviewed.ready, true, JSON.stringify(reviewed.summary.blockers));
+    assert.deepEqual(reviewed.summary.excludedLocations, []);
+    const enabled = await server.inject({ method: "POST", url: `/api/sessions/${c.id}/orchestrator-campaign/full-control`, headers: { authorization: "Bearer human" },
+      payload: { expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    assert.deepEqual((c.policy().control as Extract<CampaignControl, { mode: "full_control" }>).boundary.repositories,
+      [{ repository: "owner/repo", locationIds: [c.launchLocation.id] }, { repository: "below/repo", locationIds: [c.below.id] }]);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a Custom campaign's update joins only the owner's Location, a first-message limit holds, and one that was offline at creation stays as it was (#4319)", async () => {
+  const f = fixture();
+  try {
+    const c = await customBesideOldRunner(f);
+    const store = (change: (policy: OrchestratorCampaignPolicy) => void) => {
+      const policy = c.policy();
+      change(policy);
+      f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), c.id);
+    };
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+
+    // An exclusion from an earlier offline read isn't retried: Custom has never done that.
+    store((policy) => { policy.excludedLocations = [{ locationId: c.below.id, name: "below z", failure: "runner_offline", reason: PROJECT_LOCATION_INSPECTION_FAILURES.runner_offline }]; });
+    await c.locations.runnerReconnected("below");
+    assert.equal(c.policy().excludedLocations![0]!.failure, "runner_offline");
+
+    // Someone else's Location never joins by itself: nobody reviews this list.
+    store((policy) => { policy.excludedLocations = [belowExclusion(c.below.id)]; });
+    f.db.raw().prepare("UPDATE project_locations SET added_by_user_id='usr_other' WHERE id=?").run(c.below.id);
+    await c.locations.runnerReconnected("below");
+    assert.deepEqual(c.policy().excludedLocations, [belowExclusion(c.below.id)]);
+    assert.equal(c.policy().repositories!.length, 1);
+    assert.equal(askedBelow(f), 0, "as with its survey, a Location the owner didn't add is never inspected");
+    f.db.raw().prepare("UPDATE project_locations SET added_by_user_id=? WHERE id=?").run(f.human.userId, c.below.id);
+
+    // The owner's first message limited the campaign, so that repository is available, not listed.
+    store((policy) => { policy.firstMessageScope = { state: "established", messageDigest: "d".repeat(64), establishedAt: Date.now(),
+      initialScope: { repositoryLimits: ["owner/repo"] } } as unknown as OrchestratorCampaignPolicy["firstMessageScope"]; });
+    await c.locations.runnerReconnected("below");
+    assert.deepEqual(c.policy().repositories!.map((entry) => entry.repository), ["owner/repo"]);
+    assert.deepEqual(c.policy().availableLocations, [{ locationId: c.below.id, name: "below z", repository: "below/repo" }]);
+    assert.equal(c.policy().excludedLocations, undefined);
+  } finally { f.db.close(); }
+});
+
+test("a Custom campaign's owner losing access during the inspection keeps the Location out of its list, and it stays retried (#4319)", async () => {
+  const f = fixture();
+  try {
+    const c = await customBesideOldRunner(f);
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    const target = holdInspection(f, "/fixture/below");
+    const reconnected = c.locations.runnerReconnected("below");
+    await target.taken();
+    const access = f.db.canAccessWorkspace.bind(f.db);
+    f.db.canAccessWorkspace = (principal, runnerId, workspaceId) => runnerId !== "below" && access(principal, runnerId, workspaceId);
+    target.release("below/repo", "below");
+    await reconnected;
+    assert.deepEqual(c.policy().repositories, [{ repository: "owner/repo", locationIds: [c.launchLocation.id] }]);
+    assert.equal(c.policy().locationJoins, undefined);
+    assert.deepEqual(c.policy().excludedLocations, [belowExclusion(c.below.id)]);
+    // Access back, and the next registration joins it.
+    f.db.canAccessWorkspace = access;
+    await c.locations.runnerReconnected("below");
+    assert.deepEqual(c.policy().repositories!.map((entry) => entry.repository), ["owner/repo", "below/repo"]);
+  } finally { f.db.close(); }
+});
+
+test("a transient failure after the update doesn't end a Custom Location's way back, and a folder that fails does (#4319)", async () => {
+  const f = fixture();
+  const online = f.hub.isRunnerOnline;
+  try {
+    const c = await customBesideOldRunner(f);
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    const answers = f.state.inspect;
+    const failing = (failure: string) => {
+      f.state.inspect = (message) => message.workspacePath === "/fixture/below"
+        ? { type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId, ok: false, failure: failure as never, error: "failed" }
+        : answers(message);
+    };
+    // The first read fails, then the runner drops: each keeps a retry that an offline creation lacks.
+    failing("not_a_runner_failure");
+    await c.locations.runnerReconnected("below");
+    assert.deepEqual(c.policy().excludedLocations!.map((item) => [item.failure, item.rejoinsOnReconnect]), [["read_failed", true]]);
+    f.hub.isRunnerOnline = (runnerId) => runnerId !== "below" && online(runnerId);
+    await c.locations.runnerReconnected("below");
+    assert.deepEqual(c.policy().excludedLocations!.map((item) => [item.failure, item.rejoinsOnReconnect]), [["runner_offline", true]]);
+    f.hub.isRunnerOnline = online;
+    // The flag survives being stored and read back, as every retry above depends on.
+    assert.equal(f.db.getSession(c.id)!.orchestratorPolicy!.excludedLocations![0]!.rejoinsOnReconnect, true);
+
+    // A failure that describes the folder itself is not retried, as under Full Control.
+    failing("not_repository");
+    await c.locations.runnerReconnected("below");
+    assert.deepEqual(c.policy().excludedLocations!.map((item) => [item.failure, item.rejoinsOnReconnect]), [["not_repository", undefined]]);
+    const asked = askedBelow(f);
+    await c.locations.runnerReconnected("below");
+    assert.equal(askedBelow(f), asked, "it isn't asked again");
+
+    // A retried one joins once a read succeeds.
+    const policy = c.policy();
+    policy.excludedLocations = [{ locationId: c.below.id, name: "below z", failure: "read_failed", reason: PROJECT_LOCATION_INSPECTION_FAILURES.read_failed, rejoinsOnReconnect: true }];
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), c.id);
+    f.state.inspect = answers;
+    await c.locations.runnerReconnected("below");
+    assert.deepEqual(c.policy().repositories!.map((entry) => entry.repository), ["owner/repo", "below/repo"]);
+    assert.equal(c.policy().excludedLocations, undefined);
+  } finally { f.hub.isRunnerOnline = online; f.db.close(); }
+});
+
+test("a campaign that becomes Custom during a reconnect's inspection applies Custom's own retry rule: an exclusion that doesn't qualify neither joins nor gains a retry (#4319)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  answerBelow(f);
+  registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+  const offline = { failure: "runner_offline" as const, reason: PROJECT_LOCATION_INSPECTION_FAILURES.runner_offline };
+  try {
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    const store = (change: (policy: OrchestratorCampaignPolicy) => void) => {
+      const policy = c.policy();
+      change(policy);
+      f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), c.rootId);
+    };
+    store((policy) => { policy.excludedLocations = [{ locationId: below.id, name: "below z", ...offline }]; });
+    const target = holdInspection(f, "/fixture/below");
+    const reconnected = c.locations.runnerReconnected("below");
+    await target.taken();
+    // Full Control retried it; Custom, as the campaign now is, wouldn't have.
+    store((policy) => { delete policy.control; policy.repositories = [{ repository: "owner/repo", locationIds: [c.p.launchLocation.id] }]; });
+    target.release("below/repo", "below");
+    await reconnected;
+    assert.deepEqual(c.policy().repositories, [{ repository: "owner/repo", locationIds: [c.p.launchLocation.id] }]);
+    assert.deepEqual(c.policy().excludedLocations, [{ locationId: below.id, name: "below z", ...offline }], "unchanged, and with no retry flag");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a stored exclusion always reads as today's fixed sentence, so raising the floor neither drops the list nor shows stored text (#4319)", () => {
+  const f = fixture();
+  try {
+    const project = f.db.createProject({ name: "Stored Reason", scope: f.scope });
+    const location = f.db.addProjectLocation(project.id, { runnerId: "r", workspaceId: "w", addedByUserId: f.human.userId });
+    const created = f.sessions.createSession({ ...request, projectId: project.id, projectLocationId: location.id }, undefined, f.scope);
+    assert.ok(created.ok && created.data, created.error ?? "created");
+    const id = created.data.id;
+    const store = (excludedLocations: unknown) => {
+      const policy = JSON.parse((f.db.raw().prepare("SELECT orchestrator_policy FROM sessions WHERE id=?").get(id) as { orchestrator_policy: string }).orchestrator_policy);
+      f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify({ ...policy, excludedLocations }), id);
+    };
+    store([{ locationId: "l", name: "n", failure: "runner_below_gates", reason: "Update and restart it to protocol version 1 or newer. /home/someone/path" }]);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.excludedLocations, [belowExclusion("l", "n")]);
+    store([{ locationId: "l", name: "n", failure: "not_a_failure", reason: "anything" }]);
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.excludedLocations, undefined, "an unknown failure is still dropped");
+  } finally { f.db.close(); }
 });
 
 /* Waiting for You lists every scope approval the server routed to the owner (#4334). */

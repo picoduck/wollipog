@@ -28,6 +28,7 @@ import { ChoiceRows, SegmentedControl, type ChoiceRowOption } from "./ui/ChoiceC
 import { SAVED_MS } from "./ui/SettingsRows.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { enableFullControlCampaign, OrchestratorControlChoice } from "./FullControlPreparation.js";
+import { useFeedback } from "./FeedbackProvider.js";
 import { CampaignBehaviorEditor } from "./CampaignBehaviorEditor.js";
 
 /** Who answers a descendant session's requests (§8.4 choice rows). The off choice is "Human",
@@ -238,6 +239,7 @@ export function OrchestratorControlsDialog({
   returnFocusRef?: { current: HTMLElement | null };
 }) {
   const api = useApi();
+  const { showToast } = useFeedback();
   const ids = useId();
   const [controlPreview, setControlPreview] = useState<"custom" | "full_control">(() =>
     session.orchestratorCampaign?.control !== undefined && Number.isSafeInteger(session.orchestratorCampaign.policyRevision)
@@ -334,7 +336,7 @@ export function OrchestratorControlsDialog({
     if (enabling) return;
     setEnabling(true); setEnableError(null);
     try {
-      onSessionChanged(await enableFullControlCampaign(api, session.id));
+      onSessionChanged(await enableFullControlCampaign(api, session.id, ({ message, detail }) => showToast(message, { tone: "warning", detail })));
       showSaved("control");
     } catch (cause) {
       setEnableError(cause instanceof Error ? cause.message : "Full Control was not enabled.");

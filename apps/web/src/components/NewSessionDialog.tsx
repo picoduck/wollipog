@@ -81,6 +81,7 @@ import { FieldWarning } from "./FieldWarning.js";
 import { statusMeta } from "../status-meta.js";
 import { Notice } from "./Notice.js";
 import { FullControlBlockedError, launchFullControlCampaign } from "./FullControlPreparation.js";
+import { useFeedback } from "./FeedbackProvider.js";
 import {
   evaluateOrchestratorPolicy,
   policyDraftFromDefaults,
@@ -183,6 +184,7 @@ export function NewSessionDialog({
   preset?: NewSessionPreset;
 }) {
   const api = useApi();
+  const { showToast } = useFeedback();
   const instanceScope = useInstanceScope();
   const {
     runners,
@@ -1241,7 +1243,7 @@ export function NewSessionDialog({
     setBusy(true);
     try {
       const session = fullControlLaunch
-        ? await launchFullControlCampaign(api, buildSessionRequest())
+        ? await launchFullControlCampaign(api, buildSessionRequest(), ({ message, detail }) => showToast(message, { tone: "warning", detail }))
         : await api.createSession(buildSessionRequest());
       navigate({ name: "session", id: session.id });
       if (launchSurface === "native_tui") onOpenTerminal?.();

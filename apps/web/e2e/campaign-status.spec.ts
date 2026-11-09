@@ -200,7 +200,7 @@ for (const theme of ["dark", "light"] as const) {
       await expect(section.getByRole("list", { name: "Excluded Locations" })).toContainText("not a git repository");
       // Each failure names its own reason.
       const excludedRows = section.getByRole("list", { name: "Excluded Locations" }).getByRole("listitem");
-      await expect(excludedRows.filter({ hasText: "Wollipog on Old Mac" })).toContainText("The Location's runner is too old to verify it; update the runner.");
+      await expect(excludedRows.filter({ hasText: "Wollipog on Old Mac" })).toContainText("The Location's runner can't perform this campaign's gates. Update and restart it to protocol version 327 or newer.");
       await expect(excludedRows.filter({ hasText: "Wollipog on Travel Laptop" })).toContainText("The Location's machine is offline.");
       await expect(section).toContainText("Joined at boundary revision 6.");
       await section.scrollIntoViewIfNeeded();
@@ -213,6 +213,29 @@ for (const theme of ["dark", "light"] as const) {
       await expect(section.getByRole("list", { name: "Locations of picoduck/shared-docs" })).toContainText("Shared Docs");
       await expect(section.getByRole("button", { name: "Include Shared Docs in Campaign" })).toHaveCount(0);
       if (REPOSITORIES_EVIDENCE_DIR) await section.screenshot({ path: `${REPOSITORIES_EVIDENCE_DIR}/repositories-included-${device}-${theme}.png` });
+    });
+
+    test(`Start warns about a Location its runner's version left out, and Repositories keeps listing it, on a ${device} ${theme} viewport (#4319)`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.goto(`/campaign-status-e2e.html?scenario=campaign&repositories=1&locationWarning=1&theme=${theme}`);
+      const section = page.locator("section.campaign-detail-section", { has: page.locator("h3", { hasText: /^Repositories$/ }) });
+      const reason = "The Location's runner can't perform this campaign's gates. Update and restart it to protocol version 327 or newer.";
+      await expect(section.getByRole("list", { name: "Excluded Locations" }).getByRole("listitem").filter({ hasText: "Wollipog on Old Mac" })).toContainText(reason);
+      const warning = page.getByRole("status").filter({ hasText: "Wollipog on Old Mac isn't in this campaign yet." });
+      await expect(warning).toContainText(reason);
+      await expect(warning).toContainText("Campaign Status lists it until it can join.");
+      await section.getByRole("heading", { name: "Excluded Locations" }).scrollIntoViewIfNeeded();
+      await assertNoHorizontalOverflow(page, ".campaign-status");
+      const box = await warning.boundingBox();
+      expect(box && box.x >= 0 && box.x + box.width <= viewport.width, "the whole warning fits the viewport").toBe(true);
+      if (REPOSITORIES_EVIDENCE_DIR) await page.screenshot({ path: `${REPOSITORIES_EVIDENCE_DIR}/location-gates-${device}-${theme}.png` });
+      // The warning stays until it is dismissed; the listing stays after that.
+      await warning.getByRole("button").click();
+      await expect(warning).toHaveCount(0);
+      const row = section.getByRole("list", { name: "Excluded Locations" }).getByRole("listitem").filter({ hasText: "Wollipog on Old Mac" });
+      await expect(row).toContainText(reason);
+      await row.scrollIntoViewIfNeeded();
+      if (REPOSITORIES_EVIDENCE_DIR) await page.screenshot({ path: `${REPOSITORIES_EVIDENCE_DIR}/location-gates-listed-${device}-${theme}.png` });
     });
 
     test(`a repository the first message left out shows as available on a ${device} ${theme} viewport (#4117)`, async ({ page }) => {

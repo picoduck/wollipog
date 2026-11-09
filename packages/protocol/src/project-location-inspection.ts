@@ -1,8 +1,15 @@
+/** The lowest runner protocol that can perform every gate a campaign routes through a Location
+ * (#4319): the highest of `locationIssueClosure`, `locationForgeObservation` and
+ * `locationIssuePublication`. A Location on an older runner doesn't join a campaign. Raise this when a
+ * new gate raises that highest floor; a protocol test holds the two together. */
+export const CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL = 327;
+
 /** Why one Project Location could not be verified (#4117, #4138). Each reason is a fixed,
  * non-sensitive sentence: no local path, origin URL or command output ever reaches it. */
 export const PROJECT_LOCATION_INSPECTION_FAILURES = {
   runner_offline: "The Location's machine is offline.",
   runner_too_old: "The Location's runner is too old to verify it; update the runner.",
+  runner_below_gates: `The Location's runner can't perform this campaign's gates. Update and restart it to protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer.`,
   unknown_location: "The Location is not an active Location of this Project.",
   path_missing: "The Location's folder is missing or unavailable on its machine.",
   not_repository: "The Location's folder is not a git repository with a valid HEAD.",
@@ -31,6 +38,9 @@ export interface CampaignExcludedLocation {
   name: string;
   failure: ProjectLocationInspectionFailure;
   reason: string;
+  /** A Custom campaign only (#4319): this exclusion began as `runner_below_gates`, so a reconnect still
+   * retries it whatever the last read found. Full Control retries by `failure` alone. */
+  rejoinsOnReconnect?: true;
 }
 
 /** A Project Location someone other than the campaign's owner added mid-campaign (#4117). It joins

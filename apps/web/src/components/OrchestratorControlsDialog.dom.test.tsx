@@ -22,6 +22,9 @@ import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { withScopedClockOverrides } from "./test-clock-overrides.js";
 import { fireDomEvent } from "./test-dom-events.js";
+import { FeedbackContext } from "./FeedbackProvider.js";
+
+const toasts: Array<{ message: string; tone?: string; detail?: string }> = [];
 import {
   ORCHESTRATOR_CONTROLS_CONFLICT,
   ORCHESTRATOR_CONTROLS_RELOAD_TIMEOUT_MS,
@@ -163,14 +166,17 @@ async function open(
     if (!alive) return;
     const dialog = (
       <ApiProvider client={merged}>
-        <OrchestratorControlsDialog
-          session={current}
-          refusal={refusal}
-          modelLabel={modelLabel}
-          onClose={() => { closed += 1; }}
-          // The store's part: the session the dialog is given follows what it reports.
-          onSessionChanged={(next) => { changed.push(next); render(next); }}
-        />
+        <FeedbackContext.Provider value={{ confirm: async () => false, showToast: (message, options) => { toasts.push({ message, tone: options?.tone, detail: options?.detail }); return 1; },
+          showUndo: () => -1, dismissToast: () => undefined }}>
+          <OrchestratorControlsDialog
+            session={current}
+            refusal={refusal}
+            modelLabel={modelLabel}
+            onClose={() => { closed += 1; }}
+            // The store's part: the session the dialog is given follows what it reports.
+            onSessionChanged={(next) => { changed.push(next); render(next); }}
+          />
+        </FeedbackContext.Provider>
       </ApiProvider>
     );
     // The app renders under StrictMode, whose mount runs every effect's setup, cleanup and setup.
@@ -319,6 +325,27 @@ test("choosing Full Control on a live campaign shows no form, and Enable Full Co
   assert.match(dialog.textContent ?? "", /Effective Mode: Full Control/);
   assert.deepEqual(footerButtons(dialog), ["Done"], "an enabled campaign has nothing left to enable");
   assert.ok([...dialog.querySelectorAll("button")].some((button) => button.textContent?.trim() === "Revoke Full Control"));
+});
+
+test("enabling Full Control without a Location because of its runner's version warns the person, and a current one doesn't (#4319)", async () => {
+  const reason = "The Location's runner can't perform this campaign's gates. Update and restart it to protocol version 327 or newer.";
+  const enable = async (summary: Partial<CampaignLaunchPreflight["summary"]>) => {
+    toasts.length = 0;
+    const base = enablePreflight(true);
+    const harness = await open(orchestrator(), {
+      fullControlEnablePreflight: async () => ({ preflight: { ...base, summary: { ...base.summary, ...summary } }, expectedRevision: 2 }),
+      enableFullControl: async () => fullCampaign(),
+    });
+    const dialog = harness.dialog();
+    await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+    await act(async () => dialog.querySelector<HTMLButtonElement>(".modal-foot .btn.primary")!.click());
+    await act(async () => { await Promise.resolve(); });
+    await harness.unmount();
+  };
+  await enable({ excludedLocations: [{ locationId: "l", name: "Old Mac", failure: "runner_below_gates", reason }] });
+  assert.deepEqual(toasts, [{ message: "Old Mac isn't in this campaign yet.", tone: "warning", detail: `${reason} Campaign Status lists it until it can join.` }]);
+  await enable({ excludedLocations: [] });
+  assert.deepEqual(toasts, []);
 });
 
 test("a genuine impossibility on a live campaign is one inline error, and nothing changes", async () => {

@@ -48,6 +48,8 @@ import {
   sessionEventWireProjectionVariant,
   SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET,
   SESSION_EVENT_WIRE_PROJECTION_VARIANTS,
+  CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL,
+  PROJECT_LOCATION_INSPECTION_FAILURES,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_CONTROL_PLANE_SERVICE,
   WOLLIPOG_POLICY_HOOK_POLL_CAPABILITY_HEADER,
@@ -375,6 +377,14 @@ test("PROTOCOL_VERSION is 337", () => {
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.mergeClosureWatch, 330);
   assert.equal(runnerSupportsProtocol(329, "mergeClosureWatch"), false);
   assert.equal(runnerSupportsProtocol(330, "mergeClosureWatch"), true);
+  // A Location joins a campaign only on a runner that can perform all of these gates (#4319): this
+  // fails when a new gate raises the highest floor without raising the campaign's.
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.campaignLocationGates, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+  assert.equal(CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL, Math.max(RUNNER_CAPABILITY_MIN_PROTOCOL.locationIssueClosure,
+    RUNNER_CAPABILITY_MIN_PROTOCOL.locationForgeObservation, RUNNER_CAPABILITY_MIN_PROTOCOL.locationIssuePublication));
+  assert.equal(runnerSupportsProtocol(CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1, "campaignLocationGates"), false);
+  assert.equal(runnerSupportsProtocol(CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL, "campaignLocationGates"), true);
+  assert.match(PROJECT_LOCATION_INSPECTION_FAILURES.runner_below_gates, new RegExp(`protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer`, "u"));
   // A publication created through a Location needs a v327 runner there (#4119).
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.locationIssuePublication, 327);
   assert.equal(runnerSupportsProtocol(RUNNER_CAPABILITY_MIN_PROTOCOL.locationIssuePublication - 1, "locationIssuePublication"), false);

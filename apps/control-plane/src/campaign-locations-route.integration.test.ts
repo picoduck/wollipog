@@ -11,7 +11,7 @@ import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROJECT_LOCATION_INSPECTION_FAILURES, PROTOCOL_VERSION, WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
+import { CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROJECT_LOCATION_INSPECTION_FAILURES, PROTOCOL_VERSION, WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   type CampaignControl, type RunnerMetadata } from "@wollipog/protocol";
 import { hashToken } from "./auth.js";
 import { ControlPlaneDb } from "./db.js";
@@ -127,7 +127,7 @@ async function startControlPlane(t: TestContext) {
     await delay(50);
   }
   /** A runner that answers inspections from ORIGINS and accepts every scope synchronization. */
-  const connect = async (metadata: RunnerMetadata, token: string, snapshots: unknown[]) => {
+  const connect = async (metadata: RunnerMetadata, token: string, snapshots: unknown[], protocolVersion = PROTOCOL_VERSION) => {
     const socket = new WebSocket(`ws://127.0.0.1:${port}/runner`);
     sockets.push(socket);
     const messages: Array<Record<string, unknown>> = [];
@@ -150,7 +150,7 @@ async function startControlPlane(t: TestContext) {
       socket.addEventListener("open", () => done(), { once: true });
       socket.addEventListener("error", () => reject(new Error("runner websocket failed to open")), { once: true });
     });
-    socket.send(JSON.stringify({ type: "register", token, protocolVersion: PROTOCOL_VERSION, runner: metadata, sessionSnapshots: snapshots }));
+    socket.send(JSON.stringify({ type: "register", token, protocolVersion, runner: metadata, sessionSnapshots: snapshots }));
     for (let waited = 0; !messages.some((message) => message.type === "registered"); waited += 25) {
       if (waited > 10_000) throw new Error(`runner was not registered:\n${logs}`);
       await delay(25);
@@ -209,6 +209,23 @@ test("a runner's real registration retries the owner's Location the launch found
   assert.equal(cp.boundary().revision, before + 1);
   assert.ok(messages.some((message) => message.type === "campaign_launch_inspect" && message.workspacePath === "/away/third"));
   assert.equal(cp.read((db) => db.getSession(ROOT)!.orchestratorPolicy!.excludedLocations?.length ?? 0), 0);
+});
+
+test("a runner's real registration below the gates' floor records why, and its real update then joins the Location (#4319)", { timeout: 90_000 }, async (t) => {
+  const cp = await startControlPlane(t);
+  const before = cp.boundary().revision;
+  const exclusion = () => cp.read((db) => db.getSession(ROOT)!.orchestratorPolicy!.excludedLocations?.find((item) => item.locationId === cp.awayLocationId));
+  assert.equal(exclusion()?.failure, "runner_offline");
+  const old = await cp.connect(runnerMetadata(AWAY, AWAY_WORKSPACES), AWAY_TOKEN, [], CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1);
+  await cp.until("the exclusion to name the version", () => exclusion()?.failure === "runner_below_gates");
+  assert.match(exclusion()!.reason, new RegExp(`protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer`, "u"));
+  assert.equal(cp.boundary().revision, before);
+  assert.equal(old.some((message) => message.type === "campaign_launch_inspect"), false, "that runner is never asked");
+  const updated = await cp.connect(runnerMetadata(AWAY, AWAY_WORKSPACES), AWAY_TOKEN, []);
+  await cp.until("the Location to join after the update", () => Boolean(cp.boundary().repositories?.some((entry) => entry.repository === "owner/third")));
+  assert.equal(cp.boundary().revision, before + 1);
+  assert.ok(updated.some((message) => message.type === "campaign_launch_inspect" && message.workspacePath === "/away/third"));
+  assert.equal(exclusion(), undefined);
 });
 
 test("a session credential is refused by every route that adds a Location, and no row is written (#4117)", { timeout: 90_000 }, async (t) => {
