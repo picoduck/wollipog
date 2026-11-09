@@ -12768,7 +12768,7 @@ export class SessionsService {
       const additionCount = groups.reduce((total, group) => total + group.additions.length, 0);
       const otherAdditions = additionCount - snapshot.additions.length;
       // Selection lineage without a selection to fill is read as no lineage: a failed or uncertain
-      // grant's proposal still goes to the owner, and a healthy grant without one is refused.
+      // grant's proposal still goes to the owner; a healthy grant without a selection now needs owner review too.
       const lineageless = !snapshot.lineage || snapshot.lineage.kind === "selection";
       const grantReview = !human && additionCount && lineageless ? this.scopeGrantReview(latest) : undefined;
       // Additions without any lineage that no grant review takes go to the owner as one typed request
@@ -12792,6 +12792,7 @@ export class SessionsService {
         const limit = this.db.campaignIssueLimit(sessionId,
           (grantReview ? grantReviewMaxIssues(latest.orchestratorPolicy, { grantReview }, boundary, scopeSize) : undefined) ?? boundary.issueAuthority!.maxIssues);
         if (toOwner) ownerReview = { cause: "lineage_missing" };
+        let followUpAdmissionLog: Record<string, unknown> | undefined;
         let evidence: unknown = { removals: snapshot.removals, ...(snapshot.otherRepositories ? { otherRepositories: snapshot.otherRepositories } : {}) };
         if (grantReview || ownerReview) {
           // No admission: the decision is the owner's.
@@ -12863,9 +12864,9 @@ export class SessionsService {
             snapshot.verifiedPublications = [{ publicationOccurrenceId: grant.occurrenceId, issue: addedIssue }];
             evidence = { occurrenceId: grant.occurrenceId, payloadDigest: grant.resourceDigest, issue: addedIssue,
               ...(otherGroup ? { repository: otherGroup.repository } : {}), ...(approval ? { approval } : {}) };
-            if (!ownerReview) this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "scope_proposal", sessionId, requestId: request.requestId,
+            if (!ownerReview) followUpAdmissionLog = { event: "campaign_issue_admission", entryPoint: "scope_proposal", sessionId, requestId: request.requestId,
               boundaryRevision: boundary.revision, scopeRevision: snapshot.expectedRevision, lineage: "follow_up", publicationOccurrenceId: grant.occurrenceId,
-              publicationAuthority: approval ? "human_approval" : "bounded_admission", ...(approval ? { approvalBasis: approval.basis, approvalObjective: approval.objective } : {}), outcome: "admitted" }));
+              publicationAuthority: approval ? "human_approval" : "bounded_admission", ...(approval ? { approvalBasis: approval.basis, approvalObjective: approval.objective } : {}), outcome: "admitted" };
           }
         }
         // Only consumed slots survive owner approval; a verified publication settles its own slot.
@@ -12876,7 +12877,10 @@ export class SessionsService {
           if (!ownerReview || requested > 100) return refuse("capacity_exhausted", { limit, requested });
           ownerReview.maxIssuesIncrease = { from: boundary.issueAuthority!.maxIssues, increase: requested - limit };
         }
-        if (!grantReview && !ownerReview) snapshot.issueAdmission = { boundaryRevision: boundary.revision, evidenceDigest: issueEvidenceDigest(evidence) };
+        if (!grantReview && !ownerReview) {
+          snapshot.issueAdmission = { boundaryRevision: boundary.revision, evidenceDigest: issueEvidenceDigest(evidence) };
+          if (followUpAdmissionLog) this.log.info(JSON.stringify(followUpAdmissionLog));
+        }
       }
       if (grantReview) snapshot.grantReview = grantReview;
       if (ownerReview) snapshot.ownerReview = ownerReview;

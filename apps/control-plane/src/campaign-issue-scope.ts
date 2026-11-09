@@ -157,9 +157,10 @@ export function scopeRequestOutsideBoundary(root: SessionView, request: Campaign
 
 /** An epic's lineage names its repository in lower case, and only outside the launch repository. */
 function canonicalLineage(lineage: NonNullable<CampaignIssueScopeRequest["lineage"]>, launch: string): NonNullable<CampaignIssueScopeRequest["lineage"]> {
-  if (lineage.kind !== "epic" || typeof lineage.repository !== "string") return lineage;
-  const { repository, ...rest } = lineage;
-  return repository.toLowerCase() === launch ? rest : { ...rest, repository: repository.toLowerCase() };
+  if (lineage.kind === "selection") return { kind: "selection" };
+  if (lineage.kind === "follow_up") return { kind: "follow_up", publicationOccurrenceId: lineage.publicationOccurrenceId };
+  const repository = lineage.repository?.toLowerCase();
+  return { kind: "epic", epic: lineage.epic, ...(repository && repository !== launch ? { repository } : {}) };
 }
 
 /** The exact change, grouped by repository (#4118): `repository` is the launch repository, whose

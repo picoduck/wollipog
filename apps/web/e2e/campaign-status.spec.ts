@@ -10,6 +10,8 @@ async function assertNoHorizontalOverflow(page: Page, selector: string) {
   expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
 }
 
+const SCOPE_EVIDENCE_DIR = process.env.CAMPAIGN_SCOPE_EVIDENCE_DIR;
+
 const campaignRow = (page: Page) => page.locator('.session-tools [data-tool="campaign"]');
 const workRows = (page: Page) => page.locator(".campaign-work-row");
 const queries = (page: Page) => page.evaluate(() => window.__WOLLIPOG_CAMPAIGN_STATUS_E2E__.queries());
@@ -173,9 +175,7 @@ for (const theme of ["dark", "light"] as const) {
         await expect(page.locator("h3.campaign-detail-title")).toHaveText(title);
         const delivery = page.locator("section.campaign-detail-section", { has: page.locator("h4", { hasText: /^Delivery$/ }) });
         await delivery.scrollIntoViewIfNeeded();
-        await assertNoHorizontalOverflow(page, ".request-card");
-        await card.getByRole("button", { name: "Expand Decision", exact: true }).click();
-        await page.screenshot({ path: `/tmp/s4333-evidence/expanded-${viewport.name}.png`, fullPage: true });
+        await assertNoHorizontalOverflow(page, ".campaign-status");
         if (FORGE_EVIDENCE_DIR) {
           await page.screenshot({ path: `${FORGE_EVIDENCE_DIR}/forge-${name}-${device}-${theme}.png` });
         }
@@ -399,9 +399,7 @@ for (const theme of ["dark", "light"] as const) {
         } else {
           await expect(page.getByText(/Authorized Recovery Unavailable|No Recovery Needed/u)).toHaveCount(0);
         }
-        await assertNoHorizontalOverflow(page, ".request-card");
-        await card.getByRole("button", { name: "Expand Decision", exact: true }).click();
-        await page.screenshot({ path: `/tmp/s4333-evidence/expanded-${viewport.name}.png`, fullPage: true });
+        await assertNoHorizontalOverflow(page, ".campaign-status");
       });
     }
   }
@@ -520,7 +518,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
           const barBox = await page.getByRole("navigation", { name: "App Navigation" }).boundingBox();
           expect(buttonBox!.y + buttonBox!.height).toBeLessThanOrEqual(barBox!.y);
         }
-        await page.screenshot({ path: `/tmp/s4333-evidence/campaign-${capture}.png`, fullPage: true });
+        if (SCOPE_EVIDENCE_DIR) await page.screenshot({ path: `${SCOPE_EVIDENCE_DIR}/campaign-${capture}.png`, fullPage: true });
       }
       await openRequest.click();
       const card = page.locator(`[data-session-request-id="${route.request}"]`);
@@ -530,7 +528,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
         await expect(card).toContainText(increase ? "raises Maximum Issues from 6 to 7" : "counts it once");
         await assertNoHorizontalOverflow(page, ".request-card");
         await card.getByRole("button", { name: "Expand Decision", exact: true }).click();
-        await page.screenshot({ path: `/tmp/s4333-evidence/expanded-${capture}.png`, fullPage: true });
+        if (SCOPE_EVIDENCE_DIR) await page.screenshot({ path: `${SCOPE_EVIDENCE_DIR}/expanded-${capture}.png`, fullPage: true });
 
       }
       await expect(card.locator(":focus")).toHaveCount(1);

@@ -1038,6 +1038,6 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
     await expect(page.getByText(/authority differs from the current boundary/)).toBeVisible();
     await expect(page.getByText(/counts it once/)).toBeVisible();
     await assertNoHorizontalOverflow(page, ".request-card");
-    await page.screenshot({ path: `/tmp/s4333-evidence/request-${viewport.name}.png`, fullPage: true });
+    if (process.env.CAMPAIGN_SCOPE_EVIDENCE_DIR) await page.screenshot({ path: `${process.env.CAMPAIGN_SCOPE_EVIDENCE_DIR}/request-${viewport.name}.png`, fullPage: true });
   });
 }

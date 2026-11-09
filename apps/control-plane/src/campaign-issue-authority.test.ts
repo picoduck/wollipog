@@ -62,7 +62,8 @@ function harness(full = true, maximum = 5, issues = [100]) {
     }
     throw new Error("Unexpected runner command");
   };
-  const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
+  const logs: string[] = [];
+  const svc = new SessionsService(db, hub, { info(message) { logs.push(message); }, warn() {}, error() {} });
   // A healthy Decision Model (#4104) on a fake harness: relatedness and closure-reason checks confirm.
   svc.setDecisionRuntime(healthyDecisionRuntime(db).runtime);
   if (full) assert.ok(svc.setCampaignControl("root", { mode: "full_control", objective: "Implement epic 100", operations: ["campaign_issue_scope", "issue_closure", "follow_up_issue_publication", "implementation_question"],
@@ -74,7 +75,7 @@ function harness(full = true, maximum = 5, issues = [100]) {
   assert.ok(svc.recordCampaignPlan("root", {items:[{key:"issue:100",issue:{repository:"team/repo",number:100}}],planComplete:true}).ok);
   const page = db.campaignWorkLedger.page("root", {state:"all",limit:100},Date.now()); assert.ok(page.ok);
   const item = page.data.items[0]!;
-  return { db, svc, hub, metadata, principal, state, approve, proposal, item };
+  return { db, svc, hub, metadata, principal, state, approve, proposal, item, logs };
 }
 
 test("#4164 real runner inspection admits a merge-queue squash delivery and rejects invalid merges", async () => {
@@ -2328,6 +2329,7 @@ test("#2940 a person-approved publication cannot exceed the human-set issue limi
     const p = await humanApprovedPublication(h);
     const refused = await followUpScope(h, "over-limit", p.decision.occurrenceId);
     assert.equal(refusalCode(refused), "capacity_exhausted"); assert.equal(refused.status, 409);
+    assert.equal(h.logs.some((line) => { const event = JSON.parse(line); return event.requestId === "over-limit" && event.outcome === "admitted"; }), false);
     assert.equal(h.db.admittedCampaignPublicationIssue("root", p.decision.occurrenceId), null);
     assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100]);
     // The limit is the campaign's, not the raw Maximum Issues: once the person admits a follow-up
@@ -4730,7 +4732,8 @@ test("#4333 every person-only lineage cause creates one owner request; only the 
         assert.equal(snapshot.ownerReview!.maxIssuesIncrease, undefined, "verified publication does not count twice");
         assert.deepEqual(snapshot.additions, [101]);
         if (publicationOccurrenceId) assert.deepEqual(snapshot.verifiedPublications, [{ publicationOccurrenceId, issue: 101 }]);
-        const repeated = await h.svc.proposeCampaignIssueScope("root", { ...request, requestId: "repeat" });
+        const reorderedLineage = Object.fromEntries(Object.entries(lineage).reverse()) as typeof lineage;
+        const repeated = await h.svc.proposeCampaignIssueScope("root", { ...request, lineage: reorderedLineage, requestId: "repeat" });
         assert.equal(repeated.data!.occurrenceId, proposed.data!.occurrenceId);
         assert.equal(pendingScopeRequests(h).length, 1);
         assert.equal(h.svc.resolveWorkflowDecision("root", "root", proposed.data!.occurrenceId, { outcome: "approve" },
