@@ -8559,6 +8559,7 @@ export class ControlPlaneDb {
       controlPlane.collectWorkflowArtifactBlobs();
       controlPlane.rekeyNestedCampaignChildReports();
       controlPlane.captureUnresetLegacyCampaignReports();
+      controlPlane.recordEarlierUnreadLocations(Date.now());
       controlPlane.campaignWorkLedger.accounting.startRecording(Date.now());
       controlPlane.seedUsageAggregationBaseline(Date.now());
       controlPlane.backfillClaudeRunningTotals();
@@ -10198,6 +10199,27 @@ export class ControlPlaneDb {
     });
     for (const { root, revoked } of released) if (revoked.length) settle?.(root, revoked);
     return targetLocation ? this.projectLocation(targetLocation.id) : this.projectLocation(locationId);
+  }
+
+  /** At startup (#4319): an exclusion recorded before `unreadLocations` existed, on the owner's own
+   * Location with no repository named and a runner below the gates' floor or of no known version as it
+   * stands now, is recorded as unread before anything is served. Otherwise one that isn't
+   * `runner_below_gates` would count only after a later write, and not at all if its runner updated
+   * first. What a campaign already records stays, unless a placement or a naming has resolved it. */
+  recordEarlierUnreadLocations(now: number): void {
+    for (const { id } of this.stmt(`SELECT id FROM sessions WHERE parent_session_id IS NULL AND archived=0
+      AND status NOT IN ('completed','failed','stopped')
+      AND CASE WHEN json_valid(orchestrator_policy) THEN json_type(orchestrator_policy, '$.excludedLocations') ELSE NULL END='array'`)
+      .all() as Array<{ id: string }>) {
+      const policy = this.sessionOrchestratorPolicy(id);
+      if (!policy) continue;
+      const owner = this.campaignOwnerForRoot(id, policy);
+      const before = JSON.stringify(policy.unreadLocations ?? []);
+      this.trackUnreadLocations(policy, this.unreadNow(policy, owner), new Set(), owner);
+      if (JSON.stringify(policy.unreadLocations ?? []) !== before) {
+        this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(policy), now, id);
+      }
+    }
   }
 
   /** The live campaigns of a Project whose unread Locations include this one (#4319). */

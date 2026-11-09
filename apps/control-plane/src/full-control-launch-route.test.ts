@@ -9087,6 +9087,27 @@ test("a Custom Location offline at creation whose first read is on a current run
   } finally { f.db.close(); }
 });
 
+test("at startup, an earlier exclusion of the owner's Location left unread for another reason on an old runner is recorded, so its runner's update doesn't lift it (#4319 security review)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  registerBelow(f);
+  try {
+    const mine = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    // As a control plane before this one stored it: offline, no repository, no unread record.
+    const { unreadLocations: _none, ...policy } = c.policy();
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify({ ...policy, excludedLocations: [...policy.excludedLocations ?? [],
+      { locationId: mine.id, name: "below z", failure: "runner_offline", reason: PROJECT_LOCATION_INSPECTION_FAILURES.runner_offline }] }), c.rootId);
+    const child = childAt(f, c.rootId, "r", "w");
+    const before = await ask(f, child, publicationIn("elsewhere/repo"), "before-startup");
+    assert.equal(before.ok, true, "nothing records it yet");
+    f.db.recordEarlierUnreadLocations(Date.now());
+    assert.ok(c.policy().unreadLocations?.some((item) => item.locationId === mine.id), "recorded unread");
+    await stillUnread(f, c.rootId, child, "once startup recorded it");
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    await stillUnread(f, c.rootId, child, "after its runner updates, before any read");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
 test("a re-authorization that lists no exclusions keeps an unread Location unread (#4319 fourth read)", async () => {
   const f = fixture();
   const c = await launchedMultiRepositoryCampaign(f);
