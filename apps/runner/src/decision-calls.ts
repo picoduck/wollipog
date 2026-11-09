@@ -1,6 +1,7 @@
 import type {
   AgentDefinition,
   DecisionErrorClass,
+  DecisionPricingContext,
   RunDecisionMessage,
   RunDecisionResultMessage,
   SessionNamingRunnerFailurePhase,
@@ -41,7 +42,11 @@ export interface DecisionGeneration {
   outputText: string;
   model?: string;
   usage?: RunDecisionResultMessage["usage"];
+  pricing?: DecisionPricingContext;
 }
+
+/** What a failed attempt still reported about the provider work it was billed for. */
+type DecisionFailureMetering = Pick<DecisionGeneration, "model" | "pricing">;
 
 export class DecisionCallFailure extends Error {
   override readonly name = "DecisionCallFailure";
@@ -50,6 +55,7 @@ export class DecisionCallFailure extends Error {
     readonly phase: SessionNamingRunnerFailurePhase,
     readonly usage?: RunDecisionResultMessage["usage"],
     readonly retryAfterMs?: number,
+    readonly metering?: DecisionFailureMetering,
   ) {
     super(errorClass);
   }
@@ -143,6 +149,41 @@ function claudeUsage(envelope: Record<string, unknown>): RunDecisionResultMessag
   };
 }
 
+/** One request's whole input, in the buckets `claudeUsage` keeps apart. */
+function claudeRequestInput(value: Record<string, unknown>): number {
+  return count(value.input_tokens) + count(value.cache_read_input_tokens) + count(value.cache_creation_input_tokens);
+}
+
+/** Each request's input, when `iterations` accounts for every input token in `usage`. It can list
+ * only a later request: a recorded two-request turn totals 70,767 and lists one of 37,370 (#4368). */
+function claudeRequestInputs(usage: Record<string, unknown>): number[] | null {
+  const iterations = Array.isArray(usage.iterations) ? usage.iterations as unknown[] : [];
+  const fields = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"];
+  const entries = iterations.filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object");
+  const complete = iterations.length > 0 && entries.length === iterations.length && fields.every((field) =>
+    entries.every((entry) => Number.isSafeInteger(entry[field]) && (entry[field] as number) >= 0) &&
+    entries.reduce((total, entry) => total + (entry[field] as number), 0) === usage[field]);
+  return complete ? entries.map(claudeRequestInput) : null;
+}
+
+/** The tier and request size Claude's envelope reports. `usage` totals the call, so without a complete
+ * `iterations` list the total only bounds each request. Fast mode reads as the session driver does. */
+function claudePricing(envelope: Record<string, unknown>): DecisionPricingContext | undefined {
+  const usage = envelope.usage;
+  if (!usage || typeof usage !== "object") return undefined;
+  const value = usage as Record<string, unknown>;
+  const serviceTier = value.speed === "fast"
+    ? "fast"
+    : typeof value.service_tier === "string" && value.service_tier ? value.service_tier : undefined;
+  const requests = claudeRequestInputs(value);
+  return {
+    ...(serviceTier ? { serviceTier } : {}),
+    requestInputTokens: requests
+      ? { min: Math.min(...requests), max: Math.max(...requests) }
+      : { min: 0, max: claudeRequestInput(value) },
+  };
+}
+
 function claudeModel(envelope: Record<string, unknown>): string | undefined {
   const modelUsage = envelope.modelUsage;
   if (!modelUsage || typeof modelUsage !== "object") return undefined;
@@ -163,22 +204,26 @@ export function interpretClaudeDecisionEnvelope(stdout: string, exitCode: number
   }
   const usage = claudeUsage(envelope);
   const model = claudeModel(envelope);
-  if (envelope.stop_reason === "refusal") throw new DecisionCallFailure("refused", "generation", usage);
+  const pricing = claudePricing(envelope);
+  const metering: DecisionFailureMetering = { ...(model ? { model } : {}), ...(pricing ? { pricing } : {}) };
+  if (envelope.stop_reason === "refusal") throw new DecisionCallFailure("refused", "generation", usage, undefined, metering);
   if (envelope.is_error === true || envelope.subtype !== "success") {
     throw new DecisionCallFailure(
       decisionErrorClassForStatus(envelope.api_error_status) ?? "provider_failed",
       "generation",
       usage,
+      undefined,
+      metering,
     );
   }
   if (envelope.structured_output === undefined || envelope.structured_output === null) {
-    throw new DecisionCallFailure("invalid_output", "output_validation", usage);
+    throw new DecisionCallFailure("invalid_output", "output_validation", usage, undefined, metering);
   }
   const outputText = JSON.stringify(envelope.structured_output);
   if (Buffer.byteLength(outputText, "utf8") > DECISION_OUTPUT_MAX_BYTES) {
-    throw new DecisionCallFailure("invalid_output", "output_validation", usage);
+    throw new DecisionCallFailure("invalid_output", "output_validation", usage, undefined, metering);
   }
-  return { outputText, ...(model ? { model } : {}), ...(usage ? { usage } : {}) };
+  return { outputText, ...metering, ...(usage ? { usage } : {}) };
 }
 
 function claudeEnvironment(env: Record<string, string>): Record<string, string> {
@@ -300,13 +345,21 @@ async function generateCodexDecision(
   let sawDelta = false;
   let usage: RunDecisionResultMessage["usage"] | undefined;
   let answeredBy = message.target.model;
+  let serviceTier: string | undefined;
+  let requestInputTokens: DecisionPricingContext["requestInputTokens"];
+  let usageUpdates = 0;
   let lastError: DecisionErrorClass | null = null;
+  const metering = (): DecisionFailureMetering => {
+    const pricing = { ...(serviceTier ? { serviceTier } : {}), ...(requestInputTokens ? { requestInputTokens } : {}) };
+    return { model: answeredBy, ...(Object.keys(pricing).length ? { pricing } : {}) };
+  };
   let settleTurn!: (value: void | PromiseLike<void>) => void;
   let rejectTurn!: (reason?: unknown) => void;
   const turn = new Promise<void>((resolve, reject) => { settleTurn = resolve; rejectTurn = reject; });
   void turn.catch(() => {});
   let phase: SessionNamingRunnerFailurePhase = "initialization";
-  const fail = (errorClass: DecisionErrorClass) => rejectTurn(new DecisionCallFailure(errorClass, phase, usage));
+  const fail = (errorClass: DecisionErrorClass) =>
+    rejectTurn(new DecisionCallFailure(errorClass, phase, usage, undefined, metering()));
   const peer = new JsonRpcPeer(child.stdin, child.stdout, () => fail("transport"), DECISION_OUTPUT_MAX_BYTES * 4);
   const append = (value: unknown) => {
     if (typeof value !== "string") return;
@@ -330,15 +383,33 @@ async function generateCodexDecision(
     if (type !== "userMessage" && type !== "agentMessage" && type !== "reasoning") fail("invalid_output");
   });
   peer.onNotification("thread/tokenUsage/updated", (params: unknown) => {
-    const last = (params as { tokenUsage?: { last?: Record<string, unknown> } } | null)?.tokenUsage?.last;
-    if (!last) return;
-    const cached = count(last.cachedInputTokens);
+    const tokenUsage = (params as { tokenUsage?: { last?: Record<string, unknown>; total?: Record<string, unknown> } } | null)?.tokenUsage;
+    // The thread is this attempt's own, so its total is the attempt; `last` is only the latest response.
+    const counted = tokenUsage?.total ?? tokenUsage?.last;
+    if (!counted) return;
+    const cached = count(counted.cachedInputTokens);
+    const input = count(counted.inputTokens);
     usage = {
-      inputTokens: Math.max(0, count(last.inputTokens) - cached),
-      outputTokens: count(last.outputTokens),
+      inputTokens: Math.max(0, input - cached),
+      outputTokens: count(counted.outputTokens),
       cacheReadInputTokens: cached,
       cacheCreationInputTokens: 0,
     };
+    usageUpdates++;
+    // `inputTokens` already includes cached input. Only a first update whose response is the whole
+    // total proves one request's size; anything else only bounds it.
+    requestInputTokens = usageUpdates === 1 && tokenUsage?.last && count(tokenUsage.last.inputTokens) === input
+      ? { min: input, max: input }
+      : { min: 0, max: input };
+  });
+  // A tier that changes once the turn is sent doesn't say which one served it, so nothing assumes
+  // either. This can arrive before the `turn/start` reply, so `turn_start` counts as well.
+  peer.onNotification("thread/settings/updated", (params: unknown) => {
+    const value = (params as { threadSettings?: { serviceTier?: unknown } } | null)?.threadSettings?.serviceTier;
+    if (value !== null && (typeof value !== "string" || !value)) return;
+    const tier = value ?? "default";
+    const turnSent = phase === "turn_start" || phase === "generation";
+    serviceTier = turnSent && serviceTier !== tier ? "unknown" : tier;
   });
   // Codex answers on the model the turn names unless it says it rerouted the turn.
   peer.onNotification("model/rerouted", (params: unknown) => {
@@ -370,11 +441,14 @@ async function generateCodexDecision(
     await peer.requestWithDeadline("initialize", { clientInfo: { name: "wollipog-decision", version: "1" } }, deadline);
     peer.notify("initialized", {});
     phase = "thread_start";
-    const started = await peer.requestWithDeadline<{ thread?: { id?: unknown } }>(
+    const started = await peer.requestWithDeadline<{ thread?: { id?: unknown }; serviceTier?: unknown }>(
       "thread/start",
       codexDecisionThreadParams(cwd, message.instructions),
       deadline,
     );
+    // Null is Codex's name for the default tier; a response that doesn't say leaves the tier unknown.
+    if (started?.serviceTier === null) serviceTier = "default";
+    else if (typeof started?.serviceTier === "string" && started.serviceTier) serviceTier = started.serviceTier;
     const threadId = started?.thread?.id;
     if (typeof threadId !== "string" || !threadId) throw new DecisionCallFailure("provider_failed", "thread_start");
     phase = "turn_start";
@@ -385,12 +459,12 @@ async function generateCodexDecision(
     );
     phase = "generation";
     await turn;
-    if (!output.trim()) throw new DecisionCallFailure("invalid_output", "output_validation", usage);
-    return { outputText: output, model: answeredBy, ...(usage ? { usage } : {}) };
+    if (!output.trim()) throw new DecisionCallFailure("invalid_output", "output_validation", usage, undefined, metering());
+    return { outputText: output, ...metering(), ...(usage ? { usage } : {}) };
   } catch (error) {
     if (error instanceof DecisionCallFailure) throw error;
     const rpc = error as { requestTimeout?: boolean } | null;
-    throw new DecisionCallFailure(rpc?.requestTimeout ? "timed_out" : lastError ?? "provider_failed", phase, usage);
+    throw new DecisionCallFailure(rpc?.requestTimeout ? "timed_out" : lastError ?? "provider_failed", phase, usage, undefined, metering());
   } finally {
     clearTimeout(timer);
     peer.dispose("decision call complete");
@@ -511,7 +585,7 @@ export class DecisionExecutor {
     const fail = (
       errorClass: DecisionErrorClass,
       phase: SessionNamingRunnerFailurePhase = "preflight",
-      extra: Pick<RunDecisionResultMessage, "usage" | "retryAfterMs" | "provider" | "billingSource" | "model"> = {},
+      extra: Pick<RunDecisionResultMessage, "usage" | "retryAfterMs" | "provider" | "billingSource" | "model" | "pricing"> = {},
     ): RunDecisionResultMessage => ({
       type: "run_decision_result",
       requestId: message.requestId,
@@ -574,7 +648,9 @@ export class DecisionExecutor {
       if (!generated.outputText.trim() || Buffer.byteLength(generated.outputText, "utf8") > DECISION_OUTPUT_MAX_BYTES) {
         return fail("invalid_output", "output_validation", {
           ...accountFields,
+          ...(generated.model ? { model: generated.model } : {}),
           ...(generated.usage ? { usage: generated.usage } : {}),
+          ...(generated.pricing ? { pricing: generated.pricing } : {}),
         });
       }
       return {
@@ -586,12 +662,15 @@ export class DecisionExecutor {
         // Only what the provider reported: a record must never show the target as the answering model.
         ...(generated.model ? { model: generated.model } : {}),
         ...(generated.usage ? { usage: generated.usage } : {}),
+        ...(generated.pricing ? { pricing: generated.pricing } : {}),
       };
     } catch (error) {
       return error instanceof DecisionCallFailure
         ? fail(error.errorClass, error.phase, {
             ...accountFields,
             ...(error.usage ? { usage: error.usage } : {}),
+            ...(error.metering?.model ? { model: error.metering.model } : {}),
+            ...(error.metering?.pricing ? { pricing: error.metering.pricing } : {}),
             ...(error.retryAfterMs !== undefined ? { retryAfterMs: error.retryAfterMs } : {}),
           })
         : fail("provider_failed", failurePhase, accountFields);

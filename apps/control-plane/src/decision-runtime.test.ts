@@ -31,7 +31,7 @@ import {
   hubDecisionTransport,
   sanitizeRunDecisionResult,
 } from "./decision-runtime.js";
-import type { RateTable } from "./usage-pricing.js";
+import { parseRateTable, type RateTable } from "./usage-pricing.js";
 
 const ORG = "org_personal";
 
@@ -417,6 +417,144 @@ test("a Decision record carries the model each attempt reported, and none for an
     { attempt: 1, errorClass: "transport", latencyMs: 5 },
     { attempt: 2, model: "claude-haiku-5-5", latencyMs: 7 },
   ]);
+});
+
+/**
+ * Rates shaped as the live table publishes them (#4368), through the real parser: Sonnet has a batch
+ * tier, Haiku a batch tier and a 100,000-token input threshold, and Codex's Luna priority and flex
+ * tiers and a 272,000-token threshold. Priced with no context, every one of these is unpriced.
+ */
+const LIVE_SHAPED_RATES = parseRateTable({
+  "claude-sonnet-5-5": {
+    input_cost_per_token: 0.000002, output_cost_per_token: 0.00001, cache_read_input_token_cost: 1e-7, cache_creation_input_token_cost: 0.0000025,
+    input_cost_per_token_batches: 0.000001, output_cost_per_token_batches: 0.000005, cache_read_input_token_cost_batches: 5e-8, cache_creation_input_token_cost_batches: 0.00000125,
+  },
+  "claude-haiku-5-5": {
+    input_cost_per_token: 1e-7, output_cost_per_token: 5e-7, cache_read_input_token_cost: 1e-8, cache_creation_input_token_cost: 1.25e-7,
+    input_cost_per_token_batches: 5e-8, output_cost_per_token_batches: 2.5e-7, cache_read_input_token_cost_batches: 5e-9, cache_creation_input_token_cost_batches: 6.25e-8,
+    input_cost_per_token_above_100k_tokens: 5e-7, output_cost_per_token_above_100k_tokens: 0.0000025, cache_read_input_token_cost_above_100k_tokens: 5e-8, cache_creation_input_token_cost_above_100k_tokens: 6.25e-7,
+  },
+  "gpt-5.6-luna": {
+    input_cost_per_token: 2e-7, output_cost_per_token: 9e-7, cache_read_input_token_cost: 2e-8,
+    input_cost_per_token_priority: 4e-7, output_cost_per_token_priority: 0.0000018, cache_read_input_token_cost_priority: 4e-8,
+    input_cost_per_token_flex: 1e-7, output_cost_per_token_flex: 4.5e-7, cache_read_input_token_cost_flex: 1e-8,
+    input_cost_per_token_above_272k_tokens: 4e-7, output_cost_per_token_above_272k_tokens: 0.0000018, cache_read_input_token_cost_above_272k_tokens: 4e-8,
+  },
+});
+
+const HAIKU_RATE = (usage: typeof USAGE) => usage.inputTokens * 1e-7 + usage.outputTokens * 5e-7 + usage.cacheCreationInputTokens * 1.25e-7;
+const STANDARD_REQUEST = { serviceTier: "standard", requestInputTokens: { min: 110, max: 110 } };
+
+function pricedVerdict(overrides: Partial<RunDecisionResultMessage> = {}): Step {
+  return { ...(verdict("confirm") as Partial<RunDecisionResultMessage>), model: "claude-haiku-5-5", usage: USAGE, pricing: STANDARD_REQUEST, ...overrides };
+}
+
+function nearly(actual: number | null | undefined, expected: number, label: string) {
+  assert.ok(typeof actual === "number" && Math.abs(actual - expected) < 1e-12, `${label}: ${String(actual)} is not ${expected}`);
+}
+
+test("a Decision attempt on a request-rated model records its cost, on the occurrence and the campaign total (#4368)", async () => {
+  const run = harness([pricedVerdict()], { rateTable: LIVE_SHAPED_RATES });
+  const outcome = await run.decide({ campaignSessionId: "root-session" });
+  const [attempt] = run.db.listDecisionAttempts(outcome.occurrenceId);
+  nearly(attempt!.costUsd, HAIKU_RATE(USAGE), "attempt");
+  nearly(run.runtime.view(outcome.occurrenceId)!.usage.costUsd, HAIKU_RATE(USAGE), "occurrence usage");
+  const total = run.db.campaignDecisionUsage("root-session");
+  nearly(total.costUsd, HAIKU_RATE(USAGE), "campaign total");
+  assert.equal(total.unpricedCalls, 0);
+});
+
+test("a Decision attempt is priced by the model that answered, not its target's alias (#4368)", async () => {
+  // The record #4367 exposed: a Haiku target answered by Sonnet costs what Sonnet costs.
+  const run = harness([pricedVerdict({ model: "claude-sonnet-5-5" })], { rateTable: LIVE_SHAPED_RATES });
+  const outcome = await run.decide();
+  assert.equal(run.runtime.view(outcome.occurrenceId)!.target?.model, "haiku");
+  assert.equal(run.runtime.view(outcome.occurrenceId)!.attempts[0]!.model, "claude-sonnet-5-5");
+  nearly(run.db.listDecisionAttempts(outcome.occurrenceId)[0]!.costUsd, 10 * 0.000002 + 20 * 0.00001 + 100 * 0.0000025, "Sonnet");
+});
+
+test("an attempt naming no model is priced by an exact target and stays unpriced on an alias (#4368)", async () => {
+  const unreported: Partial<RunDecisionResultMessage> = { ...(pricedVerdict() as Partial<RunDecisionResultMessage>) };
+  delete unreported.model;
+  const onAlias = harness([unreported], { rateTable: LIVE_SHAPED_RATES });
+  const alias = await onAlias.decide();
+  assert.equal(onAlias.db.listDecisionAttempts(alias.occurrenceId)[0]!.costUsd, null, "the table never prices a family name");
+  assert.equal(onAlias.runtime.view(alias.occurrenceId)!.attempts[0]!.model, undefined);
+  const onExact = harness([unreported], { rateTable: LIVE_SHAPED_RATES, resolution: { ok: true, target: { ...TARGET, model: "claude-haiku-5-5" } } });
+  const exact = await onExact.decide();
+  nearly(onExact.db.listDecisionAttempts(exact.occurrenceId)[0]!.costUsd, HAIKU_RATE(USAGE), "exact target");
+  assert.equal(onExact.runtime.view(exact.occurrenceId)!.attempts[0]!.model, undefined, "the record still claims no answering model");
+});
+
+test("a Codex attempt is priced by the tier the server named, and a failed attempt keeps its cost (#4368)", async () => {
+  const usage = { inputTokens: 90, outputTokens: 20, cacheReadInputTokens: 10, cacheCreationInputTokens: 0 };
+  const codex = { provider: "codex" as const, model: "gpt-5.6-luna", usage };
+  const size = { requestInputTokens: { min: 100, max: 100 } };
+  const cost = (input: number, output: number, cached: number) => 90 * input + 20 * output + 10 * cached;
+  const run = harness([
+    { ...codex, ok: false, errorClass: "provider_overloaded", pricing: { serviceTier: "default", ...size } },
+    pricedVerdict({ ...codex, pricing: { serviceTier: "priority", ...size } }),
+  ], { rateTable: LIVE_SHAPED_RATES });
+  const outcome = await run.decide();
+  const attempts = run.db.listDecisionAttempts(outcome.occurrenceId);
+  nearly(attempts[0]!.costUsd, cost(2e-7, 9e-7, 2e-8), "failed attempt on the default tier");
+  nearly(attempts[1]!.costUsd, cost(4e-7, 0.0000018, 4e-8), "priority tier");
+});
+
+test("a request over a rate threshold is priced at that rate, and a range across it isn't guessed (#4368)", async () => {
+  const large = { inputTokens: 150_000, outputTokens: 20, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
+  const cases: Array<[string, RunDecisionResultMessage["pricing"], number | null]> = [
+    ["one request over the threshold", { serviceTier: "standard", requestInputTokens: { min: 150_000, max: 150_000 } }, 150_000 * 5e-7 + 20 * 0.0000025],
+    ["two requests under it", { serviceTier: "standard", requestInputTokens: { min: 70_000, max: 80_000 } }, 150_000 * 1e-7 + 20 * 5e-7],
+    // Two requests the provider didn't list separately: one could be over the threshold, or neither.
+    ["a range that spans it", { serviceTier: "standard", requestInputTokens: { min: 0, max: 150_000 } }, null],
+    ["a bound wholly under it", { serviceTier: "standard", requestInputTokens: { min: 0, max: 99_000 } }, 150_000 * 1e-7 + 20 * 5e-7],
+  ];
+  for (const [label, pricing, expected] of cases) {
+    const run = harness([pricedVerdict({ usage: large, pricing })], { rateTable: LIVE_SHAPED_RATES });
+    const { occurrenceId } = await run.decide();
+    const cost = run.db.listDecisionAttempts(occurrenceId)[0]!.costUsd;
+    if (expected === null) assert.equal(cost, null, label);
+    else nearly(cost, expected, label);
+  }
+});
+
+test("a missing or unpublished tier or size leaves an attempt unpriced, never at a guessed rate or $0 (#4368)", async () => {
+  const cases: Array<[string, Partial<RunDecisionResultMessage>]> = [
+    ["no context at all, as an older runner sends", { pricing: undefined }],
+    ["no service tier", { pricing: { requestInputTokens: { min: 110, max: 110 } } }],
+    ["no request size", { pricing: { serviceTier: "standard" } }],
+    ["a tier the table has no rate for", { pricing: { serviceTier: "priority", requestInputTokens: { min: 110, max: 110 } } }],
+    ["a tier a mid-turn change left unknown", { pricing: { serviceTier: "unknown", requestInputTokens: { min: 110, max: 110 } } }],
+    ["a model the table doesn't have", { model: "claude-unlisted-9" }],
+  ];
+  for (const [label, overrides] of cases) {
+    const run = harness([pricedVerdict(overrides)], { rateTable: LIVE_SHAPED_RATES });
+    const { occurrenceId } = await run.decide({ campaignSessionId: "root-session" });
+    assert.equal(run.db.listDecisionAttempts(occurrenceId)[0]!.costUsd, null, label);
+    assert.equal(run.runtime.view(occurrenceId)!.usage.costUsd, null, label);
+    const total = run.db.campaignDecisionUsage("root-session");
+    assert.equal(total.costUsd, null, label);
+    assert.equal(total.unpricedCalls, 1, label);
+  }
+  const noTable = harness([pricedVerdict()], { rateTable: null });
+  const { occurrenceId } = await noTable.decide();
+  assert.equal(noTable.db.listDecisionAttempts(occurrenceId)[0]!.costUsd, null, "no rate table");
+});
+
+test("only well-formed pricing context crosses the Decision boundary (#4368)", () => {
+  const base = { type: "run_decision_result" as const, requestId: "r", ok: false, errorClass: "provider_failed" as const };
+  const sanitized = (pricing: unknown) =>
+    sanitizeRunDecisionResult({ ...base, pricing } as RunDecisionResultMessage)!.pricing;
+  assert.deepEqual(sanitized({ serviceTier: "standard", requestInputTokens: { min: 1, max: 2 }, extra: "dropped" }),
+    { serviceTier: "standard", requestInputTokens: { min: 1, max: 2 } });
+  assert.deepEqual(sanitized({ serviceTier: "x".repeat(65), requestInputTokens: { min: 1, max: 2 } }), { requestInputTokens: { min: 1, max: 2 } });
+  assert.deepEqual(sanitized({ serviceTier: "standard", requestInputTokens: { min: 3, max: 2 } }), { serviceTier: "standard" });
+  assert.deepEqual(sanitized({ serviceTier: "standard", requestInputTokens: { min: -1, max: 2 } }), { serviceTier: "standard" });
+  assert.deepEqual(sanitized({ serviceTier: "standard", requestInputTokens: { min: 0.5, max: 2 } }), { serviceTier: "standard" });
+  assert.equal(sanitized({ serviceTier: 7, requestInputTokens: "many" }), undefined);
+  assert.equal(sanitized("standard"), undefined);
+  assert.equal(sanitized(undefined), undefined);
 });
 
 test("a routing claim interrupted by a restart is routed again and links the one existing request", async () => {

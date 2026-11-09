@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import type { AgentDefinition, RunDecisionMessage } from "@wollipog/protocol";
@@ -563,4 +564,151 @@ test("a Codex turn the server reroutes reports the model it rerouted to (#4367)"
   const result = await run.execute(message({ target: { agentId: "codex", driver: "codex-app-server", model: "haiku", effort: "low" } }), codexAgent(), {});
   assert.equal(result.ok, true);
   assert.equal(result.model, "rerouted-model");
+});
+
+test("Claude's envelope reports the tier and each request's size, on an answer and on a failure (#4368)", () => {
+  // The fields a real Claude Code 2.1.318 result carries.
+  const usage = {
+    input_tokens: 2, output_tokens: 226, cache_read_input_tokens: 0, cache_creation_input_tokens: 1131, service_tier: "standard", speed: "standard",
+    iterations: [{ input_tokens: 2, output_tokens: 226, cache_read_input_tokens: 0, cache_creation_input_tokens: 1131, type: "message" }],
+  };
+  const answer = { type: "result", subtype: "success", is_error: false, structured_output: { verdict: "confirm", reason: "ok" }, usage, modelUsage: { "claude-haiku-5-5": {} } };
+  const read = (envelope: unknown) => interpretClaudeDecisionEnvelope(JSON.stringify(envelope), 0);
+  assert.deepEqual(read(answer).pricing, { serviceTier: "standard", requestInputTokens: { min: 1133, max: 1133 } });
+  const withUsage = (changes: Record<string, unknown>) => read({ ...answer, usage: { ...usage, ...changes } }).pricing;
+  assert.deepEqual(withUsage({
+    input_tokens: 11, cache_read_input_tokens: 105, cache_creation_input_tokens: 20,
+    iterations: [
+      { input_tokens: 10, cache_read_input_tokens: 5, cache_creation_input_tokens: 0 },
+      { input_tokens: 1, cache_read_input_tokens: 100, cache_creation_input_tokens: 20 },
+    ],
+  }), { serviceTier: "standard", requestInputTokens: { min: 15, max: 121 } });
+  // Without each request's size, the total only bounds them.
+  const bounded = { serviceTier: "standard", requestInputTokens: { min: 0, max: 1133 } };
+  for (const [label, iterations] of [
+    ["absent", undefined],
+    ["empty", []],
+    ["not objects", ["bad"]],
+    ["a missing bucket", [{ input_tokens: 2, cache_creation_input_tokens: 1131 }]],
+    ["a non-numeric bucket", [{ input_tokens: "2", cache_read_input_tokens: 0, cache_creation_input_tokens: 1131 }]],
+    ["a negative bucket", [{ input_tokens: 3, cache_read_input_tokens: -1, cache_creation_input_tokens: 1131 }]],
+    ["only a later request", [{ input_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 31 }]],
+  ] as const) assert.deepEqual(withUsage({ iterations }), bounded, label);
+  // Fast mode is what the session driver reads it as, and a missing tier stays missing.
+  assert.equal(withUsage({ speed: "fast" })?.serviceTier, "fast");
+  assert.equal("serviceTier" in withUsage({ service_tier: undefined })!, false);
+  assert.equal("serviceTier" in withUsage({ service_tier: "" })!, false);
+  assert.equal(read({ ...answer, usage: undefined }).pricing, undefined);
+  assert.throws(() => read({ ...answer, is_error: true, api_error_status: 529 }), (error: unknown) => {
+    assert.ok(error instanceof DecisionCallFailure);
+    assert.equal(error.errorClass, "provider_overloaded");
+    assert.equal(error.metering?.model, "claude-haiku-5-5");
+    assert.deepEqual(error.metering?.pricing, { serviceTier: "standard", requestInputTokens: { min: 1133, max: 1133 } });
+    return true;
+  });
+});
+
+test("a Claude attempt carries its pricing context and answering model to the result, also when it fails (#4368)", async () => {
+  const usage = { input_tokens: 2, output_tokens: 3, cache_read_input_tokens: 0, cache_creation_input_tokens: 5, service_tier: "standard" };
+  const respond = (envelope: Record<string, unknown>) => new DecisionExecutor({
+    prepareDirectory: async () => ({ cwd: "/neutral", cleanup: async () => {} }),
+    spawn: () => fakeProcess(({ child, stdout }) => {
+      stdout.end(JSON.stringify({ type: "result", usage, modelUsage: { "claude-haiku-5-5": {} }, ...envelope }));
+      child.emit("close", 0);
+    }, false),
+  }).execute(message(), claudeAgent(), {});
+  const pricing = { serviceTier: "standard", requestInputTokens: { min: 0, max: 7 } };
+  const ok = await respond({ subtype: "success", is_error: false, structured_output: { verdict: "confirm", reason: "ok" } });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.model, "claude-haiku-5-5");
+  assert.deepEqual(ok.pricing, pricing);
+  const noAnswer = await respond({ subtype: "success", is_error: false });
+  assert.equal(noAnswer.errorClass, "invalid_output");
+  assert.equal(noAnswer.model, "claude-haiku-5-5");
+  assert.deepEqual(noAnswer.pricing, pricing);
+  const refused = await respond({ subtype: "success", is_error: false, stop_reason: "refusal" });
+  assert.equal(refused.errorClass, "refused");
+  assert.deepEqual(refused.pricing, pricing);
+});
+
+/** A fake Codex App Server answering as the 0.165.0 schema says: `thread/start` names the tier, null
+ * meaning default, and token usage carries the latest response and the thread's total. */
+function codexPricingRun(steps: {
+  threadStart?: Record<string, unknown>;
+  beforeAnswer?: Array<[string, unknown]>;
+  answer?: boolean;
+} = {}): DecisionExecutor {
+  return new DecisionExecutor({
+    prepareDirectory: async () => ({ cwd: "/neutral", cleanup: async () => {} }),
+    spawn: () => fakeProcess(({ stdout }, line) => {
+      const request = JSON.parse(line) as { id?: number; method: string };
+      const reply = (result: unknown) => stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`);
+      const notify = (method: string, params: unknown) => stdout.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
+      if (request.method === "initialize") reply({});
+      if (request.method === "thread/start") reply({ thread: { id: "thread_1" }, serviceTier: null, ...steps.threadStart });
+      if (request.method === "turn/start") {
+        reply({ turn: { id: "turn_1" } });
+        for (const [method, params] of steps.beforeAnswer ?? []) notify(method, params);
+        if (steps.answer === false) notify("turn/completed", { turn: { status: "failed" } });
+        else {
+          notify("item/completed", { item: { type: "agentMessage", text: "{\"verdict\":\"confirm\",\"reason\":\"ok\"}" } });
+          notify("turn/completed", { turn: { status: "completed" } });
+        }
+      }
+    }, true),
+  });
+}
+
+const CODEX_TARGET: RunDecisionMessage["target"] = { agentId: "codex", driver: "codex-app-server", model: "gpt-5.6-luna", effort: "low" };
+const breakdown = (inputTokens: number, cachedInputTokens: number, outputTokens: number) => ({ inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens: 0, totalTokens: inputTokens + outputTokens });
+const tokenUsage = (last: ReturnType<typeof breakdown>, total = last): [string, unknown] => ["thread/tokenUsage/updated", { tokenUsage: { last, total } }];
+
+async function codexResult(steps: Parameters<typeof codexPricingRun>[0]) {
+  return codexPricingRun(steps).execute(message({ target: CODEX_TARGET }), { ...codexAgent(), capabilities: { ...models, models: [{ id: CODEX_TARGET.model, displayName: "Luna", efforts: ["low"] }] } }, {});
+}
+
+test("a Codex attempt reports the tier the server named and its one request's size (#4368)", async () => {
+  const onDefault = await codexResult({ beforeAnswer: [tokenUsage(breakdown(100, 10, 20))] });
+  assert.equal(onDefault.ok, true);
+  assert.equal(onDefault.model, CODEX_TARGET.model);
+  assert.deepEqual(onDefault.usage, { inputTokens: 90, outputTokens: 20, cacheReadInputTokens: 10, cacheCreationInputTokens: 0 });
+  assert.deepEqual(onDefault.pricing, { serviceTier: "default", requestInputTokens: { min: 100, max: 100 } });
+  const onPriority = await codexResult({ threadStart: { serviceTier: "priority" }, beforeAnswer: [tokenUsage(breakdown(100, 0, 20))] });
+  assert.equal(onPriority.pricing?.serviceTier, "priority");
+});
+
+test("a Codex attempt never assumes a tier the server didn't name or one that changed mid-turn (#4368)", async () => {
+  const silent = await codexResult({ threadStart: { serviceTier: undefined }, beforeAnswer: [tokenUsage(breakdown(100, 0, 20))] });
+  assert.equal(silent.ok, true);
+  assert.deepEqual(silent.pricing, { requestInputTokens: { min: 100, max: 100 } });
+  const settings = (serviceTier: string | null): [string, unknown] => ["thread/settings/updated", { threadId: "thread_1", threadSettings: { serviceTier } }];
+  const changed = await codexResult({ beforeAnswer: [settings("priority"), tokenUsage(breakdown(100, 0, 20))] });
+  assert.equal(changed.pricing?.serviceTier, "unknown");
+  const unchanged = await codexResult({ beforeAnswer: [settings(null), tokenUsage(breakdown(100, 0, 20))] });
+  assert.equal(unchanged.pricing?.serviceTier, "default");
+});
+
+test("a Codex attempt counts its whole thread, and several responses only bound a request's size (#4368)", async () => {
+  const twoResponses = await codexResult({ beforeAnswer: [
+    tokenUsage(breakdown(100, 0, 20)),
+    tokenUsage(breakdown(40, 10, 5), breakdown(140, 10, 25)),
+  ] });
+  assert.deepEqual(twoResponses.usage, { inputTokens: 130, outputTokens: 25, cacheReadInputTokens: 10, cacheCreationInputTokens: 0 });
+  assert.deepEqual(twoResponses.pricing, { serviceTier: "default", requestInputTokens: { min: 0, max: 140 } });
+  const failed = await codexResult({ beforeAnswer: [tokenUsage(breakdown(100, 0, 20))], answer: false });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.model, CODEX_TARGET.model);
+  assert.deepEqual(failed.usage, { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 });
+  assert.deepEqual(failed.pricing, { serviceTier: "default", requestInputTokens: { min: 100, max: 100 } });
+});
+
+test("a recorded turn whose iterations list only its later request yields a bound, not that request's size (#4368)", () => {
+  // One real Claude Code 2.1.296 turn of two requests: usage totals 70,767 input tokens, and
+  // `iterations` lists only the second, of 37,370.
+  const recorded = JSON.parse(readFileSync(new URL("./drivers/fixtures/claude-live-usage-stream.json", import.meta.url), "utf8")) as Array<Record<string, unknown>>;
+  const envelope = { ...recorded.find((record) => record.type === "result"), structured_output: { verdict: "confirm", reason: "ok" } };
+  assert.deepEqual(interpretClaudeDecisionEnvelope(JSON.stringify(envelope), 0).pricing, {
+    serviceTier: "standard",
+    requestInputTokens: { min: 0, max: 70_767 },
+  });
 });
