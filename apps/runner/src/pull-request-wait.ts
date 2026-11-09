@@ -325,6 +325,7 @@ interface CheckNode {
   suiteId?: number;
   workflowId?: number;
   workflowEvent?: string;
+  workflowContext?: string;
   /** The branch a check run's suite was created for, and when: the push or event that created it.
    * A re-run or a delayed start keeps its suite's time. */
   branch?: string;
@@ -357,6 +358,7 @@ function checkNode(raw: unknown): CheckNode | null {
       ...(positiveId(record(node.checkSuite)?.databaseId) ? { suiteId: record(node.checkSuite)!.databaseId as number } : {}),
       ...(positiveId(record(node.checkSuite)?.workflowId) ? { workflowId: record(node.checkSuite)!.workflowId as number } : {}),
       ...(typeof record(node.checkSuite)?.workflowEvent === "string" ? { workflowEvent: record(node.checkSuite)!.workflowEvent as string } : {}),
+      ...(typeof record(node.checkSuite)?.workflowContext === "string" ? { workflowContext: record(node.checkSuite)!.workflowContext as string } : {}),
       name: node.name,
       state: !completed ? "pending" : PASS_CONCLUSIONS.has(conclusion) ? "passed" : "failed",
       conclusion: completed ? conclusion || "UNKNOWN" : String(node.status ?? "PENDING"),
@@ -393,7 +395,7 @@ function newer(node: CheckNode, previous: CheckNode): boolean {
     previousTime >= Date.UTC(2000, 0, 1) && time > previousTime;
 }
 
-/** Workflow id and automatic event distinguish same-named jobs; suites remain separate otherwise.
+/** Workflow, event and branch/PR context distinguish jobs; suites remain separate without proof.
  * Without either, no cross-run supersession is provable. Keep the worst unbeaten candidate,
  * including all candidates if inconsistent id/time comparisons form a cycle. */
 function latestChecks(rawNodes: unknown[], state: (node: CheckNode) => CheckState = (node) => node.state): CheckNode[] {
@@ -401,7 +403,7 @@ function latestChecks(rawNodes: unknown[], state: (node: CheckNode) => CheckStat
   for (const raw of rawNodes) {
     const node = checkNode(raw);
     if (!node) continue;
-    const identity = node.workflowId !== undefined && node.workflowEvent ? `workflow:${node.workflowId}:${node.workflowEvent}`
+    const identity = node.workflowId !== undefined && node.workflowEvent && node.workflowContext ? `workflow:${node.workflowId}:${node.workflowEvent}:${node.workflowContext}`
       : node.suiteId !== undefined ? `suite:${node.suiteId}` : "unknown";
     const key = JSON.stringify([node.kind, node.appId ?? null, identity, node.name]);
     const entries = groups.get(key) ?? [];
@@ -536,6 +538,7 @@ interface Observation {
   /** Latest ready event, or creation for a PR with a known empty ready-event timeline. */
   admittedAfter: number | null;
   admittedSkippedRuns?: ReadonlySet<number>;
+  workflowRetry?: boolean;
   /** The pull request's head branch, which check suites name. */
   headRef: string | null;
   /** The latest merge-queue event, when it is a removal no force push has followed. */
@@ -710,10 +713,11 @@ async function admittedSkippedRuns(
 /** At most one optional 100-run read per commit observation, only for shared names in distinct
  * suites with uncached identity. Missing, denied, malformed or truncated provenance retains separate suites. No workflow
  * name is trusted as identity: different workflows can themselves have the same display name. */
-type WorkflowIdentity = { workflowId: number; workflowEvent: string };
+type WorkflowIdentity = { workflowId: number; workflowEvent: string; workflowContext: string };
 async function workflowChecks(
-  gh: GhRunner, repository: string, sha: string | null, rollup: unknown, cache: Map<number, WorkflowIdentity>,
-): Promise<unknown> {
+  gh: GhRunner, repository: string, sha: string | null, rollup: unknown, cache: Map<number, WorkflowIdentity | null>,
+): Promise<{ rollup: unknown; retry: boolean }> {
+  let retry = false;
   const contexts = record(record(rollup)?.contexts);
   const nodes = Array.isArray(contexts?.nodes) ? contexts.nodes : [];
   const suites = new Map<string, Set<number>>();
@@ -725,39 +729,53 @@ async function workflowChecks(
     ids.add(node.suiteId);
     suites.set(key, ids);
   }
-  if (!sha || ![...suites.values()].some((ids) => ids.size > 1)) return rollup;
+  if (!sha || ![...suites.values()].some((ids) => ids.size > 1)) return { rollup, retry };
   const missing = [...suites.values()].some((ids) => ids.size > 1 && [...ids].some((id) => !cache.has(id)));
   if (missing) {
-    const body = await provenanceRead(gh, `repos/${repository}/actions/runs?head_sha=${sha}&per_page=100`);
+    let body: Record<string, unknown> | null = null;
+    try {
+      const response = await gh(["api", "--hostname", "github.com", `repos/${repository}/actions/runs?head_sha=${sha}&per_page=100`]);
+      retry = response.timedOut || transient(response);
+      if (response.code === null && !response.timedOut) body = record(parseJson(response.stdout));
+      if (body?.errors !== undefined && (!Array.isArray(body.errors) || body.errors.length > 0)) body = null;
+    } catch { /* An unclassified denial retains suites; it never fails the wait. */ }
     const runs = body?.workflow_runs;
     if (Array.isArray(runs) && runs.length <= 100 && body?.total_count === runs.length) {
-      const found = new Map<number, WorkflowIdentity>();
+      const found = new Map<number, WorkflowIdentity | null>();
       let valid = true;
       for (const raw of runs) {
         const run = record(raw);
         if (!run || run.head_sha !== sha || !positiveId(run.check_suite_id) || !positiveId(run.workflow_id) ||
             typeof run.event !== "string") { valid = false; break; }
-        const identity = { workflowId: run.workflow_id, workflowEvent: run.event };
-        const previous = found.get(run.check_suite_id) ?? cache.get(run.check_suite_id);
-        if (previous && (previous.workflowId !== identity.workflowId || previous.workflowEvent !== identity.workflowEvent)) {
+        const prs = Array.isArray(run.pull_requests) ? run.pull_requests.map(record) : [];
+        const prEvent = ["pull_request", "pull_request_target"].includes(run.event);
+        const branch = typeof run.head_branch === "string" && run.head_branch ? run.head_branch : null;
+        const comparable = branch !== null && (run.event === "push" || (prEvent && prs.length > 0 &&
+          prs.every((pr) => positiveId(pr?.number) && typeof record(pr?.base)?.ref === "string")));
+        const context = comparable ? JSON.stringify([branch, prEvent
+          ? prs.map((pr) => [pr!.number, record(pr!.base)!.ref]).sort((a, b) => Number(a[0]) - Number(b[0])) : []]) : null;
+        const identity = context === null ? null : { workflowId: run.workflow_id, workflowEvent: run.event, workflowContext: context };
+        if (found.has(run.check_suite_id) && JSON.stringify(found.get(run.check_suite_id)) !== JSON.stringify(identity)) {
           valid = false; break;
         }
-        // Different event types test different inputs; manual dispatch inputs cannot be compared.
-        // Only automatic push/PR event families admit supersession across suites.
-        if (["push", "pull_request", "pull_request_target"].includes(run.event)) found.set(run.check_suite_id, identity);
+        const previous = cache.get(run.check_suite_id);
+        if (previous && identity && (previous.workflowId !== identity.workflowId || previous.workflowEvent !== identity.workflowEvent ||
+            previous.workflowContext !== identity.workflowContext)) { valid = false; break; }
+        found.set(run.check_suite_id, identity);
       }
-      if (valid) for (const [id, identity] of found) {
+      if (valid) for (const ids of suites.values()) for (const id of ids) {
+        const identity = found.get(id) ?? cache.get(id) ?? null;
         cache.set(id, identity);
         if (cache.size > 2_000) cache.delete(cache.keys().next().value!);
       }
     }
   }
-  return { ...record(rollup), contexts: { ...contexts, nodes: nodes.map((raw) => {
+  return { retry, rollup: { ...record(rollup), contexts: { ...contexts, nodes: nodes.map((raw) => {
     const node = record(raw);
     const suite = record(node?.checkSuite);
     const identity = cache.get(suite?.databaseId as number);
-    return identity === undefined ? raw : { ...node, checkSuite: { ...suite, ...identity } };
-  }) } };
+    return !identity ? raw : { ...node, checkSuite: { ...suite, ...identity } };
+  }) } } };
 }
 
 type Read<T> = { ok: true; value: T } | { ok: false; retryable: boolean; error: string };
@@ -830,7 +848,8 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
   let transientFailures = 0;
   let polls = 0;
   // Immutable suite identities, local to this wait and bounded across changing queue heads.
-  const workflowCache = new Map<number, WorkflowIdentity>();
+  const workflowCache = new Map<number, WorkflowIdentity | null>();
+  let workflowTransientFailures = 0;
 
   const summarize = (outcome: PullRequestWaitOutcome, seen: Observation): PullRequestWaitSummary => ({
     outcome,
@@ -927,10 +946,12 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     if (!head.ok) return head;
     const group = seen.queue ? await completeContexts(seen.queue.rollup, seen.queue.headSha) : null;
     if (group && !group.ok) return group;
+    const headChecks = await workflowChecks(gh, repository, seen.rollupSha, head.value, workflowCache);
+    const groupChecks = seen.queue && group ? await workflowChecks(gh, repository, seen.queue.headSha, group.value, workflowCache) : null;
     return {
       ok: true,
-      value: { ...seen, rollup: await workflowChecks(gh, repository, seen.rollupSha, head.value, workflowCache),
-        ...(seen.queue && group ? { queue: { ...seen.queue, rollup: await workflowChecks(gh, repository, seen.queue.headSha, group.value, workflowCache) } } : {}) },
+      value: { ...seen, rollup: headChecks.rollup, workflowRetry: headChecks.retry,
+        ...(seen.queue && groupChecks ? { queue: { ...seen.queue, rollup: groupChecks.rollup } } : {}) },
     };
   };
 
@@ -1007,7 +1028,11 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
         if (deps.signal?.aborted) return { ok: false, error: "request cancelled" };
       }
       const checks = evaluateCommitChecks(seen.headSha, seen.rollup, required.names, required.apps, seen.mergeStateStatus, seen.admittedSkippedRuns);
-      if (checks.requiredState === "failed" || (input.returnOnAnyFailure && checks.summary.failedJobs.length > 0)) {
+      // Retry only classified transient optional reads, within a fixed budget. A denied read still
+      // retains observed failures; an unresolved transient at the deadline reports timeout.
+      const retryIdentity = seen.workflowRetry === true && ++workflowTransientFailures <= MAX_TRANSIENT_FAILURES;
+      if (!seen.workflowRetry) workflowTransientFailures = 0;
+      if (!retryIdentity && (checks.requiredState === "failed" || (input.returnOnAnyFailure && checks.summary.failedJobs.length > 0))) {
         return { ok: true, summary: summarize("checks_failed", seen) };
       }
       if (checks.requiredState === "none") return { ok: true, summary: summarize("no_required_checks", seen) };
