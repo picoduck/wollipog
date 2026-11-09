@@ -1139,11 +1139,16 @@ export class AutomationsService {
       } else if (execution.actionKind === "create_session" && execution.sessionId && failed.state === "rejected") {
         // A genuine failed launch stops its root. Validated campaign governance cancellation
         // was classified above; it keeps the root resumable instead.
-        this.db.updateSessionStatus(execution.sessionId, "stopped", now, {
-          cause: "launch_rejected",
-          confirmation: "launch_rejected",
-        });
-        this.hub.sessionChangedById(execution.sessionId);
+        const root = this.db.getSession(execution.sessionId);
+        const terminalCampaign = execution.specSnapshot?.action.kind === "create_session" &&
+          execution.specSnapshot.action.request.campaign && root && ["failed", "completed", "stopped"].includes(root.status);
+        if (!terminalCampaign) {
+          this.db.updateSessionStatus(execution.sessionId, "stopped", now, {
+            cause: "launch_rejected",
+            confirmation: "launch_rejected",
+          });
+          this.hub.sessionChangedById(execution.sessionId);
+        }
       }
       if (execution.specSnapshot?.action.kind === "create_session" && execution.specSnapshot.action.request.campaign &&
           execution.sessionId && this.campaignHasUnfinishedChildren(execution.sessionId)) return;

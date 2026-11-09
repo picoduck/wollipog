@@ -217,19 +217,29 @@ test("terminal-first governance replay keeps its campaign active without replaci
   } finally { f.db.close(); }
 });
 
-test("a genuine provider failure after delegation holds overlap until its children finish", async () => {
+test("a genuine provider failure after delegation holds overlap without repeatedly stopping its root", async t => {
   const f = fixture();
   try {
     const { saved, execution, root, command } = await start(f);
     const child = createChild(f, root.id);
+    const changes = t.mock.method(f.hub, "sessionChangedById");
     f.service.onDurableCommandReceipt("r", { type: "durable_session_command_update", commandId: command.commandId,
       sessionId: root.id, state: "failed", revision: 2, error: "Service temporarily unavailable, please retry later" }, Date.now());
     assert.equal(f.db.listAutomationCommands(execution.executionId).length, 1, "a campaign that delegated work cannot retry its initial prompt");
     assert.equal(f.db.getSession(root.id)!.status, "stopped");
+    const stoppedAt = f.db.getSession(root.id)!.updatedAt;
+    const broadcastCount = changes.mock.callCount();
     f.service.tick(saved.nextFireAt! + 60_000);
+    f.service.tick(saved.nextFireAt! + 60_001);
     await f.drain();
     assert.equal(f.db.getAutomationExecution(execution.executionId)!.status, "running");
     assert.equal(f.db.listSessions().length, 2);
+    assert.equal(f.db.getSession(root.id)!.updatedAt, stoppedAt, "reconciliation does not rewrite a terminal root");
+    assert.equal(changes.mock.callCount(), broadcastCount, "no redundant stopped broadcasts");
+    // A late provider status also remains the actual terminal result.
+    f.db.updateSessionStatus(root.id, "failed", Date.now());
+    f.service.tick(saved.nextFireAt! + 60_002);
+    assert.equal(f.db.getSession(root.id)!.status, "failed");
     f.db.updateSessionStatus(child.id, "completed", Date.now());
     f.service.tick(execution.createdAt + 1);
     assert.equal(f.db.getAutomationExecution(execution.executionId)!.status, "failed");
