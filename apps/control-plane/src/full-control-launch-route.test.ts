@@ -7540,6 +7540,32 @@ test("a transient failure after the update doesn't end a Custom Location's way b
   } finally { f.hub.isRunnerOnline = online; f.db.close(); }
 });
 
+test("a campaign that becomes Custom during a reconnect's inspection applies Custom's own retry rule: an exclusion that doesn't qualify neither joins nor gains a retry (#4319)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  answerBelow(f);
+  registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+  const offline = { failure: "runner_offline" as const, reason: PROJECT_LOCATION_INSPECTION_FAILURES.runner_offline };
+  try {
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    const store = (change: (policy: OrchestratorCampaignPolicy) => void) => {
+      const policy = c.policy();
+      change(policy);
+      f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), c.rootId);
+    };
+    store((policy) => { policy.excludedLocations = [{ locationId: below.id, name: "below z", ...offline }]; });
+    const target = holdInspection(f, "/fixture/below");
+    const reconnected = c.locations.runnerReconnected("below");
+    await target.taken();
+    // Full Control retried it; Custom, as the campaign now is, wouldn't have.
+    store((policy) => { delete policy.control; policy.repositories = [{ repository: "owner/repo", locationIds: [c.p.launchLocation.id] }]; });
+    target.release("below/repo", "below");
+    await reconnected;
+    assert.deepEqual(c.policy().repositories, [{ repository: "owner/repo", locationIds: [c.p.launchLocation.id] }]);
+    assert.deepEqual(c.policy().excludedLocations, [{ locationId: below.id, name: "below z", ...offline }], "unchanged, and with no retry flag");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
 test("a stored exclusion always reads as today's fixed sentence, so raising the floor neither drops the list nor shows stored text (#4319)", () => {
   const f = fixture();
   try {

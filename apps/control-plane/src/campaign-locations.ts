@@ -11,6 +11,12 @@ import { inspectProjectLocation } from "./project-location-inspection.js";
  * runner's protocol version changes only by registering again, so an update is a reconnect (#4319). */
 const RETRIED_ON_RECONNECT: ReadonlySet<string> = new Set(["runner_offline", "read_failed", "runner_too_old", "runner_below_gates"]);
 
+/** Custom retries only what #4319 excludes there, and that exclusion's later transient failures: one
+ * that was offline when the campaign was created stays out, as it always has. */
+function retriedOnReconnect(item: CampaignExcludedLocation, custom: boolean): boolean {
+  return custom ? item.failure === "runner_below_gates" || item.rejoinsOnReconnect === true : RETRIED_ON_RECONNECT.has(item.failure);
+}
+
 type Outcome = { ok: true; data: { joined: boolean; revision: number } } | { ok: false; status: number; error: string };
 
 /** A campaign's boundary follows its Project after launch (#4117). Every widening has one of three
@@ -68,9 +74,7 @@ export class CampaignLocations {
     return this.forRoots([...db.campaignRepositoryRoots({ runnerId }), ...db.customCampaignRepositoryRoots(runnerId)], (root) => {
       const custom = root.orchestratorPolicy?.control?.mode !== "full_control";
       const retry = (root.orchestratorPolicy?.excludedLocations ?? [])
-        // Custom retries only what #4319 excludes there, and that exclusion's later transient failures:
-        // one that was offline when the campaign was created stays out, as it always has.
-        .filter((item) => custom ? item.failure === "runner_below_gates" || item.rejoinsOnReconnect === true : RETRIED_ON_RECONNECT.has(item.failure))
+        .filter((item) => retriedOnReconnect(item, custom))
         .map((item) => db.getProjectLocation(item.locationId))
         .filter((location): location is ProjectLocationView => Boolean(location && location.runnerId === runnerId &&
           location.projectId === root.projectId && location.availability !== "runner_removed" &&
@@ -158,8 +162,9 @@ export class CampaignLocations {
         !this.inBoundary(fresh, location.id) &&
         (!custom || this.customSurveyLists(fresh, now)) &&
         (source !== "owner_added" || was.addedBy === owner) &&
+        // Under the campaign's mode as it is now: one that changed meanwhile applies its own rule.
         (source !== "runner_reconnected" || fresh.orchestratorPolicy?.excludedLocations?.some((item) =>
-          item.locationId === location.id && RETRIED_ON_RECONNECT.has(item.failure))) &&
+          item.locationId === location.id && retriedOnReconnect(item, custom))) &&
         (source !== "owner_included" || Boolean(includer && includer.userId === owner &&
           db.canAccessWorkspace(includer, now.runnerId, now.workspaceId))));
       if (!eligible) { changed = true; return; }
