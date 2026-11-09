@@ -1,5 +1,5 @@
 import { boundedIssueNumbers, campaignIssueLimitsRequirement, campaignIssueScopeChangesRequirement, campaignRepositoryLocation,
-  campaignScopeForRepository, campaignScopeIssues, canonicalCampaignIssues,
+  campaignScopeChangeGroups, campaignScopeForRepository, campaignScopeIssues, canonicalCampaignIssues,
   gitlabCampaignIssuesRequirement, normalizeCampaignIssueScopeSnapshot, RUNNER_CAPABILITY_MIN_PROTOCOL, runnerCapabilityRequirementError, runnerSupportsProtocol,
   type CampaignIssueRef, type CampaignIssueScope, type CampaignIssueScopeRepositoryView, type RunnerCapabilityRequirementDetails,
   type CampaignIssueScopeRequest, type CampaignIssueScopeSnapshot, type CampaignIssueScopeView, type CampaignScopeProposalView, type SessionView,
@@ -224,6 +224,33 @@ export function scopeSnapshot(db: ControlPlaneDb, root: SessionView, repository:
  * request lists, and its approval revokes, every one (#3915). */
 export function everyOutstandingScopeDecision(db: ControlPlaneDb, rootId: string): string[] {
   return db.authorityBoundWorkflowDecisionsForController(rootId).filter((d) => d.category !== "campaign_issue_scope").map((d) => d.occurrenceId).sort();
+}
+
+/** Whether a decision filed or settled since a person's Full Control scope request bears on its
+ * change, which makes the request stale (#4332). The approval revokes whatever is outstanding when
+ * it happens and records exactly that, so the list only gates approval where the change is at stake:
+ * - A child's decision never decides here. A child the ledger can't prove unrelated is in the
+ *   request's `activeChildren`, whose digest covers each of its unconsumed decisions, so any change
+ *   to it already moves the digest. Any other child is proven unrelated to every changed issue.
+ * - A closure names its issue, so it bears on the change only when that issue is one the change adds
+ *   or removes.
+ * - A follow-up publication or admission holds a slot the approval counts again when it is decided.
+ * - Nothing proves any other decision of the root unrelated, so it still bears on the change.
+ * A listed decision that can no longer be read proves nothing, and bears on it too. */
+export function outstandingDecisionsBearOnScopeRequest(db: ControlPlaneDb, rootId: string, request: CampaignIssueScopeSnapshot): boolean {
+  const listed = new Set(request.affectedDecisions);
+  const outstanding = new Set(everyOutstandingScopeDecision(db, rootId));
+  const groups = campaignScopeChangeGroups(request);
+  return [...listed, ...outstanding].filter((id) => listed.has(id) !== outstanding.has(id)).some((id) => {
+    const decision = db.workflowDecisionByOccurrence(id);
+    if (!decision) return true;
+    const snapshot = decision.resourceSnapshot;
+    if (snapshot.category === "issue_closure") {
+      const group = groups.find((candidate) => candidate.repository.toLowerCase() === snapshot.repository.toLowerCase());
+      return Boolean(group && (group.additions.includes(snapshot.issue) || group.removals.includes(snapshot.issue)));
+    }
+    return decision.sessionId === rootId && snapshot.category !== "follow_up_issue_publication" && snapshot.category !== "campaign_follow_up_admission";
+  });
 }
 
 /** Whether a scope change that adds or removes `changed` invalidates an outstanding decision (#3915).

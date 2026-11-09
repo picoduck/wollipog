@@ -335,6 +335,7 @@ test("scope approval request shows exact changes and affected assignments",async
   await expect(page.getByText("team/repo#124",{exact:true})).toBeVisible();
   await expect(page.getByText("closure-member-124",{exact:true})).toBeVisible();
   await expect(page.getByText(/Issue closure still requires its own human approval/)).toBeVisible();
+  await expect(page.getByText(/Under Full Control, approving revokes every decision outstanding at that moment, including any filed after this request/)).toBeVisible();
 });
 
 for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "phone", width: 390, height: 844 }]) {

@@ -150,6 +150,25 @@ occurrence, under the same policy revision; exactly one revision bump since; and
 boundary still current and still giving the Orchestrator the merge. Any later policy change, any
 other revocation, or an approval that was never armed stays terminal.
 
+That request's list of outstanding decisions is what it showed when it was made; the approval revokes
+whatever is outstanding when it happens, including decisions filed after the request, except Owner
+Questions, which are never listed or revoked. The approved decision's `scopeRevokedDecisions`, and the
+audit record consuming it (`workflowDecision.revokedDecisions`), list exactly what it revoked, whoever
+approved the change; reconciliation reads that record. So under Full Control a person's request (an
+owner request without lineage, a grant or selection review, a first-message proposal routed to the
+owner, or the owner's own Campaign Status change) stays approvable while decisions come and go (#4332).
+What still refuses it as stale, applying nothing:
+
+- a changed scope revision, boundary, or Maximum Issues limit behind a stated increase;
+- changed additions or removals, or a changed assignment of a removed issue;
+- any change to a live child the work ledger can't prove unrelated to every added and removed issue,
+  including a decision it files or settles, since `activeChildren` binds each child's unconsumed
+  decisions;
+- a closure of an added or removed issue being filed or settled;
+- any other decision of the root being filed or settled, other than a closure of another issue or a
+  follow-up publication or admission, whose slot the approval counts again: nothing proves the root's
+  own work unrelated to the change.
+
 Protocol v208 capability-gates the complete operation before any update. Every active Orchestrator
 participant must run in a Location of one of the campaign's repositories (#4118); finish or move
 incompatible participants first. A participant outside the launch repository needs a v313 runner.
@@ -418,7 +437,7 @@ Approval, instead of retyping it.
   returns that same occurrence, whatever the explanation now says.
 - Only the owner can approve it, as any human-owned scope request: an Orchestrator can neither
   resolve nor consume it, and an agent cannot supply an `ownerReview` or a larger increase itself.
-  Approval still revokes and lists every outstanding decision (#3915). If Maximum Issues moved since
+  Approval still revokes every outstanding decision (#3915) and records exactly which (#4332). If Maximum Issues moved since
   the request (any boundary change revokes it anyway), approving it is refused as stale and applies
   nothing.
 
