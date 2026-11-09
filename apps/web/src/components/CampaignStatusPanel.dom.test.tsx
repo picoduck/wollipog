@@ -1652,7 +1652,7 @@ test("a scope approval the server routed to the owner opens exactly its own requ
       .find((candidate) => candidate.querySelector("h3")?.textContent === "Waiting for You");
     assert.deepEqual([...section()!.querySelectorAll("dt")].map((term) => term.textContent), ["Scope Approval", "Scope Approval", "Scope Approval"]);
     assert.ok([...section()!.querySelectorAll("dd")].every((detail, index) => detail.textContent!.startsWith(`${summaries[index]}Proposed by the Orchestrator`)));
-    assert.equal(section()!.querySelector(`button[aria-label='Open Request: ${summaries[2]}']`), null,
+    assertNoDomNode(section()!.querySelector(`button[aria-label='Open Request: ${summaries[2]}']`),
       "a request this session doesn't list offers no way to open another one instead");
     await click(section()!.querySelector(`button[aria-label='Open Request: ${summaries[1]}']`)!);
     await settle();
