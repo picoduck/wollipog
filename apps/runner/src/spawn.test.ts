@@ -8,7 +8,7 @@ import path from "node:path";
 import net from "node:net";
 import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
-import { buildBwrapArgs, bwrapPathWritable, bwrapTemporaryEnvironment, buildCloudArgs, buildContainerArgs, buildWslAgentControlRelayArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, wslProviderPidfile, type AgentProcess } from "./spawn.js";
+import { buildBwrapArgs, bwrapPathWritable, bwrapTemporaryEnvironment, buildCloudArgs, buildContainerArgs, buildWslAgentControlRelayArgs, buildWslArgs, killTree, killTreeAndWait, killWindowsTreeAndWait, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, windowsTreeKillFailures, winQuoteArg, wslProviderPidfile, type AgentProcess, type WindowsTreeKillDeps } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { WSL_BWRAP_LAUNCHER_PATH } from "./wsl-bwrap-launcher.js";
 import { captureLiveProcess, runFixtureCleanup, terminateOriginalProcess, waitForOriginalProcessToStop, type PosixProcessIdentity } from "../test-support/posix-process.js";
@@ -30,6 +30,129 @@ const windowsJobIsolation = {
   ],
   network: "inherit" as const,
 };
+
+// The stderr strings below are copied from hosted windows-latest failures of the successor fixture.
+const TASKKILL_ROOT_GONE = "ERROR: The process with PID 1396 (child process of PID 512) could not be terminated.\r\nReason: There is no running instance of the task.\r\n";
+const TASKKILL_MEMBER_UNSUPPORTED = "ERROR: The process with PID 8744 (child process of PID 896) could not be terminated.\r\nReason: The operation attempted is not supported.\r\n";
+
+test("taskkill failure output yields its members only when every line is understood", () => {
+  assert.deepEqual(windowsTreeKillFailures(TASKKILL_ROOT_GONE), [1396]);
+  assert.deepEqual(windowsTreeKillFailures(TASKKILL_MEMBER_UNSUPPORTED), [8744]);
+  assert.deepEqual(windowsTreeKillFailures(TASKKILL_ROOT_GONE + TASKKILL_MEMBER_UNSUPPORTED), [1396, 8744]);
+  assert.equal(windowsTreeKillFailures(""), undefined, "no named member proves nothing");
+  assert.equal(windowsTreeKillFailures("Reason: Access is denied.\r\n"), undefined, "a reason without a member proves nothing");
+  assert.equal(windowsTreeKillFailures(`${TASKKILL_ROOT_GONE}ERROR: Invalid syntax.\r\n`), undefined);
+  assert.equal(windowsTreeKillFailures("FEHLER: Der Prozess mit PID 1396 konnte nicht beendet werden.\r\n"), undefined, "localized text stays a failure");
+});
+
+function windowsTreeKillFixture(result: { code: number; stderr: string } | null, running: Set<number>, settleMs = 150) {
+  const child = new EventEmitter() as unknown as AgentProcess;
+  (child as { pid?: number }).pid = 1396;
+  const taskkilled: number[] = [];
+  const deps: WindowsTreeKillDeps = {
+    taskkill(pid, done) {
+      taskkilled.push(pid);
+      setImmediate(() => done(
+        result ? Object.assign(new Error(`Command failed: taskkill /pid ${pid} /T /F\n${result.stderr}`), { code: result.code }) : null,
+        result?.stderr ?? "",
+      ));
+    },
+    isRunning: (pid) => running.has(pid),
+    settleMs,
+  };
+  return { child, deps, taskkilled };
+}
+
+/** Settles to the kill's result, or "pending" if it has not resolved after `ms`. */
+async function killResultWithin(kill: Promise<boolean>, ms: number): Promise<boolean | "pending"> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([kill, new Promise<"pending">((resolve) => { timer = setTimeout(() => resolve("pending"), ms); })]);
+  } finally { clearTimeout(timer); }
+}
+
+test("Windows tree kill still waits for close after a clean taskkill and treats 128 as gone", async () => {
+  const clean = windowsTreeKillFixture(null, new Set());
+  const cleanKill = killWindowsTreeAndWait(clean.child, clean.deps);
+  assert.equal(await killResultWithin(cleanKill, 50), "pending", "a clean taskkill is not proof until the root closes");
+  clean.child.emit("close", 1, null);
+  assert.equal(await cleanKill, true);
+  assert.deepEqual(clean.taskkilled, [1396]);
+
+  const gone = windowsTreeKillFixture({ code: 128, stderr: 'ERROR: The process "1396" not found.\r\n' }, new Set());
+  assert.equal(await killWindowsTreeAndWait(gone.child, gone.deps), true);
+});
+
+test("Windows tree kill proves a root taskkill found already gone once it closes", async () => {
+  const { child, deps } = windowsTreeKillFixture({ code: 1, stderr: TASKKILL_ROOT_GONE }, new Set());
+  const kill = killWindowsTreeAndWait(child, deps);
+  assert.equal(await killResultWithin(kill, 50), "pending", "a nonzero taskkill does not end the wait");
+  child.emit("close", 1, null);
+  assert.equal(await kill, true);
+});
+
+test("Windows tree kill waits for a named member to finish exiting", async () => {
+  const running = new Set([8744]);
+  const { child, deps } = windowsTreeKillFixture({ code: 1, stderr: TASKKILL_MEMBER_UNSUPPORTED }, running, 2_000);
+  const kill = killWindowsTreeAndWait(child, deps);
+  child.emit("close", 1, null);
+  assert.equal(await killResultWithin(kill, 80), "pending", "a closed root does not prove a named member gone");
+  running.delete(8744);
+  assert.equal(await kill, true);
+});
+
+test("Windows tree kill fails when a named member outlives the settling window", async () => {
+  const { child, deps } = windowsTreeKillFixture({ code: 1, stderr: TASKKILL_MEMBER_UNSUPPORTED }, new Set([8744]));
+  const kill = killWindowsTreeAndWait(child, deps);
+  child.emit("close", 1, null);
+  assert.equal(await kill, false);
+});
+
+test("Windows tree kill fails, without hanging, when the root never closes", async () => {
+  const { child, deps } = windowsTreeKillFixture({ code: 1, stderr: TASKKILL_MEMBER_UNSUPPORTED }, new Set());
+  assert.equal(await killWindowsTreeAndWait(child, deps), false);
+});
+
+test("Windows tree kill fails at once on taskkill output it does not understand", async () => {
+  const { child, deps } = windowsTreeKillFixture({ code: 1, stderr: "ERROR: Access denied.\r\n" }, new Set());
+  assert.equal(await killResultWithin(killWindowsTreeAndWait(child, deps), 50), false);
+});
+
+// taskkill lists the tree and only then terminates each member, so a member that exits in between
+// makes it exit nonzero about a process that is no longer running. Sweep the moment the tree exits
+// across taskkill's own runtime, since that window can't be aimed at directly. Without the settling
+// wait this failed on hosted windows-latest at 10ms, with "The operation attempted is not supported".
+test("Windows tree kill proves a tree that exits while taskkill is working", {
+  skip: process.platform !== "win32",
+  timeout: 180_000,
+}, async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "wollipog-windows-tree-kill-"));
+  const root = path.join(dir, "root.cjs");
+  writeFileSync(root, `
+    const { spawn } = require("node:child_process");
+    const worker = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    worker.once("spawn", () => {
+      console.log("READY");
+      setTimeout(() => { worker.kill(); process.exit(7); }, Number(process.argv[2]));
+    });
+  `);
+  const unproven: number[] = [];
+  try {
+    for (let exitAfterMs = 0; exitAfterMs < 80; exitAfterMs += 2) {
+      const child = spawnAgent({ command: process.execPath, args: [root, String(exitAfterMs)], cwd: dir, windowsShell: false });
+      child.stdin.end();
+      child.stdout.setEncoding("utf8");
+      await new Promise<void>((resolve, reject) => {
+        child.once("error", reject);
+        child.stdout.on("data", (text: string) => { if (text.includes("READY")) resolve(); });
+      });
+      if (!await killTreeAndWait(child)) unproven.push(exitAfterMs);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+  assert.deepEqual(unproven, [], "every terminated tree is proven gone");
+});
 
 test("Windows Job launcher is materialized, caches its bridge, and clears both specs", () => {
   assert.equal(materializeWindowsJobLauncher(windowsJobTestCacheRoot), windowsJobLauncherPath);
