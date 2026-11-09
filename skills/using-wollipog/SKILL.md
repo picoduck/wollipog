@@ -303,7 +303,9 @@ forge itself: an earlier push of a pull request that later moved on and merged i
 any local commit outside its history is kept. An unchanged recorded branch may instead prove its stable head is
 contained by the current remote-tracking default branch. Discard refuses attached, dirty, other
 upstream-less, or unpushed trees. Push a worktree branch with upstream tracking, for example
-`git push -u origin HEAD:<branch>`, so the tree stays retirable without forge recovery.
+`git push -u origin HEAD:<branch>`, so the tree stays retirable without forge recovery. In an isolated
+session Git cannot record the upstream (see Git in an Isolated Session), so retirement relies on the
+forge-verified head above.
 
 Child creation may select a supported model and reasoning effort in the same request. Explicit
 values apply before the initial prompt and override saved harness defaults; read the effective pair
@@ -711,6 +713,28 @@ file does not approve evidence or a merge. External evidence URLs and review rul
 Attach the exact completed capture you intend to cite. Re-attaching an unchanged identical file
 returns the existing artifact; a changed file needs new metadata and any applicable new review.
 Keep files within the authorized task scope and respect privacy, retention, and approval policies.
+
+## Git in an Isolated Session
+
+On a native Linux managed worktree, Git can write this worktree, its admin directory and the shared
+objects, refs and logs, but not the repository's shared `config`, `packed-refs` or `rr-cache`. Use
+ordinary Git, with these exceptions:
+
+- **Pushing:** `git push -u` lands the push and exits 0, but prints `could not lock config file` and
+  records no upstream. Prefer `git push origin HEAD:refs/heads/<branch>`.
+- **Upstream and config:** `git branch --set-upstream-to` and `git config` writes fail. There is no
+  way to set them from inside the session.
+- **Branches:** do not leave a selected worktree on another branch. `git switch` works, but the next
+  turn is held for worktree recovery until the branch is restored. For new work, use
+  `create_worktree` and end the turn.
+- **A worktree created this turn:** it cannot be committed in until the session relaunches there.
+  Follow `isolation.nextStep`; do not work around it.
+- **Fetching:** `git fetch origin main` moves `origin/main` as usual. `git fetch --prune` cannot
+  delete refs.
+- **Rerere** is turned off in the session, because its shared cache stays read-only. Conflicts are
+  resolved by hand each time.
+- **Stalled SSH:** this is the network, not the sandbox. Use HTTPS, for example
+  `git -c credential.helper= -c 'credential.helper=!gh auth git-credential' fetch https://github.com/<owner>/<repo>.git <ref>`.
 
 ## Deleting Refs From an Isolated Session
 

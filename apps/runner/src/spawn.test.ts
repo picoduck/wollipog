@@ -596,6 +596,20 @@ test("buildBwrapArgs pins a managed worktree root below a read-only parent", () 
   assert.ok(parent > args.indexOf("--tmpfs") && requested > parent && child > requested && git > child && registration > git);
 });
 
+test("buildBwrapArgs turns rerere off only in a protected worktree's boundary, and adds no mount for it", () => {
+  const base = { backend: "bwrap" as const, command: "/usr/bin/bwrap", args: [] as string[], network: "inherit" as const };
+  const setenv = (args: string[]) => args.flatMap((value, index) => value === "--setenv" ? [[args[index + 1], args[index + 2]]] : []);
+  const mounts = (args: string[]) => args.filter((value) => /^--(?:ro-)?bind$/u.test(value)).length;
+  const worktree = { parent: "/work/trees", path: "/work/trees/s1", gitWritableRoots: ["/repo/.git/objects"] };
+  const protectedArgs = buildBwrapArgs({ command: "/bin/sh", args: [], cwd: worktree.path }, { ...base, protectedWorktree: worktree });
+  assert.deepEqual(setenv(protectedArgs), [["GIT_CONFIG_PARAMETERS", "'rerere.enabled=false'"]]);
+  assert.ok(protectedArgs.indexOf("--setenv") < protectedArgs.indexOf("--"), "it is an option of bwrap, not of the command");
+  assert.equal(protectedArgs.some((value) => /rr-cache|packed-refs/u.test(value)), false, "nothing of rerere's is bound");
+  assert.equal(mounts(protectedArgs), 4, "the root, the parent, the worktree and the one Git root");
+  assert.deepEqual(setenv(buildBwrapArgs({ command: "/bin/sh", args: [], cwd: "/work/other" }, base)), [],
+    "a launch outside a protected worktree keeps its repository's configuration");
+});
+
 test("buildBwrapArgs rejects a different cwd under a protected worktree launch", () => {
   assert.throws(() => buildBwrapArgs({ command: "/bin/sh", args: [], cwd: "/repo/.git/hooks" }, {
     backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "inherit",

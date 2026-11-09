@@ -372,6 +372,20 @@ export function buildCloudArgs(
   ];
 }
 
+/**
+ * Git configuration every process in a protected worktree's boundary runs with, in the form `git -c`
+ * hands its children. Rerere keeps its shared resolutions in the common `rr-cache`, which stays
+ * read-only here because another session's or a person's merge would replay anything written to it.
+ * With rerere on, a conflict there makes `git commit` crash after the commit lands and leaves
+ * `MERGE_RR.lock`, so every later commit exits non-zero. This turns off a feature the boundary already
+ * denies, and makes nothing writable.
+ *
+ * This variable rather than `GIT_CONFIG_COUNT` and `GIT_CONFIG_KEY_0`: a provider that filters
+ * environment names containing `KEY` would keep the count and drop the key, and Git then fails every
+ * command. Filtering this one only restores the behavior above. It replaces any inherited value.
+ */
+export const PROTECTED_WORKTREE_GIT_CONFIG = "'rerere.enabled=false'";
+
 export function buildBwrapArgs(opts: Pick<SpawnAgentOptions, "command" | "args" | "cwd">, isolation: BwrapSpawnIsolation): string[] {
   const bridge = isolation.wslAgentControl;
   const socketDir = bridge?.socketPath ? posix.dirname(bridge.socketPath) : undefined;
@@ -434,6 +448,7 @@ export function buildBwrapArgs(opts: Pick<SpawnAgentOptions, "command" | "args" 
         "--remount-ro", isolation.guardStateMask.directory,
       ]
       : []),
+    ...(isolation.protectedWorktree ? ["--setenv", "GIT_CONFIG_PARAMETERS", PROTECTED_WORKTREE_GIT_CONFIG] : []),
     "--chdir", opts.cwd,
     "--",
     opts.command,
