@@ -92,6 +92,9 @@ export interface ProviderAccountSelectionRecord {
   /** The runner rechecks eligibility before a new binding. Set only for a policy that chose among
    * accounts: a named account or default was chosen by a person and keeps its recovery path. */
   revalidateAtLaunch?: boolean;
+  /** Set when this launch names a model and a policy chose the account. No reliable per-account model
+   * source exists, so nothing checked that the account's plan offers that model. Never score on it. */
+  modelCompatibility?: "unknown";
 }
 
 export interface ProviderAccountSelectionCandidate {
@@ -134,6 +137,31 @@ export interface ProviderAccountSelectionResult {
 
 export type ProviderAccountPolicyEnforcement = "enforced" | "machine_offline" | "runner_update_required";
 
+/** How an agent names an account. Account ids are derived from account labels, which are personal
+ * data, so agent tools carry this instead: an opaque reference the control plane computes from the
+ * Machine and account, valid in `providerAccountId`. `:` is not valid in an account id, so a reference
+ * and an id can never be mistaken for each other, whatever a runner's configuration names an account. */
+export const PROVIDER_ACCOUNT_REF_PREFIX = "acct:";
+
+export function isProviderAccountRef(value: string): boolean {
+  return /^acct:[0-9a-f]{16}$/u.test(value);
+}
+
+/** One account an agent could name for a launch of this agent. Reason codes and references only. */
+export interface ProviderAccountChoice {
+  accountRef: string;
+  /** 1-based rank in the Priority Order; null for an account that isn't ranked. */
+  position: number | null;
+  /** Set on the account a launch naming nothing is expected to use. */
+  expected?: boolean;
+  /** Whether a launch from an agent may name this account. See `providerAccountNamedRefusal`. */
+  canName: boolean;
+  /** Why it can't be named, or the limit an explicit choice would override. */
+  reason?: ProviderAccountSkipReason;
+  retryAt?: number;
+  limitLabel?: string;
+}
+
 /** `GET /api/runners/:id/provider-account-selection`: what a launch without a chosen account would
  * do now, resolved by the same code as the launch itself. A preview promises nothing: every launch
  * resolves again. */
@@ -141,6 +169,10 @@ export interface ProviderAccountSelectionPreview extends ProviderAccountSelectio
   /** Whether the Machine can honor the saved mode right now. */
   enforcement: ProviderAccountPolicyEnforcement;
   generatedAt: number;
+  /** Protocol v337: every account of this provider an agent could name instead. */
+  choices?: ProviderAccountChoice[];
+  /** Protocol v337: as on the record, when the preview was asked about a model. */
+  modelCompatibility?: "unknown";
 }
 
 export type ProviderAccountChoiceAction = "choose_account" | "sign_in" | "wait" | "review_provider_accounts" | "update_runner";
@@ -257,6 +289,26 @@ export function providerAccountLaunchIneligibility(
 ): ProviderAccountSkipReason | null {
   if (!account) return "missing";
   return providerAccountIneligibility(account, { ...input, positiveEvidenceOnly: true })?.reason ?? null;
+}
+
+/** A limit a named account overrides: choosing it knowingly is what an explicit choice is for, and the
+ * provider enforces the limit either way. */
+const PROVIDER_ACCOUNT_NAMED_OVERRIDES: ReadonlySet<ProviderAccountSkipReason> = new Set(["cooldown", "usage_exhausted", "spend_limit_reached"]);
+
+/** Why an agent may not name this account, or null when it may. A person who names an account keeps
+ * the sign-in recovery and billing decision for themselves. An agent can do neither: it can't sign in,
+ * and it must never decide to spend API credits. Only known facts refuse, as at the runner's recheck. */
+export function providerAccountNamedRefusal(
+  account: ProviderAccountDefinition,
+  input: Omit<ProviderAccountEligibilityInput, "positiveEvidenceOnly">,
+): ProviderAccountSkipReason | null {
+  const refused = providerAccountIneligibility(account, { ...input, positiveEvidenceOnly: true })?.reason ?? null;
+  return refused && !PROVIDER_ACCOUNT_NAMED_OVERRIDES.has(refused) ? refused : null;
+}
+
+/** The account refusal for a launch from an agent. Names no account. */
+export function providerAccountNamedRefusalSentence(reason: ProviderAccountSkipReason): string {
+  return `The chosen provider account ${PROVIDER_ACCOUNT_SKIP_TEXT[reason]}, so an agent can't start a session with it. Choose another account, or ask a person to review this machine's Provider Accounts.`;
 }
 
 export interface ProviderAccountSelectionInput {
@@ -390,6 +442,7 @@ export function resolveProviderAccountSelection(input: ProviderAccountSelectionI
 /** What the launch stores: the reason, never which accounts were passed over. */
 export function providerAccountSelectionRecord(
   result: Pick<ProviderAccountSelectionResult, "source" | "mode" | "policyRevision" | "candidates">,
+  options: { modelNamed?: boolean } = {},
 ): ProviderAccountSelectionRecord {
   const skipped: Partial<Record<ProviderAccountSkipReason, number>> = {};
   // Only accounts ranked ahead of the choice were skipped. Those after it were never needed, and an
@@ -405,6 +458,7 @@ export function providerAccountSelectionRecord(
     policyRevision: result.policyRevision,
     ...(Object.keys(skipped).length ? { skipped } : {}),
     ...(result.source === "priority" ? { revalidateAtLaunch: true } : {}),
+    ...(result.source === "priority" && options.modelNamed ? { modelCompatibility: "unknown" as const } : {}),
   };
 }
 
@@ -429,6 +483,10 @@ export function providerAccountSkipSummary(skipped: Partial<Record<ProviderAccou
   return joinFragments(entries.map(([reason, count]) =>
     count === 1 ? `one ${PROVIDER_ACCOUNT_SKIP_TEXT[reason]}` : `${count} accounts ${PROVIDER_ACCOUNT_SKIP_TEXT[reason].replace(/^isn't /u, "aren't ").replace(/^is /u, "are ").replace(/^has /u, "have ").replace(/^needs /u, "need ")}`));
 }
+
+/** The whole statement of the limit, for a launch that names a model: nothing checked it. */
+export const PROVIDER_ACCOUNT_MODEL_UNKNOWN_SENTENCE =
+  "Whether this account's plan offers the chosen model isn't known. If the provider refuses it, choose another account for this session.";
 
 /** Why this account, in plain language. Safe for any viewer of the session: it names no account. */
 export function providerAccountSelectionSentence(record: Pick<ProviderAccountSelectionRecord, "source" | "skipped">): string {

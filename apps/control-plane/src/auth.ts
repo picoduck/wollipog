@@ -110,6 +110,8 @@ const AGENT_CONTROL_API_ROUTES = new Set([
   "POST /api/sessions/:id/location-switch-requests/:occurrenceId/execute",
   "GET /api/compatibility",
   "GET /api/runners",
+  // What a launch would use and which accounts an agent may name (#4353); account references only.
+  "GET /api/runners/:id/provider-account-selection",
   "GET /api/sessions",
   "GET /api/sessions/:id",
   "GET /api/sessions/:id/events",
@@ -181,7 +183,8 @@ const ORCHESTRATOR_API_ROUTES = new Set([
   "GET /api/sessions/:id/automation-proposals/:occurrenceId",
   "POST /api/sessions/:id/automation-proposals/:occurrenceId/execute",
   "POST /api/sessions/:id/result/handoff",
-  "GET /api/compatibility", "GET /api/runners", "GET /api/sessions", "GET /api/sessions/:id",
+  "GET /api/compatibility", "GET /api/runners", "GET /api/runners/:id/provider-account-selection",
+  "GET /api/sessions", "GET /api/sessions/:id",
   "GET /api/sessions/:id/events", "GET /api/governance/policies",
   "GET /api/sessions/:id/campaign/issue-scope",
   "POST /api/sessions/:id/campaign/issue-scope/proposals",

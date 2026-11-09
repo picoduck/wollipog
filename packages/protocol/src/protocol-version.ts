@@ -1368,6 +1368,10 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   335,
   // v336 slot
   // v337 slot
+  // 337: Agent tools and the CLI can name a provider account (#4353). The control plane resolves an
+  //      opaque account reference and refuses an account an agent can't use. A runner's tools refuse
+  //      a choice below v337, where the reference would not resolve.
+  337,
   // v338 slot
   // v339 slot
   // v340 slot

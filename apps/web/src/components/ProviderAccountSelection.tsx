@@ -9,6 +9,7 @@ import {
   type ProviderAccountSkipReason,
   type RunnerView,
 } from "@wollipog/protocol";
+import type { ProviderAccountSelectionTarget } from "../api.js";
 import { useApi } from "../api-context.js";
 import { subscriptionResetLabel } from "../account-unavailable-reasons.js";
 import { AccountIdentifier } from "./AccountIdentifier.js";
@@ -61,11 +62,26 @@ export function providerAccountSelectionRefreshKey(runner: RunnerView | undefine
 
 const REFRESH_MS = 60_000;
 
+/** Where a launch would go, in the terms its request uses, so the server predicts that launch's own
+ * project. A project is what was chosen, No Project is a choice too, and with neither (a server
+ * without projects) the server infers it from the workspace, as it will at launch. */
+export function providerAccountPreviewPlacement(input: {
+  projectsSupported: boolean;
+  projectId: string | null | undefined;
+  /** Absent for a browsed path, which never joins a project by inference. */
+  workspaceId: string | undefined;
+}): Pick<ProviderAccountSelectionTarget, "projectId" | "workspaceId" | "noProject"> {
+  return {
+    ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+    ...(input.projectId ? { projectId: input.projectId } : input.projectsSupported ? { noProject: "1" as const } : {}),
+  };
+}
+
 /** Read the preview for one target, refreshing as usage and cooldowns move. A reading for another
  * target is never returned, so a dialog can't show the previous agent's account while it loads. */
 export function useProviderAccountSelection(
   runnerId: string | undefined,
-  target: { agentId?: string; provider?: "claude" | "codex"; projectId?: string } | null,
+  target: ProviderAccountSelectionTarget | null,
   refreshKey: string,
 ): ProviderAccountSelectionPreview | null {
   const api = useApi();

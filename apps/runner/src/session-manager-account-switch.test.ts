@@ -600,6 +600,81 @@ test("account-switch failure reasons are bounded and control-free", async () => 
   }
 });
 
+test("a model refused on a policy-chosen account reaches the caller and moves nothing (#4353)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-account-model-refusal-"));
+  const messages: RunnerToControlPlane[] = [];
+  const launches: string[] = [];
+  const refusal = "The model isn't available on your plan.";
+  let prompts = 0;
+  let manager: SessionManager | undefined;
+  try {
+    const made = makeManager(root, (_driver: unknown, launch: { env: Record<string, string> }, callbacks: {
+      onEvent?: (event: { kind: string; message?: string }) => void;
+    }) => {
+      launches.push(launch.env.CODEX_HOME!);
+      return {
+        pid: launches.length,
+        initialize: async () => {},
+        newSession: async () => {},
+        prompt: async () => {
+          prompts += 1;
+          callbacks.onEvent?.({ kind: "error", message: refusal });
+          return "refusal" as const;
+        },
+        lastTurnError: () => refusal,
+        // How both drivers classify a 400-class refusal today; no fixture proves a plan's exact wording.
+        lastTurnFailureCategory: () => "invalid_request" as const,
+        cancel: () => {},
+        dispose: () => {},
+        setConfig: async () => {},
+        resolvePermission: () => false,
+        agentSessionId: () => "codex-thread",
+      };
+    }, messages);
+    manager = made.manager;
+    const now = Date.now();
+    // Another account is healthy and automatic switching is on, so only the refusal's kind keeps it put.
+    const usage = (id: string): SubscriptionUsageSnapshot => ({
+      sourceId: id, runnerId: "runner", agentId: "codex", provider: "codex",
+      providerAccountId: id, state: "available", fetchedAt: now,
+      buckets: [{ id: "five_hour", label: "Five Hour", remainingPercent: 70, usedPercent: 30, status: "available", resetsAt: now + 60_000 }],
+    });
+    const internals = manager as unknown as {
+      providerAccounts: () => ProviderAccountDefinition[];
+      subscriptionUsageInventory: () => SubscriptionUsageSnapshot[];
+    };
+    internals.providerAccounts = () => [
+      { id: "work", label: "Work", provider: "codex", authStatus: "authenticated", billing: "subscription" },
+      { id: "backup", label: "Backup", provider: "codex", authStatus: "authenticated", billing: "subscription" },
+    ];
+    internals.subscriptionUsageInventory = () => [usage("work"), usage("backup")];
+    assert.equal(manager.configureAutomaticAccountSwitch({ enabled: true, revision: 1 }), true);
+    manager.setAutomaticAccountSwitchAuthorityReady(true);
+    const spec: SessionLaunchSpec = { ...launchSpec(root, "codex-app-server", "work"), config: { model: "plan-refused-model" },
+      providerAccountSelection: { schemaVersion: 1, source: "priority", mode: "priority", policyRevision: 1, revalidateAtLaunch: true, modelCompatibility: "unknown" } };
+    assert.equal(await manager.start(spec), true);
+    made.store.patchMeta(spec.sessionId, { agentSessionId: "codex-thread" });
+
+    const idle = () => messages.filter((message) => message.type === "session_status" &&
+      message.sessionId === spec.sessionId && message.status === "idle").length;
+    const idleBefore = idle();
+    assert.equal(manager.prompt(spec.sessionId, "start"), true);
+    await waitFor(() => idle() > idleBefore, "the refused turn did not settle");
+    // Give anything that would retry or switch the chance to run.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.ok(JSON.stringify(messages).includes(refusal), "the provider's own refusal reaches the caller");
+    assert.equal(prompts, 1, "nothing retries the turn");
+    assert.deepEqual(launches, [accounts.work.credentialHome], "nothing relaunches on another account");
+    assert.equal(made.store.readMeta(spec.sessionId)?.providerAccountId, "work", "the session keeps its account");
+    assert.equal(made.store.readMeta(spec.sessionId)?.providerAccountAutomaticallySelected, undefined);
+    assert.ok(!JSON.stringify(messages).includes("provider_account_switched"));
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("an exhausted structured window schedules an automatic switch only after the turn settles", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-account-switch-automatic-"));
   const messages: RunnerToControlPlane[] = [];

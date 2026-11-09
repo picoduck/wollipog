@@ -10765,6 +10765,21 @@ test("a retried staged launch keeps its account after the policy changes (#4353)
   assert.equal(conflicting.status, 409, "a different explicit account conflicts rather than moving the accepted launch");
 });
 
+test("a retried launch that named an account by reference keeps it (#4353)", () => {
+  const { db, svc, request } = priorityHarness();
+  const ref = svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID }).data!.choices!.find((choice) => choice.position === 2)!.accountRef;
+  const stage = { sessionId: "s_staged_named", stage() {}, activate() {} };
+  const named = { ...request, providerAccountId: ref };
+  const first = svc.createSession(named, stage);
+  assert.ok(first.ok && first.data, first.error);
+  assert.equal(first.data.providerAccountId, "second");
+  assert.ok(db.setMachineProviderAccountPolicy(RUNNER_ID, "claude",
+    { mode: "priority", fixedAccountId: null, priorityAccountIds: ["third"] }, 1, Date.now()).ok);
+  const retried = svc.createSession(named, stage);
+  assert.ok(retried.ok && retried.data, retried.error);
+  assert.deepEqual([retried.data.id, retried.data.providerAccountId], [first.data.id, "second"], "the policy changing doesn't move it");
+});
+
 test("a restart keeps the session's account whatever the policy says now (#4353)", async () => {
   const { db, hub, svc, request } = priorityHarness();
   const created = svc.createSession(request);
@@ -10944,6 +10959,156 @@ test("Priority Order won't move a project's account-held memory between accounts
   assert.equal(svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID, projectId: project.id }).data?.refusal, "account_memory");
   const explicit = svc.createSession({ ...inProject, providerAccountId: "second" });
   assert.ok(explicit.ok, explicit.error);
+});
+
+test("an agent names an account by reference, and only one it could actually use (#4353)", () => {
+  const { db, hub, svc, request, setAccounts, meta } = priorityHarness();
+  const owner = db.localIdentityContext();
+  const parent = svc.createSession(request, undefined, { organizationId: owner.organizationId, owner: { kind: "user", userId: owner.userId } });
+  assert.ok(parent.ok && parent.data, parent.error);
+  db.updateSessionStatus(parent.data.id, "running", Date.now());
+  const asChild = (providerAccountId?: string) => svc.createSession({ ...request, ...(providerAccountId ? { providerAccountId } : {}) },
+    undefined, db.sessionScope(parent.data!.id) ?? undefined, false, false, false, { parentSessionId: parent.data!.id });
+  const choices = () => svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID, parentSessionId: parent.data!.id }).data!.choices!;
+  const refOf = (position: number) => choices().find((choice) => choice.position === position)!.accountRef;
+
+  // The listing tells accounts apart without saying whose they are.
+  const listing = JSON.stringify(choices());
+  for (const personal of ["first-person", "second", "third", "example.com", "codex"]) assert.ok(!listing.includes(personal), listing);
+  assert.deepEqual(choices().map((choice) => [choice.position, choice.expected ?? false, choice.canName]), [[1, true, true], [2, false, true], [3, false, true]]);
+
+  const named = asChild(refOf(2));
+  assert.ok(named.ok && named.data, named.error);
+  assert.equal(named.data.providerAccountId, "second", "an explicit choice overrides the policy");
+  assert.equal(named.data.providerAccountSelection?.source, "explicit");
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.providerAccountId, "second", "the runner receives the real account");
+
+  assert.match(asChild("acct:0000000000000000").error ?? "", /not available for the selected agent/u);
+  // Another provider's account on the same Machine is no choice for this agent.
+  const codexRef = svc.providerAccountSelectionPreview(RUNNER_ID, { provider: "codex" }).data!.choices![0]!.accountRef;
+  assert.match(asChild(codexRef).error ?? "", /not available for the selected agent/u);
+
+  const set = (id: string, change: Partial<ProviderAccountDefinition>) => setAccounts(meta.providerAccounts!.map((account) =>
+    account.id === id ? { ...account, ...change } : account));
+  // An agent can't sign in, and it never decides to spend API credits.
+  set("second", { authStatus: "unauthenticated" });
+  const ref = refOf(2);
+  assert.equal(choices().find((choice) => choice.accountRef === ref)?.canName, false);
+  assert.equal(choices().find((choice) => choice.accountRef === ref)?.reason, "signed_out");
+  const signedOut = asChild(ref);
+  assert.equal(signedOut.status, 409);
+  assert.match(signedOut.error ?? "", /needs sign-in, so an agent can't start a session with it/u);
+  set("second", { billing: "api" });
+  assert.match(asChild(ref).error ?? "", /would spend API credits/u);
+  // A person keeps both decisions.
+  assert.ok(svc.createSession({ ...request, providerAccountId: "second" }).ok, "a person's explicit choice is unchanged");
+
+  // A usage limit is what an explicit choice overrides: it stays nameable and says what it overrides.
+  set("second", { billing: "subscription" });
+  set("third", { selectionCooldownUntil: Date.now() + 60_000 });
+  const cooling = choices().find((choice) => choice.position === 3)!;
+  assert.deepEqual([cooling.canName, cooling.reason], [true, "cooldown"]);
+  assert.ok(asChild(cooling.accountRef).ok);
+});
+
+test("a launch and its preview follow the project a Location infers, not only a chosen one (#4353)", () => {
+  const { db, svc, request, meta } = priorityHarness();
+  // A registered workspace has one Location, so a session naming no project joins that one.
+  const location = db.findProjectLocation(RUNNER_ID, WORKSPACE_ID);
+  assert.ok(location);
+  meta.agents = meta.agents.map((agent) => agent.id === AGENT_ID ? { ...agent, version: "2.1.0" } : agent);
+  db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+
+  // On a Claude Code that keeps project memory in the account's HOME, that memory would move.
+  const inferred = svc.createSession(request);
+  assert.equal(inferred.providerAccountSelection?.refusal, "account_memory", inferred.error);
+  const preview = svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID, workspaceId: WORKSPACE_ID });
+  assert.equal(preview.data?.refusal, "account_memory", "the preview says what the launch will say");
+  const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Do it" });
+  assert.equal(run.providerAccountSelection?.refusal, "account_memory", run.error);
+
+  // No Project is a choice: nothing is inferred on either side.
+  const noProject = svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID, workspaceId: WORKSPACE_ID, projectId: null });
+  assert.equal(noProject.data?.status, "selected");
+  const launched = svc.createSession({ ...request, projectId: null, projectLocationId: null });
+  assert.ok(launched.ok && launched.data, launched.error);
+  assert.equal(launched.data.providerAccountId, noProject.data?.accountId);
+  assert.equal(launched.data.projectId, null);
+
+  // With no workspace to read, as in Provider Accounts, there is no project to predict.
+  assert.equal(svc.providerAccountSelectionPreview(RUNNER_ID, { provider: "claude" }).data?.status, "selected");
+});
+
+test("only a launch naming a model under a policy is told its plan wasn't checked (#4353)", () => {
+  const { db, svc, request, meta, setAccounts } = priorityHarness();
+  meta.agents = meta.agents.map((agent) => agent.id === AGENT_ID ? { ...agent, capabilities: { ...agent.capabilities!, models: [{ id: "chosen-model", label: "Chosen" }] } } : agent);
+  db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+  setAccounts(meta.providerAccounts!);
+  const plain = svc.createSession(request);
+  assert.ok(plain.ok && plain.data, plain.error);
+  assert.equal(plain.data.providerAccountSelection?.modelCompatibility, undefined, "no model, no note");
+  assert.equal(svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID }).data?.modelCompatibility, undefined);
+
+  const named = svc.createSession({ ...request, config: { model: "chosen-model" } });
+  assert.ok(named.ok && named.data, named.error);
+  assert.equal(named.data.providerAccountSelection?.modelCompatibility, "unknown");
+  assert.equal(svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID, model: "chosen-model" }).data?.modelCompatibility, "unknown");
+
+  // A person's choice of account isn't a policy's: nothing was claimed, so there is nothing to qualify.
+  const explicit = svc.createSession({ ...request, providerAccountId: "second", config: { model: "chosen-model" } });
+  assert.ok(explicit.ok && explicit.data, explicit.error);
+  assert.equal(explicit.data.providerAccountSelection?.modelCompatibility, undefined);
+});
+
+test("a workflow's orchestrator answers for the project it joins, not its workers' (#4353)", () => {
+  const { db, svc } = priorityHarness();
+  // Project memory is fine on the workers' Claude Code; `test-orchestrator` reports no such version.
+  const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, workflowId: "builtin:build-review", task: "Build and review",
+    agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID }, orchestratorAgentId: "test-orchestrator" };
+
+  // Everyone in the organization can reach the workspace's project, so the orchestrator joins it too.
+  const shared = svc.createWorkflowRun(request);
+  assert.equal(shared.providerAccountSelection?.refusal, "account_memory", shared.error);
+
+  // A narrower project keeps the organization-scoped orchestrator out, whether named or inferred, so
+  // it has no project memory to move. Its workers still join.
+  const { project, location, scope } = makeTeamOwnedProject(db);
+  assert.equal(db.setResourceScope({ resource: "workspace", runnerId: RUNNER_ID, resourceId: WORKSPACE_ID, scope, now: 3 }), true);
+  for (const placement of [{}, { projectId: project.id, projectLocationId: location.id }]) {
+    const run = svc.createWorkflowRun({ ...request, ...placement });
+    assert.ok(run.ok && run.data, run.error);
+    const orchestrator = run.data.sessions.find((session) => session.agentId === "test-orchestrator")!;
+    assert.equal(orchestrator.projectId, null);
+    assert.equal(orchestrator.providerAccountSelection?.source, "priority");
+    for (const worker of run.data.sessions.filter((session) => session.agentId !== "test-orchestrator")) {
+      assert.equal(worker.projectId, project.id);
+    }
+  }
+});
+
+test("an account reference and a configured id can never be each other (#4353)", () => {
+  const base: ProviderAccountDefinition = { id: "work", label: "Work", provider: "claude", authStatus: "authenticated", billing: "subscription" };
+  const probe = priorityHarness({ accounts: [base], order: ["work"] });
+  const ref = probe.svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID }).data!.choices![0]!.accountRef;
+  assert.match(ref, /^acct:[0-9a-f]{16}$/u);
+  // Everything a runner's configuration admits for an id excludes the separator, so this is the closest
+  // an id can get: the same characters, which name that account and no other.
+  const lookalike = ref.replace(":", "_");
+  const { svc, request } = priorityHarness({ order: ["work"], accounts: [base, { ...base, id: lookalike, label: "Other" }] });
+  assert.equal(svc.createSession({ ...request, providerAccountId: lookalike }).data?.providerAccountId, lookalike);
+  assert.equal(svc.createSession({ ...request, providerAccountId: ref }).data?.providerAccountId, "work");
+  assert.equal(svc.createSession({ ...request, providerAccountId: "acct:not-a-digest" }).status, 400, "a malformed reference is no id either");
+});
+
+test("a launch that infers a project joins the one the shared rule names (#4353)", () => {
+  const { db, svc, request } = priorityHarness();
+  const location = db.findProjectLocation(RUNNER_ID, WORKSPACE_ID);
+  assert.ok(location);
+  const scope = db.workspaceScope(RUNNER_ID, WORKSPACE_ID) ?? db.runnerScope(RUNNER_ID)!;
+  assert.equal(db.inferredSessionProjectLocation(RUNNER_ID, WORKSPACE_ID, scope)?.id, location.id);
+  const created = svc.createSession(request);
+  assert.ok(created.ok && created.data, created.error);
+  assert.equal(created.data.projectId, location.projectId, "the rule and the session agree on a project");
 });
 
 test("a session without a chosen account never takes a profile only other control planes may use (#3240)", () => {
@@ -11695,6 +11860,29 @@ test("createSession online → 201 and sends start_session with the right launch
   // its store + stream, not appended by the control plane.
   assert.equal(hub.sessionChangedCalls.length, 1);
   assert.equal(hub.sessionEventCalls.length, 0);
+});
+
+test("an agent's named account is refused on a target that can't use it, not dropped (#4353)", () => {
+  const { db, svc } = makeHarness();
+  const owner = db.localIdentityContext();
+  const container = {
+    id: `runner:${RUNNER_ID}:container:offline-tools`, runnerId: RUNNER_ID, name: "host · Offline tools",
+    kind: "container" as const, workspaceStrategy: "worktree" as const, adapter: "container" as const,
+    boundaries: { filesystem: "container" as const, network: "deny" as const, secrets: "none" as const, billing: "none" as const },
+    environment: { id: "offline-tools", revision: 1, image: `example/agent@sha256:${"3".repeat(64)}`, setupCheckDigest: "4".repeat(64) },
+    compatibleAgentIds: [AGENT_ID], available: true,
+  };
+  const meta = runnerMeta();
+  meta.providerAccounts = [{ id: "work", label: "Work", provider: "claude", authStatus: "authenticated", billing: "subscription" }];
+  db.registerRunner({ ...meta, executionTargets: [container] }, Date.now(), PROTOCOL_VERSION);
+  const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+  const parent = svc.createSession(request, undefined, { organizationId: owner.organizationId, owner: { kind: "user", userId: owner.userId } });
+  assert.ok(parent.ok && parent.data, parent.error);
+  db.updateSessionStatus(parent.data.id, "running", Date.now());
+  const refused = svc.createSession({ ...request, executionTargetId: container.id, useWorktree: true, providerAccountId: "work" },
+    undefined, db.sessionScope(parent.data.id) ?? undefined, false, false, false, { parentSessionId: parent.data.id });
+  assert.equal(refused.status, 409);
+  assert.match(refused.error ?? "", /doesn't use this machine's provider accounts/u);
 });
 
 test("createSession selects and persists an exact compatible container environment", () => {

@@ -152,7 +152,8 @@ CI job treats that skip as a failure rather than coverage.
 wollipog session list [--archived] --json
 wollipog session get ID --json
 wollipog session events ID [--after SEQ [--event-epoch EPOCH]] [--limit COUNT] --json
-wollipog session create --runner ID --agent ID (--workspace ID | --path PATH) [--prompt TEXT] [--model MODEL] [--effort EFFORT] [--cost-budget USD] [--max-tool-calls N] [--max-child-sessions N] [--work-item CAMPAIGN_WORK_ITEM_ID] --json
+wollipog session create --runner ID --agent ID (--workspace ID | --path PATH) [--prompt TEXT] [--model MODEL] [--effort EFFORT] [--cost-budget USD] [--max-tool-calls N] [--max-child-sessions N] [--work-item CAMPAIGN_WORK_ITEM_ID] [--provider-account ACCOUNT_REF] --json
+wollipog session accounts --runner ID --agent ID [--workspace ID] [--model MODEL] --json
 wollipog session prompt ID TEXT --json
 wollipog session steering ID --json
 wollipog session steering-get ID SUBMISSION_ID --json
