@@ -4,6 +4,8 @@ import {
   agentAvailableForRunnerDefault,
   parseProviderAccountPolicyWrite,
   providerAccountChoiceRequired,
+  providerAccountChoiceRequiredForAgent,
+  providerAccountSelectionPreviewForAgent,
   providerAccountChoiceRequiredSentence,
   providerAccountIneligibility,
   providerAccountLaunchIneligibility,
@@ -196,6 +198,23 @@ test("modes this release can't enforce fail closed", () => {
   assert.ok(providerAccountChoiceRequired(oldRunner).actions.includes("update_runner"));
   const memory = resolve({ policy: priority("a"), accounts, accountSpecificMemory: true });
   assert.equal(memory.refusal, "account_memory");
+  // With nothing eligible there is no account to move memory to, so a launch and its preview both say that.
+  const nothing = resolve({ policy: priority("a"), accounts: [account("a", { authStatus: "unauthenticated" })], accountSpecificMemory: true });
+  assert.equal(nothing.refusal, "no_eligible_account");
+});
+
+test("an agent's reading of a selection carries no account id (#4353)", () => {
+  const refused = resolve({ policy: priority("a"), accounts: [account("a", { authStatus: "unauthenticated" })] });
+  const narrowed = providerAccountChoiceRequiredForAgent(providerAccountChoiceRequired(refused));
+  assert.equal("candidates" in narrowed, false);
+  assert.equal(narrowed.refusal, "no_eligible_account");
+  assert.ok(narrowed.actions.includes("choose_account"));
+  const selected = resolve({ policy: priority("a"), accounts: [account("a")] });
+  const preview = providerAccountSelectionPreviewForAgent({ ...selected, enforcement: "enforced", generatedAt: NOW,
+    choices: [{ accountRef: "acct:0000000000000000", position: 1, expected: true, canName: true }] });
+  assert.equal("candidates" in preview, false);
+  assert.equal("accountId" in preview, false);
+  assert.equal(preview.choices?.[0]?.accountRef, "acct:0000000000000000");
 });
 
 test("the runner's recheck refuses only on positive evidence", () => {
