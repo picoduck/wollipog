@@ -4,6 +4,7 @@ import { useApi } from "../api-context.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { DecisionAnswerChecklist } from "./DecisionAnswerChecklist.js";
+import { DecisionModelFacts } from "./DecisionModelFacts.js";
 import { isDecisionModelCheck } from "./decision-model.js";
 import type { CampaignRequestTarget } from "./CampaignStatusPanel.js";
 
@@ -256,6 +257,7 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
                     <dd>{DECISION_FAILURE_LABELS[decision.failureClass]}</dd>
                   </div>
                 )}
+                <DecisionModelFacts decision={decision} />
               </dl>
               {(subject || (awaiting && canClassify)) && (
                 <div className="campaign-screen-actions" role="group" aria-label={`${label} Actions`}>

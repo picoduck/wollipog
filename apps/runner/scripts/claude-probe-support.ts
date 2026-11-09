@@ -274,6 +274,8 @@ export interface RunOptions {
   traceFile?: string;
   /** Lines written to stdin before any output; stdin then stays open until `closeStdin` or exit. */
   stdin?: string[];
+  /** End stdin right after those lines, for a one-shot `-p` call that reads to end of input. */
+  closeStdinAfterWrite?: boolean;
   /** Called for each stdout JSON event; may write to stdin (control responses, steering). */
   onEvent?: (event: Record<string, unknown>, write: (line: string) => void, closeStdin: () => void) => void;
   /**
@@ -323,6 +325,7 @@ export function runClaude(options: RunOptions): Promise<ClaudeRun> {
     const closeStdin = () => { if (!child.stdin.destroyed) child.stdin.end(); };
     child.stdin.on("error", () => {});
     for (const line of options.stdin ?? []) write(line);
+    if (options.closeStdinAfterWrite) closeStdin();
     child.stdout.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       stdout += text;

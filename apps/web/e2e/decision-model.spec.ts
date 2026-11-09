@@ -45,7 +45,7 @@ for (const viewport of VIEWPORTS) {
       await page.goto(settings());
       const decision = group(page);
       await decision.getByRole("button", { name: /^Run Test/ }).click();
-      await expect(decision.getByText("Verdict: Confirm. 3.2 s, 1 attempt on Claude Code (Haiku, Low effort).")).toBeVisible();
+      await expect(decision.getByText("Verdict: Confirm. 3.2 s, 1 attempt on Claude Code (Haiku, Low effort), answered by claude-haiku-5-5.")).toBeVisible();
       await capture(page, `${viewport.label}-admin-test-verdict`, testInfo, decision);
     });
 
@@ -86,7 +86,7 @@ for (const viewport of VIEWPORTS) {
       await capture(page, `${viewport.label}-viewer-read-only`, testInfo, decision);
     });
 
-    test("Campaign Status groups each decision with its outcome, reason, model and usage", async ({ page }, testInfo) => {
+    test("Campaign Status groups each decision with its outcome, reason, target model, answering model and usage", async ({ page }, testInfo) => {
       await page.goto("/campaign-status-e2e.html?scenario=campaign&decisions=1");
       await expect(page.locator(".campaign-status-summary")).toBeVisible();
       const section = page.locator("section.campaign-status-handoffs").filter({ has: page.getByRole("heading", { name: "Decision Model", exact: true }) });
@@ -97,8 +97,18 @@ for (const viewport of VIEWPORTS) {
         await expect(items.nth(index)).toHaveCSS("border-top-style", "solid");
       }
       await expect(items.nth(0)).toContainText("Verdict: Confirm");
-      await expect(items.nth(0)).toContainText("Haiku, Low effort");
+      // #4367: each record names its target and, as its own row, the exact model that answered.
+      const fact = (index: number, term: string) => items.nth(index).locator("dl.facts > div")
+        .filter({ has: page.getByRole("term").getByText(term, { exact: true }) }).locator("dd");
+      await expect(items.nth(0).getByRole("term")).toHaveText(["Decision", "Outcome", "Target Model", "Answered By", "Usage"]);
+      await expect(fact(0, "Target Model")).toContainText("Haiku, Low effort");
+      await expect(fact(0, "Answered By")).toHaveText("claude-haiku-5-5");
       await expect(items.nth(0)).toContainText("3,466 tokens, $0.0052");
+      await expect(fact(1, "Target Model")).toContainText("Haiku, Low effort");
+      await expect(fact(1, "Answered By")).toHaveText("claude-sonnet-5-5");
+      // An attempt that never reached a provider reports no model, so the record claims none.
+      await expect(fact(2, "Target Model")).toContainText("Haiku, Low effort");
+      await expect(fact(2, "Answered By")).toHaveCount(0);
       await expect(items.nth(1)).toContainText("Uncertain: the owner decides");
       await expect(items.nth(2)).toContainText("No verdict (no connected machine can make decisions): the owner decides");
       await capture(page, `${viewport.label}-campaign-status-decisions`, testInfo, section);

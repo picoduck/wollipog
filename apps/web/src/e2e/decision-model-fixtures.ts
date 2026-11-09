@@ -29,7 +29,7 @@ export const DECIDED: DecisionOccurrenceView = {
   reason: "picoduck/example is listed in the boundary.",
   target: DECISION_TARGET,
   inputDigests: {},
-  attempts: [{ attempt: 1, latencyMs: 3_140 }],
+  attempts: [{ attempt: 1, model: "claude-haiku-5-5", latencyMs: 3_140 }],
   usage: { inputTokens: 210, outputTokens: 48, cacheReadInputTokens: 0, cacheCreationInputTokens: 3_208, costUsd: 0.0052 },
   createdAt: Date.UTC(2026, 10, 5, 7, 0),
 };
@@ -48,6 +48,8 @@ export function campaignDecisionsFixture(campaignSessionId: string): CampaignDec
         verdict: "uncertain",
         reason: "The request names two repositories and the boundary lists one.",
         humanRequestId: "wfd_owner",
+        // A record from before #4367: the provider answered on another model than the target's.
+        attempts: [{ attempt: 1, model: "claude-sonnet-5-5", latencyMs: 2_210 }],
       },
       {
         ...withoutAnswer,

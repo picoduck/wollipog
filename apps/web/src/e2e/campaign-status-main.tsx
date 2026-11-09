@@ -69,6 +69,7 @@ import "../styles.css";
 import { campaignRecoveryFixture } from "./campaign-recovery-fixtures.js";
 import {
   campaignDecisionsFixture,
+  DECISION_TARGET,
   TYPED_ADMITTED,
   TYPED_CLOSURE_MISFIT,
   TYPED_REFUSED,
@@ -1003,13 +1004,14 @@ const scopeCompatibility = scopeRequirement ? (({ error, ...versions }) =>
 const decisionUsage = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUsd: 0 };
 let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["decisions"] = params.get("screen") === "1" ? [
   { occurrenceId: "dec_keys", kind: "credential_screen", promptVersion: "credential_screen.v1", state: "decided", verdict: "discusses",
-    reason: "It asks which keyboard keys the Side Panel tools should use; nothing is handed over.", inputDigests: {}, attempts: [],
+    reason: "It asks which keyboard keys the Side Panel tools should use; nothing is handed over.", inputDigests: {},
+    target: DECISION_TARGET, attempts: [{ attempt: 1, model: "claude-haiku-5-5", latencyMs: 1_840 }],
     usage: decisionUsage, createdAt: NOW - 240_000, subject: { sessionId: "s_child", surface: "implementation_question", requestId: "keys" } },
   { occurrenceId: "dec_token", kind: "credential_screen", promptVersion: "credential_screen.v1", state: "decided", verdict: "ask",
     reason: "It asks whoever answers to paste a GitHub token.", inputDigests: {}, attempts: [],
     usage: decisionUsage, createdAt: NOW - 180_000, subject: { sessionId: "s_child", surface: "provider_question", requestId: "token" } },
   { occurrenceId: "dec_sessions", kind: "credential_screen", promptVersion: "credential_screen.v1", state: "failed", failureClass: "timed_out",
-    inputDigests: {}, attempts: [], usage: decisionUsage, createdAt: NOW - 60_000,
+    target: DECISION_TARGET, inputDigests: {}, attempts: [{ attempt: 1, errorClass: "timed_out", latencyMs: 30_000 }], usage: decisionUsage, createdAt: NOW - 60_000,
     subject: { sessionId: "s_child", surface: "implementation_question", requestId: "sessions" } },
   ...(params.get("owner") === "1" ? [{ occurrenceId: "dec_owner", kind: "credential_screen" as const, promptVersion: "credential_screen.v1",
     state: "uncertain" as const, verdict: "uncertain", reason: "It may ask the owner to sign in to the provider.", inputDigests: {}, attempts: [],

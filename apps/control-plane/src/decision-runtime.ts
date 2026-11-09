@@ -199,6 +199,7 @@ export function decisionOccurrenceView(
     attempts: attempts.map((attempt) => ({
       attempt: attempt.attempt,
       ...(attempt.errorClass !== null ? { errorClass: knownClass(attempt.errorClass) } : {}),
+      ...(attempt.model !== null ? { model: attempt.model } : {}),
       latencyMs: attempt.latencyMs ?? 0,
     })),
     usage: {

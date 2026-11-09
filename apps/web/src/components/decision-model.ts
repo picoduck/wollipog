@@ -86,6 +86,15 @@ export function decisionModelName(target: Pick<DecisionModelResolvedTarget, "mod
   return target.modelName ?? target.model;
 }
 
+/**
+ * The models the provider reported answering a decision, as their exact ids and without repeats, so
+ * a record can't read as if its target answered when another model did (#4367). Attempts that
+ * reported none, such as one that never reached a provider, add nothing.
+ */
+export function decisionAnsweredBy(decision: Pick<DecisionOccurrenceView, "attempts">): string {
+  return [...new Set(decision.attempts.flatMap((attempt) => attempt.model ? [attempt.model] : []))].join(", ");
+}
+
 function seconds(ms: number): string {
   return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} s`;
 }
@@ -104,7 +113,8 @@ export function decisionTestSummary(result: DecisionModelTestResult): string {
   const where = occurrence.target
     ? ` on ${occurrence.target.harnessName} (${decisionModelName(occurrence.target)}, ${effortLabel(occurrence.target.effort)} effort)`
     : "";
-  const facts = `${seconds(result.latencyMs)}, ${attempts(occurrence.attempts.length)}${where}.`;
+  const answeredBy = decisionAnsweredBy(occurrence);
+  const facts = `${seconds(result.latencyMs)}, ${attempts(occurrence.attempts.length)}${where}${answeredBy ? `, answered by ${answeredBy}` : ""}.`;
   if (occurrence.state === "decided" || occurrence.state === "uncertain") {
     return `Verdict: ${verdictLabel(occurrence.verdict ?? "")}. ${facts}`;
   }
