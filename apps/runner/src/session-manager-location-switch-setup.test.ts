@@ -639,6 +639,108 @@ test("a rollback that cannot finish says the worktree is still there, and no swi
   });
 });
 
+/** In docs on fix/install-link, with a trusted setup whose teardown logs where it ran. */
+async function inSetUpWorktree(h: Harness, teardownLog: string): Promise<{ id: string; path: string; marker: string; hooks: unknown }> {
+  commitSetup(h, {
+    setup: [{ name: "Prepare Docs", command: write("from-docs-setup", "'x'"), timeoutSeconds: 30 }],
+    teardown: [{ name: "Clean Docs", command: [process.execPath, "-e",
+      `require('fs').appendFileSync(${JSON.stringify(teardownLog)},process.cwd()+'\\n')`], timeoutSeconds: 30 }],
+  });
+  assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+  await answerTrust(h, "trust");
+  await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move to docs did not finish");
+  const meta = h.store.readMeta(h.sessionId)!;
+  const worktree = meta.worktrees![0]!;
+  return { id: worktree.id, path: worktree.path, marker: meta.worktreeProcessMarkers![worktree.id]!, hooks: meta.worktreeHooks![worktree.id] };
+}
+
+/** The same branch name in the app repository, whose setup fails as `config` says. */
+function appBranchWithConfig(h: Harness, config: unknown): SessionLocationSwitchMessage {
+  git(h.app, "checkout", "--quiet", "-b", "fix/install-link");
+  writeFileSync(join(h.app, ".wollipog.json"), typeof config === "string" ? config : JSON.stringify({ version: 1, ...config as object }));
+  git(h.app, "add", ".wollipog.json");
+  git(h.app, "commit", "--quiet", "-m", "setup");
+  git(h.app, "checkout", "--quiet", "main");
+  return h.message({ workspaceId: "app", workspacePath: h.app, repository: "acme/app", locationName: "App", occurrenceId: "occurrence-app" });
+}
+
+test("a switch to the same branch name in another repository inherits nothing from the worktree it is leaving", async () => {
+  await withSession("same-branch-card", async (h) => {
+    const teardownLog = join(h.root, "teardown-log");
+    const current = await inSetUpWorktree(h, teardownLog);
+    assert.deepEqual(await h.manager.requestLocationSwitch(appBranchWithConfig(h, { setup: [{ name: "Prepare App", command: fail, timeoutSeconds: 30 }] })), { ok: true });
+    await waitFor(() => payloads(h, "permission_request").length === 2, "the app's trust card did not open");
+    const [record] = journal(h);
+    assert.notEqual(record?.worktreeId, current.id, "two repositories never share a worktree identity");
+    assert.equal(record?.hooks, undefined, "before its own setup is trusted, the attempt has no teardown at all");
+    assert.notEqual(record?.processMarker, current.marker);
+
+    // Dismissing the card gives the worktree back without running the docs teardown in it.
+    h.manager.resolvePermission(h.sessionId, payloads(h, "permission_request")[1].requestId, null);
+    await waitFor(() => failure(h) !== undefined, "the dismissed card did not fail the switch");
+    await waitFor(() => journal(h).length === 0, "the app worktree was not given back");
+    assert.equal(existsSync(teardownLog), false, "no teardown ran anywhere");
+  });
+});
+
+for (const { kind, config, trust } of [
+  { kind: "an invalid configuration", config: "{\"version\":99}", trust: false },
+  { kind: "a failing required step", config: { setup: [{ name: "Prepare App", command: fail, timeoutSeconds: 30 }] }, trust: true },
+]) {
+  test(`${kind} on the same branch name elsewhere leaves the current worktree's hooks, marker and port block alone`, async () => {
+    await withSession(`same-branch-${trust ? "step" : "invalid"}`, async (h) => {
+      const teardownLog = join(h.root, "teardown-log");
+      const current = await inSetUpWorktree(h, teardownLog);
+      const allocator = (h.manager as unknown as { worktreePortAllocator: { get(owner: string): unknown } }).worktreePortAllocator;
+      const owner = `${h.sessionId}\0${current.id}`;
+      const block = allocator.get(owner);
+      assert.ok(block);
+
+      assert.deepEqual(await h.manager.requestLocationSwitch(appBranchWithConfig(h, config)), { ok: true });
+      if (trust) {
+        await waitFor(() => payloads(h, "permission_request").length === 2, "the app's trust card did not open");
+        h.manager.resolvePermission(h.sessionId, payloads(h, "permission_request")[1].requestId, "trust");
+      }
+      await waitFor(() => failure(h) !== undefined, "the switch did not fail");
+      await waitFor(() => journal(h).length === 0, "the app worktree was not given back");
+
+      const meta = h.store.readMeta(h.sessionId)!;
+      assert.equal(meta.worktreePath, current.path, "the session stays where it was");
+      assert.deepEqual(meta.worktreeHooks?.[current.id], current.hooks);
+      assert.equal(meta.worktreeProcessMarkers?.[current.id], current.marker);
+      assert.deepEqual(allocator.get(owner), block);
+      assert.equal(existsSync(teardownLog), false, "the docs teardown did not run in the app worktree");
+      assert.equal(existsSync(join(current.path, "from-docs-setup")), true);
+
+      // That teardown is still there for when the worktree really goes.
+      h.manager.stop(h.sessionId);
+      await h.manager.delete(h.sessionId);
+      await waitFor(() => existsSync(teardownLog), "the current worktree lost its teardown");
+      assert.equal(readFileSync(teardownLog, "utf8").trim(), current.path, "and it ran where it belongs");
+    });
+  });
+}
+
+test("a worktree remade on a path this session used before takes no teardown from the worktree that was there", async () => {
+  await withSession("remade-path", async (h) => {
+    const teardownLog = join(h.root, "teardown-log");
+    const earlier = await inSetUpWorktree(h, teardownLog);
+    git(h.app, "branch", "away");
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message({ workspaceId: "app", workspacePath: h.app, repository: "acme/app",
+      locationName: "App", occurrenceId: "occurrence-away", recoverBranch: "away" })), { ok: true });
+    await waitFor(() => h.providers[2]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move away did not finish");
+    // The worktree is gone from disk, though the session's records still hold its teardown.
+    git(h.docs, "worktree", "remove", "--force", earlier.path);
+    commitSetup(h, "{\"version\":99}");
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message({ occurrenceId: "occurrence-back" })), { ok: true });
+    await waitFor(() => failure(h) !== undefined, "the switch did not fail");
+    await waitFor(() => journal(h).length === 0, "the new worktree was not given back");
+    assert.match(failure(h)!.reason!, /configuration is invalid/u);
+    assert.equal(existsSync(teardownLog), false, "the old worktree's teardown never ran on the new one");
+    assert.deepEqual(docsWorktrees(h), [h.docs]);
+  });
+});
+
 test("the worktree is claimed and on record before Git makes it, so no crash or other session finds it unaccounted for", async () => {
   await withSession("write-ahead", async (h) => {
     const internals = h.manager as unknown as {

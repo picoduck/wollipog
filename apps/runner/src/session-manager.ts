@@ -14894,6 +14894,10 @@ export class SessionManager {
     // about to create it, and only then. Everything destructive below depends on this and nothing
     // else: a worktree without it is never set up, torn down or removed by this switch (#4209).
     const reservation: { record?: WorktreeCleanupRecord; view?: SessionWorktreeView } = {};
+    // From the whole path, not its last segment: that is a hash of the branch name alone, shared by
+    // the same branch in another repository, and hooks, process markers and port blocks are keyed
+    // by this id. A failed switch must not touch what the session's current worktree holds.
+    const targetWorktreeId = (path: string) => createHash("sha256").update(path).digest("hex").slice(0, 16);
     const reserveWorktree = (path: string, branch: string): void => {
       // Claimed and journaled before Git registers the path, with no await in between. Another
       // session's switch therefore never finds it free, even mid-checkout, and from here on a crash
@@ -14904,11 +14908,13 @@ export class SessionManager {
       }
       this.reusedWorktreeClaims.set(path, sessionId);
       claim.path = path;
-      const view: SessionWorktreeView = { id: path.split(/[\\/]/u).at(-1)!, path, branch, baseRef: branch, source: "created",
+      const view: SessionWorktreeView = { id: targetWorktreeId(path), path, branch, baseRef: branch, source: "created",
         // A recovered branch is the person's existing work: removing this worktree keeps it.
         ...(pending.recoverBranch ? { branchPreexisted: true } : {}) };
       const record = this.cleanupRecordForWorktree(targetOf(view), view, "creation_rollback", "force");
       record.auxiliaryWorktreeRollback = true;
+      // Only this attempt's own trusted setup gives it a teardown, never an earlier worktree's.
+      delete record.hooks;
       record.processMarker = randomUUID();
       this.cleanupJournal.add(record);
       reservation.record = record;
@@ -14981,11 +14987,11 @@ export class SessionManager {
       worktree = reused
         // An existing worktree is continued as it is and stays its owner's: attached, so nothing
         // ever sets it up, tears it down or removes it with this session.
-        ? { id: createHash("sha256").update(created.path).digest("hex").slice(0, 16), path: created.path,
+        ? { id: targetWorktreeId(created.path), path: created.path,
           branch: created.branch, baseRef: created.baseRef, baseCommit: created.baseCommit, source: "attached",
           reusedInPlace: true, ...(defaultBranch ? { defaultBranch } : {}) }
         : {
-          id: created.path.split(/[\\/]/u).at(-1)!, path: created.path, branch: created.branch, baseRef: created.baseRef,
+          id: targetWorktreeId(created.path), path: created.path, branch: created.branch, baseRef: created.baseRef,
           baseCommit: created.baseCommit, source: "created",
           // A recovered branch is the person's existing work: removing this worktree keeps it.
           ...(pending.recoverBranch ? { branchPreexisted: true } : {}),
