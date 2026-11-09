@@ -24,6 +24,8 @@ import { isAgentControlApiRouteAllowed } from "./auth.js";
 import {
   CampaignForgeObserver,
   forgeFact,
+  sanitizedGitLabObservation,
+  sanitizedObservation,
   type CampaignForgeObserverDeps,
 } from "./campaign-forge-observations.js";
 import { registerCampaignStatusRoutes } from "./campaign-status-routes.js";
@@ -215,6 +217,26 @@ test("a fact is fresh, then stale after the documented age, and unavailable reas
   assert.deepEqual(forgeFact(undefined, "online", now), { availability: "unavailable", reason: "not_observed" });
   assert.deepEqual(forgeFact(undefined, "offline", now), { availability: "unavailable", reason: "runner_disconnected" });
   assert.deepEqual(forgeFact(undefined, "unsupported", now), { availability: "unavailable", reason: "runner_unsupported" });
+});
+
+test("a merge time is stored when usable, and an unusable one is dropped without refusing the observation a gate reads", async () => {
+  const gitlab: CampaignForgeGitLabMergeRequestObservation = { forge: "gitlab", state: "merged", draft: false, headSha: HEAD, baseRef: "main",
+    approvals: { approved: true, approvedBy: 1, left: 0 }, pipeline: null, mergeTrain: null, mergeCommitSha: HEAD };
+  const merged = observation({ state: "merged", mergeCommitSha: HEAD });
+  for (const bad of [-1, 1.5, "2026-11-09T10:00:00Z", null, Number.MAX_VALUE]) {
+    assert.deepEqual(sanitizedObservation({ ...merged, mergedAt: bad as number }), merged);
+    assert.deepEqual(sanitizedGitLabObservation({ ...gitlab, mergedAt: bad as number }), gitlab);
+  }
+  assert.equal(sanitizedObservation({ ...merged, mergedAt: 1_000 }).mergedAt, 1_000);
+  assert.equal(sanitizedGitLabObservation({ ...gitlab, mergedAt: 1_000 }).mergedAt, 1_000);
+
+  const fixture = forgeFixture();
+  try {
+    const now = Date.now();
+    await observer(fixture, fakeRunner(allOk({ ...merged, mergedAt: "whenever" as unknown as number })), { now: () => now }).refresh(fixture.root, [PR]);
+    const fact = detailFacts(fixture, now)[0]!.fact;
+    assert.deepEqual([fact.availability, fact.availability === "fresh" && "mergedAt" in fact.value], ["fresh", false]);
+  } finally { fixture.db.close(); }
 });
 
 test("every forge failure reason is stored per pull request and replaces nothing but availability", async () => {

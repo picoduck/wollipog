@@ -1000,7 +1000,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   });
   const priorityBody = { mode: "priority", priorityAccountIds: ["work"], expectedRevision: 1 };
   assert.equal((await putPolicy(operatorToken, priorityBody)).status, 403, "only a Machine manager can change the policy");
-  assert.equal((await putPolicy(ownerToken, { ...priorityBody, mode: "automatic_balance" })).status, 400, "no mode beyond the ones this release enforces");
+  assert.equal((await putPolicy(ownerToken, { ...priorityBody, mode: "unrecognized_mode" })).status, 400, "no mode beyond the ones this release enforces");
   assert.equal((await putPolicy(ownerToken, { ...priorityBody, priorityAccountIds: ["nope"] })).status, 409, "a new entry must exist on the Machine");
   const notGrantedOrder = await putPolicy(ownerToken, { ...priorityBody, priorityAccountIds: ["work", "theirs"] });
   assert.equal(notGrantedOrder.status, 409);

@@ -327,8 +327,9 @@ run in this agent's environment, or would spend API credits is refused for an ag
 A usage limit is what naming overrides, so `reason` reports it even when `canName` is true.
 
 A `PROVIDER_ACCOUNT_CHOICE_REQUIRED` refusal started nothing. Act on its `actions`: name an account
-as above, wait until `retryAt`, or relay a sign-in or review to a person. Runs and workflows can't
-name an account. Whether an account's plan offers a model isn't known; when you name a model under a
+as above, wait until `retryAt`, or relay a sign-in or review to a person. `create_run` takes
+`providerAccountIds` by agent id and `create_workflow_run` takes `providerAccountBindings` by role, each
+with the same references. Whether an account's plan offers a model isn't known; when you name a model under a
 policy the result says so, and if the provider refuses it, name another account.
 
 ## Waiting for Pull Request Checks
@@ -906,6 +907,11 @@ Control or Custom, asks the campaign's owner to add it:
 
 You cannot create a Location. When no Location of the repository exists in the Project, report that
 the work needs one; once the owner adds it, it joins the campaign on its own.
+
+A Location on a runner too old to perform the campaign's gates doesn't join: `repositoryBoundary` lists
+it under `excludedLocations` with a reason naming the version it needs, and asking to add its repository
+is refused with that reason. Report that its runner needs updating. It can join once that runner updates,
+without a new launch.
 
 ## Inspecting and Changing Campaign Issue Scope
 

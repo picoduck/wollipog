@@ -27,6 +27,9 @@ import { describeBoundaries } from "./SessionOptions.js";
 import { ariaReferencedText, assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { fireDomEvent } from "./test-dom-events.js";
+import { FeedbackContext } from "./FeedbackProvider.js";
+
+const toasts: Array<{ message: string; tone?: string; detail?: string }> = [];
 
 const SKILLS_UNAVAILABLE = /Managed skills from this Machine are unavailable on container and cloud targets/u;
 /** System nouns docs/design-system.md §17.2 retires from user copy. */
@@ -200,7 +203,10 @@ async function mountFixture(
     root.render(
       <ApiProvider client={client}>
         <StoreProvider connection={connection} navigation={navigation}>
-          <DialogWhenReady preset={preset} onOpenTerminal={() => { terminalOpens.count += 1; }} />
+          <FeedbackContext.Provider value={{ confirm: async () => false, showToast: (message, options) => { toasts.push({ message, tone: options?.tone, detail: options?.detail }); return 1; },
+            showUndo: () => -1, dismissToast: () => undefined }}>
+            <DialogWhenReady preset={preset} onOpenTerminal={() => { terminalOpens.count += 1; }} />
+          </FeedbackContext.Provider>
         </StoreProvider>
       </ApiProvider>,
     );
@@ -1765,6 +1771,29 @@ function assertNoFullControlForm(container: HTMLDivElement): void {
     assert.doesNotMatch(text, copy);
   }
 }
+
+test("Start warns about a Location Full Control left out for its runner's version, in the same one action (#4319)", async () => {
+  const reason = "The Location's runner can't perform this campaign's gates. Update and restart it to protocol version 327 or newer.";
+  toasts.length = 0;
+  const fixture = await mountFixture({ runners: [fullControlRunner()] }, undefined, undefined, undefined, undefined, undefined, {
+    fullControlLaunchPreflight: async (input) => {
+      const preflight = launchPreflight(true, input);
+      return { preflight: { ...preflight, summary: { ...preflight.summary, excludedLocations: [{ locationId: "loc_old", name: "Old Mac", failure: "runner_below_gates", reason }] } } };
+    },
+    createFullControlCampaign: async () => ({ id: "campaign-1" } as SessionView),
+  });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    await chooseControlMode(fixture.container, "Full Control");
+    assert.deepEqual(toasts, [], "nothing is shown before Start");
+    await act(async () => createButton(fixture.container).click());
+    await act(async () => { await Promise.resolve(); });
+    assert.deepEqual(toasts, [{ message: "Old Mac isn't in this campaign yet.", tone: "warning", detail: `${reason} Campaign Status lists it until it can join.` }]);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
 
 test("Full Control starts through the same Create Session with no form, and the session's first message is its task", async () => {
   const preflights: import("@wollipog/protocol").FullControlLaunchRequest[] = [];

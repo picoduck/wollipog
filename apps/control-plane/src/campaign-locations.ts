@@ -7,8 +7,15 @@ import type { Hub } from "./hub.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { inspectProjectLocation } from "./project-location-inspection.js";
 
-/** Exclusions that a reconnecting runner may have cleared. The others describe the folder itself. */
-const RETRIED_ON_RECONNECT: ReadonlySet<string> = new Set(["runner_offline", "read_failed"]);
+/** Exclusions that a reconnecting runner may have cleared. The others describe the folder itself. A
+ * runner's protocol version changes only by registering again, so an update is a reconnect (#4319). */
+const RETRIED_ON_RECONNECT: ReadonlySet<string> = new Set(["runner_offline", "read_failed", "runner_too_old", "runner_below_gates"]);
+
+/** Custom retries only what #4319 excludes there, and that exclusion's later transient failures: one
+ * that was offline when the campaign was created stays out, as it always has. */
+function retriedOnReconnect(item: CampaignExcludedLocation, custom: boolean): boolean {
+  return custom ? item.failure === "runner_below_gates" || item.rejoinsOnReconnect === true : RETRIED_ON_RECONNECT.has(item.failure);
+}
 
 type Outcome = { ok: true; data: { joined: boolean; revision: number } } | { ok: false; status: number; error: string };
 
@@ -20,9 +27,15 @@ type Outcome = { ok: true; data: { joined: boolean; revision: number } } | { ok:
  * - the owner's Include in Campaign of a Location someone else added, or one with no recorded adder.
  *   Reconnecting never adds one of those: nobody has seen which repository it is, so it waits.
  * Agents have no route that reaches any of these, and a Location nobody added never joins on its
- * own. Every join is inspected in the Location's own path first. While the owner's first message
- * limits the campaign, recording a join of a repository with no entry leaves the Location available
- * instead, whichever of these it came from: only an approved repository addition adds that entry. */
+ * own. Every join is inspected in the Location's own path first, and a runner that can't perform the
+ * campaign's gates there is excluded with the version it needs, then retried when it registers again
+ * (#4319). While the owner's first message limits the campaign, recording a join of a repository with
+ * no entry leaves the Location available instead, whichever of these it came from: only an approved
+ * repository addition adds that entry.
+ *
+ * A Custom campaign's list follows its Project in one case only (#4319): the owner's own Location its
+ * creation excluded for its runner's version joins once that runner updates, which restores what its
+ * creation would have listed. Its list grants nothing, and a person still approves every scope change. */
 export class CampaignLocations {
   private readonly queues = new Map<string, Promise<unknown>>();
 
@@ -57,13 +70,28 @@ export class CampaignLocations {
 
   /** A runner reconnected: retry its Locations that were excluded only because it was away. */
   runnerReconnected(runnerId: string): Promise<void> {
-    return this.forRoots(this.deps.db.campaignRepositoryRoots({ runnerId }), (root) => {
-      const retry = (root.orchestratorPolicy?.excludedLocations ?? []).filter((item) => RETRIED_ON_RECONNECT.has(item.failure))
-        .map((item) => this.deps.db.getProjectLocation(item.locationId))
+    const { db } = this.deps;
+    return this.forRoots([...db.campaignRepositoryRoots({ runnerId }), ...db.customCampaignRepositoryRoots(runnerId)], (root) => {
+      const custom = root.orchestratorPolicy?.control?.mode !== "full_control";
+      const retry = (root.orchestratorPolicy?.excludedLocations ?? [])
+        .filter((item) => retriedOnReconnect(item, custom))
+        .map((item) => db.getProjectLocation(item.locationId))
         .filter((location): location is ProjectLocationView => Boolean(location && location.runnerId === runnerId &&
-          location.projectId === root.projectId && location.availability !== "runner_removed"));
+          location.projectId === root.projectId && location.availability !== "runner_removed" &&
+          (!custom || this.customSurveyLists(root, location))));
       return retry.length ? this.inspectAndRecord(root, retry, "runner_reconnected") : Promise.resolve();
     }).then(() => undefined);
+  }
+
+  /** Nobody reviews a Custom campaign's list, so only what its survey would list joins it: a Location
+   * its owner added and, as they are now, can reach. A role can change while a runner inspects. */
+  private customSurveyLists(root: SessionView, location: ProjectLocationView): boolean {
+    const { db } = this.deps;
+    const owner = this.owner(root);
+    const organizationId = db.sessionScope(root.id)?.organizationId;
+    const principal = owner && organizationId ? db.operatingHumanPrincipal(owner, organizationId) : null;
+    return Boolean(principal && root.projectId && db.projectLocationAddedBy(location.id) === owner &&
+      db.canAccessProject(principal, root.projectId) && db.canAccessWorkspace(principal, location.runnerId, location.workspaceId));
   }
 
   /** The campaign owner's Include in Campaign of a Location in its Project. */
@@ -91,7 +119,9 @@ export class CampaignLocations {
 
   private owner(root: SessionView): string | null {
     const control = root.orchestratorPolicy?.control;
-    return control?.mode === "full_control" ? control.boundary.authorizedByUserId : null;
+    if (control?.mode === "full_control") return control.boundary.authorizedByUserId;
+    const scope = root.orchestratorPolicy?.repositories ? this.deps.db.sessionScope(root.id) : null;
+    return scope?.owner.kind === "user" ? scope.owner.userId : null;
   }
 
   private revision(root: SessionView): number {
@@ -101,7 +131,8 @@ export class CampaignLocations {
 
   private inBoundary(root: SessionView, locationId: string): boolean {
     const control = root.orchestratorPolicy?.control;
-    return control?.mode === "full_control" && Boolean(control.boundary.repositories?.some((entry) => entry.locationIds.includes(locationId)));
+    const listed = control?.mode === "full_control" ? control.boundary.repositories : root.orchestratorPolicy?.repositories;
+    return Boolean(listed?.some((entry) => entry.locationIds.includes(locationId)));
   }
 
   private async inspectAndRecord(root: SessionView, locations: ProjectLocationView[], source: CampaignLocationJoin["source"],
@@ -110,13 +141,14 @@ export class CampaignLocations {
     const before = new Map(locations.map((location) => [location.id, { runnerId: location.runnerId, workspaceId: location.workspaceId,
       addedBy: db.projectLocationAddedBy(location.id) }]));
     const results = await Promise.all(locations.map((location) => inspectProjectLocation(this.deps, location.id, {
-      projectId: root.projectId ?? undefined, timeoutMs: this.deps.inspectionTimeoutMs, requireProtocol: "campaignRepositoryBoundary" })));
+      projectId: root.projectId ?? undefined, timeoutMs: this.deps.inspectionTimeoutMs, joinsCampaign: true })));
     // The inspections ran on other machines. Everything the provenance rested on is read again here,
     // and nothing is awaited between this check and the record below: a Location removed, moved
     // away and back, re-added by someone else, or no longer reachable meanwhile is not recorded.
     const fresh = db.getSession(root.id);
     if (!fresh) return { ok: false, status: 409, error: "This campaign ended." };
     const owner = this.owner(fresh);
+    const custom = fresh.orchestratorPolicy?.control?.mode !== "full_control";
     const joins: Array<{ locationId: string; name: string; repository: string; source: CampaignLocationJoin["source"] }> = [];
     const excluded: CampaignExcludedLocation[] = [];
     const pending: CampaignPendingLocation[] = [];
@@ -128,9 +160,11 @@ export class CampaignLocations {
       const eligible = Boolean(owner && now && now.projectId === fresh.projectId && now.availability !== "runner_removed" &&
         now.runnerId === was.runnerId && now.workspaceId === was.workspaceId && db.projectLocationAddedBy(location.id) === was.addedBy &&
         !this.inBoundary(fresh, location.id) &&
+        (!custom || this.customSurveyLists(fresh, now)) &&
         (source !== "owner_added" || was.addedBy === owner) &&
+        // Under the campaign's mode as it is now: one that changed meanwhile applies its own rule.
         (source !== "runner_reconnected" || fresh.orchestratorPolicy?.excludedLocations?.some((item) =>
-          item.locationId === location.id && RETRIED_ON_RECONNECT.has(item.failure))) &&
+          item.locationId === location.id && retriedOnReconnect(item, custom))) &&
         (source !== "owner_included" || Boolean(includer && includer.userId === owner &&
           db.canAccessWorkspace(includer, now.runnerId, now.workspaceId))));
       if (!eligible) { changed = true; return; }
@@ -141,7 +175,9 @@ export class CampaignLocations {
         return;
       }
       if (result.ok) joins.push({ locationId: location.id, name: location.name, repository: result.location.repository, source });
-      else excluded.push({ locationId: location.id, name: location.name, failure: result.failure, reason: result.reason });
+      else excluded.push({ locationId: location.id, name: location.name, failure: result.failure, reason: result.reason,
+        // A transient read after the update must not end this Location's way back into a Custom list.
+        ...(custom && result.failure !== "runner_below_gates" && RETRIED_ON_RECONNECT.has(result.failure) ? { rejoinsOnReconnect: true as const } : {}) });
     });
     if (changed && source === "owner_included") return { ok: false, status: 409, error: "That Location changed while it was inspected; try again." };
     return this.record(fresh, { joins, excluded, pending });
@@ -160,7 +196,8 @@ export class CampaignLocations {
       this.deps.log.warn(JSON.stringify({ event: "campaign_locations_not_recorded", sessionId: root.id, status: result.status }));
       return result;
     }
-    if (result.joined) {
+    // A Custom campaign's list has no boundary to re-mint and revokes nothing.
+    if (result.joined && root.orchestratorPolicy?.control?.mode === "full_control") {
       // A join is an owner-authorized boundary change: what it revoked leaves its pauses, and every
       // member's runner gets the new boundary.
       this.deps.settle(root, result.revoked, owner, now);

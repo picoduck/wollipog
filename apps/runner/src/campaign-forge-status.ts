@@ -16,7 +16,7 @@ import type {
   CampaignPullRequestRef,
 } from "@wollipog/protocol";
 import { CAMPAIGN_FORGE_OBSERVATION, campaignRepositoryLocation, forgeActionBranchName } from "@wollipog/protocol";
-import { observeGitLabMergeRequests, type GlabRunner } from "./campaign-gitlab-status.js";
+import { forgeMergedAt, observeGitLabMergeRequests, type GlabRunner } from "./campaign-gitlab-status.js";
 import { runContextCommand } from "./context-command.js";
 import { countCheckContexts, latestCheckContexts, summarizeCheckRollup } from "./git-ops.js";
 
@@ -85,7 +85,7 @@ export function forgeStatusQuery(refs: ReadonlyArray<{ owner: string; name: stri
     pullRequest(number:${ref.number}){
       state isDraft headRefOid baseRefName reviewDecision mergeStateStatus
       headRefName isCrossRepository headRef{target{oid}}
-      mergeCommit{oid}
+      mergeCommit{oid} mergedAt
       mergeQueueEntry{position state}
       commits(last:1){nodes{commit{statusCheckRollup{state
         contexts(first:${CONTEXTS_PER_PULL_REQUEST}){pageInfo{hasNextPage} nodes{
@@ -223,6 +223,7 @@ export function pullRequestObservation(node: unknown, defaultBranch?: unknown): 
   const rollups = checkRollups(commit ? commit.statusCheckRollup ?? null : null, REQUIREMENTS_MET.has(pr.mergeStateStatus as string));
   if (!rollups) return null;
   const headBranch = observedHeadBranch(pr);
+  const mergedAt = state === "merged" ? forgeMergedAt(pr.mergedAt) : undefined;
   return {
     state,
     draft: pr.isDraft,
@@ -232,6 +233,7 @@ export function pullRequestObservation(node: unknown, defaultBranch?: unknown): 
     ...rollups,
     mergeQueue,
     mergeCommitSha: mergeCommit ? mergeCommit.oid as string : null,
+    ...(mergedAt !== undefined ? { mergedAt } : {}),
     ...(typeof defaultBranch === "string" && defaultBranch.length > 0 && defaultBranch.length <= 256 ? { defaultBranch } : {}),
     ...(headBranch ? { headBranch } : {}),
     ...(typeof pr.isCrossRepository === "boolean" ? { crossRepository: pr.isCrossRepository } : {}),

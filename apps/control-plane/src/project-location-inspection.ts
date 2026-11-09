@@ -67,6 +67,10 @@ export async function inspectProjectLocation(
   options: { projectId?: string; signal?: AbortSignal; timeoutMs?: number; now?: () => number;
     /** A runner below this protocol capability is too old for what the caller will use it for. */
     requireProtocol?: RunnerProtocolCapability;
+    /** The Location would join a campaign (#4319), so a runner that can't perform the campaign's
+     * gates there fails as `runner_below_gates`, naming the version. A Location the campaign already
+     * holds, and its own launch Location, are never asked this. */
+    joinsCampaign?: boolean;
     /** Issues the runner must also read in the Location's repository (#4118); any it cannot read
      * as an issue there fails the inspection. */
     issueNumbers?: readonly number[];
@@ -89,7 +93,9 @@ export async function inspectProjectLocation(
   const location = active();
   if (!location) return fail("unknown_location");
   const runner = db.getRunner(location.runnerId);
+  // An offline runner's recorded version may be out of date, so offline is what it is told first.
   if (!runner || !hub.isRunnerOnline(location.runnerId)) return fail("runner_offline");
+  if (options.joinsCampaign && !runnerSupportsProtocol(runner.protocolVersion, "campaignLocationGates")) return fail("runner_below_gates");
   if ((runner.runtime?.campaignLaunchInspection?.version ?? 0) < PROJECT_LOCATION_INSPECTION_MIN_VERSION ||
       (options.requireProtocol && !runnerSupportsProtocol(runner.protocolVersion, options.requireProtocol)) ||
       (options.facts && !runnerSupportsProtocol(runner.protocolVersion, "repositoryQualifiedProposals")) ||
@@ -198,7 +204,9 @@ export async function verifyBoundaryPublishedIssue(
  * runner, workspace or path is not the Location that was inspected, so it reads as unread; one added
  * meanwhile was never inspected and waits for a later inspection. `onlyAddedBy` is for an enable and a
  * new Custom campaign: nobody sees their survey, so a Location that person didn't add is never
- * inspected and is listed as `waiting` instead (#4117). */
+ * inspected and is listed as `waiting` instead (#4117). A runner that can't perform the campaign's
+ * gates fails its Location's inspection (#4319); the launch Location is never inspected here, because
+ * its repository's gates run in the root's own checkout. */
 export function projectLocationSurvey(db: ControlPlaneDb, hub: Hub, principal: AuthPrincipal, input: {
   projectId: string | null; launchLocationId: string | null; rootProtocolVersion: number | null | undefined; timeoutMs?: number;
   onlyAddedBy?: string;
@@ -220,7 +228,7 @@ export function projectLocationSurvey(db: ControlPlaneDb, hub: Hub, principal: A
   return {
     async inspect(signal: AbortSignal): Promise<void> {
       const results = await Promise.all(others.map((location) => inspectProjectLocation({ db, hub }, location.id, { projectId: projectId!,
-        signal, timeoutMs: input.timeoutMs, requireProtocol: "campaignRepositoryBoundary" })));
+        signal, timeoutMs: input.timeoutMs, joinsCampaign: true })));
       others.forEach((location, index) => inspections.set(location.id, results[index]!));
     },
     /** Reads each issue a launch names in another repository (#4118) through a Location of that
@@ -235,7 +243,7 @@ export function projectLocationSurvey(db: ControlPlaneDb, hub: Hub, principal: A
         });
         if (!location) return false;
         const read = await inspectProjectLocation({ db, hub }, location.id, { projectId: projectId!, signal,
-          timeoutMs: input.timeoutMs, requireProtocol: "campaignRepositoryBoundary", issueNumbers });
+          timeoutMs: input.timeoutMs, joinsCampaign: true, issueNumbers });
         return read.ok && read.location.repository === repository;
       }));
       return reads.every(Boolean);

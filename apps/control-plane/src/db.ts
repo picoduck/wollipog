@@ -699,8 +699,8 @@ CREATE TABLE IF NOT EXISTS machine_provider_account_defaults (
   revision INTEGER NOT NULL CHECK (revision > 0),
   updated_at INTEGER NOT NULL,
   -- Versioned selection policy (#4353). account_id stays the fixed default under every mode. mode is
-  -- deliberately unconstrained, with mode_settings beside it, so a later mode needs no table rebuild;
-  -- a value this release doesn't know reads as unsupported and fails closed.
+  -- unconstrained text and mode_settings is unused; a value this release doesn't know reads as
+  -- unsupported and fails closed.
   mode TEXT NOT NULL DEFAULT 'fixed',
   priority_account_ids TEXT NOT NULL DEFAULT '[]',
   mode_settings TEXT NOT NULL DEFAULT '{}',
@@ -17853,6 +17853,19 @@ export class ControlPlaneDb {
     }));
   }
 
+  /** Live root Custom campaigns with a repository list and recorded exclusions, in any Project with a
+   * Location on one runner (#4319). */
+  customCampaignRepositoryRoots(runnerId: string): SessionView[] {
+    return this.projectIdsForRunner(runnerId).flatMap((projectId) => (this.stmt(`SELECT id FROM sessions WHERE project_id=? AND parent_session_id IS NULL
+      AND archived=0 AND status NOT IN ('completed','failed','stopped')
+      AND CASE WHEN json_valid(orchestrator_policy) THEN json_type(orchestrator_policy, '$.repositories') ELSE NULL END='array'
+      AND CASE WHEN json_valid(orchestrator_policy) THEN json_type(orchestrator_policy, '$.excludedLocations') ELSE NULL END='array'`)
+      .all(projectId) as Array<{ id: string }>).flatMap(({ id }) => {
+      const root = this.getSession(id);
+      return root?.orchestratorPolicy?.repositories && root.orchestratorPolicy.control?.mode !== "full_control" ? [root] : [];
+    }));
+  }
+
   campaignPublicationReservations(rootId: string): WorkflowDecisionView[] {
     return (this.stmt("SELECT occurrence_id FROM workflow_decisions WHERE controlling_session_id=? AND category='follow_up_issue_publication' AND status IN ('pending','approved','consumed')")
       .all(rootId) as Array<{ occurrence_id: string }>).flatMap((row) => {
@@ -18190,6 +18203,38 @@ export class ControlPlaneDb {
         finishAddition(0);
         this.db.exec("COMMIT");
         return { ok: true, revision: 0, joined: true, revoked: [] };
+      }
+      if (policy && control?.mode !== "full_control" && policy.repositories) {
+        // Custom's owner Location whose runner has now updated (#4319). Its list has no revision, and
+        // a first-message limit holds as it does under Full Control: only an approved addition gives
+        // a repository an entry.
+        const scope = this.sessionScope(rootId);
+        if (scope?.owner.kind !== "user" || scope.owner.userId !== ownerUserId) return refuse(403, "Only the campaign's owner can widen its repositories.");
+        const repositories = structuredClone(policy.repositories);
+        const limited = campaignRepositoryLimits(policy).length > 0;
+        const touched = new Set([...update.joins, ...update.excluded].map((item) => item.locationId));
+        const leftOut = limited ? update.joins.filter((join) => !repositories.some((entry) => entry.repository.toLowerCase() === join.repository.toLowerCase())) : [];
+        const joins = update.joins.filter((join) => !leftOut.includes(join) && !repositories.some((entry) => entry.locationIds.includes(join.locationId)));
+        for (const join of joins) {
+          const name = join.repository.toLowerCase();
+          const entry = repositories.find((item) => item.repository.toLowerCase() === name);
+          if (entry) entry.locationIds.push(join.locationId);
+          else repositories.push({ repository: name, locationIds: [join.locationId] });
+        }
+        if (!validCampaignRepositoryList(repositories)) return refuse(409, "The campaign cannot hold more repositories or Locations.");
+        policy.repositories = repositories;
+        if (joins.length) {
+          policy.locationJoins = [...(policy.locationJoins ?? []), ...joins.map((join) => ({ locationId: join.locationId, name: join.name,
+            repository: join.repository.toLowerCase(), revision: 0, at: now, source: join.source }))].slice(-CAMPAIGN_LOCATION_JOINS_MAX);
+        }
+        const excluded = [...(policy.excludedLocations ?? []).filter((item) => !touched.has(item.locationId)), ...update.excluded];
+        if (excluded.length) policy.excludedLocations = excluded.slice(-CAMPAIGN_BOUNDARY_LOCATIONS_MAX); else delete policy.excludedLocations;
+        const available = [...(policy.availableLocations ?? []).filter((item) => !touched.has(item.locationId)),
+          ...leftOut.map((join) => ({ locationId: join.locationId, name: join.name, repository: join.repository.toLowerCase() }))];
+        if (available.length) policy.availableLocations = available.slice(-CAMPAIGN_BOUNDARY_LOCATIONS_MAX); else delete policy.availableLocations;
+        this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(policy), now, rootId);
+        this.db.exec("COMMIT");
+        return { ok: true, revision: 0, joined: joins.length > 0, revoked: [] };
       }
       if (!policy || control?.mode !== "full_control" || !control.boundary.repositories) {
         return refuse(409, "Only a Full Control campaign with a repository boundary takes Project Locations.");
@@ -35489,11 +35534,12 @@ function validExcludedLocations(value: unknown): boolean {
   return Array.isArray(value) && value.length <= CAMPAIGN_BOUNDARY_LOCATIONS_MAX && value.every((item) => {
     const entry = item as Record<string, unknown> | null;
     return Boolean(entry && typeof entry === "object" && !Array.isArray(entry) &&
-      Object.keys(entry).every((key) => ["locationId", "name", "failure", "reason"].includes(key)) &&
+      Object.keys(entry).every((key) => ["locationId", "name", "failure", "reason", "rejoinsOnReconnect"].includes(key)) &&
+      (entry.rejoinsOnReconnect === undefined || entry.rejoinsOnReconnect === true) &&
       typeof entry.locationId === "string" && entry.locationId.length > 0 && entry.locationId.length <= 256 &&
       typeof entry.name === "string" && entry.name.length <= 256 &&
       typeof entry.failure === "string" && Object.hasOwn(PROJECT_LOCATION_INSPECTION_FAILURES, entry.failure) &&
-      entry.reason === PROJECT_LOCATION_INSPECTION_FAILURES[entry.failure as keyof typeof PROJECT_LOCATION_INSPECTION_FAILURES]);
+      typeof entry.reason === "string");
   });
 }
 
@@ -35589,6 +35635,9 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
   if (value.issueNumbersSource !== undefined && value.issueNumbersSource !== "human_launch_request") return null;
   // Informational only (#4117): a malformed list is dropped instead of discarding the policy.
   if (value.excludedLocations !== undefined && !validExcludedLocations(value.excludedLocations)) delete value.excludedLocations;
+  // Each reason reads as today's fixed sentence, so stored text never reaches a person, and a raised
+  // version floor (#4319) names the new version rather than dropping the list its reconnects retry.
+  else if (value.excludedLocations) value.excludedLocations = value.excludedLocations.map((item) => ({ ...item, reason: PROJECT_LOCATION_INSPECTION_FAILURES[item.failure] }));
   // Informational only (#2940), and only beside the Full Control boundary it describes.
   if (value.launchDisclosure !== undefined && (value.control?.mode !== "full_control" || !validCampaignLaunchDisclosure(value.launchDisclosure))) {
     delete value.launchDisclosure;

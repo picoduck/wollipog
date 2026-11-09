@@ -1373,6 +1373,10 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   //      a choice below v337, where the reference would not resolve.
   337,
   // v338 slot
+  // 338: Runs and workflows name an account per member (#4353), with an agent's opaque reference under
+  //      the same refusals as a session. A runner's tools refuse a choice below v338, where a run's
+  //      control plane would ignore it.
+  338,
   // v339 slot
   // 339: subscription-usage snapshots may carry `subscriptionIdentity`, a one-way fingerprint of the
   //      provider account, and source views an opaque `subscriptionKey` derived from it, so one

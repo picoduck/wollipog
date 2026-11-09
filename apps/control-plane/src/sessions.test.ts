@@ -10915,7 +10915,7 @@ test("a policy saved under a newer schema also fails closed (#4353)", () => {
 test("a mode written by a newer server fails closed until it is replaced (#4353)", () => {
   const { db, svc, request } = priorityHarness();
   (db as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }).db
-    .prepare("UPDATE machine_provider_account_defaults SET mode='automatic_balance' WHERE runner_id=?").run(RUNNER_ID);
+    .prepare("UPDATE machine_provider_account_defaults SET mode='unrecognized_mode' WHERE runner_id=?").run(RUNNER_ID);
   assert.equal(db.machineProviderAccountDefault(RUNNER_ID, "claude")?.mode, "unsupported");
   const refused = svc.createSession(request);
   assert.equal(refused.providerAccountSelection?.refusal, "unsupported_mode");
@@ -11009,6 +11009,91 @@ test("an agent names an account by reference, and only one it could actually use
   const cooling = choices().find((choice) => choice.position === 3)!;
   assert.deepEqual([cooling.canName, cooling.reason], [true, "cooldown"]);
   assert.ok(asChild(cooling.accountRef).ok);
+});
+
+test("a run names an account per member, under the same rules as a session (#4353)", () => {
+  const { db, hub, svc, meta, setAccounts } = priorityHarness();
+  const run = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID], task: "Do it" };
+
+  // A named member overrides the policy; the other still follows it, and each records which applied.
+  const named = svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: "second" } });
+  assert.ok(named.ok && named.data, named.error);
+  const member = (id: string) => named.data!.sessions.find((session) => session.agentId === id)!;
+  assert.equal(member(AGENT_ID).providerAccountId, "second");
+  assert.equal(member(AGENT_ID).providerAccountSelection?.source, "explicit");
+  assert.equal(member(AGENT_ID).providerAccountSelection?.revalidateAtLaunch, undefined, "a named account is not rechecked as a policy's choice");
+  assert.notEqual(member(CODEX_APP_AGENT_ID).providerAccountSelection?.source, "explicit");
+  const spec = hub.sentOfType("start_session").find((start) => start.spec.sessionId === member(AGENT_ID).id)!.spec;
+  assert.equal(spec.providerAccountId, "second", "the runner receives the named account");
+  assert.equal(db.getSession(member(AGENT_ID).id)?.providerAccountId, "second", "and a retry finds it on the session");
+
+  // Wrong provider, unknown account, a key that is no member, a bad shape: refused, and nothing starts.
+  const before = db.listRuns().length;
+  const wrongProvider = svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: "codex-account" } });
+  assert.equal(wrongProvider.status, 409);
+  assert.match(wrongProvider.error ?? "", new RegExp(`^${AGENT_ID}: The chosen provider account is not available`, "u"));
+  assert.equal(svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: "no-such-account" } }).status, 409);
+  const stranger = svc.createRun({ ...run, providerAccountIds: { stranger: "second" } });
+  assert.equal(stranger.status, 400);
+  assert.match(stranger.error ?? "", /names 'stranger'/u);
+  assert.equal(svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: "not valid!" } }).status, 400);
+  assert.equal(svc.createRun({ ...run, providerAccountIds: ["second"] as unknown as Record<string, string> }).status, 400);
+  assert.equal(db.listRuns().length, before, "a refused account starts no member");
+
+  // With every ranked account used up the run has no account of its own, and naming one is the way past.
+  setAccounts(meta.providerAccounts!.map((account) => account.provider === "claude" ? { ...account, selectionCooldownUntil: Date.now() + 60_000 } : account));
+  const refused = svc.createRun(run);
+  assert.equal(refused.errorDetails?.code, "PROVIDER_ACCOUNT_CHOICE_REQUIRED", refused.error);
+  assert.equal(refused.providerAccountSelection?.refusal, "no_eligible_account");
+  assert.ok(svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: "third" } }).ok, "a person's explicit choice overrides a cooldown");
+});
+
+test("an agent names a run member's account by reference, and only one it could use (#4353)", () => {
+  const { db, svc, request, setAccounts, meta } = priorityHarness();
+  const owner = db.localIdentityContext();
+  const parent = svc.createSession(request, undefined, { organizationId: owner.organizationId, owner: { kind: "user", userId: owner.userId } });
+  assert.ok(parent.ok && parent.data, parent.error);
+  db.updateSessionStatus(parent.data.id, "running", Date.now());
+  const context = { parentSessionId: parent.data.id };
+  const run = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Do it" };
+  const refOf = (position: number) => svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID, parentSessionId: context.parentSessionId })
+    .data!.choices!.find((choice) => choice.position === position)!.accountRef;
+
+  const named = svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: refOf(2) } }, context);
+  assert.ok(named.ok && named.data, named.error);
+  assert.equal(named.data.sessions[0]?.providerAccountId, "second");
+
+  setAccounts(meta.providerAccounts!.map((account) => account.id === "second" ? { ...account, authStatus: "unauthenticated" } : account));
+  const signedOut = svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: refOf(2) } }, context);
+  assert.equal(signedOut.status, 409);
+  assert.match(signedOut.error ?? "", /needs sign-in, so an agent can't start a session with it/u);
+  assert.ok(!(signedOut.error ?? "").includes("example.com"), signedOut.error);
+  const codexRef = svc.providerAccountSelectionPreview(RUNNER_ID, { provider: "codex" }).data!.choices![0]!.accountRef;
+  assert.match(svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: codexRef } }, context).error ?? "", /not available for the selected agent/u);
+  assert.ok(svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: "second" } }).ok, "a person keeps the sign-in decision");
+});
+
+test("a workflow names an account per role and for its orchestrator (#4353)", () => {
+  const { svc, setAccounts, meta } = priorityHarness();
+  const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, workflowId: "builtin:build-review", task: "Build and review",
+    agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID } };
+  const named = svc.createWorkflowRun({ ...request, providerAccountBindings: { claude: "second" } });
+  assert.ok(named.ok && named.data, named.error);
+  const builder = named.data.sessions.find((session) => session.agentId === AGENT_ID)!;
+  assert.equal(builder.providerAccountId, "second");
+  assert.equal(builder.providerAccountSelection?.source, "explicit");
+  assert.notEqual(named.data.sessions.find((session) => session.agentId === CODEX_APP_AGENT_ID)?.providerAccountSelection?.source, "explicit");
+
+  const wrongProvider = svc.createWorkflowRun({ ...request, providerAccountBindings: { claude: "codex-account" } });
+  assert.equal(wrongProvider.status, 409);
+  assert.match(wrongProvider.error ?? "", /^claude: The chosen provider account is not available/u);
+  assert.equal(svc.createWorkflowRun({ ...request, providerAccountBindings: { nobody: "second" } }).status, 400);
+  assert.equal(svc.createWorkflowRun({ ...request, orchestratorProviderAccountId: "second" }).status, 400, "there is no orchestrator to give it to");
+
+  setAccounts(meta.providerAccounts!.map((account) => account.provider === "claude" ? { ...account, selectionCooldownUntil: Date.now() + 60_000 } : account));
+  assert.equal(svc.createWorkflowRun(request).providerAccountSelection?.refusal, "no_eligible_account");
+  const chosen = svc.createWorkflowRun({ ...request, providerAccountBindings: { claude: "third" } });
+  assert.ok(chosen.ok, chosen.error);
 });
 
 test("a launch and its preview follow the project a Location infers, not only a chosen one (#4353)", () => {

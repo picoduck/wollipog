@@ -1,7 +1,10 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { providerForDriver, runnerSupportsProtocol, type BoxView, type RunnerView } from "@wollipog/protocol";
 import { agentDisplayName } from "../agent-presentation.js";
-import { ExpectedProviderAccount, providerAccountPreviewPlacement, providerAccountSelectionRefreshKey, useProviderAccountSelection } from "./ProviderAccountSelection.js";
+import { AccountIdentifierRevealButton, useAccountIdentifierReveal } from "./AccountIdentifier.js";
+import { ExpectedProviderAccount, providerAccountDescription, providerAccountExpectationSentence, providerAccountPreviewPlacement, providerAccountSelectionRefreshKey, providerAccountSkipLabel, useProviderAccountSelection } from "./ProviderAccountSelection.js";
+import { FieldError } from "./FieldError.js";
+import { isPersonalIdentifier, maskedAccountTitles } from "../personal-identifiers.js";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { useStore } from "../store.js";
@@ -26,7 +29,11 @@ import { machineOptionLabels } from "../runners.js";
 import { podMachineNames } from "../pod-session-choices.js";
 import {
   RUN_TYPE_DESCRIPTION,
+  agentNeedsAccountChoice,
+  choosableRunAgentIds,
   defaultRunAgentIds,
+  memberAccountsRequest,
+  memberAccountUnusable,
   newRunBlockedReason,
   runAgentChoices,
   runLocationOptions,
@@ -103,7 +110,8 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
       runnerSupportsProtocol(runner?.protocolVersion, "verifiedAgentAvailability"), runner?.providerAccountDefaults),
     [machine, runner?.agents, runner?.protocolVersion, runner?.providerAccountDefaults],
   );
-  const selectableIds = useMemo(() => selectableRunAgentIds(runner?.agents ?? [], runner?.providerAccountDefaults), [runner?.agents, runner?.providerAccountDefaults]);
+  const selectableIds = useMemo(() => choosableRunAgentIds(runner?.agents ?? [], runner?.providerAccountDefaults), [runner?.agents, runner?.providerAccountDefaults]);
+  const prebindableIds = useMemo(() => selectableRunAgentIds(runner?.agents ?? [], runner?.providerAccountDefaults), [runner?.agents, runner?.providerAccountDefaults]);
   const [workspaceId, setWorkspaceId] = useState(runner?.workspaces[0]?.id ?? "");
   const [agentIds, setAgentIds] = useState<string[]>(() => defaultRunAgentIds(runner?.agents ?? [], runner?.providerAccountDefaults));
   const [mode, setMode] = useState<RunWorkMode>("parallel");
@@ -112,6 +120,18 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
   const [workflowId, setWorkflowId] = useState("builtin:build-review");
   const workflow = workflows?.find((candidate) => candidate.workflowId === workflowId);
   const [agentBindings, setAgentBindings] = useState<Record<string, string>>({});
+  // By agent for Compare Agents and by role for a workflow: the two are different requests.
+  const [memberAccounts, setMemberAccounts] = useState<Record<string, string>>({});
+  const [roleAccounts, setRoleAccounts] = useState<Record<string, string>>({});
+  const [missingAccounts, setMissingAccounts] = useState<Record<string, string>>({});
+  const [accountRefresh, setAccountRefresh] = useState(0);
+  const reportMissingAccount = useCallback((member: string, name: string | null) => {
+    setMissingAccounts((current) => {
+      if ((current[member] ?? null) === name) return current;
+      const { [member]: _previous, ...rest } = current;
+      return name ? { ...rest, [member]: name } : rest;
+    });
+  }, []);
   const [task, setTask] = useState("");
   const [title, setTitle] = useState("");
   const [busy, setBusy] = useState(false);
@@ -126,6 +146,11 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
   const starting = useRef(false);
 
   const pickRunner = (id: string) => {
+    if (id !== runnerId) {
+      // Accounts belong to their Machine, so a choice never carries to another one.
+      setMemberAccounts({});
+      setRoleAccounts({});
+    }
     setRunnerId(id);
     const r = runners.get(id);
     setWorkspaceId(r?.workspaces[0]?.id ?? "");
@@ -219,14 +244,14 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
   // that agent can still start, so a Machine's routine update does not undo it.
   useEffect(() => {
     setAgentBindings((current) => {
-      const next = defaultWorkflowBindings(workflow, (runner?.agents ?? []).filter((agent) => selectableIds.includes(agent.id)));
+      const next = defaultWorkflowBindings(workflow, (runner?.agents ?? []).filter((agent) => prebindableIds.includes(agent.id)));
       for (const { key } of workflowRoleFields(workflow)) {
         const chosen = current[key];
         if (chosen && selectableIds.includes(chosen)) next[key] = chosen;
       }
       return next;
     });
-  }, [workflow, runner?.agents, selectableIds]);
+  }, [workflow, runner?.agents, selectableIds, prebindableIds]);
 
   const roleFields = workflowRoleFields(workflow);
   const humanRoles = workflowHumanRoles(workflow);
@@ -246,6 +271,7 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
     workflowChosen: Boolean(workflow),
     workflowBound: Boolean(workflow && workflowBindingsComplete(workflow, agentBindings) &&
       Object.values(agentBindings).every((id) => selectableIds.includes(id))),
+    accountChoiceMissing: Object.values(missingAccounts)[0] ?? null,
   });
   const reasonId = `${ids}-reason`;
   const typeHelperId = `${ids}-type`;
@@ -266,6 +292,8 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
         runnerId,
         workspaceId,
       });
+      const namedMembers = memberAccountsRequest(memberAccounts, Object.fromEntries(chosenAgentIds.map((id) => [id, id])), runner);
+      const namedRoles = memberAccountsRequest(roleAccounts, agentBindings, runner);
       const { run } = mode === "parallel"
         ? await api.createRun({
             ...placement,
@@ -273,6 +301,7 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
             task: task.trim(),
             title: title.trim() || undefined,
             useWorktree: true,
+            ...(namedMembers ? { providerAccountIds: namedMembers } : {}),
           })
         : await api.createWorkflowRun({
             ...placement,
@@ -282,6 +311,7 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
             title: title.trim() || undefined,
             useWorktree: true,
             agentBindings,
+            ...(namedRoles ? { providerAccountBindings: namedRoles } : {}),
           });
       starting.current = false;
       if (!mounted.current) return;
@@ -295,6 +325,8 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
         detail: cause instanceof Error && cause.message ? cause.message : String(cause),
       });
       setBusy(false);
+      // A refusal may mean a member's account stopped being usable: read again so the choice appears.
+      setAccountRefresh((current) => current + 1);
     }
   };
 
@@ -494,7 +526,21 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
                 }))}
               />
             )}
-            {runner && chosenAgentIds.map((id) => <RunMemberExpectedAccount key={id} runner={runner} agentId={id} projectId={selectedProject?.id} projectsSupported={projectsSupported} workspaceId={workspaceId || undefined} />)}
+            {runner && chosenAgentIds.map((id) => (
+              <RunMemberAccount
+                key={id}
+                runner={runner}
+                agentId={id}
+                member={id}
+                projectId={selectedProject?.id}
+                projectsSupported={projectsSupported}
+                workspaceId={workspaceId || undefined}
+                refresh={accountRefresh}
+                accountId={memberAccounts[id] ?? ""}
+                onChoose={(accountId) => setMemberAccounts((current) => ({ ...current, [id]: accountId }))}
+                onMissing={reportMissingAccount}
+              />
+            ))}
           </div>
         ) : (
           <>
@@ -530,10 +576,29 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
                     <Select<string>
                       label={role.label}
                       value={agentBindings[role.key] || null}
-                      onChange={(agentId) => setAgentBindings((current) => ({ ...current, [role.key]: agentId }))}
+                      onChange={(agentId) => {
+                        setAgentBindings((current) => ({ ...current, [role.key]: agentId }));
+                        // Another agent may be another provider's, which this account can't serve.
+                        setRoleAccounts(({ [role.key]: _previous, ...rest }) => rest);
+                      }}
                       options={roleOptions}
                       placeholder="Choose an Agent…"
                     />
+                    {agentBindings[role.key] && (
+                      <RunMemberAccount
+                        runner={runner}
+                        agentId={agentBindings[role.key]!}
+                        member={role.key}
+                        memberName={role.label}
+                        projectId={selectedProject?.id}
+                        projectsSupported={projectsSupported}
+                        workspaceId={workspaceId || undefined}
+                        refresh={accountRefresh}
+                        accountId={roleAccounts[role.key] ?? ""}
+                        onChoose={(accountId) => setRoleAccounts((current) => ({ ...current, [role.key]: accountId }))}
+                        onMissing={reportMissingAccount}
+                      />
+                    )}
                   </div>
                 ))}
                 {humanRoles.length > 0 && (
@@ -562,12 +627,85 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-/** The account one chosen agent would use, when its Machine has more than one to choose from (#4353).
- * The project matters: a policy won't move a project's account-held memory, and the run would refuse. */
-function RunMemberExpectedAccount({ runner, agentId, projectId, projectsSupported, workspaceId }: { runner: RunnerView; agentId: string; projectId: string | undefined; projectsSupported: boolean; workspaceId: string | undefined }) {
+/** The account one member would use, when its Machine has more than one to choose from, and the choice
+ * itself when the policy can't place it (#4353). The project matters: a policy won't move a project's
+ * account-held memory, and the run would refuse. A choice someone made stays until they change it, even
+ * if the policy could place the member again. */
+function RunMemberAccount({ runner, agentId, member, memberName, projectId, projectsSupported, workspaceId, refresh, accountId, onChoose, onMissing }: {
+  runner: RunnerView;
+  agentId: string;
+  /** This member's key in the request. */
+  member: string;
+  /** The field's name for it, when it isn't the agent's own: a workflow's role. */
+  memberName?: string;
+  projectId: string | undefined;
+  projectsSupported: boolean;
+  workspaceId: string | undefined;
+  refresh: number;
+  accountId: string;
+  onChoose: (accountId: string) => void;
+  onMissing: (member: string, name: string | null) => void;
+}) {
+  const reasonId = `${useId()}-reason`;
   const agent = runner.agents.find((candidate) => candidate.id === agentId);
   const provider = agent ? providerForDriver(agent.driver ?? "acp") : null;
-  const several = (runner.providerAccounts ?? []).filter((account) => account.provider === provider).length > 1;
-  const preview = useProviderAccountSelection(runner.runnerId, provider && several ? { agentId, ...providerAccountPreviewPlacement({ projectsSupported, projectId, workspaceId }) } : null, providerAccountSelectionRefreshKey(runner, runner.status === "online"));
-  return preview ? <ExpectedProviderAccount runner={runner} preview={preview} providerName={agent ? agentDisplayName(agent) : undefined} /> : null;
+  const accounts = (runner.providerAccounts ?? []).filter((account) => account.provider === provider);
+  const preview = useProviderAccountSelection(runner.runnerId, provider && accounts.length > 0 ? { agentId, ...providerAccountPreviewPlacement({ projectsSupported, projectId, workspaceId }) } : null,
+    `${providerAccountSelectionRefreshKey(runner, runner.status === "online")}\0${refresh}`);
+  const name = memberName ?? (agent ? agentDisplayName(agent) : agentId);
+  const needsChoice = accounts.length > 0 && (preview?.status === "choice_required" ||
+    (agent !== undefined && agentNeedsAccountChoice(agent, runner.providerAccountDefaults)));
+  // A choice counts only while it can still start, so one that signs out asks again rather than launching.
+  const chosen = accounts.some((account) => account.id === accountId && !memberAccountUnusable(account, agent)) ? accountId : "";
+  const missing = needsChoice && !chosen;
+  useEffect(() => {
+    onMissing(member, missing ? name : null);
+    return () => onMissing(member, null);
+  }, [member, missing, name, onMissing]);
+  const titles = maskedAccountTitles(accounts.map((account) => account.label));
+  // Bound to this exact account list: another Machine or Agent offers other accounts, hidden again.
+  const [revealed, toggleRevealed] = useAccountIdentifierReveal(
+    JSON.stringify([runner.runnerId, agentId, chosen, accounts.map((account) => [account.id, account.label])]),
+  );
+  if (!needsChoice && !chosen) {
+    return preview && accounts.length > 1 ? <ExpectedProviderAccount runner={runner} preview={preview} providerName={memberName ?? (agent ? agentDisplayName(agent) : undefined)} /> : null;
+  }
+  const label = `Account for ${name}`;
+  return (
+    <div className="field">
+      <div className="pid-field-head">
+        <span className="new-session-field-label">{label}</span>
+        {accounts.some((account) => isPersonalIdentifier(account.label)) && (
+          <AccountIdentifierRevealButton label="Emails" revealed={revealed} onToggle={toggleRevealed} withText />
+        )}
+      </div>
+      <Select<string>
+        label={label}
+        value={chosen || null}
+        onChange={onChoose}
+        options={accounts.map((account, index) => {
+          const candidate = preview?.candidates.find((item) => item.accountId === account.id);
+          const blocked = memberAccountUnusable(account, agent);
+          const unusable = blocked === "access" ? "This server can't use this account."
+            : blocked ? providerAccountDescription(account.authStatus) : null;
+          return {
+            value: account.id,
+            label: revealed ? account.label : titles[index]!,
+            ...(unusable ? { disabled: true, disabledReason: unusable }
+              : { description: (candidate && providerAccountSkipLabel(candidate)) ?? providerAccountDescription(account.authStatus) }),
+          };
+        })}
+        placeholder="Choose an Account…"
+        invalid={missing}
+        describedBy={missing ? reasonId : undefined}
+      />
+      {missing && (
+        <FieldError id={reasonId}>
+          {preview?.status === "choice_required"
+            ? providerAccountExpectationSentence(preview)
+            : "This machine's account policy can't place this agent. Choose an account, or review this machine's Provider Accounts."}
+        </FieldError>
+      )}
+    </div>
+  );
 }

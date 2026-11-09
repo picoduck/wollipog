@@ -2,6 +2,7 @@ import type {
   AgentDefinition,
   ProviderAccountDefinition,
   RunnerProviderAccountDefault,
+  RunnerView,
   SubscriptionUsageBucket,
   SubscriptionUsageSnapshot,
 } from "./index.js";
@@ -93,7 +94,7 @@ export interface ProviderAccountSelectionRecord {
    * accounts: a named account or default was chosen by a person and keeps its recovery path. */
   revalidateAtLaunch?: boolean;
   /** Set when this launch names a model and a policy chose the account. No reliable per-account model
-   * source exists, so nothing checked that the account's plan offers that model. Never score on it. */
+   * source exists, so nothing checked that the account's plan offers that model. */
   modelCompatibility?: "unknown";
 }
 
@@ -344,8 +345,8 @@ export function providerAccountPolicyFixedId(policy: Pick<RunnerProviderAccountD
   return policy?.fixedAccountId !== undefined ? policy.fixedAccountId : policy?.accountId ?? null;
 }
 
-/** Picks one of the eligible candidates, which arrive in rank order. A mode is defined by this step:
- * eligibility above is common to every mode and always runs first. */
+/** Picks one of the eligible candidates, which arrive in rank order. Eligibility above is common to
+ * every mode and always runs first. */
 function chooseEligibleCandidate(
   mode: ProviderAccountPolicyMode,
   eligible: readonly ProviderAccountSelectionCandidate[],
@@ -552,6 +553,28 @@ export function providerAccountChoiceRequiredForAgent(choice: ProviderAccountCho
 export function providerAccountSelectionPreviewForAgent(preview: ProviderAccountSelectionPreview): Omit<ProviderAccountSelectionPreview, "accountId" | "candidates"> {
   const { accountId: _accountId, candidates: _candidates, ...narrowed } = preview;
   return narrowed;
+}
+
+/** What an agent's credential receives of a Machine on `GET /api/runners`. Account ids contain account
+ * labels, which are personal data, so nothing that holds one survives; an agent names accounts through
+ * `get_provider_account_selection`'s references. Every tool reads `available` and `authStatus`, which
+ * stay. A control-plane caller that needs readiness or the saved policy reads the Machine itself. */
+export function runnerViewForAgent<T extends Pick<RunnerView, "agents">>(runner: T): Omit<T, "providerAccounts" | "providerAccountDefaults" | "providerLogins"> {
+  const { providerAccounts: _accounts, providerAccountDefaults: _defaults, providerLogins: _logins, ...narrowed } = runner as T & Pick<RunnerView, "providerAccounts" | "providerAccountDefaults" | "providerLogins">;
+  return { ...narrowed, agents: runner.agents.map(({ defaultProviderAccountId: _default, providerAccountReadiness: _readiness, ...agent }) => agent) };
+}
+
+/** Shape-check the accounts a run or workflow names for its members, by the key each member has in that
+ * request. A key that is no member is refused rather than dropped, so nobody believes a member got an
+ * account it didn't. */
+export function memberProviderAccountsError(accounts: unknown, members: readonly string[], field: string): string | null {
+  if (accounts === undefined) return null;
+  if (typeof accounts !== "object" || accounts === null || Array.isArray(accounts)) return `${field} is invalid`;
+  for (const [member, account] of Object.entries(accounts)) {
+    if (!members.includes(member)) return `${field} names '${member}', which isn't a member of this launch`;
+    if (typeof account !== "string" || !(PROVIDER_ACCOUNT_ID.test(account) || isProviderAccountRef(account))) return `${field} is invalid`;
+  }
+  return null;
 }
 
 /** The structured form of a refusal: what an unattended caller can do next. */

@@ -387,6 +387,31 @@ test("an agent's credential reads account selection in references only, over the
       assert.ok(!text.includes(personal), text);
     }
   };
+  // The inventory itself narrows for that credential, on the raw route and not only in a tool's output.
+  const inventoryAsAgent = await s.get("/api/runners", rootId);
+  assert.equal(inventoryAsAgent.status, 200, inventoryAsAgent.text);
+  assertNamesNoAccount(inventoryAsAgent.text);
+  type Listed = { runners: Array<{ runnerId: string; providerAccounts?: unknown; providerAccountDefaults?: unknown; providerLogins?: unknown;
+    agents: Array<{ id: string; available?: boolean; defaultProviderAccountId?: unknown; providerAccountReadiness?: unknown; capabilities?: unknown }> }> };
+  const narrowed = (JSON.parse(inventoryAsAgent.text) as Listed).runners.find((runner) => runner.runnerId === RUNNER)!;
+  assert.equal(narrowed.providerAccounts, undefined);
+  assert.equal(narrowed.providerAccountDefaults, undefined);
+  assert.equal(narrowed.providerLogins, undefined);
+  const narrowedAgent = narrowed.agents.find((agent) => agent.id === AGENT)!;
+  assert.equal(narrowedAgent.defaultProviderAccountId, undefined);
+  assert.equal(narrowedAgent.providerAccountReadiness, undefined);
+  assert.ok(narrowedAgent.capabilities, "what the agent tools read stays");
+  const inventoryAsPerson = await s.get("/api/runners");
+  const full = (JSON.parse(inventoryAsPerson.text) as Listed).runners.find((runner) => runner.runnerId === RUNNER)!;
+  assert.deepEqual((full.providerAccounts as Array<{ id: string }>).map((account) => account.id),
+    ["first-person-example-com-1234", "second-person-example-com-5678"], "a person reads the route as before");
+  assert.ok(full.providerAccountDefaults, "including the saved policy");
+  // Existing tools keep working from that narrowed reply, and get_campaign's Child Model check doesn't read it.
+  assert.equal((await s.tool(rootId, "list_runners")).isError, false);
+  const capabilities = await s.tool(rootId, "get_agent_capabilities", { runnerId: RUNNER, agentId: AGENT });
+  assert.equal(capabilities.isError, false, capabilities.text);
+  assertNamesNoAccount(capabilities.text);
+
   const path = `/api/runners/${RUNNER}/provider-account-selection?agentId=${AGENT}`;
   const asAgent = await s.get(path, rootId);
   assert.equal(asAgent.status, 200, asAgent.text);

@@ -249,7 +249,9 @@ possible later work.
   boundary), so it can't tell the armed command from another shell command. While a session's armed
   merge is held, the hook denies every use of a tool that can run a command (Bash, PowerShell,
   Monitor) by that session and parks it on the prerequisite, and a policy-hook card for one can't be
-  allowed; other tools are unaffected, and those tools pass again once the hold lifts.
+  allowed; other tools are unaffected, and those tools pass again once the hold lifts. The denial
+  stays session-wide even if the hook could see the command: denying only the armed command is a
+  deny-list, and a rewritten or compound form of it would pass under a mode that asks nobody.
 - **What can't be intercepted.** A provider running the armed command with neither a permission
   request nor a policy-hook evaluation reports it only afterwards, so the guard above is the only
   fence on that path. A person merging on the forge, and a raw `gh pr merge` that was never armed,
@@ -580,7 +582,7 @@ only the open attempt.
 | Campaign Elapsed | Root creation to verified campaign completion, or now while unfinished. Never a sum of item durations: two concurrent ten-minute items take about ten minutes. |
 | Item Elapsed | First attempt start to the delivered verification, or now while unfinished, including intervening waits. Planned items without an attempt show their recorded age instead. |
 | Queue Time | Recorded intervals in which the item was `queued`. |
-| Waiting Time | Recorded intervals in which the item was `waiting` or `blocked`. A verified item held on a merge dependency (#4120) counts from its verification while the hold lasts; once its own pull requests merge it reads delivered from its verification, since when the merge happened isn't recorded. |
+| Waiting Time | Recorded intervals in which the item was `waiting` or `blocked`. A verified item held on a merge dependency (#4120) counts from its verification until the hold ends, which is the first of its own merge and its last prerequisite's merge. Merge times are the forge's, see below. |
 | Active Time | Recorded intervals within an attempt while its session was running. |
 
 Queue, Waiting, and Active Time come from durable intervals recorded by slice 6, kept independent
@@ -600,6 +602,17 @@ metric counts exactly the spans in which the item's primary state was `queued`, 
 session's status are not recorded, which only matters for telling `waiting` from `blocked` and
 Waiting Time counts both; and dependencies use their current edges for the whole replay. A
 dependency without recorded history at an instant counts as unfinished, never as blocking.
+
+A hold's end comes from `mergedAt` on the stored forge fact, the time GitHub or GitLab reports. It is
+not a recorded interval and no gate or state reads it. An ended hold adds Waiting Time to the held
+item only: it replays as waiting even over a failed prerequisite, so an unassigned dependent keeps
+its Queue Time. The time is unknown when a pull request's fact came
+from a runner that doesn't report it, or was stored before runners did (the background pass doesn't
+read a merged pull request again). A merge that happened with an unknown time leaves the item
+delivered from its verification, so that hold counts nothing: Waiting Time can undercount there, and
+never counts a hold past its end. An item with a recorded delivery (#4070) counts no hold either,
+since the replay doesn't read recorded deliveries. A pull request closed without merging is set
+aside, so when it closes after the item's last merge, the hold is measured as ending at that merge.
 
 Recording begins once per database (`campaign_work_accounting_meta.started_at`). At that moment
 every existing item and open attempt receives one interval stamped with the start time. Time before

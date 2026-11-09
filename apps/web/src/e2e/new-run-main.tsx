@@ -162,6 +162,12 @@ const client = {
   providerAccountSelection: async (_runnerId: string, target: { agentId?: string; projectId?: string }) => (target.agentId === "codex" ? {
     provider: "codex", mode: "fixed", policyRevision: 1, status: "selected", source: "fixed_default", accountId: "d",
     enforcement: "enforced", generatedAt: NOW, candidates: [{ accountId: "d", position: null, eligible: true, selected: true }],
+  } : scenario === "account-priority-choice" ? {
+    provider: "claude", mode: "priority", policyRevision: 2, status: "choice_required", source: "none", refusal: "no_eligible_account",
+    enforcement: "enforced", generatedAt: NOW, candidates: [
+      { accountId: "a", position: 1, eligible: false, reason: "signed_out" },
+      { accountId: "b", position: 2, eligible: false, reason: "usage_exhausted", limitLabel: "Weekly", retryAt: NOW + 3 * 60 * 60_000 },
+    ],
   } : scenario === "account-priority-memory" && target.projectId ? {
     provider: "claude", mode: "priority", policyRevision: 2, status: "choice_required", source: "none", refusal: "account_memory",
     enforcement: "enforced", generatedAt: NOW, candidates: [],
@@ -172,12 +178,14 @@ const client = {
       { accountId: "b", position: 2, eligible: true, selected: true },
     ],
   }),
-  createRun: async () => {
+  createRun: async (request: unknown) => {
     if (scenario === "error") refuse();
+    document.body.dataset.request = JSON.stringify(request);
     return { run: { id: "run-new" }, sessions: [] };
   },
-  createWorkflowRun: async () => {
+  createWorkflowRun: async (request: unknown) => {
     if (scenario === "error") refuse();
+    document.body.dataset.request = JSON.stringify(request);
     return { run: { id: "run-new" }, sessions: [], instance: {} };
   },
 } as unknown as ApiClient;
