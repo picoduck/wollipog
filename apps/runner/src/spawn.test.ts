@@ -8,7 +8,7 @@ import path from "node:path";
 import net from "node:net";
 import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
-import { buildBwrapArgs, protectedWorktreeGitConfig, bwrapPathWritable, bwrapTemporaryEnvironment, buildCloudArgs, buildContainerArgs, buildWslAgentControlRelayArgs, buildWslArgs, killTree, killTreeAndWait, killWindowsTreeAndWait, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, windowsTreeKillFailures, winQuoteArg, wslProviderPidfile, type AgentProcess, type WindowsTreeKillDeps } from "./spawn.js";
+import { buildBwrapArgs, protectedWorktreeGitConfig, bwrapPathMayBeWritable, bwrapPathWritable, bwrapTemporaryEnvironment, buildCloudArgs, buildContainerArgs, buildWslAgentControlRelayArgs, buildWslArgs, killTree, killTreeAndWait, killWindowsTreeAndWait, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, windowsTreeKillFailures, winQuoteArg, wslProviderPidfile, type AgentProcess, type WindowsTreeKillDeps } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { WSL_BWRAP_LAUNCHER_PATH } from "./wsl-bwrap-launcher.js";
 import { captureLiveProcess, runFixtureCleanup, terminateOriginalProcess, waitForOriginalProcessToStop, type PosixProcessIdentity } from "../test-support/posix-process.js";
@@ -733,6 +733,31 @@ test("bwrapPathWritable follows bwrap's last-mount-wins order over the generated
   assert.equal(bwrapPathWritable(["--ro-bind", "/", "/", "--overlay-src", "/a", "--tmpfs", "/tmp"], "/tmp"), false,
     "an option outside the model is never read as proof of a writable path");
   assert.equal(bwrapPathWritable(["--bind", "/", "/", "--", "/bin/sh", "--tmpfs", "/data"], "/data/x"), true,
+    "the command after -- is not a bwrap option");
+});
+
+test("bwrapPathMayBeWritable counts what the provider could create and treats the unknown as writable", () => {
+  const args = ["--ro-bind", "/", "/", "--dev", "/dev", "--dir", "/dev/shm", "--proc", "/proc", "--tmpfs", "/tmp",
+    "--bind", "/work", "/work", "--ro-bind", "/work/.git", "/work/.git",
+    "--tmpfs", "/hooks", "--remount-ro", "/hooks",
+    "--tmpfs", "/state", "--bind", "/src", "/state/sub", "--remount-ro", "/state"];
+  for (const [path, mayWrite] of [
+    ["/usr/lib", false],
+    ["/tmp/retired/.git", true], // below a fresh tmpfs: absent, but the provider can create it
+    ["/dev/shm/retired/.git", true], // bwrap's --dev is a writable private filesystem
+    ["/proc/sys", true],
+    ["/work/file", true],
+    ["/work/.git", false],
+    ["/hooks/state", false],
+    ["/state/file", false],
+    ["/state/sub/file", true], // --remount-ro leaves a mount below its target writable
+    ["relative", true],
+  ] as const) {
+    assert.equal(bwrapPathMayBeWritable(args, path), mayWrite, path);
+  }
+  assert.equal(bwrapPathMayBeWritable(["--ro-bind", "/", "/", "--overlay-src", "/a"], "/usr"), true,
+    "an option outside the model is never read as proof of a read-only path");
+  assert.equal(bwrapPathMayBeWritable(["--ro-bind", "/", "/", "--", "/bin/sh", "--bind", "/x", "/x"], "/x"), false,
     "the command after -- is not a bwrap option");
 });
 

@@ -70,6 +70,7 @@ import type {
 } from "./driver.js";
 import { isProviderAuthenticationFailure, shouldRecoverProviderAuthentication } from "./provider-auth-failure.js";
 import { SKILL_TOOL_KIND, skillToolTitle } from "./skill-tool.js";
+import { isolationWithoutRetiredWorktrees, ownedWorktreeRetired } from "./retired-worktree-isolation.js";
 import { readCompatibleEnv, type Environment } from "../env-compat.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -597,6 +598,11 @@ export class ClaudeCodeDriver implements Driver {
   private readonly usageAccounting: ClaudeUsageAccounting;
   private usageBaselinePrepared = false;
   private usageBaselinePreparing = false;
+  /** Bound sibling worktrees (by path) found retired since launch. Once one is left out of a spawn it
+   * stays out, even if a directory appears at its path again: binding that needs a fresh launch. */
+  private readonly retiredOwnedWorktrees = new Set<string>();
+  /** Retired siblings a spawn actually left out, each reported once in the Agent Logs. */
+  private readonly announcedRetiredWorktrees = new Set<string>();
   /** The top-level request streaming now: its `message_start` usage, completed by `message_delta`.
    * Published live on `message_stop` when the control plane can settle it (#3086). */
   private liveRequest: { model: string; usage: Record<string, unknown> } | null = null;
@@ -786,6 +792,42 @@ export class ClaudeCodeDriver implements Driver {
 
   private managedProtections(): ManagedWorktreeProtection[] {
     return this.opts.managedWorktreeProtections?.() ?? [];
+  }
+
+  /**
+   * The isolation every spawn of this driver uses: the stored launch isolation without any sibling
+   * worktree it binds that has been retired since (#3402). The session manager relaunches a provider
+   * that binds a retired worktree, but that relaunch stands aside while the live process's background
+   * work is unfinished (#4210), and this driver can still spawn in that window: a model, effort or
+   * permission-mode change once its own tasks have ended, a resume usage probe, or a process that
+   * exited. bubblewrap refuses the stored bind of a removed worktree, so that spawn, and the
+   * person's turn, would fail. Leaving the retired binds out only narrows the boundary (see
+   * `isolationWithoutRetiredWorktrees` for what is kept), and the session manager's own relaunch
+   * still follows once the work ends.
+   */
+  private spawnIsolation(): SpawnIsolation | undefined {
+    const isolation = this.opts.isolation;
+    if (isolation?.backend !== "bwrap") return isolation;
+    const owned = isolation.protectedWorktree?.ownedWorktrees ?? [];
+    if (owned.length === 0) return isolation;
+    const managed = this.opts.managedWorktreeProtections
+      ? new Set(this.managedProtections().map((protection) => protection.worktreePath))
+      : undefined;
+    for (const worktree of owned) {
+      if (!this.retiredOwnedWorktrees.has(worktree.path) && ownedWorktreeRetired(worktree, managed)) {
+        this.retiredOwnedWorktrees.add(worktree.path);
+      }
+    }
+    const result = isolationWithoutRetiredWorktrees(isolation,
+      owned.filter((worktree) => this.retiredOwnedWorktrees.has(worktree.path)));
+    const kept = result?.backend === "bwrap" ? result.protectedWorktree?.ownedWorktrees ?? [] : [];
+    const leftOut = owned.filter((worktree) => !this.announcedRetiredWorktrees.has(worktree.path) &&
+      !kept.some((entry) => entry.path === worktree.path));
+    for (const worktree of leftOut) this.announcedRetiredWorktrees.add(worktree.path);
+    if (leftOut.length) {
+      this.cb.onStderr(`Claude launch leaves out retired worktree ${leftOut.map((worktree) => worktree.path).join(", ")} from its sandbox.`);
+    }
+    return result;
   }
 
   private effectivePermissionMode(): string {
@@ -1021,7 +1063,7 @@ export class ClaudeCodeDriver implements Driver {
           LEGACY_CLAUDE_PENDING_MAX_MS,
           ...(this.opts.orchestrator ? ORCHESTRATOR_REPOSITORY_OVERRIDE_ENV : []),
         ],
-        isolation: options?.isolation ?? this.opts.isolation,
+        isolation: options?.isolation ?? this.spawnIsolation(),
         containerAgentLaunch: true,
         cloudAgentLaunch: true,
         descendantMarker: options?.descendantMarker ?? this.opts.descendantMarker,
@@ -1369,7 +1411,7 @@ export class ClaudeCodeDriver implements Driver {
             LEGACY_CLAUDE_PENDING_MAX_MS,
             ...(this.opts.orchestrator ? ORCHESTRATOR_REPOSITORY_OVERRIDE_ENV : []),
           ],
-          isolation: this.opts.isolation,
+          isolation: this.spawnIsolation(),
           containerAgentLaunch: true,
           cloudAgentLaunch: true,
           descendantOwner: this.processes.owner,
@@ -1674,7 +1716,7 @@ export class ClaudeCodeDriver implements Driver {
             LEGACY_CLAUDE_PENDING_MAX_MS,
             ...(this.opts.orchestrator ? ORCHESTRATOR_REPOSITORY_OVERRIDE_ENV : []),
           ],
-          isolation: this.opts.isolation,
+          isolation: this.spawnIsolation(),
           containerAgentLaunch: true,
           cloudAgentLaunch: true,
           descendantOwner: this.processes.owner,

@@ -518,6 +518,45 @@ export function bwrapPathWritable(options: readonly string[], path: string): boo
   return writable;
 }
 
+/** The only mounts `bwrapPathMayBeWritable` accepts as read-only. `BWRAP_MOUNTS.writable` answers a
+ * different question (is this an existing writable directory?), so `--dev`, `--proc` and `--mqueue`,
+ * which bwrap mounts writable, are read-only there and must not be here. */
+const BWRAP_READ_ONLY_MOUNTS = new Set(["--ro-bind", "--ro-bind-try", "--ro-bind-data"]);
+
+/** Whether the provider might write or create `path` inside the sandbox the given bwrap options
+ * describe: the opposite stance of `bwrapPathWritable`, for a caller proving a path stays read-only.
+ * The last mount containing the path decides; only a read-only bind proves read-only, every other
+ * mount (a tmpfs, `--dev`, `--proc`) counts as writable, and a path below a fresh tmpfs counts too,
+ * since the provider can create it. `--remount-ro` changes only the mount at its own target, not one
+ * below it, so it decides only when that mount is the deciding one. An option or operand this model
+ * does not know answers `true`. */
+export function bwrapPathMayBeWritable(options: readonly string[], path: string): boolean {
+  if (!posix.isAbsolute(path)) return true;
+  const target = bwrapMountPath(path);
+  const contains = (mount: string) => mount === "/" || target === mount || target.startsWith(`${mount}/`);
+  let writable = true;
+  let decidingMount: string | undefined;
+  for (let index = 0; index < options.length && options[index] !== "--";) {
+    const option = options[index]!;
+    if (BWRAP_FLAGS.has(option)) { index += 1; continue; }
+    const skipped = BWRAP_NON_MOUNT_OPTIONS.get(option);
+    if (skipped) { index += 1 + skipped; continue; }
+    const mount = BWRAP_MOUNTS.get(option);
+    if (!mount) return true;
+    const destination = options[index + mount.operands];
+    if (destination === undefined || !posix.isAbsolute(destination)) return true;
+    const mounted = bwrapMountPath(destination);
+    if (option === "--remount-ro") {
+      if (mounted === decidingMount) writable = false;
+    } else if (contains(mounted)) {
+      decidingMount = mounted;
+      writable = !BWRAP_READ_ONLY_MOUNTS.has(option);
+    }
+    index += 1 + mount.operands;
+  }
+  return writable;
+}
+
 /** Temporary-directory variables POSIX tools read, `TMPDIR` first. */
 const POSIX_TEMP_ENV = ["TMPDIR", "TMP", "TEMP"] as const;
 
