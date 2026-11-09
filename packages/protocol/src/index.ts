@@ -298,6 +298,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v334 (#4353): a runner reports each account's billing and cooldown and rechecks a policy-chosen
    * account at launch, so the control plane may enforce a non-fixed account selection policy. */
   providerAccountSelectionPolicy: 334,
+  /** v337 (#4353): a control plane reads an agent's account reference and lists the accounts it may name. */
+  providerAccountAgentChoice: 337,
   providerLogin: 171,
   providerAccountRemoval: 188,
   accountScopedAgentSkills: 172,

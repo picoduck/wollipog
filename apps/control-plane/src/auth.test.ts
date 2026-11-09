@@ -37,7 +37,11 @@ test("orchestrator credentials expose only session management and governance rea
     ["POST", "/api/sessions/:id/orchestrator-campaign/verify-child"],
     ["POST", "/api/sessions/:id/background-jobs/:jobId/stop"],
     ["POST", "/api/sessions/:id/queue-hold/release"],
+    ["GET", "/api/runners/:id/provider-account-selection"],
   ]) assert.equal(isAgentControlApiRouteAllowed(method!, route!, "orchestrator"), true, route);
+  assert.equal(isAgentControlApiRouteAllowed("GET", "/api/runners/:id/provider-account-selection", "normal"), true);
+  assert.equal(isAgentControlApiRouteAllowed("PUT", "/api/runners/:id/provider-account-policies/:provider", "orchestrator"), false,
+    "an agent reads the selection; it never writes the policy");
   for (const [method, route] of [
     ["POST", "/api/runs"], ["POST", "/api/sessions/:id/approve"],
     ["POST", "/api/sessions/:id/parent-control"],

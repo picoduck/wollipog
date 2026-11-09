@@ -1022,6 +1022,11 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   assert.equal(preview.status, 200);
   assert.equal((await preview.json() as { mode?: string }).mode, "priority");
   assert.equal((await fetchWithBearer(`${httpBase}/api/runners/runner-ui-route/provider-account-selection`, ownerToken)).status, 400);
+  assert.equal((await fetchWithBearer(`${httpBase}/api/runners/runner-ui-route/provider-account-selection?provider=claude&workspaceId=no-such-workspace`, ownerToken)).status, 404,
+    "a preview reads only a workspace its caller could launch in");
+  assert.equal((await fetchWithBearer(`${httpBase}/api/runners/runner-ui-route/provider-account-selection?provider=claude&projectId=no-such-project`, ownerToken)).status, 404,
+    "and only a project its caller could launch in");
+  assert.equal((await fetchWithBearer(`${httpBase}/api/runners/runner-ui-route/provider-account-selection?provider=claude&noProject=1`, ownerToken)).status, 200);
   const restoredFixed = await putPolicy(ownerToken, { mode: "fixed", expectedRevision: 2 });
   assert.equal(restoredFixed.status, 200);
   assert.equal((await restoredFixed.json() as { providerAccountPolicy: { accountId?: string } }).providerAccountPolicy.accountId, "work",

@@ -805,6 +805,10 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       if (optionPresent(args, "--work-item") && (!campaignWorkItemId?.trim() || campaignWorkItemId.startsWith("--"))) {
         return { error: "session create --work-item requires a campaign work item ID" };
       }
+      const providerAccountId = option(args, "--provider-account");
+      if (optionPresent(args, "--provider-account") && (!providerAccountId?.trim() || providerAccountId.startsWith("--"))) {
+        return { error: "session create --provider-account requires an account reference from session accounts" };
+      }
       return {
         tool: "create_session",
         input: {
@@ -822,8 +826,15 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
           maxToolCalls: numeric(option(args, "--max-tool-calls")),
           maxChildSessions: numeric(option(args, "--max-child-sessions")),
           campaignWorkItemId,
+          providerAccountId,
         },
       };
+    }
+    case "accounts": {
+      const runnerId = option(args, "--runner");
+      const agentId = option(args, "--agent");
+      if (!runnerId || !agentId) return { error: "session accounts requires --runner and --agent" };
+      return { tool: "get_provider_account_selection", input: { runnerId, agentId, workspaceId: option(args, "--workspace"), model: option(args, "--model") } };
     }
     case "prompt":
       return words[2] && words.slice(3).join(" ").trim()
@@ -1060,7 +1071,10 @@ export async function runWollipogCli(
   const workflowDecisionTools = new Set([
     "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
   ]);
-  const requiredProtocol = parsed.tool === "create_session" && typeof parsed.input.campaignWorkItemId === "string"
+  const requiredProtocol = parsed.tool === "get_provider_account_selection" ||
+      (parsed.tool === "create_session" && typeof parsed.input.providerAccountId === "string")
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccountAgentChoice
+    : parsed.tool === "create_session" && typeof parsed.input.campaignWorkItemId === "string"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkItemAtCreation
     : parsed.tool === "create_session" && typeof parsed.input.effort === "string"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControlReasoningEffort

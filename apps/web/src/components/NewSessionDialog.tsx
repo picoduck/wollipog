@@ -8,7 +8,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
-import { providerAccountExpectationSentence, providerAccountSelectionRefreshKey, providerAccountSkipLabel, useProviderAccountSelection } from "./ProviderAccountSelection.js";
+import { providerAccountExpectationSentence, providerAccountPreviewPlacement, providerAccountSelectionRefreshKey, providerAccountSkipLabel, useProviderAccountSelection } from "./ProviderAccountSelection.js";
 import {
   PROVIDER_ACCOUNT_CHOICE_REQUIRED,
   providerAccountPolicyMode,
@@ -556,7 +556,8 @@ export function NewSessionDialog({
   // What this launch would use if nobody chooses, from the launch's own resolver (#4353). Project
   // sessions can differ, because a policy won't move a project's account-held memory.
   const accountSelection = useProviderAccountSelection(runnerId || undefined,
-    provider && agentId ? { agentId, ...(selectedProjectId ? { projectId: selectedProjectId } : {}) } : null,
+    provider && agentId ? { agentId, ...providerAccountPreviewPlacement({ projectsSupported, projectId: selectedProjectId,
+      workspaceId: browsedPath ? undefined : workspaceId || undefined }) } : null,
     `${providerAccountSelectionRefreshKey(runner, true)}\0${accountSelectionRefresh}`);
   const policyMode = providerAccountPolicyMode(savedProviderAccount);
   const policyChoiceRequired = policyMode !== "fixed" && accountSelection?.status === "choice_required";

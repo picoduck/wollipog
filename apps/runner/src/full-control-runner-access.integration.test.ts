@@ -266,6 +266,11 @@ test("a Full Control root and its descendants reach the organization runner thei
   assert.deepEqual(await visibleRunners(rootId), ["member-runner", "my-team-runner", RUNNER].sort());
   const capabilities = await tool(rootId, "get_agent_capabilities", { runnerId: RUNNER, agentId: AGENT });
   assert.equal(capabilities.isError, false, capabilities.text);
+  // An agent's credential reaches the account listing over the real route, in references only (#4353).
+  const accounts = await tool(rootId, "get_provider_account_selection", { runnerId: RUNNER, agentId: AGENT });
+  assert.equal(accounts.isError, false, accounts.text);
+  assert.ok(Array.isArray(accounts.json!.accounts), accounts.text);
+  assert.match((await tool(rootId, "get_provider_account_selection", { runnerId: "colleague-runner", agentId: AGENT })).text, /runner not found/u);
   // The campaign's fixed child harness and model resolve on that runner too (only online Machines count).
   const campaign = await tool(rootId, "get_campaign");
   assert.equal(campaign.isError, false, campaign.text);

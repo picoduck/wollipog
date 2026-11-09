@@ -9922,6 +9922,15 @@ export class ControlPlaneDb {
     return rows.length === 1 ? this.projectLocation(rows[0]!.id) : null;
   }
 
+  /** The Project Location a new session with no assignment joins: its workspace's, unless the
+   * session's audience wouldn't fit inside that Project's. Session creation applies this rule, so
+   * anything that must predict a launch's project reads it here. */
+  inferredSessionProjectLocation(runnerId: string, workspaceId: string | null | undefined, scope: ResourceScope): ProjectLocationView | null {
+    const location = workspaceId ? this.findProjectLocation(runnerId, workspaceId) : null;
+    const projectScope = location ? this.projectScope(location.projectId) : null;
+    return location && projectScope && this.scopeAudienceContainedWithMembership(scope, projectScope) ? location : null;
+  }
+
   /** Resolve an imported provider cwd against the combined durable Project Location and Machine
    * Workspace catalog. An exact physical Location may be shared by several Projects, in which case
    * we retain its Workspace identity but decline Project inference; tied Workspace identities fail
@@ -18656,7 +18665,7 @@ export class ControlPlaneDb {
         ...(allocation?.toolCalls === undefined ? {} : { maxToolCalls: allocation.toolCalls }) } };
     }
     const scope = input.scope ?? this.inheritedSessionScope(input.runnerId, input.workspaceId);
-    const inferredLocation = input.workspaceId ? this.findProjectLocation(input.runnerId, input.workspaceId) : null;
+    const inferredLocation = this.inferredSessionProjectLocation(input.runnerId, input.workspaceId, scope);
     let projectLocationId = input.projectLocationId !== undefined
       ? input.projectLocationId
       : input.projectId !== undefined ? null : inferredLocation?.id ?? null;

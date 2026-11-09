@@ -72,11 +72,10 @@ Under Priority Order an account is passed over, with a readable reason, when it:
 - has a usage window or spend control that a reading reports as used up, until its reset passes.
 
 Missing or old usage readings don't disqualify an account: only a reading that says "used up" does.
-Selection never crosses providers. Provider model catalogs are reported per agent, not per account,
-so a model is validated against the agent; an account whose plan refuses it fails at the provider.
+Selection never crosses providers.
 
-Explicit choices win. A session, child, run or workflow that names an account uses it, whatever the
-policy says or would skip. All of them resolve through one function
+Explicit choices win. A session or child that names an account uses it, whatever the policy says or
+would skip. Runs and workflows can't name one yet. All of them resolve through one function
 (`launchProviderAccount`), and multi-agent runs and workflows now bind the same account a session
 would, including a fixed default. WSL agents keep their context-local account, because a POSIX path
 doesn't identify its owning distribution, so a machine policy doesn't apply to them.
@@ -91,7 +90,42 @@ a separate opt-in control with its own provider-terms warning and safety checks.
 Project sessions on a Claude Code older than Wollipog's project memory keep that memory in the
 account's HOME. Priority Order refuses these launches, because choosing a different account later
 would silently change what the session remembers; they need an explicit account or a newer Claude
-Code.
+Code. This covers the project a launch would join without naming one: a child follows its parent, and
+any other launch follows its workspace's Location when that workspace has exactly one and the
+session's audience fits inside the project. No Project is a choice, and nothing is inferred for it. A
+preview given the workspace reads this same rule. Without a workspace, as in Provider Accounts, it
+has no project to predict.
+
+### Model Compatibility Is Not Enforced
+
+Selection doesn't check that an account's plan offers a model, because no reliable per-account source
+exists. A model is validated against the agent's catalog only. A launch that names a model under
+Priority Order records `modelCompatibility: "unknown"`, and agent tools repeat that with the result.
+Nothing is said when no model is named. New Session has no model at creation, so its preview gains
+no warning.
+
+A refusal is recoverable. The provider's error reaches the caller, and nothing retries on another
+account or moves the session: an automatic switch answers usage limits only. To get past it, start
+the session with an explicitly chosen account.
+
+What this rests on, from reading the code; no probe ran against real accounts, because that would
+mean using other accounts' credential HOMEs:
+
+- Discovery runs one model probe per agent, version, context and HOME, in the single account a launch
+  would select (`enrichAgentModels`, `selectProviderAccountForDiscovery`). `ProviderAccountDefinition`
+  has no models.
+- The per-account probes return no models: `claude auth status` (`subscriptionType`, not kept for
+  accounts), `codex login status`, and Codex `account/read` with its rate limits (`planType`).
+- Codex `model/list` and Claude's control `initialize` are authenticated catalogs and could run in each
+  account's HOME. Each run needs that HOME's lease and a provider process, a busy HOME gives no answer,
+  and nothing here shows that two plans return different lists or that a listed model will run.
+- A plan's refusal has no known signature. Claude 400 and 404 and Codex `badRequest` read as
+  `invalid_request`, and 403 reads as `permission`; no fixture captures a real one.
+- Plan names aren't used to guess, and no catalog is invented.
+
+Either of these would change the decision: a captured real refusal, which could support skipping an
+account after it refuses a model, or proof that catalogs differ by plan, which could justify probing
+each account. Automatic Balance must count compatibility as unknown and never score on it.
 
 ### When No Account Is Eligible
 
@@ -102,14 +136,35 @@ available (`choose_account`, `sign_in`, `wait`, `review_provider_accounts`, `upd
 `retryAt` when a limit is known to clear. Nothing is created: a run with one such member starts none
 of them. Unattended callers can act on this result; interactive ones offer the same account choice.
 
+### Agents Naming an Account
+
+`create_session` and `wollipog session create --provider-account` accept an optional account, and
+`get_provider_account_selection` and `wollipog session accounts` list what can be named. An agent's
+refusal text names this route. Both need protocol 337 on the control plane; the tools refuse before
+sending anything to an older one, so a choice is never silently dropped.
+
+Agents see accounts only as opaque `accountRef` values, stable for one account on one Machine, because
+an account's id contains its label. The control plane resolves a reference to the account and sends
+the runner the real one, and it accepts a real id too. A reference that matches none of this agent's
+provider's accounts is refused like any unknown id.
+
+A named account overrides the policy and goes through the same checks as the API. An agent is also
+refused an account that lacks access, needs sign-in, can't run in the agent's environment, or would
+spend API credits, because it can neither recover a sign-in nor make that billing decision; a person
+choosing the same account keeps those decisions. Usage limits and cooldowns don't refuse: overriding
+them is what an explicit choice is for, and `reason` still reports them. An execution target that
+doesn't use this machine's accounts refuses a named account rather than ignoring it. Because a label
+never reaches an agent, it can choose by eligibility but can't pick "the Work account" by name.
+
 ### Compatibility
 
 `PUT /api/runners/:id/provider-account-policies/:provider` writes `{ mode, fixedAccountId?,
 priorityAccountIds?, expectedRevision }` and keeps any field it omits, so a mode change loses neither
 the saved default nor the saved order. `GET /api/runners/:id/provider-account-selection?agentId=` (or
-`?provider=`, with an optional `projectId`) previews what a launch would do now, resolved by the
-launch's own code, with an `enforcement` of `enforced`, `machine_offline` or
-`runner_update_required`. A preview promises nothing: every launch resolves again.
+`?provider=`) previews what a launch would do now, resolved by the launch's own code, with an
+`enforcement` of `enforced`, `machine_offline` or `runner_update_required`. Pass `workspaceId`,
+`projectId` or `noProject=1` to place it, and `model` to ask about a named model. A preview promises
+nothing: every launch resolves again.
 
 - A runner below protocol 334 can't recheck a choice, so Priority Order is refused for it, both when
   saving and when launching. Explicit accounts and Default Account keep working.
@@ -125,8 +180,10 @@ launch's own code, with an `enforcement` of `enforced`, `machine_offline` or
 
 Account labels are personal data and account ids are derived from them. Refusal sentences, log lines,
 the runner's launch refusal and the reason stored on a session (`providerAccountSelection`: source,
-mode, policy revision and skip counts by reason) name no account. Only `candidates`, returned to a
-caller who can already read the machine's account inventory, carries account ids.
+mode, policy revision and skip counts by reason) name no account. Only `candidates` and a saved
+default's `accountId`, returned to a caller who can already read the machine's account inventory,
+carry account ids. Agent tools pass on only references and reason codes from that reply, so no id or
+label reaches a model's context through them.
 
 ## Remaining Work in #4353
 
