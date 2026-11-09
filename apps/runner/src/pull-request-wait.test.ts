@@ -1195,7 +1195,7 @@ for (const reverse of [false, true]) {
       const verdict = evaluateCommitChecks(HEAD, rollup(nodes), [AGGREGATOR]);
       assert.equal(verdict.requiredState, conclusion ? "failed" : "pending");
       assert.equal(verdict.summary.failedJobs.length, conclusion ? 1 : 0);
-      const fake = fakeGh([ok(pr({}, nodes)), ok(pr({}, [good, workflowJob(AGGREGATOR, "SUCCESS", bad.databaseId, 1)]))]);
+      const fake = fakeGh([ok(pr({}, nodes)), ok(pr({}, [good, workflowJob(AGGREGATOR, "SUCCESS", reverse ? 101 : 100, 1)]))]);
       const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fake.gh, ...clock() });
       assert.ok(result.ok);
       assert.equal(result.summary.outcome, conclusion ? "checks_failed" : "checks_passed");
@@ -1216,9 +1216,12 @@ test("optional shared-name failure counts and returns on any failure", async () 
 
 for (const times of [[null, RUN_AT], [RUN_AT, RUN_AT]]) {
   for (const reverse of [false, true]) {
-    test(`unorderable workflow runs retain the worse result (${times}, ${reverse})`, () => {
+    test(`unorderable workflow runs retain the worse result (${times}, ${reverse})`, async () => {
       const nodes = [run(AGGREGATOR, "FAILURE", { startedAt: times[0] }), run(AGGREGATOR, "SUCCESS", { startedAt: times[1] })];
       assert.equal(evaluateCommitChecks(HEAD, rollup(reverse ? nodes.reverse() : nodes), [AGGREGATOR]).requiredState, "failed");
+      const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fakeGh([ok(pr({}, nodes))]).gh, ...clock() });
+      assert.ok(result.ok);
+      assert.equal(result.summary.outcome, "checks_failed");
     });
   }
 }
