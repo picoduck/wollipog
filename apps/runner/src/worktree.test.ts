@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import type { RunnerToControlPlane, SessionWorktreeView } from "@wollipog/protocol";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { attachRequestedWorktree, changeRequestProvider, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, CONTAINMENT_FETCH_GIT_CONFIG, CONTAINMENT_FETCH_GIT_ENV, mergedHeadForge, mergedPullRequestContainingHead, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedGitLabMergeRequestForHead, parseMergedWorktreePullRequestForHead, parseWorktreePullRequestState, readRepositoryDefaultBranch, reclaimRetainedWorktreeRef, retainedWorktreeRefDiagnostics, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type RetainedWorktreeRefCandidate, type RetainedWorktreeRefRecord, type WorktreeCleanupRecord } from "./worktree.js";
+import { ADMIN_DIGEST_LISTING, digestAdminListing, captureRollbackSnapshot, clearWorktreeRollbackProof, worktreeCheckoutNeverFinished, createRecoveredBranchWorktree, releaseUnchangedBranch, requestedSlot, stampWorktreeRollbackProof, worktreeRollbackProofState, worktreeRollbackWork, attachRequestedWorktree, changeRequestProvider, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, CONTAINMENT_FETCH_GIT_CONFIG, CONTAINMENT_FETCH_GIT_ENV, mergedHeadForge, mergedPullRequestContainingHead, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedGitLabMergeRequestForHead, parseMergedWorktreePullRequestForHead, parseWorktreePullRequestState, readRepositoryDefaultBranch, reclaimRetainedWorktreeRef, retainedWorktreeRefDiagnostics, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type RetainedWorktreeRefCandidate, type RetainedWorktreeRefRecord, type WorktreeCleanupRecord } from "./worktree.js";
 import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { isolateFromAmbientIgnores } from "./git-test-repo.js";
@@ -770,6 +770,492 @@ test("requested worktree creation retains an unproved nonempty slot", { skip: !h
     assert.equal(existsSync(sentinel), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// #4209: a directory whose registration went away may hold anything, whichever caller finds it.
+function staleMarkerFixture(name: string) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), `wollipog-stale-${name}-`)));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  execFileSync("git", ["init", repo]);
+  execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+  execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+  execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+  const plant = (target: string, contents: boolean) => {
+    mkdirSync(target, { recursive: true });
+    writeFileSync(join(target, ".git"), `gitdir: ${join(repo, ".git", "worktrees", "pruned")}\n`);
+    if (contents) writeFileSync(join(target, "uncommitted.txt"), "the person's work\n");
+  };
+  return { root, repo, dataDir, plant };
+}
+
+const STALE_CALLERS = [
+  { caller: "createRequestedWorktree, branch absent", branchExists: false,
+    target: async (f: ReturnType<typeof staleMarkerFixture>) => join(await requestedWorktreeBoundary(f.repo, "s_stale", { dataDir: f.dataDir }), requestedSlot("fix/stale")),
+    create: (f: ReturnType<typeof staleMarkerFixture>) => createRequestedWorktree(f.repo, "s_stale", { baseRef: "HEAD", branch: "fix/stale" }, { dataDir: f.dataDir }) },
+  { caller: "createRecoveredBranchWorktree, branch present", branchExists: true,
+    target: async (f: ReturnType<typeof staleMarkerFixture>) => join(await requestedWorktreeBoundary(f.repo, "s_stale", { dataDir: f.dataDir }), requestedSlot("fix/stale")),
+    create: (f: ReturnType<typeof staleMarkerFixture>) => createRecoveredBranchWorktree(f.repo, "s_stale", "fix/stale", { dataDir: f.dataDir, holderOf: () => undefined }) },
+  { caller: "createWorktree, session branch present", branchExists: "agent/s_stale",
+    target: async (f: ReturnType<typeof staleMarkerFixture>) => {
+      const handle = await createWorktree(f.repo, "s_stale", { dataDir: f.dataDir });
+      execFileSync("git", ["-C", f.repo, "worktree", "remove", "--force", handle.path]);
+      return handle.path;
+    },
+    create: (f: ReturnType<typeof staleMarkerFixture>) => createWorktree(f.repo, "s_stale", { dataDir: f.dataDir }) },
+] as const;
+
+for (const { caller, branchExists, target, create } of STALE_CALLERS) {
+  test(`${caller}: a stale worktree directory with anything in it is refused byte for byte`, { skip: !haveGit() }, async () => {
+    const fixture = staleMarkerFixture("refused");
+    try {
+      if (branchExists === true) execFileSync("git", ["-C", fixture.repo, "branch", "fix/stale"]);
+      const path = await target(fixture);
+      fixture.plant(path, true);
+      const tip = execFileSync("git", ["-C", fixture.repo, "for-each-ref", "refs/heads"], { encoding: "utf8" });
+      await assert.rejects(create(fixture), (error: Error) => {
+        assert.ok(error.message.includes(path), "it names the directory");
+        assert.match(error.message, /no longer registered/u);
+        assert.match(error.message, /Move anything you want to keep out of it, delete the directory, then try again/u);
+        return true;
+      });
+      assert.equal(readFileSync(join(path, "uncommitted.txt"), "utf8"), "the person's work\n");
+      assert.equal(execFileSync("git", ["-C", fixture.repo, "for-each-ref", "refs/heads"], { encoding: "utf8" }), tip, "no branch moved");
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  test(`${caller}: a stale marker with nothing beside it has nothing to lose, so the worktree is made`, { skip: !haveGit() }, async () => {
+    const fixture = staleMarkerFixture("marker-only");
+    try {
+      if (branchExists === true) execFileSync("git", ["-C", fixture.repo, "branch", "fix/stale"]);
+      const path = await target(fixture);
+      fixture.plant(path, false);
+      const created = await create(fixture);
+      assert.equal(created.path, path);
+      assert.equal(execFileSync("git", ["-C", path, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8" }).trim(), "true");
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("a rollback proof holds only in the worktree it was written in, and in no later one on that path", { skip: !haveGit() }, async () => {
+  const fixture = staleMarkerFixture("proof");
+  try {
+    const options = { dataDir: fixture.dataDir };
+    const handle = await createRequestedWorktree(fixture.repo, "s_proof", { baseRef: "HEAD", branch: "fix/proof" }, options);
+    assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, undefined, options), "mismatch", "no proof proves nothing");
+    await stampWorktreeRollbackProof(handle.path, "token-1", options);
+    assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-1", options), "proved");
+    assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-2", options), "mismatch", "another attempt's token does not hold");
+    assert.equal(await worktreeRollbackProofState(fixture.repo, fixture.repo, "token-1", options), "mismatch", "it is per worktree, so not the primary checkout");
+    assert.equal(execFileSync("git", ["-C", fixture.repo, "for-each-ref", "refs/worktree"], { encoding: "utf8" }), "", "and never leaves that worktree");
+
+    execFileSync("git", ["-C", fixture.repo, "worktree", "remove", "--force", handle.path]);
+    assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-1", options), "absent");
+    execFileSync("git", ["-C", fixture.repo, "worktree", "add", handle.path, "fix/proof"]);
+    assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-1", options), "mismatch", "a new registration on the same path does not inherit it");
+
+    await stampWorktreeRollbackProof(handle.path, "token-3", options);
+    await clearWorktreeRollbackProof(handle.path, "token-3", options);
+    assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-3", options), "mismatch");
+
+    // A directory whose registration went has no proof either, and asking does not fail.
+    const pruned = `${handle.path}.away`;
+    renameSync(handle.path, pruned);
+    execFileSync("git", ["-C", fixture.repo, "worktree", "prune"]);
+    renameSync(pruned, handle.path);
+    assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-1", options), "mismatch");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("with its .git gone inside another repository, a worktree the repository still lists is no answer, so its rollback waits", { skip: !haveGit() }, async () => {
+  const fixture = staleMarkerFixture("proof-parent");
+  try {
+    const options = { dataDir: fixture.dataDir };
+    execFileSync("git", ["init", fixture.root]);
+    const handle = await createRequestedWorktree(fixture.repo, "s_proof", { baseRef: "HEAD", branch: "fix/proof" }, options);
+    await stampWorktreeRollbackProof(handle.path, "token-1", options);
+    rmSync(join(handle.path, ".git"));
+    assert.equal(execFileSync("git", ["-C", handle.path, "for-each-ref", "refs/worktree/wollipog-rollback/token-1"], { encoding: "utf8" }), "",
+      "the parent answers, with nothing, which is the trap");
+    assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-1", options), "unavailable");
+    assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, undefined, options, "fix/proof"), "unavailable");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a registered tree with no file in it and no proof is unpopulated only for the branch that was reserved", { skip: !haveGit() }, async () => {
+  const fixture = staleMarkerFixture("unpopulated");
+  try {
+    const options = { dataDir: fixture.dataDir };
+    const path = join(fixture.root, "wt");
+    execFileSync("git", ["-C", fixture.repo, "worktree", "add", "--no-checkout", "-b", "fix/empty", path]);
+    assert.equal(await worktreeRollbackProofState(fixture.repo, path, undefined, options, "fix/empty"), "unpopulated");
+    assert.equal(await worktreeRollbackProofState(fixture.repo, path, undefined, options, "fix/other"), "mismatch");
+    assert.equal(await worktreeRollbackProofState(fixture.repo, path, undefined, options), "mismatch");
+    writeFileSync(join(path, "ignored-or-not.txt"), "something\n");
+    assert.equal(await worktreeRollbackProofState(fixture.repo, path, undefined, options, "fix/empty"), "mismatch", "any file makes it someone's");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a branch is given back only while it is where the attempt made it and no worktree has it", { skip: !haveGit() }, async () => {
+  const fixture = staleMarkerFixture("release-branch");
+  try {
+    const base = execFileSync("git", ["-C", fixture.repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const exists = (branch: string) => execFileSync("git", ["-C", fixture.repo, "for-each-ref", `refs/heads/${branch}`], { encoding: "utf8" }) !== "";
+    execFileSync("git", ["-C", fixture.repo, "branch", "fix/unchanged"]);
+    assert.equal(await releaseUnchangedBranch(fixture.repo, "fix/unchanged", base), true);
+    assert.equal(exists("fix/unchanged"), false);
+
+    execFileSync("git", ["-C", fixture.repo, "branch", "fix/moved"]);
+    execFileSync("git", ["-C", fixture.repo, "switch", "--quiet", "fix/moved"]);
+    execFileSync("git", ["-C", fixture.repo, "commit", "--quiet", "--allow-empty", "-m", "a person's commit"]);
+    execFileSync("git", ["-C", fixture.repo, "switch", "--quiet", "-"]);
+    assert.equal(await releaseUnchangedBranch(fixture.repo, "fix/moved", base), false, "it has a commit");
+    assert.equal(exists("fix/moved"), true);
+
+    execFileSync("git", ["-C", fixture.repo, "branch", "fix/held"]);
+    execFileSync("git", ["-C", fixture.repo, "worktree", "add", join(fixture.root, "held"), "fix/held"]);
+    assert.equal(await releaseUnchangedBranch(fixture.repo, "fix/held", base), false, "a worktree has it");
+    assert.equal(exists("fix/held"), true);
+
+    // Back at its base, but its reflog holds a commit nothing else does, and deleting it deletes that.
+    execFileSync("git", ["-C", fixture.repo, "branch", "fix/there-and-back"]);
+    const elsewhere = execFileSync("git", ["-C", fixture.repo, "commit-tree", `${base}^{tree}`, "-p", base, "-m", "held by the reflog"], { encoding: "utf8" }).trim();
+    execFileSync("git", ["-C", fixture.repo, "update-ref", "refs/heads/fix/there-and-back", elsewhere]);
+    execFileSync("git", ["-C", fixture.repo, "update-ref", "refs/heads/fix/there-and-back", base]);
+    assert.equal(await releaseUnchangedBranch(fixture.repo, "fix/there-and-back", base), false, "its history is not only its creation");
+    assert.ok(execFileSync("git", ["-C", fixture.repo, "reflog", "show", "--format=%H", "refs/heads/fix/there-and-back"], { encoding: "utf8" }).includes(elsewhere));
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a session worktree remade after its directory was deleted keeps the commits already on its branch", { skip: !haveGit() }, async () => {
+  const fixture = staleMarkerFixture("session-branch");
+  try {
+    const options = { dataDir: fixture.dataDir };
+    const handle = await createWorktree(fixture.repo, "s_kept", options);
+    writeFileSync(join(handle.path, "work.txt"), "committed\n");
+    execFileSync("git", ["-C", handle.path, "add", "work.txt"]);
+    execFileSync("git", ["-C", handle.path, "commit", "--quiet", "-m", "this session's commit"]);
+    const tip = execFileSync("git", ["-C", handle.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    execFileSync("git", ["-C", fixture.repo, "worktree", "remove", "--force", handle.path]);
+
+    const again = await createWorktree(fixture.repo, "s_kept", options);
+    assert.equal(execFileSync("git", ["-C", again.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), tip, "no reset");
+    assert.equal(readFileSync(join(again.path, "work.txt"), "utf8"), "committed\n");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a session branch with nothing of its own still moves forward when its worktree is remade", { skip: !haveGit() }, async () => {
+  const fixture = staleMarkerFixture("session-branch-behind");
+  try {
+    const options = { dataDir: fixture.dataDir };
+    const handle = await createWorktree(fixture.repo, "s_behind", options);
+    execFileSync("git", ["-C", fixture.repo, "worktree", "remove", "--force", handle.path]);
+    execFileSync("git", ["-C", fixture.repo, "commit", "--quiet", "--allow-empty", "-m", "the primary moved on"]);
+    const head = execFileSync("git", ["-C", fixture.repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const again = await createWorktree(fixture.repo, "s_behind", options);
+    assert.equal(execFileSync("git", ["-C", again.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), head);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a requested worktree registers before it holds a file, so its proof exists first; a checkout failure leaves it registered and proved", { skip: !haveGit() }, async () => {
+  const fixture = staleMarkerFixture("materialize-order");
+  try {
+    const options = { dataDir: fixture.dataDir };
+    writeFileSync(join(fixture.repo, "a.txt"), "content\n");
+    writeFileSync(join(fixture.repo, ".gitattributes"), "a.txt filter=refuses\n");
+    execFileSync("git", ["-C", fixture.repo, "add", "a.txt", ".gitattributes"]);
+    execFileSync("git", ["-C", fixture.repo, "commit", "--quiet", "-m", "a file"]);
+    let filesWhenAnnounced: string[] | undefined;
+    const announced = createRequestedWorktree(fixture.repo, "s_order", { baseRef: "HEAD", branch: "fix/order" }, {
+      ...options,
+      materializedWorktree: async (path) => {
+        filesWhenAnnounced = execFileSync("git", ["-C", path, "ls-files", "--cached", "--others"], { encoding: "utf8" }).split("\n").filter(Boolean);
+        await stampWorktreeRollbackProof(path, "token-order", options);
+      },
+    });
+    const handle = await announced;
+    assert.deepEqual(filesWhenAnnounced, []);
+    assert.equal(readFileSync(join(handle.path, "a.txt"), "utf8"), "content\n", "and it ends whole");
+    assert.equal(execFileSync("git", ["-C", handle.path, "status", "--porcelain"], { encoding: "utf8" }), "");
+    assert.equal(execFileSync("git", ["-C", handle.path, "symbolic-ref", "HEAD"], { encoding: "utf8" }).trim(), "refs/heads/fix/order");
+
+    execFileSync("git", ["-C", fixture.repo, "config", "filter.refuses.smudge", "false"]);
+    execFileSync("git", ["-C", fixture.repo, "config", "filter.refuses.required", "true"]);
+    let path = "";
+    await assert.rejects(createRequestedWorktree(fixture.repo, "s_order", { baseRef: "HEAD", branch: "fix/fails" }, {
+      ...options,
+      materializedWorktree: async (made) => {
+        path = made;
+        await stampWorktreeRollbackProof(made, "token-fails", options);
+      },
+    }));
+    assert.equal(await worktreeRollbackProofState(fixture.repo, path, "token-fails", options), "proved");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a rollback snapshot matches only while nothing at all has changed, whatever kind of change it is", { skip: !haveGit() }, async () => {
+  const fixture = staleMarkerFixture("rollback-work");
+  try {
+    const options = { dataDir: fixture.dataDir };
+    writeFileSync(join(fixture.repo, "a.txt"), "first\n");
+    writeFileSync(join(fixture.repo, ".gitignore"), "ignored.txt\n");
+    execFileSync("git", ["-C", fixture.repo, "add", "a.txt", ".gitignore"]);
+    execFileSync("git", ["-C", fixture.repo, "commit", "--quiet", "-m", "files"]);
+    const run = (path: string, ...args: string[]) => execFileSync("git", ["-c", "user.name=T", "-c", "user.email=t@e.invalid", "-C", path, ...args],
+      { encoding: "utf8", input: "" }).trim();
+    const changes: Array<[string, (path: string) => void]> = [
+      ["a commit", (path) => run(path, "commit", "--quiet", "--allow-empty", "-m", "a commit")],
+      ["a commit then reset away, held only by the reflog", (path) => {
+        run(path, "commit", "--quiet", "--allow-empty", "-m", "a commit");
+        run(path, "reset", "--quiet", "--hard", "HEAD~1");
+      }],
+      ["a commit held only by a private ref", (path) => {
+        writeFileSync(join(path, "a.txt"), "saved\n");
+        run(path, "add", "a.txt");
+        const commit = run(path, "commit-tree", run(path, "write-tree"), "-p", "HEAD", "-m", "saved");
+        run(path, "update-ref", "refs/worktree/saved-work", commit);
+        run(path, "reset", "--quiet", "--hard", "HEAD");
+      }],
+      ["an edit to a tracked file", (path) => writeFileSync(join(path, "a.txt"), "edited\n")],
+      ["a new untracked file", (path) => writeFileSync(join(path, "notes.txt"), "notes\n")],
+      ["a version only the index holds", (path) => {
+        writeFileSync(join(path, "a.txt"), "staged only\n");
+        run(path, "add", "a.txt");
+        writeFileSync(join(path, "a.txt"), "first\n");
+      }],
+      ["an edit hidden by assume-unchanged", (path) => {
+        run(path, "update-index", "--assume-unchanged", "a.txt");
+        writeFileSync(join(path, "a.txt"), "hidden edit\n");
+      }],
+      ["an edit hidden by skip-worktree", (path) => {
+        run(path, "update-index", "--skip-worktree", "a.txt");
+        writeFileSync(join(path, "a.txt"), "hidden edit\n");
+      }],
+      ["a detached HEAD", (path) => run(path, "switch", "--quiet", "--detach")],
+      ["another branch", (path) => run(path, "switch", "--quiet", "-c", `fix/another-${path.slice(-8)}`)],
+      ["a lock", (path) => run(path, "worktree", "lock", path)],
+    ];
+    for (const [index, [kind, change]] of changes.entries()) {
+      const { path } = await createRequestedWorktree(fixture.repo, "s_work", { baseRef: "HEAD", branch: `fix/work-${index}` }, options);
+      const snapshot = await captureRollbackSnapshot(path, options);
+      assert.ok(snapshot, kind);
+      assert.deepEqual(await worktreeRollbackWork(path, snapshot!, options), { state: "unchanged" }, `${kind}: stable until then`);
+      change(path);
+      assert.equal((await worktreeRollbackWork(path, snapshot!, options)).state, "changed", kind);
+    }
+
+    const { path } = await createRequestedWorktree(fixture.repo, "s_work", { baseRef: "HEAD", branch: "fix/work-other" }, options);
+    assert.deepEqual(await worktreeRollbackWork(path, undefined, options),
+      { state: "changed", reason: "nothing proves what is in it is only what the runner left" }, "with nothing recorded, nothing is proved");
+
+    // What the rule leaves out, on purpose.
+    const snapshot = await captureRollbackSnapshot(path, options);
+    writeFileSync(join(path, "ignored.txt"), "ignored\n");
+    assert.deepEqual(await worktreeRollbackWork(path, snapshot!, options), { state: "unchanged" }, "what Git ignores is not protected");
+    rmSync(join(path, "ignored.txt"));
+
+    // Setup's own output is what the snapshot records, so it is the runner's.
+    writeFileSync(join(path, "output.txt"), "from setup\n");
+    const afterSetup = await captureRollbackSnapshot(path, options);
+    assert.deepEqual(await worktreeRollbackWork(path, afterSetup!, options), { state: "unchanged" });
+
+    // A flag that hides a file's contents proves nothing, even if it was there when the snapshot was taken.
+    run(path, "update-index", "--assume-unchanged", "a.txt");
+    assert.equal(await captureRollbackSnapshot(path, options), null);
+
+    assert.deepEqual(await worktreeRollbackWork(join(fixture.root, "nowhere"), "anything", options), { state: "unavailable" }, "no answer is not a change");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("anything in the admin directory that cannot be read as a file proves nothing: no snapshot, and no answer", { skip: !haveGit() || process.platform === "win32" }, async () => {
+  const fixture = staleMarkerFixture("rollback-symlink");
+  try {
+    const options = { dataDir: fixture.dataDir };
+    const { path } = await createRequestedWorktree(fixture.repo, "s_link", { baseRef: "HEAD", branch: "fix/link" }, options);
+    const gitDir = execFileSync("git", ["-C", path, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" }).trim();
+    const before = await captureRollbackSnapshot(path, options);
+    assert.ok(before, "Git puts nothing like that there itself, so an ordinary worktree still has a snapshot");
+    for (const plant of [
+      () => symlinkSync("/nowhere/one", join(gitDir, "something")),
+      () => execFileSync("mkfifo", [join(gitDir, "something")]),
+    ]) {
+      plant();
+      await assert.rejects(captureRollbackSnapshot(path, options), /cannot be read as a file/u);
+      assert.deepEqual(await worktreeRollbackWork(path, before!, options), { state: "unavailable" });
+      rmSync(join(gitDir, "something"));
+    }
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("an admin directory that cannot be read whole gives no snapshot and no answer, never a partial digest", { skip: !haveGit() || process.platform === "win32" || process.getuid?.() === 0 }, async () => {
+  const fixture = staleMarkerFixture("rollback-unreadable");
+  try {
+    const options = { dataDir: fixture.dataDir };
+    const { path } = await createRequestedWorktree(fixture.repo, "s_unreadable", { baseRef: "HEAD", branch: "fix/unreadable" }, options);
+    const gitDir = execFileSync("git", ["-C", path, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" }).trim();
+    const snapshot = await captureRollbackSnapshot(path, options);
+    const hidden = join(gitDir, "recovery-file");
+    writeFileSync(hidden, "recovery\n");
+    chmodSync(hidden, 0o000);
+    await assert.rejects(captureRollbackSnapshot(path, options));
+    assert.deepEqual(await worktreeRollbackWork(path, snapshot!, options), { state: "unavailable" });
+    chmodSync(hidden, 0o644);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+// The WSL form of that digest cannot run here without a distro, but the script itself is plain sh.
+test("a file's name and contents cannot be traded for another's without changing the snapshot", { skip: !haveGit() || process.platform === "win32" }, async () => {
+  const fixture = staleMarkerFixture("rollback-collision");
+  try {
+    const options = { dataDir: fixture.dataDir };
+    const { path } = await createRequestedWorktree(fixture.repo, "s_collide", { baseRef: "HEAD", branch: "fix/collide" }, options);
+    const gitDir = execFileSync("git", ["-C", path, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" }).trim();
+    writeFileSync(join(gitDir, "a"), "1\u0000file b\u00002");
+    const first = await captureRollbackSnapshot(path, options);
+    // The same bytes in a row, if a digest ran names and contents together: one file, or two.
+    writeFileSync(join(gitDir, "a"), "1");
+    writeFileSync(join(gitDir, "b"), "2");
+    assert.equal((await worktreeRollbackWork(path, first!, options)).state, "changed");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("the digest script fails when it cannot read something, and flags what it cannot read as a file", { skip: !haveGit() || process.platform === "win32" }, () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-digest-script-")));
+  const listing = () => execFileSync("sh", ["-c", ADMIN_DIGEST_LISTING, "sh", root], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  try {
+    writeFileSync(join(root, "HEAD"), "ref: refs/heads/x\n");
+    mkdirSync(join(root, "refs"));
+    writeFileSync(join(root, "refs", "saved"), "abc\n");
+    const first = digestAdminListing(listing());
+    assert.equal(digestAdminListing(listing()), first, "stable");
+
+    writeFileSync(join(root, "refs", "saved"), "changed\n");
+    const edited = digestAdminListing(listing());
+    assert.notEqual(edited, first, "contents count");
+    writeFileSync(join(root, "a b"), "same contents\n");
+    const spaced = digestAdminListing(listing());
+    rmSync(join(root, "a b"));
+    writeFileSync(join(root, "a"), "same contents\n");
+    assert.notEqual(digestAdminListing(listing()), spaced, "names count, whatever they hold");
+    rmSync(join(root, "a"));
+
+    // Round 7's collision: `a b` to `c`, and `a` to `b c`. A link is no longer described at all.
+    symlinkSync("c", join(root, "a b"));
+    assert.throws(() => digestAdminListing(listing()), /cannot be read as a file/u, "a link is no proof");
+    rmSync(join(root, "a b"));
+    symlinkSync("b c", join(root, "a"));
+    assert.throws(() => digestAdminListing(listing()), /cannot be read as a file/u);
+    rmSync(join(root, "a"));
+    execFileSync("mkfifo", [join(root, "pipe")]);
+    assert.throws(() => digestAdminListing(listing()), /cannot be read as a file/u, "and neither is anything else that is not a file");
+    rmSync(join(root, "pipe"));
+
+    if (process.getuid?.() !== 0) {
+      chmodSync(join(root, "HEAD"), 0o000);
+      assert.throws(listing, "an unreadable file fails the script, rather than leaving it out");
+      chmodSync(join(root, "HEAD"), 0o644);
+      chmodSync(join(root, "refs"), 0o000);
+      assert.throws(listing, "and so does an unreadable directory");
+      chmodSync(join(root, "refs"), 0o755);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a registered worktree whose index was never written, with files to check out, reads as never finished", { skip: !haveGit() }, async () => {
+  const fixture = staleMarkerFixture("never-finished");
+  try {
+    const options = { dataDir: fixture.dataDir };
+    const empty = join(fixture.root, "empty-commit");
+    execFileSync("git", ["-C", fixture.repo, "worktree", "add", "--no-checkout", "-b", "fix/empty-commit", empty]);
+    assert.equal(await worktreeCheckoutNeverFinished(empty, options), false, "an empty commit has nothing to check out");
+    writeFileSync(join(fixture.repo, "a.txt"), "first\n");
+    execFileSync("git", ["-C", fixture.repo, "add", "a.txt"]);
+    execFileSync("git", ["-C", fixture.repo, "commit", "--quiet", "-m", "a file"]);
+    const unfinished = join(fixture.root, "unfinished");
+    execFileSync("git", ["-C", fixture.repo, "worktree", "add", "--no-checkout", "-b", "fix/unfinished", unfinished]);
+    assert.equal(await worktreeCheckoutNeverFinished(unfinished, options), true);
+    execFileSync("git", ["-C", unfinished, "checkout", "--force", "HEAD"]);
+    assert.equal(await worktreeCheckoutNeverFinished(unfinished, options), false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a proof that cannot be read is no answer, never a missing proof", { skip: !haveGit() || process.platform === "win32" || process.getuid?.() === 0 }, async () => {
+  const fixture = staleMarkerFixture("proof-unreadable");
+  try {
+    const options = { dataDir: fixture.dataDir };
+    const handle = await createRequestedWorktree(fixture.repo, "s_proof", { baseRef: "HEAD", branch: "fix/proof" }, options);
+    await stampWorktreeRollbackProof(handle.path, "token-1", options);
+    const gitDir = execFileSync("git", ["-C", handle.path, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" }).trim();
+    // Git reads an unreadable refs directory as holding nothing, and says so with success.
+    for (const blocked of [join(gitDir, "refs", "worktree"), join(gitDir, "refs")]) {
+      chmodSync(blocked, 0o000);
+      try {
+        assert.equal(execFileSync("git", ["-C", handle.path, "for-each-ref", "refs/worktree/wollipog-rollback/token-1"], { encoding: "utf8" }), "",
+          "the trap: no error, no ref");
+        assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-1", options), "unavailable");
+      } finally {
+        chmodSync(blocked, 0o755);
+      }
+      assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-1", options), "proved");
+    }
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a Git refusal says nothing about a worktree still registered, so its rollback proof waits", { skip: !haveGit() }, async () => {
+  const fixture = staleMarkerFixture("proof-refused");
+  try {
+    const options = { dataDir: fixture.dataDir };
+    const handle = await createRequestedWorktree(fixture.repo, "s_proof", { baseRef: "HEAD", branch: "fix/proof" }, options);
+    await stampWorktreeRollbackProof(handle.path, "token-1", options);
+    const config = join(fixture.repo, ".git", "config");
+    const original = readFileSync(config);
+    writeFileSync(config, "[broken\n");
+    assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-1", options), "unavailable", "Git can read nothing right now");
+    writeFileSync(config, original);
+    assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-1", options), "proved", "and the proof was there all along");
+
+    // Only the worktree's own link is broken: the repository still lists it, so that is no answer either.
+    const marker = join(handle.path, ".git");
+    const link = readFileSync(marker);
+    writeFileSync(marker, "not a gitfile\n");
+    assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-1", options), "unavailable");
+    writeFileSync(marker, link);
+    assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-1", options), "proved");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
   }
 });
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import type { SessionLaunchSpec, SessionLocationSwitchMessage } from "@wollipog/protocol";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -274,6 +274,53 @@ if (FIXTURE_ROOT) {
       assert.equal(existsSync(join(c.root, "teardown-log")), false);
       assert.equal(store.readMeta(SESSION)?.pendingLocationSwitch?.occurrenceId, "occurrence-1");
     }, { atTrustCard: true });
+  });
+
+  test("a rollback a crash left with its proof gone still ends setup's processes, and frees its ports only then, leaving the tree alone", async () => {
+    if (process.platform === "win32") return;
+    for (const how of ["its registration went", "an older runner wrote it, with no proof"] as const) {
+      await withCrashDuringSetup(how.includes("older") ? "older-record" : "pruned", async (c) => {
+        assert.equal(alive(c.setupPid), true, "setup's process outlived the runner");
+        const journalPath = join(c.root, "data", "worktree-cleanup.json");
+        if (how.includes("older")) {
+          const records = JSON.parse(readFileSync(journalPath, "utf8")) as WorktreeCleanupRecord[];
+          for (const record of records) {
+            delete record.rollbackProof;
+            delete record.rollbackBranchBase;
+          }
+          writeFileSync(journalPath, JSON.stringify(records));
+        }
+        writeFileSync(join(c.target, "notes.txt"), "kept\n");
+        if (how.includes("registration")) {
+          renameSync(c.target, `${c.target}.away`);
+          git(c.docs, "worktree", "prune");
+          renameSync(`${c.target}.away`, c.target);
+        }
+        const { manager, journal } = c.runner();
+        const [record] = journal();
+        assert.ok(record?.portBlock);
+        manager.reconcileStore();
+        await waitFor(() => journal().length === 0, "the rollback was not ended", 3000);
+        assert.equal(alive(c.setupPid), false, "setup's process was ended by its own marker");
+        assert.equal(readFileSync(join(c.target, "notes.txt"), "utf8"), "kept\n", "and the tree is left alone");
+        assert.equal(existsSync(join(c.root, "teardown-log")), false, "with no teardown in it");
+        const allocator = (manager as unknown as { worktreePortAllocator: { get(owner: string): unknown } }).worktreePortAllocator;
+        assert.equal(allocator.get(`${SESSION}\0${record!.worktreeId}`), undefined, "its ports are free now its processes have gone");
+      });
+    }
+  });
+
+  test("a crash that left setup's output in the tree keeps the tree, when nothing can say whose it is", async () => {
+    if (process.platform === "win32") return;
+    await withCrashDuringSetup("kept-output", async (c) => {
+      writeFileSync(join(c.target, "output-or-work.txt"), "cannot tell which\n");
+      const { manager, journal } = c.runner();
+      manager.reconcileStore();
+      await waitFor(() => journal().length === 0, "the rollback was not ended", 3000);
+      assert.equal(alive(c.setupPid), false, "its process still ends");
+      assert.equal(readFileSync(join(c.target, "output-or-work.txt"), "utf8"), "cannot tell which\n");
+      assert.ok(git(c.docs, "rev-parse", "--verify", "refs/heads/fix/install-link"));
+    });
   });
 
   test("deleting a session a crash left mid-setup leaves no worktree, process or port block behind", async () => {
