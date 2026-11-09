@@ -885,6 +885,37 @@ test("Refresh All keeps its label and width while busy, and the result is a toas
   await expect(page.locator("#usage-subscriptions-panel")).not.toContainText("couldn't refresh");
 });
 
+for (const { width, height, name } of [
+  { width: 1280, height: 800, name: "desktop-1280" },
+  { width: 390, height: 844, name: "phone-390" },
+]) {
+  test(`one subscription on three machines is one account with a machine list at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    await page.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1&sharedSubscription=1");
+    const panel = page.locator("#usage-subscriptions-panel");
+    await expect(panel.locator(".section-title")).toHaveText("1 Account");
+    const account = panel.locator(".subscription-plan");
+    await expect(account).toHaveCount(1);
+    await expect(account.locator(".subscription-plan-title")).toHaveText("Claude Max");
+    await expect(account.locator(".subscription-plan-machine")).toHaveText("On 3 Machines");
+    await expect(account.locator(".subscription-plan-head .status")).toHaveCount(0);
+    // The offline machine's expired window does not outrank the laptop's current one.
+    await expect(account.locator(".subscription-window-left")).toHaveText(["48% left", "81% left"]);
+    await expect(panel).not.toContainText(/Sources? Unavailable/);
+
+    const machines = account.getByRole("list", { name: "Machines" });
+    await expect(machines).toBeHidden();
+    await account.locator("details summary").click();
+    await expect(machines.getByRole("listitem")).toHaveCount(3);
+    await expect(machines.getByRole("listitem").nth(0)).toContainText("Claude Code on laptop");
+    await expect(machines.getByRole("listitem").nth(1)).toContainText("Unavailable");
+    await expect(machines.getByRole("listitem").nth(2)).toContainText("Offline");
+    const overflow = await account.evaluate((element) => element.scrollWidth - element.clientWidth);
+    expect(overflow).toBeLessThanOrEqual(0);
+    await page.screenshot({ path: `${SHOT}/${name}-dark-shared-subscription.png`, fullPage: true });
+  });
+}
+
 test("on a phone Refresh All is the app bar's Refresh Subscriptions (#3014)", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1");

@@ -144,6 +144,133 @@ test("an account with three windows is one surface with a meter, \"N% left\" and
   }
 });
 
+const shared = (runnerId: string, runnerName: string, over: Partial<SubscriptionUsageSourceView> = {}) => source({
+  sourceId: runnerId.padEnd(32, "0"), runnerId, runnerName, subscriptionKey: "shared-subscription", ...over,
+});
+
+test("one subscription on two machines is one account with merged meters and a machine list", async () => {
+  const view = await renderTab({ subscriptionUsage: async () => response([
+    shared("laptop", "Laptop", { fetchedAt: NOW - HOUR, buckets: [window_("weekly", "Weekly", 90)] }),
+    shared("box", "Box", { fetchedAt: NOW, buckets: [window_("weekly", "Weekly", 40), window_("five_hour", "Five-Hour Window", 70)] }),
+  ]) });
+  try {
+    const surfaces = view.panel()!.querySelectorAll(".subscription-plan");
+    assert.equal(surfaces.length, 1);
+    assert.match(view.panel()!.querySelector(".section-title")?.textContent ?? "", /^1 Account$/);
+    const surface = surfaces[0]!;
+    assert.deepEqual(
+      [...surface.querySelectorAll(".subscription-window")].map((row) => row.querySelector(".subscription-window-left")?.textContent),
+      ["40% left", "70% left"],
+      "the newest reading of each window",
+    );
+    assert.equal(surface.querySelector(".subscription-plan-machine")?.textContent, "On 2 Machines");
+    assert.equal(surface.querySelector("details summary")?.textContent, "On 2 Machines");
+    assert.deepEqual(
+      [...surface.querySelectorAll("details .subscription-unavailable-name")].map((name) => name.textContent),
+      ["Codex App Server on Laptop", "Codex App Server on Box"],
+    );
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("an offline machine is named in the list while the account stays healthy", async () => {
+  const view = await renderTab({ subscriptionUsage: async () => response([
+    shared("laptop", "Laptop", { buckets: [window_("weekly", "Weekly", 90)] }),
+    shared("studio", "Studio", { fetchedAt: NOW - HOUR, runnerStatus: "offline", freshness: "stale", buckets: [window_("weekly", "Weekly", 95)] }),
+  ]) });
+  try {
+    const surface = view.panel()!.querySelector(".subscription-plan")!;
+    assertNoDomNode(surface.querySelector(".subscription-plan-head .status"), "another machine still reports this account");
+    const rows = [...surface.querySelectorAll("details .subscription-unavailable-row")];
+    assertNoDomNode(rows[0]!.querySelector(".status"), "a healthy machine has no badge");
+    assert.equal(rows[1]!.querySelector(".status")?.textContent, "Offline");
+    assert.match(rows[1]!.querySelector(".subscription-unavailable-reason")?.textContent ?? "", /The machine is offline\. Last update /);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a signed-in machine with no reading yet joins the account instead of Sources Unavailable", async () => {
+  const view = await renderTab({ subscriptionUsage: async () => response([
+    shared("laptop", "Laptop", { buckets: [window_("weekly", "Weekly", 90)] }),
+    shared("box", "Box", { state: "unavailable", detail: "Codex subscription usage has not been fetched yet." }),
+  ]) });
+  try {
+    assert.doesNotMatch(view.panel()!.textContent ?? "", /Sources? Unavailable/);
+    const rows = [...view.panel()!.querySelectorAll("details .subscription-unavailable-row")];
+    assert.equal(rows.length, 2);
+    assert.equal(rows[1]!.querySelector(".status")?.textContent, "Unavailable");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Refresh Account asks every machine on the subscription, and shows the last answer", async () => {
+  const requests: unknown[] = [];
+  const stale = [
+    shared("laptop", "Laptop", { providerAccountId: "work", buckets: [window_("weekly", "Weekly", 90)] }),
+    shared("box", "Box", { providerAccountId: "work-copy", buckets: [window_("weekly", "Weekly", 90)] }),
+  ];
+  const view = await renderTab({
+    subscriptionUsage: async () => response(stale),
+    refreshSubscriptionUsage: async (target: unknown) => {
+      requests.push(target);
+      return {
+        ...response([stale[0]!, { ...stale[1]!, buckets: [window_("weekly", "Weekly", requests.length === 1 ? 80 : 10)] }], { attempted: 1, failed: 0 }),
+        generatedAt: NOW + requests.length,
+      };
+    },
+  });
+  try {
+    await act(async () => { view.button("Refresh Account")!.click(); });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    assert.deepEqual(requests, [
+      { runnerId: "laptop", providerAccountId: "work" },
+      { runnerId: "box", providerAccountId: "work-copy" },
+    ]);
+    assert.equal(view.toasts.at(-1)?.message, "Account refreshed.");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("one machine failing a shared refresh is reported, and the others still count", async () => {
+  const sources = [
+    shared("laptop", "Laptop", { providerAccountId: "work", buckets: [window_("weekly", "Weekly", 90)] }),
+    shared("box", "Box", { providerAccountId: "work-copy", buckets: [window_("weekly", "Weekly", 90)] }),
+  ];
+  const view = await renderTab({
+    subscriptionUsage: async () => response(sources),
+    refreshSubscriptionUsage: async (target?: { runnerId: string }) => {
+      if (target?.runnerId === "box") throw new Error("unreachable");
+      return response(sources, { attempted: 1, failed: 0 });
+    },
+  });
+  try {
+    await act(async () => { view.button("Refresh Account")!.click(); });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    assert.equal(view.toasts.at(-1)?.message, "1 of 2 machines couldn't refresh. The last known values are still shown.");
+    assert.equal(view.toasts.at(-1)?.tone, "warning");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("the tab's attention count reads each subscription once, not once per machine", async () => {
+  const view = await renderTab({ subscriptionUsage: async () => response([
+    shared("laptop", "Laptop", { buckets: [window_("five_hour", "Five-Hour Window", 20)] }),
+    shared("box", "Box", { buckets: [window_("five_hour", "Five-Hour Window", 20)] }),
+  ]) });
+  try {
+    const badges = [...view.panel()!.querySelectorAll(".subscription-window .status")];
+    assert.equal(badges.length, 1);
+    assert.equal(view.tab("subscriptions").querySelector(".count-badge")?.textContent, "1");
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("a healthy account has no badge, and a window with 20% left is Approaching Limit and counted", async () => {
   const healthy = source({ buckets: [window_("weekly", "Weekly", 58), window_("five_hour", "Five-Hour Window", 70)] });
   const close = source({

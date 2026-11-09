@@ -285,6 +285,30 @@ const subscription: SubscriptionUsageResponse = {
   staleAfterMs: 600_000,
   generatedAt: END,
 };
+// `?sharedSubscription=1`: one Claude subscription on three machines, one offline and one waiting.
+if (params.get("sharedSubscription") === "1") {
+  const shared = { provider: "claude" as const, agentId: "claude", agentName: "Claude Code", plan: "max",
+    accountLabel: "primary@example.com", subscriptionKey: "shared-claude-max" };
+  subscription.sources = [
+    { ...shared, runnerId: "r-laptop", runnerName: "laptop", runnerStatus: "online", freshness: "fresh",
+      sourceId: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", state: "available", fetchedAt: SUBSCRIPTION_NOW - 3 * 60_000,
+      buckets: [
+        { id: "five_hour", label: "Five-Hour Window", usedPercent: 52, remainingPercent: 48,
+          resetsAt: SUBSCRIPTION_NOW + 2 * 3_600_000, status: "available" },
+        { id: "seven_day", label: "Weekly — All Models", usedPercent: 19, remainingPercent: 81,
+          resetsAt: SUBSCRIPTION_NOW + 6 * DAY, status: "available" },
+      ] },
+    { ...shared, runnerId: "r-box", runnerName: "build-box", runnerStatus: "online", freshness: "fresh",
+      sourceId: "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2", state: "unavailable", fetchedAt: SUBSCRIPTION_NOW,
+      detail: "Claude subscription usage is available after the first provider response in a session.", buckets: [] },
+    { ...shared, runnerId: "r-studio", runnerName: "studio", runnerStatus: "offline", freshness: "stale",
+      sourceId: "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3", state: "available", fetchedAt: SUBSCRIPTION_NOW - 26 * 3_600_000,
+      buckets: [
+        { id: "five_hour", label: "Five-Hour Window", usedPercent: 90, remainingPercent: 10,
+          resetsAt: SUBSCRIPTION_NOW - 20 * 3_600_000, status: "warning" },
+      ] },
+  ];
+}
 if (params.get("selectedUnavailable") === "1" && subscription.sources[0]) {
   const { credits: _credits, plan: _plan, ...source } = subscription.sources[0];
   subscription.sources[0] = {

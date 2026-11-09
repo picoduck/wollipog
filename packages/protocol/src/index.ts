@@ -7160,16 +7160,23 @@ export interface SubscriptionUsageSnapshot {
   accountLabel?: string;
   /** Opaque runner account coordinate; absent preserves the legacy per-agent source. */
   providerAccountId?: string;
+  /** Protocol v333: 64 hex digits, a one-way fingerprint of the provider's own account identity, so
+   * the same subscription hashes alike on every machine. Display grouping only, never an
+   * authorization key. Absent when the identity is unknown or incomplete, which never groups. */
+  subscriptionIdentity?: string;
   credits?: SubscriptionUsageCredits;
   spendControls?: SubscriptionUsageSpendControl[];
 }
 
 /** Principal-scoped control-plane projection. Last-known data remains present while stale/offline. */
-export interface SubscriptionUsageSourceView extends SubscriptionUsageSnapshot {
+export interface SubscriptionUsageSourceView extends Omit<SubscriptionUsageSnapshot, "subscriptionIdentity"> {
   runnerName: string;
   agentName: string;
   runnerStatus: RunnerStatus;
   freshness: SubscriptionUsageFreshness;
+  /** Protocol v333: sources sharing this opaque, organization-scoped key are one subscription. The
+   * runner's fingerprint itself is never projected. Absent means this source stands alone. */
+  subscriptionKey?: string;
 }
 
 export interface SubscriptionUsageResponse {

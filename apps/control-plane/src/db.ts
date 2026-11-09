@@ -16961,7 +16961,9 @@ export class ControlPlaneDb {
     // not evidence that the account changed; a present replacement label remains authoritative.
     const accountChanged = prior?.providerAccountId !== snapshot.providerAccountId ||
       (prior?.accountLabel !== snapshot.accountLabel &&
-        (snapshot.provider === "claude" || snapshot.accountLabel !== undefined));
+        (snapshot.provider === "claude" || snapshot.accountLabel !== undefined)) ||
+      (prior?.subscriptionIdentity !== undefined && snapshot.subscriptionIdentity !== undefined &&
+        prior.subscriptionIdentity !== snapshot.subscriptionIdentity);
     if (snapshot.state !== "unavailable" || snapshot.buckets.length > 0 ||
         !Array.isArray(prior?.buckets) || prior.buckets.length === 0 ||
         prior.provider !== snapshot.provider || prior.agentId !== snapshot.agentId ||
@@ -16970,6 +16972,7 @@ export class ControlPlaneDb {
     }
     return {
       ...prior,
+      ...(snapshot.subscriptionIdentity === undefined ? {} : { subscriptionIdentity: snapshot.subscriptionIdentity }),
       detail: snapshot.detail ?? "The latest provider refresh was unavailable; showing the last provider snapshot.",
     };
   }
@@ -17182,8 +17185,17 @@ export class ControlPlaneDb {
           buckets: [],
           ...(account ? { providerAccountId: account.id, accountLabel: account.label } : {}),
         };
+        // Viewers get a key scoped to their organization, never the runner's fingerprint, so a key
+        // groups sources on this screen and correlates nothing beyond it.
+        const { subscriptionIdentity, ...projected } = snapshot;
         sources.push({
-          ...snapshot,
+          ...projected,
+          ...(subscriptionIdentity === undefined ? {} : {
+            subscriptionKey: createHash("sha256")
+              .update(JSON.stringify([principal.organizationId, provider, subscriptionIdentity]))
+              .digest("hex")
+              .slice(0, 32),
+          }),
           runnerName: runner.displayName ?? runner.hostname ?? runner.runnerId,
           agentName: displayAgent.name,
           runnerStatus: runner.status,

@@ -17703,6 +17703,14 @@ button.review-finding-location {
   flex-wrap: wrap;
   gap: var(--space-1) var(--space-3);
 }
+/* A shared subscription's machines. The summary's chevron lines up with the card's text; the rows
+   carry their own inset, so only the summary is indented. */
+.subscription-plan-machines {
+  padding-block: var(--space-2);
+  box-shadow: inset 0 1px 0 var(--border);
+}
+.subscription-plan-machines[open] { padding-block-end: 0; }
+.subscription-plan-machines > summary { margin-inline-start: var(--space-3); }
 .subscription-unavailable-list {
   margin: 0;
   padding: 0;

@@ -1357,6 +1357,11 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   //      Absent kind retains legacy approval semantics; older peers refuse new question requests.
   332,
   // v333 slot
+  // 333: subscription-usage snapshots may carry `subscriptionIdentity`, a one-way fingerprint of the
+  //      provider account, and source views an opaque `subscriptionKey` derived from it, so one
+  //      subscription on several machines shows once. Additive: an older runner sends no identity
+  //      and its sources stay separate; an older control plane drops the field.
+  333,
   // v334 slot
   // v335 slot
   // v336 slot

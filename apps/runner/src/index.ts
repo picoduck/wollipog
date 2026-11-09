@@ -323,6 +323,7 @@ import {
 } from "./runner-data-dir.js";
 import { waitForRunnerControlPlaneAttestation } from "./control-plane-attestation.js";
 import {
+  readSubscriptionIdentity,
   shouldPublishSubscriptionUsageInventory,
   SubscriptionUsageManager,
   type SubscriptionUsageManagerOptions,
@@ -803,6 +804,7 @@ const subscriptionUsage = new SubscriptionUsageManager({
     }
     return authorizeSubscriptionUsageProbe(agent, env, sourceId);
   },
+  resolveSubscriptionIdentity: readSubscriptionIdentity,
   onTargetChanged: () => {
     void runDiscovery(false, false).catch((error) =>
       log(`harness rediscovery after usage target change failed: ${errText(error)}`));
