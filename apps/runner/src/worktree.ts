@@ -2946,11 +2946,17 @@ export async function worktreeRollbackProofState(
   const ref = `${ROLLBACK_PROOF_REF_PREFIX}/${proof}`;
   try {
     return (await command(context, path, ["for-each-ref", "--format=%(refname)", ref])).trim() === ref ? "proved" : "mismatch";
-  } catch (error) {
-    // Git ran and refused, whatever its wording (it varies by version): the directory is no worktree
-    // of a repository any more, its registration having gone, say. Nothing there is proved, and the
-    // answer only ever removes less. A timeout or a failed spawn says nothing, so that one waits.
-    return typeof (error as NodeJS.ErrnoException & { code?: unknown }).code === "number" ? "mismatch" : "unavailable";
+  } catch {
+    // A refusal alone means little, and its wording varies by Git version: it may be a passing failure
+    // in a worktree that setup has run in, whose rollback still has processes, a teardown and ports to
+    // settle. So ask the repository. Only its own answer, that this path is not registered, ends the
+    // rollback. Anything less leaves the record to try again.
+    try {
+      const listed = parseWorktreePorcelain(await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]));
+      return listed.some((entry) => sameWorktreePath(context, entry.path, path)) ? "unavailable" : "mismatch";
+    } catch {
+      return "unavailable";
+    }
   }
 }
 

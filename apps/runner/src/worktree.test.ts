@@ -874,6 +874,31 @@ test("a rollback proof holds only in the worktree it was written in, and in no l
   }
 });
 
+test("a Git refusal says nothing about a worktree still registered, so its rollback proof waits", { skip: !haveGit() }, async () => {
+  const fixture = staleMarkerFixture("proof-refused");
+  try {
+    const options = { dataDir: fixture.dataDir };
+    const handle = await createRequestedWorktree(fixture.repo, "s_proof", { baseRef: "HEAD", branch: "fix/proof" }, options);
+    await stampWorktreeRollbackProof(handle.path, "token-1", options);
+    const config = join(fixture.repo, ".git", "config");
+    const original = readFileSync(config);
+    writeFileSync(config, "[broken\n");
+    assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-1", options), "unavailable", "Git can read nothing right now");
+    writeFileSync(config, original);
+    assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-1", options), "proved", "and the proof was there all along");
+
+    // Only the worktree's own link is broken: the repository still lists it, so that is no answer either.
+    const marker = join(handle.path, ".git");
+    const link = readFileSync(marker);
+    writeFileSync(marker, "not a gitfile\n");
+    assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-1", options), "unavailable");
+    writeFileSync(marker, link);
+    assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-1", options), "proved");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("safe discard revalidates identity after process retirement", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-safe-discard-revalidate-"));
   const dataDir = join(root, "data");

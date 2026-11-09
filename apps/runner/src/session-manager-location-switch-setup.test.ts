@@ -1562,6 +1562,49 @@ test("a stuck rollback finishes on the sweep once what blocked it has passed, wi
   });
 });
 
+test("a Git refusal keeps a set-up worktree's rollback, so its teardown and ports wait for an answer rather than being lost", async () => {
+  await withSession("refusal-keeps-rollback", async (h) => {
+    const teardownLog = join(h.root, "teardown-log");
+    commitSetup(h, {
+      setup: [{ name: "Always Fail", command: fail, timeoutSeconds: 30 }],
+      teardown: [{ name: "Stop Services", command: [process.execPath, "-e", `require('fs').appendFileSync(${JSON.stringify(teardownLog)},'x')`], timeoutSeconds: 30 }],
+    });
+    const removal = stickRemoval(h);
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await answerTrust(h, "trust");
+    await waitFor(() => failure(h) !== undefined, "the failed setup did not fail the switch");
+    const [record] = journal(h);
+    assert.ok(record?.rollbackProof, "setup ran, so the proof is on record");
+    assert.ok(record?.hooks?.teardown.length, "with what it takes to undo it");
+    removal.free();
+
+    const internals = internalsOf(h);
+    const owner = `${h.sessionId}\0${record!.worktreeId}`;
+    const block = internals.worktreePortAllocator.get(owner);
+    assert.ok(block);
+    let now = Date.now() + 24 * 60 * 60 * 1000;
+    internals.worktreePullRequestDiscoveryNow = () => now;
+
+    const config = join(h.docs, ".git", "config");
+    const original = readFileSync(config);
+    writeFileSync(config, "[broken\n");
+    await internals.replayDeferredWorktreeRetirements();
+    writeFileSync(config, original);
+
+    assert.equal(journal(h).length, 1, "the record stays");
+    assert.deepEqual(internals.worktreePortAllocator.get(owner), block, "its ports stay held");
+    assert.equal(existsSync(teardownLog), false, "and its teardown has not run yet");
+    assert.equal(existsSync(record!.worktreePath), true);
+
+    now += 24 * 60 * 60 * 1000;
+    await internals.replayDeferredWorktreeRetirements();
+    assert.deepEqual(journal(h), [], "the next attempt finishes it");
+    assert.equal(readFileSync(teardownLog, "utf8"), "x", "with its teardown");
+    assert.equal(existsSync(record!.worktreePath), false);
+    assert.equal(internals.worktreePortAllocator.get(owner), undefined);
+  });
+});
+
 test("a worktree that replaced the proved one while its processes were ending is left alone by the forced removal", async () => {
   await withSession("swap-during-removal", async (h) => {
     commitSetup(h, FAILING_STEP);
