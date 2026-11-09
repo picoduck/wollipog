@@ -1,5 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
+import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import type { AgentDefinition, ControlPlaneToUi, ProjectLocationView, ProjectView, RunnerView, WorkflowDefinition } from "@wollipog/protocol";
 import { ApiError, api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -56,6 +57,24 @@ const runners = [
 ].map((runner) => ({
   ...runner, os: "linux", version: "1", connectedAt: NOW, lastSeen: NOW, protocolVersion: 141,
 })) as unknown as RunnerView[];
+if (scenario.startsWith("account-priority")) {
+  // #4353: Claude under Priority Order with its first account signed out, and Codex under a fixed default.
+  runners[0]!.agents = [
+    { ...agents[0]!, providerAccountReadiness: { defaultAuthStatus: "unknown", readyAccountIds: ["b"] } },
+    { ...agents[2]!, providerAccountReadiness: { defaultAuthStatus: "authenticated", defaultAccountId: "d", readyAccountIds: ["c", "d"] } },
+  ];
+  runners[0]!.protocolVersion = PROTOCOL_VERSION;
+  runners[0]!.providerAccounts = [
+    { id: "a", label: "Work", provider: "claude", authStatus: "unauthenticated", billing: "subscription" },
+    { id: "b", label: "Personal", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+    { id: "c", label: "Codex Team", provider: "codex", authStatus: "authenticated", billing: "subscription" },
+    { id: "d", label: "Codex Solo", provider: "codex", authStatus: "authenticated", billing: "subscription" },
+  ];
+  runners[0]!.providerAccountDefaults = [
+    { provider: "claude", accountId: null, revision: 2, mode: "priority", schemaVersion: 1, fixedAccountId: null, priorityAccountIds: ["a", "b"] },
+    { provider: "codex", accountId: "d", revision: 1 },
+  ];
+}
 if (scenario.startsWith("account-default")) {
   runners[0]!.protocolVersion = 283;
   if (scenario === "account-default-b") runners[0]!.providerAccountDefaults = [
@@ -139,6 +158,20 @@ const refuse = () => {
 const client = {
   ...api,
   workflowDefinitions: async () => [workflow],
+  // `account-priority-memory`: inside a project, a policy won't move memory held by the account.
+  providerAccountSelection: async (_runnerId: string, target: { agentId?: string; projectId?: string }) => (target.agentId === "codex" ? {
+    provider: "codex", mode: "fixed", policyRevision: 1, status: "selected", source: "fixed_default", accountId: "d",
+    enforcement: "enforced", generatedAt: NOW, candidates: [{ accountId: "d", position: null, eligible: true, selected: true }],
+  } : scenario === "account-priority-memory" && target.projectId ? {
+    provider: "claude", mode: "priority", policyRevision: 2, status: "choice_required", source: "none", refusal: "account_memory",
+    enforcement: "enforced", generatedAt: NOW, candidates: [],
+  } : {
+    provider: "claude", mode: "priority", policyRevision: 2, status: "selected", source: "priority", accountId: "b",
+    enforcement: "enforced", generatedAt: NOW, candidates: [
+      { accountId: "a", position: 1, eligible: false, reason: "signed_out" },
+      { accountId: "b", position: 2, eligible: true, selected: true },
+    ],
+  }),
   createRun: async () => {
     if (scenario === "error") refuse();
     return { run: { id: "run-new" }, sessions: [] };

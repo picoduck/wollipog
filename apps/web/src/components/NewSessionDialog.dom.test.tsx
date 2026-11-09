@@ -2684,6 +2684,54 @@ test("New Session shows the saved default but leaves the server to resolve it wh
   }
 });
 
+const priorityRunner = (order: string[]): RunnerView => ({
+  ...runner,
+  protocolVersion: PROTOCOL_VERSION,
+  providerAccounts: [
+    { id: "work", label: "Work", provider: "claude", authStatus: "unauthenticated", billing: "subscription" },
+    { id: "personal", label: "Personal", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+  ],
+  providerAccountDefaults: [{ provider: "claude", accountId: null, revision: 2, mode: "priority", schemaVersion: 1, fixedAccountId: null, priorityAccountIds: order }],
+});
+const defaultHarnesses = async () => ({ defaults: [] });
+
+test("New Session shows Priority Order's expected account and why, and leaves the server to choose (#4353)", async () => {
+  const preview = { provider: "claude", mode: "priority", policyRevision: 2, status: "selected", source: "priority", accountId: "personal",
+    enforcement: "enforced", generatedAt: 1, candidates: [
+      { accountId: "work", position: 1, eligible: false, reason: "signed_out" },
+      { accountId: "personal", position: 2, eligible: true, selected: true },
+    ] };
+  const fixture = await mountFixture({ runners: [priorityRunner(["work", "personal"])] }, { projectId: null }, undefined, defaultHarnesses, undefined, undefined,
+    { providerAccountSelection: async () => preview } as unknown as Partial<ApiClient>);
+  try {
+    await act(async () => { for (let index = 0; index < 5; index += 1) await Promise.resolve(); });
+    assert.match(fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Account:"]')?.getAttribute("aria-label") ?? "", /Account: Personal/u);
+    assert.match(fixture.container.textContent ?? "", /first eligible account in the machine's Priority Order\. Skipped ahead of it: one needs sign-in\./u);
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests[0]?.providerAccountId, undefined, "the expected account is not an explicit override");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("New Session requires an explicit account when no account is eligible (#4353)", async () => {
+  const preview = { provider: "claude", mode: "priority", policyRevision: 2, status: "choice_required", source: "none", refusal: "no_eligible_account",
+    enforcement: "enforced", generatedAt: 1, candidates: [
+      { accountId: "work", position: 1, eligible: false, reason: "signed_out" },
+      { accountId: "personal", position: null, eligible: false, reason: "not_ranked" },
+    ] };
+  const fixture = await mountFixture({ runners: [priorityRunner(["work"])] }, { projectId: null }, undefined, defaultHarnesses, undefined, undefined,
+    { providerAccountSelection: async () => preview } as unknown as Partial<ApiClient>);
+  try {
+    await act(async () => { for (let index = 0; index < 5; index += 1) await Promise.resolve(); });
+    assert.match(fixture.container.textContent ?? "", /No Claude account in this machine's Priority Order can start this session/u);
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests.length, 0, "nothing starts until someone chooses");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("New Session shows the first account this control plane may use, as the server would choose it (#3240)", async () => {
   const accountRunner: RunnerView = {
     ...runner,

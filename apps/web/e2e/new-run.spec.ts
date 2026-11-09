@@ -63,6 +63,28 @@ for (const width of [1440, 390]) {
       }
     });
 
+    test("a chosen agent shows the account Priority Order expects and why (#4353)", async ({ page }) => {
+      await open(page, "account-priority");
+      await dialog(page).getByRole("textbox", { name: "Task" }).fill("Compare the account setup");
+      await chooseProject(page, "Wollipog");
+      await expect(dialog(page).getByRole("checkbox", { name: /^Claude/ })).toBeChecked();
+      const codex = dialog(page).getByRole("checkbox", { name: /^Codex/ });
+      if (!await codex.isChecked()) await codex.check();
+      await expect(dialog(page).getByText(/sessions use Personal\. This is the first eligible account/u)).toBeVisible();
+      await expect(dialog(page).getByText(/sessions use Codex Solo\. This is the machine's Default Account\./u)).toBeVisible();
+      await expect(dialog(page).getByRole("button", { name: "Run 2 Agents", exact: true })).toBeEnabled();
+      await page.waitForTimeout(600); // Evidence only: let the button's settled state finish painting.
+      await page.screenshot({ path: `playwright-report/provider-accounts/new-run-expected-${width}.png`, fullPage: true });
+    });
+
+    test("a project whose memory is held by the account says so instead of promising an account (#4353)", async ({ page }) => {
+      await open(page, "account-priority-memory");
+      await dialog(page).getByRole("textbox", { name: "Task" }).fill("Compare the account setup");
+      await chooseProject(page, "Wollipog");
+      await expect(dialog(page).getByText(/memory is stored with each Claude account/u)).toBeVisible();
+      await expect(dialog(page).getByText(/sessions use Personal/u)).toHaveCount(0);
+    });
+
     test("the primary's reason is in the footer, in view, and follows the fields", async ({ page }) => {
       await open(page);
       const run = dialog(page).getByRole("button", { name: /^Run (\d )?Agents?$/ });

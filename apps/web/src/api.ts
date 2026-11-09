@@ -1630,6 +1630,21 @@ export function createApiClient(transport: ApiTransport) {
     { method: "PUT", body: JSON.stringify(body) },
   ),
 
+  updateMachineProviderAccountPolicy: (
+    runnerId: string,
+    provider: "claude" | "codex",
+    body: { mode: "fixed" | "priority"; priorityAccountIds?: string[]; fixedAccountId?: string | null; expectedRevision: number },
+  ) => req<{ providerAccountPolicy: import("@wollipog/protocol").RunnerProviderAccountDefault }>(
+    `/api/runners/${encodeURIComponent(runnerId)}/provider-account-policies/${provider}`,
+    { method: "PUT", body: JSON.stringify(body) },
+  ),
+  providerAccountSelection: (
+    runnerId: string,
+    target: { agentId?: string; provider?: "claude" | "codex"; projectId?: string },
+  ) => req<import("@wollipog/protocol").ProviderAccountSelectionPreview>(
+    `/api/runners/${encodeURIComponent(runnerId)}/provider-account-selection?${new URLSearchParams(target).toString()}`,
+  ),
+
   // Phase 3: external (CLI-started) sessions on a box.
   listExternalSessions: (runnerId: string, agentId?: string) =>
     req<{ sessions: ExternalSessionDescriptor[] }>(
