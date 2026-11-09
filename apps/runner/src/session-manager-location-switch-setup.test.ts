@@ -415,6 +415,37 @@ test("while setup runs, another session's switch to the same branch is refused r
   });
 });
 
+test("a target another switch claimed while Git was still checking it out stays that session's: no setup, no removal, no takeover", async () => {
+  await withSession("claimed-first", async (h) => {
+    commitSetup(h, { setup: [{ name: "Prepare Target", command: write(join(h.root, "setup-ran"), "'yes'"), timeoutSeconds: 30 }] });
+    // Model the other switch getting there first: its claim lands while this switch's checkout runs,
+    // so the first holder this switch sees for its own new worktree is that session.
+    const runner = h.manager as unknown as {
+      worktreeHolder: (sessionId: string, context: unknown, path: string) => unknown;
+      reusedWorktreeClaims: Map<string, string>;
+    };
+    const holder = runner.worktreeHolder.bind(h.manager);
+    let contested: string | undefined;
+    runner.worktreeHolder = (sessionId, context, path) => {
+      if (sessionId === h.sessionId && !contested) {
+        contested = path;
+        runner.reusedWorktreeClaims.set(path, "s_switch_setup_first");
+      }
+      return holder(sessionId, context, path);
+    };
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => failure(h) !== undefined, "the losing switch was not refused");
+
+    assert.match(failure(h)!.reason!, /which session s_switch_setup_first took while it was being verified/u);
+    assertStayed(h);
+    assert.equal(runner.reusedWorktreeClaims.get(contested!), "s_switch_setup_first", "the winner's claim is not overwritten");
+    assert.equal(existsSync(join(contested!, ".git")), true, "the worktree is the winner's: this switch does not remove it");
+    assert.equal(existsSync(join(h.root, "setup-ran")), false, "no setup runs in another session's worktree");
+    assert.deepEqual(payloads(h, "permission_request"), []);
+    assert.equal(h.providers.length, 1);
+  });
+});
+
 test("a runner going down during setup keeps the approved switch owed, and gives the worktree back", async () => {
   await withSession("shutdown", async (h) => {
     commitSetup(h, { setup: [{ name: "Long Step", command: sleep, timeoutSeconds: 300 }] });

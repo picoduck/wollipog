@@ -14855,17 +14855,20 @@ export class SessionManager {
         : await createRequestedWorktree(repoPath, sessionId,
           { baseRef: (await fetchRemoteDefaultBase(repoPath, options)).ref, branch: `agent/${sessionId}` }, options);
       reused = created.reusedInPlace;
+      // Checked again and claimed with no await in between, so two switches never both take one
+      // worktree while each is still verifying it. That covers one this switch just checked out too:
+      // Git registers it before its checkout ends, so another switch can find it free and claim it
+      // first. Its files are then that session's, and this switch neither sets up nor removes them.
+      // Setup can run for minutes while no record names this worktree, so the claim stays (#4209).
+      const holder = this.worktreeHolder(sessionId, meta.context, created.path);
+      if (holder && (reused || holder.sessionId !== sessionId)) {
+        throw new Error(`branch ${created.branch} is checked out in worktree ${created.path}, which session ` +
+          `${holder.sessionId} took while it was being verified; continue the task in that session instead, so the work ` +
+          "and its pull request stay with it");
+      }
+      this.reusedWorktreeClaims.set(created.path, sessionId);
+      claim.path = created.path;
       if (reused) {
-        // Checked again and claimed with no await in between, so two switches never both take one
-        // worktree while each is still verifying it.
-        const holder = this.worktreeHolder(sessionId, meta.context, created.path);
-        if (holder) {
-          throw new Error(`branch ${created.branch} is checked out in worktree ${created.path}, which session ` +
-            `${holder.sessionId} took while it was being verified; continue the task in that session instead, so the work ` +
-            "and its pull request stay with it");
-        }
-        this.reusedWorktreeClaims.set(created.path, sessionId);
-        claim.path = created.path;
         // On native Linux the provider relaunches inside the managed bubblewrap boundary, whose
         // launch refuses some worktree placements. Refuse those now, while nothing has moved:
         // after the move each retry would retire the provider and fail the launch again.
@@ -14879,11 +14882,6 @@ export class SessionManager {
               `continue in: ${refusal}; move that worktree (git worktree move) or switch it to another branch, then ask again`);
           }
         }
-      } else {
-        // Setup can run for minutes while no record names this worktree. Another session's switch
-        // to the same branch must not find it free and continue in it half set up (#4209).
-        this.reusedWorktreeClaims.set(created.path, sessionId);
-        claim.path = created.path;
       }
       const defaultBranch = await readRepositoryDefaultBranch(repoPath, options);
       worktree = reused
