@@ -2550,6 +2550,26 @@ test("#4267 an owner request states the Maximum Issues increase its additions ne
   } finally { epic.db.close(); }
 });
 
+test("#4334 an owner review's entry names its exact additions, removals and Maximum Issues increase, however long the change", async () => {
+  const withRemoval = harness(true, 5, [100, 103]);
+  try {
+    const proposed = await withRemoval.svc.proposeCampaignIssueScope("root", { requestId: "swap", expectedRevision: 1, explanation: "The owner swapped them in chat",
+      additions: [{ repository: "team/repo", number: 101 }], removals: [{ repository: "team/repo", number: 103 }] });
+    assert.ok(proposed.ok, proposed.error ?? "refused");
+    assert.equal(proposed.data!.authority, "human");
+    assert.equal(withRemoval.db.campaignOwnerDecisions("root")?.items[0]?.summary, "Add team/repo#101 and remove team/repo#103");
+  } finally { withRemoval.db.close(); }
+  // 40 issues pass the 200 characters other summaries are held to: the change and the increase after it survive whole.
+  const long = harness(true, 2);
+  try {
+    const numbers = Array.from({ length: 40 }, (_, index) => 200 + index);
+    const proposed = await proposeWithoutLineage(long, "long", numbers);
+    assert.ok(proposed.ok, proposed.error ?? "refused");
+    assert.equal(long.db.campaignOwnerDecisions("root")?.items[0]?.summary,
+      `Add ${numbers.map((number) => `team/repo#${number}`).join(", ")}, raising Maximum Issues from 2 to 41`);
+  } finally { long.db.close(); }
+});
+
 test("#4267 only the owner resolves an owner request; the Orchestrator cannot approve, consume or widen it", async () => {
   const h = harness(true, 2);
   try {

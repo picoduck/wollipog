@@ -2388,7 +2388,8 @@ export interface CampaignOwnerDecision {
   /** The session whose request it is: the root for an owner decision, else the requester. */
   sessionId: string;
   category: WorkflowDecisionCategory;
-  /** The owner decision's question, or what a handed-off occurrence decides ("Merge team/repo#7"). */
+  /** The owner decision's question, or what a handed-off occurrence decides ("Merge team/repo#7"). A
+   * scope request names its exact change and any Maximum Issues increase, and is never shortened (#4334). */
   summary: string;
   /** The root handed an Orchestrator-owned occurrence to the owner, rather than asking anew. */
   handedOff: boolean;
@@ -5350,6 +5351,9 @@ export interface PendingApproval {
   campaignRecovery?: import("./campaign-recovery.js").CampaignRecoveryRecord;
   /** Server-derived exception when a parked root callback could not be delivered. */
   standingAdmissionFailure?: "provider_delivery_unavailable";
+  /** Server-derived, never stored (#4334): the Maximum Issues increase approving this scope request
+   * applies, read when the session is read under the rule the approval applies. Informational. */
+  scopeMaxIssuesIncrease?: { from: number; increase: number };
   /** CP-derived mandatory human rule on this occurrence. Provider input cannot set it. */
   humanRequired?: boolean;
   /** CP-derived Decision Model screen of this request's text (#4104). The control plane overwrites

@@ -196,3 +196,18 @@ test("the owner's approval is presented as an Owner Question: Approve Scope, Dec
     "words never approve or change the proposal");
   assert.equal(scopeProposalAnswer({}), null);
 });
+
+test("a scope proposal's question states the Maximum Issues increase the server derived, and only then (#4334)", () => {
+  const snapshot = { category: "campaign_issue_scope" as const, repository: "owner/repo", expectedRevision: 2, before: [], additions: [31], removals: [],
+    explanation: "Ranked by priority.", affectedAssignments: [], affectedDecisions: [], activeChildren: [],
+    scopeProposal: { initial: true, messageDigest: "a".repeat(64), requestedCount: null, constraints: ["open"], withheldOperations: [], checks: ["constraints" as const],
+      route: "owner" as const, ownerCause: "constraint_check_failed" as const, ownerMessage: "Fix one bug.",
+      issues: [{ number: 31, origin: "orchestrator_chosen" as const, rationale: "Oldest." }] } };
+  const card = (extra = {}) => ({ requestId: "wd_1", occurrenceId: "wd_1", kind: "workflow_decision" as const, title: "Scope", options: [],
+    workflowDecision: { occurrenceId: "wd_1", authority: "human", resourceSnapshot: snapshot }, ...extra }) as unknown as PendingApproval;
+  const raised = presentOwnerQuestionRequest(card({ scopeMaxIssuesIncrease: { from: 5, increase: 3 } })).questions![0]!.context!;
+  assert.match(raised, /\*\*Maximum Issues:\*\* 5 to 8/u);
+  assert.match(raised, /Approving admits exactly these issues and raises Maximum Issues from 5 to 8\./u);
+  const plain = presentOwnerQuestionRequest(card()).questions![0]!.context!;
+  assert.doesNotMatch(plain, /Maximum Issues/u);
+});

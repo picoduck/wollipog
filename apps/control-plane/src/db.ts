@@ -36,6 +36,7 @@ import { PREREQUISITE_MERGE_WATCH_RUNNER, PullRequestWatches } from "./pull-requ
 import { SessionWaits } from "./session-waits.js";
 import { ReviewSettingsStore, type ReviewPolicyCapture } from "./review-settings.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
+import type { CampaignIssueScopeSnapshot } from "@wollipog/protocol";
 import { campaignScopeChangeBefore, campaignScopeChangeGroups, campaignScopeChangeResult, campaignScopeForRepository, campaignScopeHolds, campaignScopeIssues, campaignScopeNumbers, campaignScopeWithIssues, canonicalCampaignIssues } from "@wollipog/protocol";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
 import {
@@ -47,7 +48,7 @@ import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignDispatchSco
 import { campaignBoundaryRepositoryAt, campaignLocationRepository, campaignRepositoryPlaces } from "./campaign-repository-boundary.js";
 import { genericRequestScreenData, storedCredentialScreenFact } from "./credential-screen.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
-import { grantReviewMaxIssues, ownerReviewMaxIssues, proposalMaxIssues } from "./scope-grant.js";
+import { grantReviewMaxIssues, ownerReviewMaxIssues, proposalMaxIssues, scopeApprovalMaxIssuesIncrease } from "./scope-grant.js";
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
 import { validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
@@ -6440,6 +6441,26 @@ export class ControlPlaneDb {
       cursor = page.data.nextCursor ?? undefined;
     } while (cursor);
     return { state: recoveryIds.size ? "recovery_ready" : unfinished ? "recovery_held" : "complete", recoveryIds: [...recoveryIds] };
+  }
+
+  /** The Maximum Issues increase approving this root scope request applies (#4334). Approving can raise
+   * a derived limit no snapshot field records, so Waiting for You and the request's card both read it
+   * here: the limit the approval would grow, under the approval's own rule. It decides nothing. */
+  private scopeApprovalIncrease(rootId: string, snapshot: CampaignIssueScopeSnapshot) {
+    const policy = this.sessionOrchestratorPolicy(rootId) ?? undefined;
+    const boundary = policy?.control?.mode === "full_control" && this.boundaryTrailsHumanScope(rootId, policy) ? policy.control.boundary : undefined;
+    return scopeApprovalMaxIssuesIncrease(policy, snapshot, boundary);
+  }
+
+  /** A person-owned scope card as the session view shows it: the increase its approval applies, derived
+   * on every read. Whatever a stored card or a runner carried in its place is dropped. */
+  private scopeApprovalRequest(sessionId: string, request: PendingApproval): PendingApproval {
+    const { scopeMaxIssuesIncrease: _derivedIncrease, ...stored } = request;
+    const decision = stored.workflowDecision;
+    if (stored.kind !== "workflow_decision" || decision?.authority !== "human" || decision.sessionId !== sessionId ||
+        decision.controllingSessionId !== sessionId || decision.resourceSnapshot.category !== "campaign_issue_scope") return stored;
+    const increase = this.scopeApprovalIncrease(sessionId, decision.resourceSnapshot);
+    return increase ? { ...stored, scopeMaxIssuesIncrease: increase } : stored;
   }
 
   campaignRecoveryRequest(sessionId: string, request: PendingApproval): PendingApproval {
@@ -24107,7 +24128,12 @@ export class ControlPlaneDb {
    * the root for itself or a member, or by an Orchestrator nested in its membership for one of that
    * Orchestrator's own descendants, the one shape the owner can resolve there (resolveWorkflowDecision
    * admits a nested controller only through isSessionDescendant). The scope and repository requests
-   * stay the root's own. The count and the items read one predicate. */
+   * stay the root's own. The count and the items read one predicate.
+   * A scope request is listed by the server-derived mark of the route that gave it to the owner
+   * (#4334): an owner review (#4267), any grant review (#4102, #4103) or the proposal check's owner
+   * route (#4282). Only the server writes those, so the owner's own Campaign Status change carries
+   * none, and an admitted or Orchestrator-owned change is neither marked for the owner nor `human`.
+   * Listing grants nothing: the owner still decides the exact occurrence. */
   campaignOwnerDecisions(controllingSessionId: string): NonNullable<OrchestratorCampaignProjection["ownerDecisions"]> | null {
     const descendants = this.campaignDescendantIds(controllingSessionId);
     // Each [controller, requester] pair the campaign controls: the root over itself and every member,
@@ -24131,7 +24157,8 @@ export class ControlPlaneDb {
           AND EXISTS (SELECT 1 FROM json_each(?) pair WHERE json_extract(pair.value, '$[0]')=controlling_session_id
             AND json_extract(pair.value, '$[1]')=session_id)
         OR controlling_session_id=? AND (category='campaign_repository_addition'
-          OR category='campaign_issue_scope' AND session_id=controlling_session_id AND json_type(resource_snapshot, '$.ownerReview')='object'))`;
+          OR category='campaign_issue_scope' AND session_id=controlling_session_id AND (json_type(resource_snapshot, '$.ownerReview')='object'
+            OR json_type(resource_snapshot, '$.grantReview')='object' OR json_extract(resource_snapshot, '$.scopeProposal.route')='owner')))`;
     const params = [JSON.stringify(controllers), JSON.stringify(pairs), controllingSessionId];
     const total = Number((this.stmt(`SELECT COUNT(*) AS count FROM workflow_decisions WHERE ${where}`)
       .get(...params) as { count: number }).count);
@@ -24141,7 +24168,9 @@ export class ControlPlaneDb {
       .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null)
       .map((decision) => ({ occurrenceId: decision.occurrenceId, sessionId: decision.sessionId, category: decision.category,
         ...(isWorkflowQuestionSnapshot(decision.resourceSnapshot) ? { kind: "question" as const } : {}),
-        summary: ownerDecisionSummary(decision.resourceSnapshot), handedOff: decision.ownerHandoff !== undefined,
+        summary: decision.resourceSnapshot.category === "campaign_issue_scope"
+          ? campaignScopeChangeSummary(decision.resourceSnapshot, this.scopeApprovalIncrease(controllingSessionId, decision.resourceSnapshot))
+          : ownerDecisionSummary(decision.resourceSnapshot), handedOff: decision.ownerHandoff !== undefined,
         ...(decision.ownerRule ? { ownerRule: decision.ownerRule } : {}), createdAt: decision.createdAt }));
     return { total, items };
   }
@@ -29367,9 +29396,9 @@ export class ControlPlaneDb {
       eventEpoch: row.event_epoch ?? 0,
       preview: row.preview,
       pendingApproval: pending ? {
-        ...this.campaignRecoveryRequest(row.id, pending),
+        ...this.scopeApprovalRequest(row.id, this.campaignRecoveryRequest(row.id, pending)),
         ...(pending.additionalRequests ? { additionalRequests: pending.additionalRequests.map(request =>
-          this.campaignRecoveryRequest(row.id, request)) } : {}),
+          this.scopeApprovalRequest(row.id, this.campaignRecoveryRequest(row.id, request))) } : {}),
       } : pending,
       attention: (() => {
         const facts = this.stmt("SELECT * FROM session_attention WHERE session_id=?").get(row.id) as
@@ -35691,8 +35720,22 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
   };
 }
 
+/** A scope request's exact change for Campaign Status (#4267, #4334): every repository's part (#4118),
+ * each issue qualified by its own repository, and the Maximum Issues increase approving it applies.
+ * Never shortened, because the owner reads it to know what they approve; the scope's own limit bounds
+ * it. Only an initial proposal can change no issue: normalization refuses any other empty change. */
+function campaignScopeChangeSummary(snapshot: CampaignIssueScopeSnapshot, raise: { from: number; increase: number } | undefined): string {
+  const groups = campaignScopeChangeGroups(snapshot);
+  const refs = (pick: (group: (typeof groups)[number]) => number[]) =>
+    groups.flatMap((group) => pick(group).map((n) => `${group.repository}#${n}`)).join(", ");
+  const additions = refs((group) => group.additions), removals = refs((group) => group.removals);
+  const change = additions && removals ? `Add ${additions} and remove ${removals}`
+    : additions ? `Add ${additions}` : removals ? `Remove ${removals}` : "Start the campaign with no issues";
+  return change + (raise ? `, raising Maximum Issues from ${raise.from} to ${raise.from + raise.increase}` : "");
+}
+
 /** What a decision the owner kept decides, in a line Campaign Status can list (#4064). */
-function ownerDecisionSummary(snapshot: WorkflowDecisionView["resourceSnapshot"]): string {
+function ownerDecisionSummary(snapshot: Exclude<WorkflowDecisionView["resourceSnapshot"], { category: "campaign_issue_scope" }>): string {
   const text = (() => {
     switch (snapshot.category) {
       case "owner_decision":
@@ -35702,18 +35745,6 @@ function ownerDecisionSummary(snapshot: WorkflowDecisionView["resourceSnapshot"]
       case "merged_branch_deletion": return `Delete branch ${snapshot.branch} in ${snapshot.repository}`;
       case "issue_closure": return `Close ${snapshot.repository}#${snapshot.issue}`;
       case "follow_up_issue_publication": return `Publish ${JSON.stringify(snapshot.sanitizedTitle)} in ${snapshot.repository}`;
-      case "campaign_issue_scope": {
-        // An Orchestrator's proposal waiting for the owner names its exact change (#4267).
-        if (!snapshot.ownerReview) return `Change the campaign's issue scope in ${snapshot.repository}`;
-        // Every repository's part, each issue qualified by its own repository (#4118).
-        const groups = campaignScopeChangeGroups(snapshot);
-        const refs = (pick: (group: (typeof groups)[number]) => number[]) =>
-          groups.flatMap((group) => pick(group).map((n) => `${group.repository}#${n}`)).join(", ");
-        const removals = refs((group) => group.removals);
-        const raise = snapshot.ownerReview.maxIssuesIncrease;
-        return `Add ${refs((group) => group.additions)}${removals ? ` and remove ${removals}` : ""}` +
-          (raise ? `, raising Maximum Issues from ${raise.from} to ${raise.from + raise.increase}` : "");
-      }
       case "ui_evidence_approval": return `Review ${snapshot.evidence.length} UI evidence item${snapshot.evidence.length === 1 ? "" : "s"}`;
       case "campaign_repository_addition": return `Add ${snapshot.repository} to the campaign`;
       default: return snapshot.category;
@@ -35730,7 +35761,7 @@ function pendingApprovalWithOccurrenceIds(
     pendingRequests(prior).map((request) => [request.requestId, request]),
   );
   const identify = (request: PendingApproval): PendingApproval => {
-    const { campaignRecovery: _derivedRecovery, ...stored } = request;
+    const { campaignRecovery: _derivedRecovery, scopeMaxIssuesIncrease: _derivedIncrease, ...stored } = request;
     return {
       ...stored,
       occurrenceId: request.occurrenceId || priorByRequestId.get(request.requestId)?.occurrenceId ||

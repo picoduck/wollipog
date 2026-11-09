@@ -1627,6 +1627,43 @@ test("a decision an owner rule kept is waiting for you with the rule's source an
   }
 });
 
+test("a scope approval the server routed to the owner opens exactly its own request, and offers nothing when that request isn't listed (#4334)", async () => {
+  const summaries = ["Add picoduck/wollipog#40, raising Maximum Issues from 5 to 8", "Add picoduck/wollipog#41 and remove picoduck/wollipog#39", "Add picoduck/wollipog#42"];
+  const own = (occurrenceId: string) => ({ requestId: `request_${occurrenceId}`, occurrenceId, title: "Campaign Issue Scope Approval Required", options: [] });
+  const items = summaries.map((summary, index) => ({ occurrenceId: `occ_scope_${index}`, sessionId: "s_root", category: "campaign_issue_scope" as const, summary, handedOff: false, createdAt: NOW }));
+  const { client } = fakeClient(() => ({ revision: 1, items: [], nextCursor: null }), {});
+  const root = session({
+    // The session's first request is another one, and the third entry's request isn't listed here at all.
+    pendingApproval: { ...own("occ_other"), additionalRequests: [own("occ_scope_0"), own("occ_scope_1")] },
+    orchestratorCampaign: campaignProjection(workSummary(), { status: "waiting_human", ownerDecisions: { total: items.length, items } }),
+  });
+  const panel = await mount({ initial: root, client });
+  const regions = ["request_occ_other", "request_occ_scope_0", "request_occ_scope_1"].map((requestId) => {
+    const region = document.createElement("div");
+    region.dataset.sessionRequestId = requestId;
+    region.dataset.sessionRequestSession = "s_root";
+    document.body.append(region);
+    return region;
+  });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    const section = () => [...panel.container.querySelectorAll("section")]
+      .find((candidate) => candidate.querySelector("h3")?.textContent === "Waiting for You");
+    assert.deepEqual([...section()!.querySelectorAll("dt")].map((term) => term.textContent), ["Scope Approval", "Scope Approval", "Scope Approval"]);
+    assert.ok([...section()!.querySelectorAll("dd")].every((detail, index) => detail.textContent!.startsWith(`${summaries[index]}Proposed by the Orchestrator`)));
+    assertNoDomNode(section()!.querySelector(`button[aria-label='Open Request: ${summaries[2]}']`),
+      "a request this session doesn't list offers no way to open another one instead");
+    await click(section()!.querySelector(`button[aria-label='Open Request: ${summaries[1]}']`)!);
+    await settle();
+    assert.ok(document.activeElement === regions[2], "the entry's own request takes focus, not the session's first");
+    assert.deepEqual(harnessRequests.selected, []);
+  } finally {
+    for (const region of regions) region.remove();
+    await panel.dispose();
+  }
+});
+
 test("a kept decision a nested Orchestrator controls opens at its own request in its session, never another of that session's (#4337)", async () => {
   // The root lists another request of the same worker, but not the nested Orchestrator's decision.
   harnessRequests.descendants = [pendingRequest("s_worker", "occ_other")];
