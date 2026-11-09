@@ -357,6 +357,9 @@ export interface CampaignForgePullRequestObservation {
   /** The pull request's merge-queue entry, or null when it is not queued. */
   mergeQueue: { state: CampaignForgeMergeQueueState; position: number | null } | null;
   mergeCommitSha: string | null;
+  /** When the forge says it merged, in epoch milliseconds. Only for Waiting Time: no gate reads it.
+   * Absent while unmerged, from older runners, and from a fact stored before they reported it. */
+  mergedAt?: number;
   /** v275: the repository's default branch. Absent from older runners, which cannot prove that a
    * merge landed on it. */
   defaultBranch?: string;
@@ -400,6 +403,8 @@ export interface CampaignForgeGitLabMergeRequestObservation {
   mergeTrain: { status: CampaignGitLabMergeTrainStatus; position: number | null } | null;
   /** The merge commit, or the squash commit of a squash merge without one. */
   mergeCommitSha: string | null;
+  /** See `CampaignForgePullRequestObservation.mergedAt`. */
+  mergedAt?: number;
 }
 
 /** A pull request or merge request observation. A GitHub one carries no `forge`, as before #3600. */

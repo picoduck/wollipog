@@ -74,7 +74,8 @@ import {
   campaignCostMetric,
   type CampaignUsageAmount,
 } from "./campaign-work-accounting.js";
-import { campaignItemDurations, campaignItemTimelines } from "./campaign-work-times.js";
+import type { ForgeFact } from "./campaign-forge-observations.js";
+import { campaignItemDurations, campaignItemTimelines, type CampaignItemTimelineInput } from "./campaign-work-times.js";
 import {
   campaignItemRepository,
   campaignItemRepositories,
@@ -533,6 +534,8 @@ interface LedgerSnapshot {
   /** #4120: items with a delivered verification whose state is not delivered, since their own pull
    * requests have not merged and a merge dependency holds them. */
   verifiedHeld: ReadonlySet<string>;
+  /** A verified item whose merge hold has ended, when each merge that could end it has a known time. */
+  endedHolds: ReadonlyMap<string, { kind: "unmerged" | "failed"; until: number }>;
   /** #4120: each item's repository, and its prerequisites in other repositories. */
   repositories: Map<string, string | null>;
   mergePrerequisites: Map<string, CampaignMergePrerequisite[]>;
@@ -589,6 +592,19 @@ function stagePullRequests(item: ItemRow): CampaignPullRequestRef[] {
 }
 
 const forgeRefKeyOf = (ref: CampaignPullRequestRef) => `${ref.repository.toLowerCase()}#${ref.number}`;
+
+/** When the last of these merged pull requests merged, or null when any merge time is unknown. A
+ * merge can't postdate the read that saw it, so no forge or runner clock moves a hold past that. */
+function latestMergeOf(facts: readonly ForgeFact[]): number | null {
+  let latest = 0;
+  for (const fact of facts) {
+    const value = fact.availability === "unavailable" ? fact.lastValue : fact.value;
+    const observedAt = fact.availability === "unavailable" ? fact.lastObservedAt : fact.observedAt;
+    if (value?.mergedAt === undefined || observedAt === undefined) return null;
+    latest = Math.max(latest, Math.min(value.mergedAt, observedAt));
+  }
+  return latest;
+}
 
 /** Every pull request an item names (#4120): its reported stage's, then its recorded deliveries'. */
 function namedPullRequests(item: ItemRow, deliveries: readonly DeliveryRow[] | undefined): CampaignPullRequestRef[] {
@@ -2075,10 +2091,12 @@ export class CampaignWorkLedgerStore {
     // is set aside, any other must have merged (a gated one at a head its gate approved), and at least
     // one must have. Unlike the proof it needs no fresh read: a merge stays a merge as it ages, and a
     // read that failed since doesn't undo the merged value stored. In a repository outside the proof's,
-    // or never read, nothing is known merged.
-    const ownPullRequestsMerged = (itemId: string): boolean => {
+    // or never read, nothing is known merged. `at` is when the last of them merged, null when any
+    // merge time is unknown; only Waiting Time reads it.
+    const NOT_MERGED = { merged: false, at: null };
+    const ownMerge = (itemId: string): { merged: boolean; at: number | null } => {
       const row = byId.get(itemId);
-      if (!row) return false;
+      if (!row) return NOT_MERGED;
       const issue = issueOf(row.issue_repository, row.issue_number);
       const proof = new Set([...campaignRepositories, ...(issue ? [issue.repository.toLowerCase()] : [])]);
       const candidates = new Map<string, { ref: CampaignPullRequestRef; heads: string[] }>(
@@ -2099,20 +2117,21 @@ export class CampaignWorkLedgerStore {
         candidates.set(forgeRefKeyOf(ref), { ref, heads: [...(candidates.get(forgeRefKeyOf(ref))?.heads ?? []), gate.headSha] });
       }
       const refs = [...candidates.values()].map(({ ref }) => ref);
-      if (!refs.length || refs.some((ref) => proof.size && !proof.has(ref.repository.toLowerCase()))) return false;
+      if (!refs.length || refs.some((ref) => proof.size && !proof.has(ref.repository.toLowerCase()))) return NOT_MERGED;
       const facts = this.hooks.forgePullRequests?.(campaignId, refs, now) ?? [];
-      if (facts.length !== refs.length) return false;
-      let merged = 0;
+      if (facts.length !== refs.length) return NOT_MERGED;
+      const merges: ForgeFact[] = [];
       for (const { ref, fact } of facts) {
         const value = fact.availability === "unavailable" ? fact.lastValue : fact.value;
-        if (!value) return false;
+        if (!value) return NOT_MERGED;
         if (value.state === "closed") continue;
         const heads = candidates.get(forgeRefKeyOf(ref))!.heads;
-        if (value.state !== "merged" || !value.mergeCommitSha || (heads.length && !heads.includes(value.headSha))) return false;
-        merged += 1;
+        if (value.state !== "merged" || !value.mergeCommitSha || (heads.length && !heads.includes(value.headSha))) return NOT_MERGED;
+        merges.push(fact);
       }
-      return merged > 0;
+      return merges.length ? { merged: true, at: latestMergeOf(merges) } : NOT_MERGED;
     };
+    const ownMerges = new Map(items.filter((item) => mergePrerequisites.get(item.id)?.length).map((item) => [item.id, ownMerge(item.id)]));
     const observations = new Map<string, CampaignAttemptSessionObservation | null>();
     const records = items.map((item) => {
       const latest = attempts.get(item.id)?.at(-1);
@@ -2134,12 +2153,26 @@ export class CampaignWorkLedgerStore {
         openAttemptSession: open?.session_id ? observations.get(open.session_id) ?? null : null,
         recordedDelivery: currentDelivery(deliveries.get(item.id), latest) !== null,
         mergeDependencies: (mergePrerequisites.get(item.id) ?? []).map(campaignMergeDependencyStatus),
-        ...(mergePrerequisites.get(item.id)?.length ? { ownPullRequestsMerged: ownPullRequestsMerged(item.id) } : {}),
+        ...(ownMerges.has(item.id) ? { ownPullRequestsMerged: ownMerges.get(item.id)!.merged } : {}),
       };
     });
     const derived = deriveCampaignWorkItemStates(records);
     const verifiedHeld = new Set(records.filter((record) => record.latestAttempt?.delivered && !record.recordedDelivery &&
       derived.get(record.id)?.state !== "delivered" && record.commitment === "committed").map((record) => record.id));
+    // Waiting Time: a verified item with merge dependencies reads delivered from the first of its own
+    // merge and its last prerequisite's merge, the two ends `deriveCampaignWorkItemState` knows. Each
+    // that happened needs a known time: the true end is the earlier, so one alone could overstate it.
+    const endedHolds = new Map<string, { kind: "unmerged" | "failed"; until: number }>();
+    for (const record of records) {
+      const own = ownMerges.get(record.id);
+      if (!own || !record.latestAttempt?.delivered || record.recordedDelivery || derived.get(record.id)?.state !== "delivered") continue;
+      const prerequisitesMerged = record.mergeDependencies.every((status) => status === "merged");
+      const ends = [...(own.merged ? [own.at] : []),
+        ...(prerequisitesMerged ? [latestMergeOf(mergePrerequisites.get(record.id)!.flatMap(({ pullRequests }) => pullRequests.map(({ fact }) => fact)))] : [])];
+      if (ends.length && !ends.includes(null)) {
+        endedHolds.set(record.id, { kind: record.mergeDependencies.includes("failed") ? "failed" : "unmerged", until: Math.min(...ends as number[]) });
+      }
+    }
     return {
       revision: ledger?.revision ?? 0,
       planState: ledger?.plan_state ?? "not_recorded",
@@ -2152,6 +2185,7 @@ export class CampaignWorkLedgerStore {
       deliveries,
       derived,
       verifiedHeld,
+      endedHolds,
       repositories,
       mergePrerequisites,
       prerequisitesOf,
@@ -2190,19 +2224,22 @@ export class CampaignWorkLedgerStore {
     now: number): CampaignWorkItemTimes {
     const transitions = this.accounting.itemTransitions(campaignId);
     const statuses = this.accounting.attemptStatuses(campaignId);
-    // #4120: a verified item held on a merge dependency since its verification (the live state says so).
-    const heldAfterDelivery = (id: string): "unmerged" | "failed" | undefined => {
+    // #4120: a verified item held on a merge dependency since its verification, until now (the live
+    // state says so) or until a merge ended it.
+    const heldAfterDelivery = (id: string): Pick<CampaignItemTimelineInput, "heldAfterDelivery" | "heldUntil"> => {
+      const ended = snapshot.endedHolds.get(id);
+      if (ended) return { heldAfterDelivery: ended.kind, heldUntil: ended.until };
       const derived = snapshot.derived.get(id);
-      if (!derived || derived.state === "delivered") return undefined;
-      return derived.causes.includes("dependency_blocked") && derived.state === "blocked" && snapshot.verifiedHeld.has(id) ? "failed"
-        : derived.causes.includes("dependency_unmerged") && snapshot.verifiedHeld.has(id) ? "unmerged" : undefined;
+      if (!derived || derived.state === "delivered" || !snapshot.verifiedHeld.has(id)) return {};
+      return derived.causes.includes("dependency_blocked") && derived.state === "blocked" ? { heldAfterDelivery: "failed" }
+        : derived.causes.includes("dependency_unmerged") ? { heldAfterDelivery: "unmerged" } : {};
     };
     const timelines = campaignItemTimelines(snapshot.items.map((candidate) => ({
       id: candidate.id,
       createdAt: candidate.created_at,
       transitions: transitions.get(candidate.id) ?? [],
       dependsOn: snapshot.dependencies.get(candidate.id) ?? [],
-      ...(heldAfterDelivery(candidate.id) ? { heldAfterDelivery: heldAfterDelivery(candidate.id) } : {}),
+      ...heldAfterDelivery(candidate.id),
       attempts: (snapshot.attempts.get(candidate.id) ?? []).map((attempt) => ({
         ordinal: attempt.ordinal,
         startedAt: attempt.started_at,

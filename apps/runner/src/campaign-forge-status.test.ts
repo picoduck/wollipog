@@ -234,6 +234,21 @@ test("a merged pull request carries its merge commit, approval, and draft and cl
   assert.deepEqual([values[2]?.state, values[2]?.reviewDecision, values[2]?.mergeQueue], ["closed", "changes_requested", { state: "unknown", position: null }]);
 });
 
+test("a merged pull request reports GitHub's merge time, and an unusable one leaves the observation standing", async () => {
+  const gh = stub(answer({
+    r0: { pullRequest: pr({ state: "MERGED", mergeCommit: { oid: MERGE }, mergedAt: "2026-11-09T10:00:00Z" }) },
+    r1: { pullRequest: pr({ state: "MERGED", mergeCommit: { oid: MERGE }, mergedAt: "whenever" }) },
+    r2: { pullRequest: pr({ state: "MERGED", mergeCommit: { oid: MERGE } }) },
+    r3: { pullRequest: pr({ state: "OPEN", mergedAt: "2026-11-09T10:00:00Z" }) },
+  }));
+  const outcome = await observeForgeStatus([REF, { ...REF, number: 1 }, { ...REF, number: 2 }, { ...REF, number: 3 }], gh);
+  assert.ok(outcome.ok);
+  const values = outcome.results.map((result) => result.ok ? result.observation as CampaignForgePullRequestObservation : null);
+  assert.equal(values[0]?.mergedAt, Date.parse("2026-11-09T10:00:00Z"));
+  assert.deepEqual(values.slice(1).map((value) => [value?.state, value && "mergedAt" in value]), [["merged", false], ["merged", false], ["open", false]]);
+  assert.match(forgeStatusQuery([{ owner: "o", name: "n", number: 1 }]), /mergeCommit\{oid\} mergedAt\n/u);
+});
+
 test("per pull request: not found or forbidden is forge_not_found, a malformed node is forge_error", async () => {
   const gh = stub(answer({
     r0: { pullRequest: null },

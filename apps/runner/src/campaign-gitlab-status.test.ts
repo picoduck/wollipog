@@ -79,6 +79,20 @@ test("an open merge request on a train reads its approvals, running pipeline, an
   }
 });
 
+test("a merged merge request reports GitLab's merge time, and an unusable one leaves the observation standing", async () => {
+  const read = async (fields: Record<string, unknown>) => {
+    const [result] = await observeGitLabMergeRequests([REF], glabStub({
+      [mrPath()]: ok(detail(fields)),
+      [`${mrPath()}/approvals`]: ok(approvals()),
+    }));
+    assert.ok(result?.ok);
+    return result.observation;
+  };
+  assert.equal((await read({ state: "merged", merge_commit_sha: MERGE, merged_at: "2026-11-09T10:00:00.000Z" })).mergedAt, Date.parse("2026-11-09T10:00:00Z"));
+  const unusable = await read({ state: "merged", merge_commit_sha: MERGE, merged_at: "whenever" });
+  assert.deepEqual([unusable.state, "mergedAt" in unusable], ["merged", false]);
+});
+
 test("a merged merge request reports its merge or squash commit and is not asked about the train", async () => {
   const merged = glabStub({
     [mrPath()]: ok(detail({ state: "merged", merge_commit_sha: MERGE, head_pipeline: { id: 902, status: "success" } })),

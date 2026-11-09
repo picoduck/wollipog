@@ -532,7 +532,14 @@ export function sanitizedGitLabObservation(mr: CampaignForgeGitLabMergeRequestOb
     pipeline: mr.pipeline ? { id: mr.pipeline.id, status: mr.pipeline.status } : null,
     mergeTrain: mr.mergeTrain ? { status: mr.mergeTrain.status, position: mr.mergeTrain.position } : null,
     mergeCommitSha: mr.mergeCommitSha,
+    ...mergedAtField(mr.mergedAt),
   };
+}
+
+/** Waiting Time alone reads a merge time, so an unusable one is dropped rather than refusing the
+ * observation, which a merge gate does read. */
+function mergedAtField(value: unknown): { mergedAt?: number } {
+  return Number.isSafeInteger(value) && (value as number) > 0 ? { mergedAt: value as number } : {};
 }
 
 /** The runner is trusted to read, not to shape what is stored: only the wire fields survive. */
@@ -575,6 +582,7 @@ export function sanitizedObservation(pr: CampaignForgePullRequestObservation): C
     requiredChecks: rollup(pr.requiredChecks),
     mergeQueue: pr.mergeQueue ? { state: pr.mergeQueue.state, position: pr.mergeQueue.position } : null,
     mergeCommitSha: pr.mergeCommitSha,
+    ...mergedAtField(pr.mergedAt),
     ...(pr.defaultBranch !== undefined ? { defaultBranch: pr.defaultBranch } : {}),
     ...(pr.headBranch !== undefined ? { headBranch: { name: pr.headBranch.name, tipSha: pr.headBranch.tipSha } } : {}),
     ...(pr.crossRepository !== undefined ? { crossRepository: pr.crossRepository } : {}),

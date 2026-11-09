@@ -972,6 +972,108 @@ test("a dependent verified delivered while its own pull request is open waits on
   } finally { h.observer.dispose(); h.db.close(); }
 });
 
+/** Read the forge, then how much Waiting Time the delivered dependent gained after its verification,
+ * measured an hour from now so a hold still counting would show. */
+async function heldFor(h: Awaited<ReturnType<typeof fixture>>, verifiedAt: number, ownNumbers = [5]): Promise<number> {
+  await h.observer.readNow("root", [{ repository: "owner/api", number: 7 }, ...ownNumbers.map((number) => ({ repository: "owner/app", number }))]);
+  assert.equal(h.detail("app").primaryState, "delivered");
+  const waitingAt = (at: number) => {
+    const metric = h.db.campaignWorkLedger.detail("root", h.item("app"), at)!.times!.waiting;
+    return "value" in metric ? metric.value : NaN;
+  };
+  return waitingAt(Date.now() + 60 * 60_000) - waitingAt(verifiedAt);
+}
+
+async function verifiedHolding(forgeOwn: CampaignForgePullRequestObservation) {
+  const h = await fixture();
+  h.forge.set("owner/api#7", pull("open"));
+  h.forge.set("owner/app#5", forgeOwn);
+  h.stage("app", "owner/app", 5);
+  await verifyAppDelivered(h);
+  const verifiedAt = h.detail("app").verifications.at(-1)!.verifiedAt;
+  await h.observer.readNow("root", [{ repository: "owner/api", number: 7 }, { repository: "owner/app", number: 5 }]);
+  return { h, verifiedAt };
+}
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+test("a hold's end stays in Waiting Time after its own merge, from the forge's merge time (#4120)", async () => {
+  const { h, verifiedAt } = await verifiedHolding(pull("open"));
+  try {
+    assert.deepEqual(h.detail("app").stateCauses, ["dependency_unmerged"]);
+    await tick();
+    const mergedAt = Date.now();
+    await tick();
+    h.forge.set("owner/app#5", pull("merged", { mergedAt }));
+    assert.equal(await heldFor(h, verifiedAt), mergedAt - verifiedAt, "from verification to its own merge, and no further");
+  } finally { h.observer.dispose(); h.db.close(); }
+});
+
+test("a dependent naming several pull requests is held until the last merges, and one closed unmerged is set aside (#4120)", async () => {
+  const { h, verifiedAt } = await verifiedHolding(pull("open"));
+  try {
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item("app"), stage: { stage: "merged",
+      pullRequests: [{ repository: "owner/app", number: 5 }, { repository: "owner/app", number: 6 }] } }).ok);
+    await tick();
+    const first = Date.now();
+    await tick();
+    const last = Date.now();
+    await tick();
+    h.forge.set("owner/app#5", pull("merged", { mergedAt: last }));
+    h.forge.set("owner/app#6", pull("merged", { mergedAt: first }));
+    assert.equal(await heldFor(h, verifiedAt, [5, 6]), last - verifiedAt, "the later merge, wherever it is named");
+    h.forge.set("owner/app#5", pull("closed"));
+    assert.equal(await heldFor(h, verifiedAt, [5, 6]), first - verifiedAt, "the closed one has no merge to wait for");
+  } finally { h.observer.dispose(); h.db.close(); }
+});
+
+test("a hold ends at the prerequisite's merge, where the state turns delivered, not at the dependent's later one (#4120)", async () => {
+  const { h, verifiedAt } = await verifiedHolding(pull("open"));
+  try {
+    await tick();
+    const prerequisiteMergedAt = Date.now();
+    await tick();
+    h.forge.set("owner/api#7", pull("merged", { mergedAt: prerequisiteMergedAt }));
+    assert.equal(await heldFor(h, verifiedAt), prerequisiteMergedAt - verifiedAt, "while its own pull request is still open");
+    await tick();
+    h.forge.set("owner/app#5", pull("merged", { mergedAt: Date.now() }));
+    await tick();
+    assert.equal(await heldFor(h, verifiedAt), prerequisiteMergedAt - verifiedAt, "and its own later merge doesn't extend it");
+  } finally { h.observer.dispose(); h.db.close(); }
+});
+
+test("a dependent merged before its verification was never held, and a merge with no known time counts no hold (#4120)", async () => {
+  const merged = await verifiedHolding(pull("merged", { mergedAt: 1 }));
+  try {
+    assert.equal(await heldFor(merged.h, merged.verifiedAt), 0, "merged before it was verified");
+  } finally { merged.h.observer.dispose(); merged.h.db.close(); }
+  const unknown = await verifiedHolding(pull("open"));
+  try {
+    await tick();
+    unknown.h.forge.set("owner/app#5", pull("merged"));
+    assert.equal(await heldFor(unknown.h, unknown.verifiedAt), 0, "an older runner's merge has no time");
+  } finally { unknown.h.observer.dispose(); unknown.h.db.close(); }
+  // One known time isn't enough when the other merge could have ended the hold first.
+  const partial = await verifiedHolding(pull("open"));
+  try {
+    await tick();
+    partial.h.forge.set("owner/api#7", pull("merged"));
+    partial.h.forge.set("owner/app#5", pull("merged", { mergedAt: Date.now() }));
+    assert.equal(await heldFor(partial.h, partial.verifiedAt), 0, "the prerequisite's merge, of unknown time, may have ended it earlier");
+  } finally { partial.h.observer.dispose(); partial.h.db.close(); }
+});
+
+test("a merge time can't carry a hold past the read that saw the merge (#4120)", async () => {
+  const { h, verifiedAt } = await verifiedHolding(pull("open"));
+  try {
+    await tick();
+    const beforeRead = Date.now();
+    h.forge.set("owner/app#5", pull("merged", { mergedAt: beforeRead + 24 * 60 * 60_000 }));
+    const held = await heldFor(h, verifiedAt);
+    assert.ok(held >= beforeRead - verifiedAt && held < 60_000, `bounded by the observation, got ${held}`);
+  } finally { h.observer.dispose(); h.db.close(); }
+});
+
 test("two items placed in one repository under another repository's issue keep a display-only dependency, unless one names a pull request elsewhere (#4120)", async () => {
   const setup = async () => {
     const h = await fixture({ dependency: null });

@@ -96,6 +96,14 @@ function json(stdout: string): unknown {
 }
 
 const SHA = /^[0-9a-f]{40}$/u;
+
+/** A forge's merge time in epoch milliseconds. Only Waiting Time reads it, so a value that doesn't
+ * parse is left out and the observation stands: the merge itself is what a gate reads. */
+export function forgeMergedAt(value: unknown): number | undefined {
+  const parsed = typeof value === "string" ? Date.parse(value) : NaN;
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 const STATE: Record<string, CampaignForgeGitLabMergeRequestObservation["state"]> = {
   opened: "open", locked: "open", closed: "closed", merged: "merged",
 };
@@ -147,6 +155,7 @@ export function gitlabMergeRequestObservation(
   if (!approval || typeof approval.approved !== "boolean" || !Array.isArray(approval.approved_by)) return null;
   const left = approval.approvals_left;
   if (left !== undefined && left !== null && (!Number.isSafeInteger(left) || (left as number) < 0)) return null;
+  const mergedAt = state === "merged" ? forgeMergedAt(mr.merged_at) : undefined;
   return {
     forge: "gitlab",
     state,
@@ -160,6 +169,7 @@ export function gitlabMergeRequestObservation(
     },
     pipeline,
     mergeCommitSha: mergeCommit ?? squashCommit,
+    ...(mergedAt !== undefined ? { mergedAt } : {}),
   };
 }
 
