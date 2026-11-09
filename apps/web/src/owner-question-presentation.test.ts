@@ -33,6 +33,7 @@ test("child questions share question presentation, attention and Inbox metadata 
   assert.equal(shown.pendingApproval.async, undefined);
   assert.equal(shown.pendingApproval.questions![0]!.allowOther, true);
   assert.equal(sessionAttentionStatus(shown)?.label, "Needs Your Input");
+  assert.equal(sessionAttentionStatus(shown)?.description, "This session asked you a question. Answer it to continue.");
   assert.equal(requestKindMeta(card).label, "Question", "Inbox and request lists identify the stored card as a question");
   assert.equal(approvalOptionForIntent(card, "approve"), null, "question choices cannot be approved by a one-key shortcut");
   const legacy = ownerCard("legacy", { category: "implementation_question", question: "May I proceed?",

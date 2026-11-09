@@ -134,6 +134,9 @@ test("child questions preserve delegated ownership, choices, dismissal and legac
     assert.match(h.prompts("child").find((text) => text.includes(asked.data!.occurrenceId))!, /Approach B/u);
     const plain = await create("plain", { ...snapshot, options: [] });
     assert.ok(plain.ok && plain.data, plain.error ?? "created");
+    assert.equal(h.svc.resolveWorkflowDecision("root", "child", plain.data.occurrenceId,
+      { outcome: "approve", childMessage: "Use a third approach.", evidenceReviewed: ["unrelated"] },
+      "orchestrator", { kind: "agent", id: "root" }, () => true).status, 400, "free text still runs the full resolution validator");
     const free = h.svc.resolveWorkflowDecision("root", "child", plain.data.occurrenceId,
       { outcome: "approve", childMessage: "Use a third approach." }, "orchestrator", { kind: "agent", id: "root" }, () => true);
     assert.ok(free.ok && free.data, free.error ?? "answered");

@@ -17302,9 +17302,9 @@ export class SessionsService {
     const snapshot = decision.resourceSnapshot;
     if (snapshot.category === "implementation_question" || snapshot.category === "owner_decision" ||
         snapshot.category === "location_switch") {
-      if (isChildQuestionSnapshot(snapshot) && resolution.outcome === "approve" &&
-          resolution.selectedOptionId === undefined && resolution.childMessage) return ok(resolution);
-      if (resolution.outcome === "approve" &&
+      const freeTextAnswer = isChildQuestionSnapshot(snapshot) && resolution.selectedOptionId === undefined &&
+        resolution.childMessage !== undefined;
+      if (resolution.outcome === "approve" && !freeTextAnswer &&
           (typeof resolution.selectedOptionId !== "string" ||
             !snapshot.options.some((option) => option.optionId === resolution.selectedOptionId))) {
         return fail(snapshot.category === "location_switch" ? "a Location switch approval must choose one offered Location and action"

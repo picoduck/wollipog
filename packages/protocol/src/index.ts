@@ -166,7 +166,7 @@ import type {
 } from "./campaign-work-ledger.js";
 export type { ConversationHandoffDraft, InPlaceHandoffTurn } from "./conversation-handoff.js";
 import { pendingRequests, prioritizedPendingRequests } from "./worker-attention.js";
-import { isOwnerQuestionCard, isOwnerQuestionRequest } from "./owner-question.js";
+import { isChildQuestionSnapshot, isOwnerQuestionCard, isOwnerQuestionRequest } from "./owner-question.js";
 export {
   attentionRequestRank,
   pendingRequests,
@@ -4235,7 +4235,9 @@ function singleSessionAttentionStatus(
     return {
       kind: "input_required",
       label: "Needs Your Input",
-      description: "The Orchestrator asked you a question and keeps working while it waits for your answer.",
+      description: isChildQuestionSnapshot(pending?.workflowDecision?.resourceSnapshot)
+        ? "This session asked you a question. Answer it to continue."
+        : "The Orchestrator asked you a question and keeps working while it waits for your answer.",
     };
   }
   if (pending?.kind === "question" && pending.recoveryReason === "provider_restart") {
