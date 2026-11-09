@@ -1367,6 +1367,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 335: Review any owned worktree without selecting it; concurrent admission per pull request (#4329).
   335,
   // v336 slot
+  // 336: Server-derived owner scope review causes retain verified publication lineage (#4333).
+  336,
   // v337 slot
   // 337: Agent tools and the CLI can name a provider account (#4353). The control plane resolves an
   //      opaque account reference and refuses an account an agent can't use. A runner's tools refuse

@@ -1,5 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from "react";
-import { campaignScopeChangeGroups, type CampaignIssueScopeSnapshot, type CampaignIssueScopeView, type PendingApproval, type SessionView } from "@wollipog/protocol";
+import { CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS, campaignScopeChangeGroups, type CampaignIssueScopeSnapshot, type CampaignIssueScopeView, type PendingApproval, type SessionView } from "@wollipog/protocol";
 import { browserRandomUUID } from "../browser-crypto.js";
 import { Checkbox, Select } from "./ui/ChoiceControls.js";
 import { useApi } from "../api-context.js";
@@ -15,7 +15,7 @@ const issueCount = (count: number) => `${count} issue${count === 1 ? "" : "s"}`;
 function ScopeOwnerReviewFacts({ review }: { review: NonNullable<CampaignIssueScopeSnapshot["ownerReview"]> }) {
   const raise = review.maxIssuesIncrease;
   return <p>
-    The Orchestrator proposed this change. No authorized epic, published follow-up or issue selection admits it, so it needs your approval.
+    The Orchestrator proposed this change. {CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS[review.cause]}
     {raise
       ? ` It needs ${issueCount(raise.increase)} more than Maximum Issues allows. Approving adds the issues and raises Maximum Issues from ${raise.from} to ${raise.from + raise.increase}; denying leaves both unchanged.`
       : " Denying leaves the scope unchanged."}
@@ -37,6 +37,10 @@ export function CampaignIssueScopeSummary({ snapshot, derivedIncrease }: {
   return <>
     {snapshot.grantReview && <ScopeGrantReviewFacts review={snapshot.grantReview} />}
     {snapshot.ownerReview && <ScopeOwnerReviewFacts review={snapshot.ownerReview} />}
+    {snapshot.ownerReview && snapshot.ownerReview.cause !== "lineage_missing" && <dl className="facts">
+      <div><dt>Owner Review Cause</dt><dd>{snapshot.ownerReview.cause}</dd></div>
+    </dl>}
+    {snapshot.ownerReview && snapshot.verifiedPublications?.length ? <p>Approving also settles the verified published follow-up's reserved slot. Maximum Issues counts it once.</p> : null}
     {snapshot.scopeProposal ? <ScopeProposalFacts repository={snapshot.repository} proposal={snapshot.scopeProposal} explanation={snapshot.explanation} />
       : <p>{snapshot.explanation}</p>}
     {raise && !snapshot.ownerReview && <p>Approving also raises Maximum Issues from {raise.from} to {raise.from + raise.increase}; denying leaves it unchanged.</p>}

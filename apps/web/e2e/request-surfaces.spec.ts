@@ -1029,3 +1029,15 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     }
   });
 }
+
+for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "phone", width: 390, height: 844 }]) {
+  test(`lineage requiring owner review (#4333), ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/request-surfaces-e2e.html?scenario=issue-scope&ownerReview=1&lineageReview=1");
+    await expect(page.getByText("publication_authority_changed", { exact: true })).toBeVisible();
+    await expect(page.getByText(/authority differs from the current boundary/)).toBeVisible();
+    await expect(page.getByText(/counts it once/)).toBeVisible();
+    await assertNoHorizontalOverflow(page, ".request-card");
+    await page.screenshot({ path: `/tmp/s4333-evidence/request-${viewport.name}.png`, fullPage: true });
+  });
+}

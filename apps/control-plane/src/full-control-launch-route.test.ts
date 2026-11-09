@@ -4140,7 +4140,10 @@ test("a person's launch authorizes an epic in another repository, whose members 
       f.sessions.proposeCampaignIssueScope(id, { requestId: randomUUID(), expectedRevision: policy().issueScope!.revision, additions, removals: [], explanation: "An epic's member.", lineage });
     const member = { repository: "other/repo", number: 41 };
     // The same number in the launch repository is another issue, with no authority.
-    assert.equal((await propose([{ repository: "owner/repo", number: 41 }], { kind: "epic", epic: 40 })).errorDetails?.code, "epic_not_authorized");
+    const ownerReview = await propose([{ repository: "owner/repo", number: 41 }], { kind: "epic", epic: 40 });
+    assert.ok(ownerReview.ok);
+    assert.equal(ownerReview.data!.authority, "human");
+    assert.equal((ownerReview.data!.resourceSnapshot as import("@wollipog/protocol").CampaignIssueScopeSnapshot).ownerReview?.cause, "epic_not_authorized");
     assert.equal((await propose([{ repository: "owner/repo", number: 41 }], { kind: "epic", epic: 40, repository: "other/repo" })).errorDetails?.code, "epic_members_unverified",
       "an epic's lineage admits only its own repository's members");
     assert.equal((await propose([{ repository: "other/repo", number: 99 }], { kind: "epic", epic: 40, repository: "other/repo" })).errorDetails?.code, "epic_members_unverified");

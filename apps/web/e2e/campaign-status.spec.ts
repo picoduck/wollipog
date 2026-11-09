@@ -173,7 +173,9 @@ for (const theme of ["dark", "light"] as const) {
         await expect(page.locator("h3.campaign-detail-title")).toHaveText(title);
         const delivery = page.locator("section.campaign-detail-section", { has: page.locator("h4", { hasText: /^Delivery$/ }) });
         await delivery.scrollIntoViewIfNeeded();
-        await assertNoHorizontalOverflow(page, ".campaign-status");
+        await assertNoHorizontalOverflow(page, ".request-card");
+        await card.getByRole("button", { name: "Expand Decision", exact: true }).click();
+        await page.screenshot({ path: `/tmp/s4333-evidence/expanded-${viewport.name}.png`, fullPage: true });
         if (FORGE_EVIDENCE_DIR) {
           await page.screenshot({ path: `${FORGE_EVIDENCE_DIR}/forge-${name}-${device}-${theme}.png` });
         }
@@ -397,7 +399,9 @@ for (const theme of ["dark", "light"] as const) {
         } else {
           await expect(page.getByText(/Authorized Recovery Unavailable|No Recovery Needed/u)).toHaveCount(0);
         }
-        await assertNoHorizontalOverflow(page, ".campaign-status");
+        await assertNoHorizontalOverflow(page, ".request-card");
+        await card.getByRole("button", { name: "Expand Decision", exact: true }).click();
+        await page.screenshot({ path: `/tmp/s4333-evidence/expanded-${viewport.name}.png`, fullPage: true });
       });
     }
   }
@@ -491,6 +495,7 @@ test("decisions the owner kept wait for them in Campaign Status, and each opens 
 
 for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "phone", width: 390, height: 844 }]) {
   for (const route of [
+    { name: "lineage requiring a person (#4333)", scope: "1&lineageReview=1", request: "wd_scope_141", summary: "Add team/repo#141. The publication's authority differs from the current boundary, so it needs your approval. (publication_authority_changed)", limit: "6 to 7" },
     { name: "a proposal without lineage (#4267)", scope: "1", request: "wd_scope_141", summary: "Add team/repo#141, team/repo#142, raising Maximum Issues from 6 to 7", limit: "6 to 7" },
     { name: "a failed grant's proposal (#4334)", scope: "grant", request: "wd_scope_143", summary: "Add team/repo#143, team/docs#7, raising Maximum Issues from 6 to 9", limit: "6 to 9" },
     { name: "a proposal check's owner route (#4334)", scope: "proposal", request: "wd_scope_151", summary: "Add team/repo#151, team/repo#152, raising Maximum Issues from 6 to 8", limit: "6 to 8" },
@@ -504,12 +509,22 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
       await expect(waiting).toContainText("Proposed by the Orchestrator");
       await expect(waiting).toContainText("Only you can make this decision.");
       await assertNoHorizontalOverflow(page, ".campaign-status");
+      if (route.name.includes("#4333")) await page.screenshot({ path: `/tmp/s4333-evidence/campaign-${viewport.name}.png`, fullPage: true });
       await waiting.getByRole("button", { name: `Open Request: ${route.summary}`, exact: true }).click();
       const card = page.locator(`[data-session-request-id="${route.request}"]`);
       await expect(card).toBeVisible();
+      if (route.name.includes("#4333")) {
+        await expect(card).toContainText("publication_authority_changed");
+        await expect(card).toContainText("authority differs from the current boundary");
+        await expect(card).toContainText("counts it once");
+        await assertNoHorizontalOverflow(page, ".request-card");
+        await card.getByRole("button", { name: "Expand Decision", exact: true }).click();
+        await page.screenshot({ path: `/tmp/s4333-evidence/expanded-${viewport.name}.png`, fullPage: true });
+
+      }
       await expect(card.locator(":focus")).toHaveCount(1);
       // The card it opens states the same increase the entry names (#4334).
-      await expect(card).toContainText(`Maximum Issues${route.scope === "proposal" ? ": " : ""}${route.limit}`);
+      if (!route.name.includes("#4333")) await expect(card).toContainText(`Maximum Issues${route.scope === "proposal" ? ": " : ""}${route.limit}`);
     });
   }
 
