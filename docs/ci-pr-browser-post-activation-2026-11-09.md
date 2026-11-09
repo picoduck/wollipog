@@ -151,7 +151,12 @@ All **three browser-failing runs out of 130 (2.31%)** have a corresponding
 failed-check removal for their PR: three browser-associated ejections following
 **full** PR coverage, with no evidenced reduced-selection escape. No other
 Chromium or WebKit failing/timed-out job appears in the group cohort. Other
-failing groups failed Node jobs; their main-versus-flake attribution is outside
+failing groups failed Node jobs. The #4345 group also failed `Unit Tests (1)`
+(job 128363650367): two groups have browser-only CI failures, and one has mixed
+browser/Node failures. Thus 17 of the 19 failing groups failed Node jobs, 16
+without a browser failure. Cancelled group 42170940981 also has a failed Node
+job and remains in the cancelled run count. Three browser-associated removals do not mean three removals
+caused solely by browser failures. Node main-versus-flake attribution is outside
 this browser-routing measurement and is not classified as a browser escape.
 
 The November 4 baseline supplies no preactivation browser-ejection distribution;
@@ -265,6 +270,8 @@ The other two browser failures are also retry-only failures after full coverage:
 Both untruncated timing projections contain one failing attempt and a passing
 retry with the same file/test IDs. The agent-question failure has the same hashed
 test ID in #4229 and #4349. This supports repeated flakiness, not a diagnosis.
+The #4345 removal is associated with both its browser flake and a concurrent
+Node failure, so the removal cannot be attributed solely to the browser flake.
 Historical prior PR heads were checked against read-only PR metadata. No merge-group browser
 failure in this sample needs an “escaped reduced PR regression” or “proven main
 regression” attribution: all three are observed retry-only failures after full
