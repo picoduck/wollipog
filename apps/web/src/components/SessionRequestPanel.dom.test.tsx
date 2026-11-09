@@ -663,6 +663,10 @@ test("an Orchestrator-owned child question stays read-only with a formatted summ
     assert.doesNotMatch(container.textContent ?? "", /"category"|Typed Workflow Decision|Implementation Decision|Do Not Proceed/u);
     assert.equal(footButtons(container).length, 0);
   } finally { await act(async () => root.unmount()); container.remove(); }
+  const list = await mountNavigator({ descendants: [child] });
+  try {
+    assert.equal(list.container.querySelector(".row-title")?.textContent, "Which approach should the child use?");
+  } finally { await list.cleanUp(); }
 });
 
 test("switching between descendant questions preserves each request's draft", async () => {

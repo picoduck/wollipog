@@ -206,8 +206,9 @@ export function RequestCard({
   const decideRef = useRef(decide);
   decideRef.current = decide;
   useEffect(() => {
-    if (!intentRef || readOnlyNotice) return;
+    if (!intentRef) return;
     const handler: RequestIntentHandler = (intent) => {
+      if (readOnlyNotice) return true;
       const option = requestOptionForIntent(cardOptions, intent);
       if (option) void decideRef.current(option);
       // The expanded request owns A and D even when it cannot act on them, so the key never falls

@@ -11,6 +11,7 @@ import {
 import {
   presentOwnerQuestionRequest,
   isOwnerQuestionRequest,
+  isChildQuestionSnapshot,
   type DescendantRequestView,
   type PendingApproval,
   type SessionView,
@@ -105,6 +106,8 @@ export function requestTypeLabel(request: PendingApproval): string {
 
 /** A row's first line: the request's own title, or a question's words where its title is generic. */
 function rowTitle(request: PendingApproval): string {
+  const snapshot = request.workflowDecision?.resourceSnapshot;
+  if (isChildQuestionSnapshot(snapshot)) return snapshot.question.trim() || request.title;
   return request.kind === "question" ? request.questions?.[0]?.question.trim() || request.title : request.title;
 }
 
