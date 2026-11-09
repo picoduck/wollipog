@@ -9612,6 +9612,8 @@ export interface AutomationCommandView {
 export interface AutomationExecution {
   /** Live campaign projection for scheduled Orchestrators; root idleness is not completion. */
   campaignStatus?: OrchestratorCampaignProjection["status"];
+  /** Retained even when a signed trigger's private spec snapshot is omitted from the view. */
+  campaignSessionId?: string;
   executionId: string;
   automationId: string;
   /** Unique stable key `<automationId>:<scheduledFor>` used to reject duplicate ticks. */

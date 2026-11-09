@@ -629,9 +629,10 @@ export class AutomationsService {
       automation,
       executions: this.db.listAutomationExecutions(automationId).map(execution => {
         const view = automationExecutionView(execution);
-        const campaignStatus = execution.sessionId && execution.specSnapshot?.action.kind === "create_session" &&
-          execution.specSnapshot.action.request.campaign ? this.db.getSession(execution.sessionId)?.orchestratorCampaign?.status : undefined;
-        return { ...view, ...(campaignStatus ? { campaignStatus } : {}) };
+        const campaignSessionId = execution.sessionId && execution.specSnapshot?.action.kind === "create_session" &&
+          execution.specSnapshot.action.request.campaign ? execution.sessionId : undefined;
+        const campaignStatus = campaignSessionId ? this.db.getSession(campaignSessionId)?.orchestratorCampaign?.status : undefined;
+        return { ...view, ...(campaignSessionId ? { campaignSessionId } : {}), ...(campaignStatus ? { campaignStatus } : {}) };
       }),
       events: this.db.listAutomationEvents(automationId),
     });

@@ -26,7 +26,7 @@ export type View =
   /** Archive visit intents are memory-only; viewPath deliberately serializes neither field. */
   | { name: "archived"; archiveSearch?: string; browseVisit?: { restore: boolean; activationId: number } }
   | { name: "projects"; id?: string; pane?: ProjectsPane }
-  | { name: "session"; id: string; location?: SourceLocation; attention?: AttentionTarget; artifacts?: ArtifactsTarget }
+  | { name: "session"; id: string; location?: SourceLocation; attention?: AttentionTarget; artifacts?: ArtifactsTarget; campaign?: true }
   /** `member`: the comparison member a phone shows (#2975); wider layouts show every member. */
   | { name: "run"; id: string; member?: string }
   | { name: "settings"; section?: SettingsSection; policyId?: string; focus?: SettingsFocus }
@@ -544,6 +544,8 @@ export function viewPath(view: View): string {
     case "projects": return view.id ? `/projects/~${encodeResourceId(view.id)}` : view.pane ? `/projects/${view.pane}` : "/projects";
     case "session": return view.location
       ? `/sessions/~${encodeResourceId(view.id)}/files/~${encodeOpaque(view.location.path)}${sourceLocationSearch(view.location)}`
+      : view.campaign
+      ? `/sessions/~${encodeResourceId(view.id)}/campaign`
       : view.artifacts
       ? `/sessions/~${encodeResourceId(view.id)}/artifacts${view.artifacts.artifactId === undefined ? "" : `/~${encodeResourceId(view.artifacts.artifactId)}`}`
       : view.attention
@@ -698,6 +700,11 @@ export function viewFromPath(pathname: string, search = ""): View | null {
     if (id === null || requestId === null || [...params.keys()].length !== 1 ||
         epoch === null || !/^(0|[1-9]\d*)$/.test(epoch) || !Number.isSafeInteger(Number(epoch))) return null;
     return { name: "session", id, attention: { eventEpoch: Number(epoch), ...(requestId === undefined ? {} : { requestId }) } };
+  }
+  const campaignMatch = /^\/sessions\/~([^/]+)\/campaign$/.exec(path);
+  if (campaignMatch) {
+    const id = decodeResourceId(campaignMatch[1]!);
+    return id === null || (search !== "" && search !== "?") ? null : { name: "session", id, campaign: true };
   }
   const artifactsMatch = /^\/sessions\/~([^/]+)\/artifacts(?:\/~([^/]+))?$/.exec(path);
   if (artifactsMatch) {

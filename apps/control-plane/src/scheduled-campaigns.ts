@@ -104,7 +104,7 @@ export class ScheduledCampaignRuntime {
   async launch(automation: AutomationSchedule, execution: AutomationExecution, target: AutomationRunnerTarget,
     delivery: PreStagedDeliveryOptions): Promise<ServiceResult<SessionView>> {
     if (automation.action.kind !== "create_session" || !automation.action.request.campaign) return fail("Campaign configuration is missing");
-    const human = this.human(this.db.automationSoleHumanAuthor(automation.automationId) ?? undefined, target.runnerId);
+    let human = this.human(this.db.automationSoleHumanAuthor(automation.automationId) ?? undefined, target.runnerId);
     if (!human) return fail("The campaign schedule no longer has one active authorizing human; review and recreate the schedule");
     const { campaign, ...stored } = automation.action.request;
     const body: CreateSessionRequest = { ...stored, runnerId: target.runnerId, workspaceId: target.workspaceId,
@@ -112,7 +112,6 @@ export class ScheduledCampaignRuntime {
       ...(target.projectLocationId !== undefined ? { projectLocationId: target.projectLocationId } : {}),
       prompt: scheduledCampaignPrompt(stored.prompt, campaign), config: { ...stored.config } };
     const ownerScope = this.scope(human);
-    const context = this.context(human);
     const rootId = delivery.sessionId!;
     const existing = this.db.getSession(rootId);
     // Once materialized, authority and allowance belong to that exact root. Recovery never
@@ -142,8 +141,11 @@ export class ScheduledCampaignRuntime {
         this.db.getWorkspacePath(target.runnerId, target.workspaceId) !== workspacePath) {
       return fail("The campaign schedule or target changed during launch; no campaign was started");
     }
+    human = this.human(human.userId, target.runnerId);
+    if (!human) return fail("The schedule's author is no longer authorized to launch campaigns");
     runner = this.db.listRunnersForPrincipal(human).find(r => r.runnerId === target.runnerId);
     if (!runner) return fail("Campaign target is unavailable");
+    const context = this.context(human);
     let plan: PreparedCampaignLaunch | undefined;
     const prepared = this.sessions.createSession(body, undefined, ownerScope, false, false, false, {
       ...context, inspectLaunchPlan: value => { plan = value; },

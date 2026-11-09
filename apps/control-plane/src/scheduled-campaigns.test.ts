@@ -171,6 +171,25 @@ test("repository drift refuses authority and starts no provider", async () => {
   } finally { f.db.close(); }
 });
 
+test("Custom campaigns preserve explicit root ceilings inside the aggregate allowance", async () => {
+  const f = fixture();
+  try {
+    const input = f.spec("custom");
+    Object.assign(input.action.request.config!, { costBudgetUsd: 3, maxToolCalls: 30, costCheckpointsUsd: [1] });
+    const saved = f.service.create(input, f.actor).data!;
+    f.service.tick(saved.nextFireAt!);
+    await f.drain();
+    const execution = f.db.listAutomationExecutions(saved.automationId)[0]!;
+    assert.notEqual(execution.status, "failed", execution.error ?? "Campaign started");
+    const root = f.db.getSession(execution.sessionId!)!;
+    assert.equal(root.costBudgetUsd, 3);
+    assert.equal(root.maxToolCalls, 30);
+    assert.deepEqual(root.costCheckpointsUsd, [1]);
+    assert.equal(f.db.campaignBudgets.view(root.id)!.authority.costUsd, 20);
+    assert.deepEqual(f.db.campaignBudgets.userLimits(root.id), { costBudgetUsd: 3, maxToolCalls: 30 });
+  } finally { f.db.close(); }
+});
+
 test("unsupported parent and child selections fail at save without substitution", () => {
   const f = fixture();
   try {
@@ -228,6 +247,23 @@ test("editing the schedule while inspection is pending cannot admit the previous
     await f.drain();
     assert.equal(f.db.listSessions().length, 0);
     assert.match(f.db.listAutomationExecutions(saved.automationId)[0]!.error!, /changed during launch/);
+  } finally { f.db.close(); }
+});
+
+test("revoking the author's membership during inspection refuses the launch", async () => {
+  const f = fixture();
+  try {
+    const saved = f.service.create(f.spec(), f.actor).data!;
+    const send = f.hub.sendToRunner.bind(f.hub);
+    f.hub.sendToRunner = (runnerId, message) => {
+      if (message.type === "campaign_launch_inspect") f.db.raw().prepare(
+        "UPDATE identity_memberships SET role='viewer' WHERE user_id=? AND organization_id=?").run(f.human.userId, f.human.organizationId);
+      return send(runnerId, message);
+    };
+    f.service.tick(saved.nextFireAt!);
+    await f.drain();
+    assert.equal(f.db.listSessions().length, 0);
+    assert.match(f.db.listAutomationExecutions(saved.automationId)[0]!.error!, /no longer authorized/);
   } finally { f.db.close(); }
 });
 

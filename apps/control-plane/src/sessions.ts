@@ -5819,7 +5819,14 @@ export class SessionsService {
           const created = humanLaunch
             ? this.db.createHumanCampaignLaunch(sessionInput, humanLaunch.principal, humanLaunch.requestId, humanLaunch.digest).session
             : insert();
-          if (!humanLaunch) this.db.campaignBudgets.authorize(id, scheduled.budget);
+          if (!humanLaunch) {
+            // Preserve independently configured root ceilings before the aggregate allowance
+            // snapshots them, just as createHumanCampaignLaunch does for Full Control roots.
+            if (config.costBudgetUsd !== undefined) this.db.updateSessionCostBudget(id, config.costBudgetUsd, now);
+            if (config.maxToolCalls !== undefined) this.db.updateSessionMaxToolCalls(id, config.maxToolCalls, now);
+            if (config.costCheckpointsUsd?.length) this.db.updateSessionCostCheckpoints(id, config.costCheckpointsUsd, now);
+            this.db.campaignBudgets.authorize(id, scheduled.budget);
+          }
           const allocated = this.db.getSession(created.id)!;
           config.costBudgetUsd = allocated.costBudgetUsd ?? undefined;
           config.maxToolCalls = allocated.maxToolCalls ?? undefined;
