@@ -144,27 +144,12 @@ export async function bindPullRequestScope(input: {
       !Number.isSafeInteger(request.number) || request.number <= 0) {
     refuseReview("the pull request is not this session's open, same-repository pull request");
   }
-  const worktree = meta?.worktreePath ? meta.worktrees?.find((candidate) => candidate.path === meta.worktreePath) : undefined;
-  // A worktree a Location switch reused in place (#4138) is the session's own through the same
-  // verified-Location identity as a created one; it is proven registered again below.
-  const reused = worktree?.source === "attached" && worktree.reusedInPlace === true;
-  if (!meta || !meta.worktreePath ||
-      (worktree && worktree.source !== "created" && worktree.source !== "legacy" && !reused) || meta.context?.kind !== "native" ||
+  if (!meta || meta.context?.kind !== "native" ||
       (meta.executionTarget?.adapter && meta.executionTarget.adapter !== "host")) {
     refuseReview("the review must cover the session's own native managed worktree");
   }
-  if (!worktree) {
+  if (!meta!.worktrees?.length) {
     refuseReview("resume this session once so the runner can verify its automatic worktree before requesting a review");
-  }
-  const automatic = worktree!.source === "legacy";
-  if (automatic) {
-    const proof = meta!.launchWorktreeProof;
-    if (!proof || proof.sessionId !== meta!.sessionId || proof.repoPath !== meta!.repoPath ||
-        proof.path !== worktree!.path || proof.branch !== worktree!.branch ||
-        proof.branch !== `agent/${meta!.sessionId}` ||
-        (meta!.worktreeBranch !== undefined && meta!.worktreeBranch !== proof.branch)) {
-      refuseReview("resume this session once so the runner can verify its automatic worktree before requesting a review");
-    }
   }
   input.beforeRepository?.();
   const repoPath = realpathSync(meta!.repoPath);
@@ -173,17 +158,14 @@ export async function bindPullRequestScope(input: {
   const remote = parseForgeRemote(origin);
   const sameRepository = named!.forge === "github"
     ? githubSlug(origin)?.toLowerCase() === repository.toLowerCase()
-    // GitLab: the origin names exactly this host and project; `glab --hostname` then proves both.
+    // GitLab: the origin names exactly this host and project; glab proves both.
     : remote?.host.toLowerCase() === named!.host.toLowerCase() &&
       remote.project.toLowerCase() === named!.project.toLowerCase();
-  if (!sameRepository) {
-    refuseReview("the pull request is not this session's open, same-repository pull request");
-  }
+  if (!sameRepository) refuseReview("the pull request is not this session's open, same-repository pull request");
   if (named!.forge === "github" && !tools.gh) refuseReview("the runner is missing a trusted gh for GitHub reviews");
   if (named!.forge === "gitlab" && !tools.glab) refuseReview("the runner is missing a trusted glab for GitLab reviews");
-  // The origin is session-writable configuration, and glab may hold credentials that are not bound
-  // to one host (GITLAB_TOKEN). So, like every other GitLab reader, no authenticated request goes to
-  // a self-managed host the user's own global glab configuration does not name.
+  // The origin is session-writable. Never send glab credentials to a self-managed host the
+  // user's own global configuration does not name.
   if (named!.forge === "gitlab" && named!.host.toLowerCase() !== "gitlab.com" &&
       !(input.gitlabHostConfigured && await input.gitlabHostConfigured(tools.glab!, named!.host, env).catch(() => false))) {
     refuseReview("the runner's glab is not configured for this GitLab host");
@@ -192,8 +174,27 @@ export async function bindPullRequestScope(input: {
     ? await input.pullRequest(tools.gh!, repository, request.number, env)
     : await input.mergeRequest!(tools.glab!, named!.host, named!.project, request.number, env);
   if (pr.state !== "open" || pr.baseRepository.toLowerCase() !== repository.toLowerCase() ||
-      pr.headRepository.toLowerCase() !== repository.toLowerCase() || pr.headRef !== worktree!.branch) {
+      pr.headRepository.toLowerCase() !== repository.toLowerCase()) {
     refuseReview("the pull request is not this session's open, same-repository pull request");
+  }
+  const matches = meta!.worktrees!.filter((candidate) => candidate.branch === pr.headRef);
+  if (matches.length !== 1) refuseReview("the pull request is not this session's open, same-repository pull request");
+  const worktree = matches[0]!;
+  // A worktree a Location switch reused in place (#4138) is the session's own through the same
+  // verified-Location identity as a created one; it is proven registered again below.
+  const reused = worktree.source === "attached" && worktree.reusedInPlace === true;
+  if (worktree.source !== "created" && worktree.source !== "legacy" && !reused) {
+    refuseReview("the review must cover the session's own native managed worktree");
+  }
+  const automatic = worktree!.source === "legacy";
+  if (automatic) {
+    const proof = meta!.launchWorktreeProof;
+    if (!proof || proof.sessionId !== meta!.sessionId || proof.repoPath !== meta!.repoPath ||
+        proof.path !== worktree!.path || proof.branch !== worktree!.branch ||
+        proof.branch !== `agent/${meta!.sessionId}` ||
+        (worktree.path === meta!.worktreePath && meta!.worktreeBranch !== undefined && meta!.worktreeBranch !== proof.branch)) {
+      refuseReview("resume this session once so the runner can verify its automatic worktree before requesting a review");
+    }
   }
   if (!PUSHED_HEAD.test(request.headSha) || pr.headSha !== request.headSha) {
     refuseReview("the requested head is not the pull request's pushed head");
@@ -206,7 +207,7 @@ export async function bindPullRequestScope(input: {
   if (!lstatSync(commonDir, { throwIfNoEntry: false })?.isDirectory() || existsSync(join(commonDir, "commondir"))) {
     refuseReview("the review snapshot could not be prepared");
   }
-  if (automatic || reused) {
+  if (automatic || reused || worktree.path !== meta!.worktreePath) {
     // Read the primary checkout's registration/HEAD records. The worktree's own pointer is only
     // compared with that trusted repository, never used to choose the snapshot's source.
     // A durable launch proof cannot authorize a removed/replaced tree or a later branch switch.

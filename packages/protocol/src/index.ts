@@ -343,6 +343,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionWorktreeRefDeletion: 227,
   /** v228 runner plans review rounds and validates review attempts (#3369). */
   reviewRuns: 228,
+  /** Reviews of any owned worktree, with concurrent admission per pull request (#4329). */
+  parallelWorktreeReviews: 335,
   /** v237 binds post-upvote extensions and enforces their delta scope (#3641). */
   postUpvoteReviewExtensions: 237,
   /** Review sessions preserve admitted campaign accounting through final usage settlement. */

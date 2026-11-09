@@ -434,6 +434,64 @@ test("a requester has one active review; another starts once it settles", () => 
   } finally { h.db.close(); }
 });
 
+test("different pull requests run concurrently and each delivers its own continuation", () => {
+  const h = harness();
+  try {
+    const a = requested(h);
+    const pr = { repository: "picoduck/wollipog", number: 4329 };
+    const b = h.svc.requestReviewSession("s1", request({ pullRequest: pr }));
+    assert.ok(b.ok && b.data, b.error ?? "request refused");
+    assert.equal(h.svc.requestReviewSession("s1", request()).status, 409);
+    assert.equal(h.svc.requestReviewSession("s1", request({ pullRequest: { ...pr, repository: "Picoduck/Wollipog" } })).status, 409);
+    assert.equal(h.db.reviewSessions.history("s1", pr).validRounds, 0);
+    for (const id of [a.reviewSessionId, b.data.reviewSessionId]) {
+      h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: id, state: "failed" });
+      assert.equal(h.db.reviewSessions.view(id)!.terminal, true);
+    }
+    h.db.updateSessionStatus("s1", "idle", Date.now());
+    h.svc.retryDuePrompts();
+    const commands = continuationCommands(h);
+    const prompts = [...commands.values()].join("\n");
+    assert.ok(prompts.includes(a.reviewSessionId));
+    assert.ok(prompts.includes(b.data.reviewSessionId));
+    for (const commandId of commands.keys()) {
+      h.svc.onDurablePromptReceipt("r", { type: "durable_session_command_update", commandId, sessionId: "s1", state: "started", revision: 5 } as never);
+    }
+    assert.equal(h.db.reviewSessions.view(a.reviewSessionId)!.continuation, "delivered");
+    assert.equal(h.db.reviewSessions.view(b.data.reviewSessionId)!.continuation, "delivered");
+  } finally { h.db.close(); }
+});
+
+test("older runners still serialize reviews of different pull requests", () => {
+  const h = harness({ protocol: 334 });
+  try {
+    requested(h);
+    const b = h.svc.requestReviewSession("s1", request({ pullRequest: { repository: "picoduck/wollipog", number: 4329 } }));
+    assert.equal(b.status, 409);
+    assert.equal(h.starts().length, 1);
+  } finally { h.db.close(); }
+});
+
+test("concurrent review reservations share the remaining ceiling and release only at terminal", () => {
+  const h = harness();
+  try {
+    h.db.updateSessionCostBudget("s1", 10, 5);
+    h.db.addSessionUsage("s1", { costUsd: 2 }, 6);
+    const a = requested(h);
+    assert.equal(h.starts()[0]!.spec.config?.costBudgetUsd, 4);
+    h.db.addSessionUsage(a.reviewSessionId, { costUsd: 1 }, 7);
+    const b = h.svc.requestReviewSession("s1", request({ pullRequest: { repository: "picoduck/wollipog", number: 4329 } }));
+    assert.ok(b.ok, b.error ?? "request refused");
+    assert.equal(h.starts()[1]!.spec.config?.costBudgetUsd, 2);
+    assert.equal(h.db.reviewSessions.reservedFor("s1"), 5);
+    assert.equal(h.db.reviewSessions.spentFor("s1"), 1);
+    h.db.updateSessionCostBudget("s1", 8, 8);
+    assert.match(h.svc.requestReviewSession("s1", request({ pullRequest: { repository: "picoduck/wollipog", number: 4330 } })).error!, /no cost budget/);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: a.reviewSessionId, state: "failed" });
+    assert.equal(h.db.reviewSessions.reservedFor("s1"), 2);
+  } finally { h.db.close(); }
+});
+
 test("get_review_session exposes the immutable Codex host-access admission snapshot", () => {
   const h = harness();
   try {
@@ -1745,8 +1803,8 @@ test("the retired bridge points campaign allowance members to their own review s
   } finally { h.db.close(); }
 });
 
-test("a requester's cost budget bounds its review, and an exhausted budget refuses one", () => {
-  const h = harness();
+test("a legacy requester's cost budget bounds its review, and an exhausted budget refuses one", () => {
+  const h = harness({ protocol: 334 });
   try {
     h.db.updateSessionCostBudget("s1", 10, 5);
     h.db.addSessionUsage("s1", { costUsd: 4 }, 6);
