@@ -33,6 +33,7 @@ import {
   choosableRunAgentIds,
   defaultRunAgentIds,
   memberAccountsRequest,
+  memberAccountUnusable,
   newRunBlockedReason,
   runAgentChoices,
   runLocationOptions,
@@ -291,8 +292,8 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
         runnerId,
         workspaceId,
       });
-      const namedMembers = memberAccountsRequest(memberAccounts, chosenAgentIds, runner?.providerAccounts);
-      const namedRoles = memberAccountsRequest(roleAccounts, Object.keys(agentBindings), runner?.providerAccounts);
+      const namedMembers = memberAccountsRequest(memberAccounts, Object.fromEntries(chosenAgentIds.map((id) => [id, id])), runner);
+      const namedRoles = memberAccountsRequest(roleAccounts, agentBindings, runner);
       const { run } = mode === "parallel"
         ? await api.createRun({
             ...placement,
@@ -654,7 +655,8 @@ function RunMemberAccount({ runner, agentId, member, memberName, projectId, proj
   const name = memberName ?? (agent ? agentDisplayName(agent) : agentId);
   const needsChoice = accounts.length > 0 && (preview?.status === "choice_required" ||
     (agent !== undefined && agentNeedsAccountChoice(agent, runner.providerAccountDefaults)));
-  const chosen = accounts.some((account) => account.id === accountId) ? accountId : "";
+  // A choice counts only while it can still start, so one that signs out asks again rather than launching.
+  const chosen = accounts.some((account) => account.id === accountId && !memberAccountUnusable(account, agent)) ? accountId : "";
   const missing = needsChoice && !chosen;
   useEffect(() => {
     onMissing(member, missing ? name : null);
@@ -668,7 +670,6 @@ function RunMemberAccount({ runner, agentId, member, memberName, projectId, proj
   if (!needsChoice && !chosen) {
     return preview && accounts.length > 1 ? <ExpectedProviderAccount runner={runner} preview={preview} providerName={memberName ?? (agent ? agentDisplayName(agent) : undefined)} /> : null;
   }
-  const ready = agent?.providerAccountReadiness?.readyAccountIds;
   const label = `Account for ${name}`;
   return (
     <div className="field">
@@ -684,9 +685,9 @@ function RunMemberAccount({ runner, agentId, member, memberName, projectId, proj
         onChange={onChoose}
         options={accounts.map((account, index) => {
           const candidate = preview?.candidates.find((item) => item.accountId === account.id);
-          // A run starts unattended, so an account that can't start isn't offered, as with a signed-out agent.
-          const unusable = account.profile?.access === "not_granted" ? "This server can't use this account."
-            : ready && !ready.includes(account.id) ? providerAccountDescription(account.authStatus) : null;
+          const blocked = memberAccountUnusable(account, agent);
+          const unusable = blocked === "access" ? "This server can't use this account."
+            : blocked ? providerAccountDescription(account.authStatus) : null;
           return {
             value: account.id,
             label: revealed ? account.label : titles[index]!,

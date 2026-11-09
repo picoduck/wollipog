@@ -91,14 +91,31 @@ export function choosableRunAgentIds(agents: AgentDefinition[], defaults?: Runne
     .map((option) => option.agent.id);
 }
 
-/** The accounts a launch names, for members still in it and accounts still on the Machine. */
+type RunAccount = NonNullable<RunnerView["providerAccounts"]>[number];
+
+/** Why this account can't start this agent's run member, or null when it can. A run starts unattended, so
+ * one that would only fail its first turn isn't offered, and a choice that stops being usable stops counting,
+ * as with a signed-out agent. A usage limit isn't here: overriding one is what an explicit choice is for. */
+export function memberAccountUnusable(account: RunAccount, agent: AgentDefinition | undefined): "access" | "not_ready" | null {
+  if (account.profile?.access === "not_granted") return "access";
+  if (account.authStatus === "unauthenticated") return "not_ready";
+  const ready = agent?.providerAccountReadiness?.readyAccountIds;
+  return ready && !ready.includes(account.id) ? "not_ready" : null;
+}
+
+/** The accounts a launch names, by member, given the agent each member runs: only for members still in it,
+ * and accounts still on the Machine, of that agent's provider, that can still start it. */
 export function memberAccountsRequest(
   chosen: Readonly<Record<string, string>>,
-  members: readonly string[],
-  accounts: RunnerView["providerAccounts"],
+  members: Readonly<Record<string, string>>,
+  runner: Pick<RunnerView, "agents" | "providerAccounts"> | undefined,
 ): Record<string, string> | undefined {
-  const named = Object.entries(chosen).filter(([member, accountId]) =>
-    members.includes(member) && accounts?.some((account) => account.id === accountId));
+  const named = Object.entries(chosen).filter(([member, accountId]) => {
+    if (!Object.hasOwn(members, member)) return false;
+    const agent = runner?.agents.find((candidate) => candidate.id === members[member]);
+    const account = runner?.providerAccounts?.find((candidate) => candidate.id === accountId);
+    return Boolean(agent && account && account.provider === providerForDriver(agent.driver ?? "acp") && !memberAccountUnusable(account, agent));
+  });
   return named.length ? Object.fromEntries(named) : undefined;
 }
 

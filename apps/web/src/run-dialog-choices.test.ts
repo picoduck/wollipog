@@ -197,11 +197,30 @@ test("an agent its policy can't place, with another account ready, is choosable 
   assert.deepEqual(choosableRunAgentIds([defaultNotReady], fixed), []);
 });
 
-test("a launch names accounts only for members still in it and accounts still on the Machine (#4353)", () => {
-  const accounts = [{ id: "work" }, { id: "home" }] as RunnerView["providerAccounts"];
-  assert.equal(memberAccountsRequest({}, ["a"], accounts), undefined);
-  assert.deepEqual(memberAccountsRequest({ a: "work", gone: "home", b: "removed" }, ["a", "b"], accounts), { a: "work" });
-  assert.equal(memberAccountsRequest({ a: "work" }, ["a"], undefined), undefined);
+test("a launch names accounts only for members still in it, and accounts that can still start them (#4353)", () => {
+  const account = (id: string, provider: "claude" | "codex", overrides: object = {}) =>
+    ({ id, label: id, provider, authStatus: "authenticated", billing: "subscription", ...overrides });
+  const claude = agent("claude", "claude-code", { providerAccountReadiness: { defaultAuthStatus: "authenticated", readyAccountIds: ["work", "out", "theirs"] } });
+  const free = agent("free", "claude-code");
+  const runner = { agents: [claude, free], providerAccounts: [
+    account("work", "claude"),
+    account("home", "claude"),
+    account("out", "claude", { authStatus: "unauthenticated" }),
+    account("theirs", "claude", { profile: { access: "not_granted" } }),
+    account("codex-one", "codex"),
+  ] } as unknown as RunnerView;
+  const request = (accountId: string, member = "a", agentId = "claude") => memberAccountsRequest({ a: accountId }, { [member]: agentId }, runner);
+  assert.equal(memberAccountsRequest({}, { a: "claude" }, runner), undefined);
+  assert.deepEqual(request("work"), { a: "work" });
+  assert.equal(request("work", "someone-else"), undefined, "a member no longer in the launch");
+  assert.equal(request("removed"), undefined, "an account no longer on the Machine");
+  assert.equal(request("home"), undefined, "an account this agent reports as not ready");
+  assert.equal(request("out"), undefined, "an account that signed out");
+  assert.equal(request("theirs"), undefined, "an account this server may not use");
+  assert.equal(request("codex-one", "a", "free"), undefined, "another provider's account");
+  assert.deepEqual(request("home", "a", "free"), { a: "home" }, "an agent reporting no readiness takes any signed-in account");
+  assert.equal(request("work", "a", "gone"), undefined, "an agent no longer on the Machine");
+  assert.equal(memberAccountsRequest({ a: "work" }, { a: "claude" }, undefined), undefined);
 });
 
 test("the primary waits for a member's account, after the fields above it (#4353)", () => {

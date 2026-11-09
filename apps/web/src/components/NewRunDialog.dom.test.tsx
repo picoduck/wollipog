@@ -677,6 +677,7 @@ test("No Project submission sends explicit null Project identities", async () =>
 
 const accountRunner: RunnerView = {
   ...runner,
+  providerAccountDefaults: [{ provider: "claude", accountId: null, revision: 2, mode: "priority", schemaVersion: 1, fixedAccountId: null, priorityAccountIds: ["work", "home"] }],
   providerAccounts: [
     { id: "work", label: "work@example.com", provider: "claude", authStatus: "authenticated", billing: "subscription" },
     { id: "home", label: "home@example.com", provider: "claude", authStatus: "authenticated", billing: "subscription" },
@@ -721,6 +722,70 @@ test("a member that needs an account asks for it, blocks the run until chosen, a
     assert.equal(footerReason(fixture.container), null);
     await clickPrimary(fixture.container, "Run 2 Agents");
     assert.deepEqual(fixture.parallelRequests[0]?.providerAccountIds, { claude: "work" });
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a chosen account that stops being usable asks again rather than launching (#4353)", async () => {
+  const fixture = await mountFixture({ runners: [accountRunner] }, { preview: noEligible });
+  try {
+    await choose(fixture.container, "Project", "No Project");
+    await settlePreviews();
+    await enterTask(fixture.container);
+    await openSelect(fixture.container, "Account for Claude");
+    await act(async () => { fixture.container.querySelector<HTMLButtonElement>('[role="option"]:not([aria-disabled="true"])')?.click(); });
+    await settle();
+    assert.equal(footerReason(fixture.container), null);
+
+    // The account it chose signs out while the dialog is open, with another still ready.
+    const signedOut: RunnerView = {
+      ...accountRunner,
+      providerAccounts: accountRunner.providerAccounts!.map((account) => account.id === "work" ? { ...account, authStatus: "unauthenticated" as const } : account),
+      agents: accountRunner.agents.map((agent) => agent.id === "claude" ? { ...agent, providerAccountReadiness: { defaultAuthStatus: "unknown" as const, readyAccountIds: ["home"] } } : agent),
+    };
+    await act(async () => { fixture.socket.push(snapshot({ runners: [signedOut] })); });
+    await settlePreviews();
+    assert.equal(footerReason(fixture.container), "Choose an account for Claude to continue.");
+    assert.equal(button(fixture.container, /^Run 2 Agents$/u).disabled, true);
+    await act(async () => { button(fixture.container, /^Run 2 Agents$/u).click(); });
+    assert.equal(fixture.parallelRequests.length, 0, "nothing starts on the account that stopped working");
+
+    await openSelect(fixture.container, "Account for Claude");
+    await act(async () => { fixture.container.querySelector<HTMLButtonElement>('[role="option"]:not([aria-disabled="true"])')?.click(); });
+    await settle();
+    assert.equal(footerReason(fixture.container), null);
+    await clickPrimary(fixture.container, "Run 2 Agents");
+    assert.deepEqual(fixture.parallelRequests[0]?.providerAccountIds, { claude: "home" });
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a member the policy can place again drops a choice that stopped working (#4353)", async () => {
+  let required = true;
+  const placed = { provider: "claude", mode: "priority", policyRevision: 2, status: "selected", source: "priority", accountId: "home", enforcement: "enforced", generatedAt: 1,
+    candidates: [{ accountId: "home", position: 1, eligible: true, selected: true }] };
+  const fixture = await mountFixture({ runners: [accountRunner] }, { preview: (agentId) => agentId === "claude" && !required ? placed : noEligible(agentId) });
+  try {
+    await choose(fixture.container, "Project", "No Project");
+    await settlePreviews();
+    await enterTask(fixture.container);
+    await openSelect(fixture.container, "Account for Claude");
+    await act(async () => { fixture.container.querySelector<HTMLButtonElement>('[role="option"]:not([aria-disabled="true"])')?.click(); });
+    await settle();
+
+    required = false;
+    const signedOut: RunnerView = {
+      ...accountRunner,
+      providerAccounts: accountRunner.providerAccounts!.map((account) => account.id === "work" ? { ...account, authStatus: "unauthenticated" as const } : account),
+      agents: accountRunner.agents.map((agent) => agent.id === "claude" ? { ...agent, providerAccountReadiness: { defaultAuthStatus: "unknown" as const, readyAccountIds: ["home"] } } : agent),
+    };
+    await act(async () => { fixture.socket.push(snapshot({ runners: [signedOut] })); });
+    await settlePreviews();
+    assert.equal(footerReason(fixture.container), null);
+    await clickPrimary(fixture.container, "Run 2 Agents");
+    assert.equal(fixture.parallelRequests[0]?.providerAccountIds, undefined, "the policy places it, so nothing names the signed-out account");
   } finally {
     await unmountFixture(fixture);
   }
