@@ -1,4 +1,8 @@
-import { providerForDriver as providerForSessionAccountSwitch } from "@wollipog/protocol";
+import {
+  longestExhaustedUsageBucket,
+  providerForDriver as providerForSessionAccountSwitch,
+  subscriptionUsageBucketExhausted,
+} from "@wollipog/protocol";
 import type {
   ProviderAccountDefinition,
   ProviderAuthenticationAccountOption,
@@ -42,23 +46,6 @@ export function providerAuthenticationAccountOptions(
   });
 }
 
-/** A window counts as used up from its latest reading only until its reset time passes, as the
- * runner's automatic switch counts it (#2304); a window with no reset time stays used up until a
- * newer reading says otherwise. */
-function bucketExhausted(bucket: SubscriptionUsageBucket, now: number): boolean {
-  if (bucket.resetsAt !== undefined && bucket.resetsAt <= now) return false;
-  return bucket.status === "exhausted" || bucket.remainingPercent === 0 ||
-    (bucket.usedPercent !== undefined && bucket.usedPercent >= 100);
-}
-
-/** The used-up window that keeps an account unavailable longest: one with no reset time, else the
- * one that resets last. */
-function longestExhaustedWindow(exhausted: SubscriptionUsageBucket[]): SubscriptionUsageBucket | undefined {
-  return exhausted.reduce<SubscriptionUsageBucket | undefined>((longest, bucket) =>
-    !longest || (longest.resetsAt !== undefined &&
-      (bucket.resetsAt === undefined || bucket.resetsAt > longest.resetsAt)) ? bucket : longest, undefined);
-}
-
 /** Split the session's same-Machine, same-provider accounts into the ones a switch may choose and
  * the ones it may not, each of those with a typed reason (#2276). Only signed-in accounts whose
  * latest provider windows do not report exhaustion are offered; unknown usage is not headroom, and a
@@ -96,8 +83,8 @@ export function providerAccountSwitchChoices(
     const source = sources.find((candidate) =>
       candidate.runnerId === session.runnerId && candidate.providerAccountId === account.id);
     if (!source || source.state !== "available") { reject("usage_unknown"); continue; }
-    const exhausted = source.buckets.filter((bucket) => bucketExhausted(bucket, now));
-    if (exhausted.length) { reject("usage_exhausted", longestExhaustedWindow(exhausted)); continue; }
+    const exhausted = source.buckets.filter((bucket) => subscriptionUsageBucketExhausted(bucket, now));
+    if (exhausted.length) { reject("usage_exhausted", longestExhaustedUsageBucket(exhausted)); continue; }
     offered.push({
       id: account.id,
       label: account.label,

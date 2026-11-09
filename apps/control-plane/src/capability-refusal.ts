@@ -1,6 +1,7 @@
 import {
   runnerCapabilityRequirement,
   runnerCapabilityRequirementDetails,
+  type ProviderAccountChoiceRequired,
   type RunnerCapabilityRequirementDetails,
   type RunnerProtocolCapability,
 } from "@wollipog/protocol";
@@ -30,8 +31,14 @@ export function failureBody(
     error?: string;
     capabilityRequirement?: RunnerCapabilityRequirementDetails;
     errorDetails?: Record<string, string | number>;
+    providerAccountSelection?: ProviderAccountChoiceRequired;
   },
   fallback?: string,
 ): { error?: string } & Partial<RunnerCapabilityRequirementDetails> & Record<string, unknown> {
-  return { ...result.errorDetails, error: result.error ?? fallback, ...result.capabilityRequirement };
+  return {
+    ...result.errorDetails,
+    error: result.error ?? fallback,
+    ...result.capabilityRequirement,
+    ...(result.providerAccountSelection ? { providerAccountSelection: result.providerAccountSelection } : {}),
+  };
 }

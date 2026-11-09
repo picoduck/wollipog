@@ -150,6 +150,25 @@ occurrence, under the same policy revision; exactly one revision bump since; and
 boundary still current and still giving the Orchestrator the merge. Any later policy change, any
 other revocation, or an approval that was never armed stays terminal.
 
+That request's list of outstanding decisions is what it showed when it was made; the approval revokes
+whatever is outstanding when it happens, including decisions filed after the request, except Owner
+Questions, which are never listed or revoked. The approved decision's `scopeRevokedDecisions`, and the
+audit record consuming it (`workflowDecision.revokedDecisions`), list exactly what it revoked, whoever
+approved the change; reconciliation reads that record. So under Full Control a person's request (an
+owner request without lineage, a grant or selection review, a first-message proposal routed to the
+owner, or the owner's own Campaign Status change) stays approvable while decisions come and go (#4332).
+What still refuses it as stale, applying nothing:
+
+- a changed scope revision, boundary, or Maximum Issues limit behind a stated increase;
+- changed additions or removals, or a changed assignment of a removed issue;
+- any change to a live child the work ledger can't prove unrelated to every added and removed issue,
+  including a decision it files or settles, since `activeChildren` binds each child's unconsumed
+  decisions;
+- a closure of an added or removed issue being filed or settled;
+- any other decision of the root being filed or settled, other than a closure of another issue or a
+  follow-up publication or admission, whose slot the approval counts again: nothing proves the root's
+  own work unrelated to the change.
+
 Protocol v208 capability-gates the complete operation before any update. Every active Orchestrator
 participant must run in a Location of one of the campaign's repositories (#4118); finish or move
 incompatible participants first. A participant outside the launch repository needs a v313 runner.
@@ -422,7 +441,7 @@ whose snapshot carries a server-derived `ownerReview: { cause: "lineage_missing"
 additions, any removals and the Orchestrator's `explanation`. That is the route for an issue the
 owner asks for in conversation after launch: the owner approves or denies the proposal in one step
 from their Inbox or from Campaign Status's **Waiting for You**, where it is listed as a Scope
-Approval, instead of retyping it.
+Approval (below), instead of retyping it.
 
 - When the scope plus the slots consumed publications still hold would exceed the campaign's issue
   limit, the request states the Maximum Issues increase it needs as `ownerReview.maxIssuesIncrease: { from, increase }`.
@@ -435,11 +454,40 @@ Approval, instead of retyping it.
   returns that same occurrence, whatever the explanation now says.
 - Only the owner can approve it, as any human-owned scope request: an Orchestrator can neither
   resolve nor consume it, and an agent cannot supply an `ownerReview` or a larger increase itself.
-  Approval still revokes and lists every outstanding decision (#3915). If Maximum Issues moved since
+  Approval still revokes every outstanding decision (#3915) and records exactly which (#4332). If Maximum Issues moved since
   the request (any boundary change revokes it anyway), approving it is refused as stale and applies
   nothing.
 
 Epic, follow-up and selection lineage, the selection review below and Custom campaigns are unchanged.
+
+### Scope Approvals Under Waiting for You (#4334)
+
+Campaign Status's **Waiting for You** lists every pending, person-owned `campaign_issue_scope`
+request on the campaign root that the server created from an Orchestrator's proposal, wherever the
+proposal was routed to the owner:
+
+- `ownerReview`: additions without lineage (above);
+- `grantReview`, any cause: a failed or uncertain first-message grant (#4102), or a selection review
+  that was uncertain, failed or unverified (#4103);
+- `scopeProposal.route: "owner"`: an uncertain or failed constraint check, or anything else that makes
+  a proposal the owner's one approval (#4282). It stays presented as an Owner Question where it is
+  answered, and listed as a Scope Approval here.
+
+Each entry is a Scope Approval marked "Proposed by the Orchestrator". It names the exact
+repository-qualified additions and removals, never shortened, and any Maximum Issues increase
+approving it applies: the one an owner review states, or the derived limit a failed or uncertain grant
+or a proposal grows to fit, read under the rule the approval itself applies. An initial proposal that
+adds nothing says the campaign starts with no issues. Its Open Request opens that exact occurrence and
+no other. When the session doesn't list that occurrence, the entry offers no Open Request rather than
+another request. The request's own card and the Owner Question state the same increase. The server
+derives it on each read of the session (`PendingApproval.scopeMaxIssuesIncrease`) and never stores it,
+so it isn't part of the request's snapshot or digest and changes nothing about what approving does.
+
+An entry leaves the list once its request is approved, denied, revoked or superseded. Orchestrator-owned
+and admitted changes aren't listed, and neither is the owner's own Campaign Status change, because none
+of them carries a mark of the owner's route. Only the server writes those marks. Listing grants
+nothing: the owner still decides the exact occurrence, under the same approval rules. The Decision
+Model Checks and Scope Proposal sections keep their own displays.
 
 When the owner's first message asked the campaign to choose issues (a scope grant with a selection,
 #4102), the Orchestrator proposes the issues it chose with `lineage: {kind: "selection"}` and its

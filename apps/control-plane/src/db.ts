@@ -1,5 +1,5 @@
 import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
-import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
+import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, agentAvailableForRunnerDefault, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
 import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, PROJECT_LOCATION_INSPECTION_FAILURES, validCampaignRepositoryList,
   type CampaignBoundaryRepository, type CampaignRepositoryAdditionResult,
   type CampaignExcludedLocation, type CampaignLocationJoin, type CampaignPendingLocation, type CampaignRepositoryBoundaryView } from "@wollipog/protocol";
@@ -36,6 +36,7 @@ import { PREREQUISITE_MERGE_WATCH_RUNNER, PullRequestWatches } from "./pull-requ
 import { SessionWaits } from "./session-waits.js";
 import { ReviewSettingsStore, type ReviewPolicyCapture } from "./review-settings.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
+import type { CampaignIssueScopeSnapshot } from "@wollipog/protocol";
 import { campaignScopeChangeBefore, campaignScopeChangeGroups, campaignScopeChangeResult, campaignScopeForRepository, campaignScopeHolds, campaignScopeIssues, campaignScopeNumbers, campaignScopeWithIssues, canonicalCampaignIssues } from "@wollipog/protocol";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
 import {
@@ -47,7 +48,7 @@ import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignDispatchSco
 import { campaignBoundaryRepositoryAt, campaignLocationRepository, campaignRepositoryPlaces } from "./campaign-repository-boundary.js";
 import { genericRequestScreenData, storedCredentialScreenFact } from "./credential-screen.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
-import { grantReviewMaxIssues, ownerReviewMaxIssues, proposalMaxIssues } from "./scope-grant.js";
+import { grantReviewMaxIssues, ownerReviewMaxIssues, proposalMaxIssues, scopeApprovalMaxIssuesIncrease } from "./scope-grant.js";
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
 import { validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
@@ -258,6 +259,9 @@ import {
   type RunnerCapacityState,
   type RunnerAutomaticAccountSwitchConfiguration,
   type RunnerProviderAccountDefault,
+  type ProviderAccountPolicyMode,
+  type ProviderAccountSelectionRecord,
+  PROVIDER_ACCOUNT_POLICY_SCHEMA_VERSION,
   type RunnerRuntimeInfo,
   type RunnerCredentialView,
   type RunnerStatus,
@@ -478,6 +482,11 @@ function safeProviderAccounts(value: RunnerView["providerAccounts"]): NonNullabl
       provider: account.provider,
       authStatus: account.authStatus,
       ...(account.profile ? { profile: { id: account.profile.id, access: account.profile.access } } : {}),
+      // Protocol v334 (#4353). An unrecognized value reads as unverified, which selection passes over.
+      ...(account.billing === "subscription" || account.billing === "api" || account.billing === "unknown"
+        ? { billing: account.billing } : {}),
+      ...(Number.isSafeInteger(account.selectionCooldownUntil) && account.selectionCooldownUntil! > 0
+        ? { selectionCooldownUntil: account.selectionCooldownUntil! } : {}),
     };
   });
 }
@@ -689,6 +698,13 @@ CREATE TABLE IF NOT EXISTS machine_provider_account_defaults (
   account_id TEXT,
   revision INTEGER NOT NULL CHECK (revision > 0),
   updated_at INTEGER NOT NULL,
+  -- Versioned selection policy (#4353). account_id stays the fixed default under every mode. mode is
+  -- deliberately unconstrained, with mode_settings beside it, so a later mode needs no table rebuild;
+  -- a value this release doesn't know reads as unsupported and fails closed.
+  mode TEXT NOT NULL DEFAULT 'fixed',
+  priority_account_ids TEXT NOT NULL DEFAULT '[]',
+  mode_settings TEXT NOT NULL DEFAULT '{}',
+  schema_version INTEGER NOT NULL DEFAULT 1,
   PRIMARY KEY (runner_id, provider),
   FOREIGN KEY (runner_id) REFERENCES runners(runner_id) ON DELETE CASCADE
 );
@@ -3465,6 +3481,7 @@ interface SessionRow {
   agent_id: string | null;
   provider_account_id: string | null;
   provider_account_label: string | null;
+  provider_account_selection?: string | null;
   provider_account_automatically_selected: number;
   provider_account_switch_failure: string | null;
   location_switch?: string | null;
@@ -4975,6 +4992,7 @@ export interface NewSessionInput {
   agentId: string | null;
   providerAccountId?: string;
   providerAccountLabel?: string;
+  providerAccountSelection?: ProviderAccountSelectionRecord;
   title: string;
   titleSource?: SessionTitleSource;
   useWorktree: boolean;
@@ -6425,6 +6443,26 @@ export class ControlPlaneDb {
     return { state: recoveryIds.size ? "recovery_ready" : unfinished ? "recovery_held" : "complete", recoveryIds: [...recoveryIds] };
   }
 
+  /** The Maximum Issues increase approving this root scope request applies (#4334). Approving can raise
+   * a derived limit no snapshot field records, so Waiting for You and the request's card both read it
+   * here: the limit the approval would grow, under the approval's own rule. It decides nothing. */
+  private scopeApprovalIncrease(rootId: string, snapshot: CampaignIssueScopeSnapshot) {
+    const policy = this.sessionOrchestratorPolicy(rootId) ?? undefined;
+    const boundary = policy?.control?.mode === "full_control" && this.boundaryTrailsHumanScope(rootId, policy) ? policy.control.boundary : undefined;
+    return scopeApprovalMaxIssuesIncrease(policy, snapshot, boundary);
+  }
+
+  /** A person-owned scope card as the session view shows it: the increase its approval applies, derived
+   * on every read. Whatever a stored card or a runner carried in its place is dropped. */
+  private scopeApprovalRequest(sessionId: string, request: PendingApproval): PendingApproval {
+    const { scopeMaxIssuesIncrease: _derivedIncrease, ...stored } = request;
+    const decision = stored.workflowDecision;
+    if (stored.kind !== "workflow_decision" || decision?.authority !== "human" || decision.sessionId !== sessionId ||
+        decision.controllingSessionId !== sessionId || decision.resourceSnapshot.category !== "campaign_issue_scope") return stored;
+    const increase = this.scopeApprovalIncrease(sessionId, decision.resourceSnapshot);
+    return increase ? { ...stored, scopeMaxIssuesIncrease: increase } : stored;
+  }
+
   campaignRecoveryRequest(sessionId: string, request: PendingApproval): PendingApproval {
     const { campaignRecovery: _derivedRecovery, ...stored } = request;
     const rootId = this.campaignRootForMember(sessionId);
@@ -7569,6 +7607,8 @@ export class ControlPlaneDb {
       "superseded_by TEXT",
       // #4301: approval survives supersession and later terminal transitions.
       "closure_approval TEXT",
+      // #4332: exactly what an applied scope change revoked, written in its own transaction.
+      "scope_revoked_decisions TEXT",
       // #4064: the root handed this Orchestrator-owned occurrence to the campaign's owner.
       "owner_handoff TEXT",
       // #4137: the installed or user-authored rule that kept this occurrence for a person.
@@ -7773,6 +7813,8 @@ export class ControlPlaneDb {
       "provider_account_label TEXT",
       "provider_account_automatically_selected INTEGER NOT NULL DEFAULT 0 CHECK (provider_account_automatically_selected IN (0, 1))",
       "provider_account_switch_failure TEXT",
+      // #4353: why this session started on its account, as reason codes that name no account.
+      "provider_account_selection TEXT",
       // #4138: the runner's pending or failed Location switch for the live session.
       "location_switch TEXT",
       // Provider profiles (#3239): the profile the session's account binding recorded.
@@ -7787,6 +7829,15 @@ export class ControlPlaneDb {
       try { db.exec(`ALTER TABLE sessions ADD COLUMN ${column}`); } catch { /* column already present */ }
     }
     try { db.exec("ALTER TABLE subscription_usage_snapshots ADD COLUMN provider_account_id TEXT"); } catch { /* column already present */ }
+    // #4353: existing rows become fixed policies, keeping their default, revision and legacy fallback.
+    for (const column of [
+      "mode TEXT NOT NULL DEFAULT 'fixed'",
+      "priority_account_ids TEXT NOT NULL DEFAULT '[]'",
+      "mode_settings TEXT NOT NULL DEFAULT '{}'",
+      "schema_version INTEGER NOT NULL DEFAULT 1",
+    ]) {
+      try { db.exec(`ALTER TABLE machine_provider_account_defaults ADD COLUMN ${column}`); } catch { /* column already present */ }
+    }
     for (const col of [
       "input_tokens INTEGER NOT NULL DEFAULT 0",
       "output_tokens INTEGER NOT NULL DEFAULT 0",
@@ -9005,12 +9056,35 @@ export class ControlPlaneDb {
 
   machineProviderAccountDefaults(runnerId: string): RunnerProviderAccountDefault[] {
     return (this.stmt(
-      "SELECT provider, account_id, revision FROM machine_provider_account_defaults WHERE runner_id=? ORDER BY provider",
+      `SELECT provider, account_id, revision, mode, priority_account_ids, schema_version
+       FROM machine_provider_account_defaults WHERE runner_id=? ORDER BY provider`,
     ).all(runnerId) as unknown as Array<{
       provider: RunnerProviderAccountDefault["provider"];
       account_id: string | null;
       revision: number;
-    }>).map((row) => ({ provider: row.provider, accountId: row.account_id, revision: row.revision }));
+      mode: string;
+      priority_account_ids: string;
+      schema_version: number;
+    }>).map((row) => {
+      const mode = row.schema_version <= PROVIDER_ACCOUNT_POLICY_SCHEMA_VERSION && (row.mode === "fixed" || row.mode === "priority")
+        ? row.mode : "unsupported" as const;
+      const order = parseJson<unknown>(row.priority_account_ids);
+      const priorityAccountIds = Array.isArray(order) ? order.filter((id): id is string => typeof id === "string") : [];
+      // A plain default reads exactly as it did before policies existed.
+      if (mode === "fixed" && priorityAccountIds.length === 0) {
+        return { provider: row.provider, accountId: row.account_id, revision: row.revision };
+      }
+      return {
+        provider: row.provider,
+        // What older clients read. Any other mode shows them no default they could mistake for this one.
+        accountId: mode === "fixed" ? row.account_id : null,
+        revision: row.revision,
+        mode,
+        schemaVersion: row.schema_version,
+        fixedAccountId: row.account_id,
+        priorityAccountIds,
+      };
+    });
   }
 
   machineProviderAccountDefault(
@@ -9020,6 +9094,8 @@ export class ControlPlaneDb {
     return this.machineProviderAccountDefaults(runnerId).find((choice) => choice.provider === provider) ?? null;
   }
 
+  /** The route older clients use. It writes a fixed default only, so it can never replace a policy
+   * those clients can't show; the refusal happens in the same transaction as the revision check. */
   setMachineProviderAccountDefault(
     runnerId: string,
     provider: RunnerProviderAccountDefault["provider"],
@@ -9027,9 +9103,10 @@ export class ControlPlaneDb {
     expectedRevision: number,
     now: number,
   ): { ok: true; choice: RunnerProviderAccountDefault } |
-     { ok: false; choice: RunnerProviderAccountDefault | null } {
+     { ok: false; choice: RunnerProviderAccountDefault | null; notFixed?: true } {
     return this.atomic(() => {
       const current = this.machineProviderAccountDefault(runnerId, provider);
+      if (current && (current.mode ?? "fixed") !== "fixed") return { ok: false, choice: current, notFixed: true };
       if ((current?.revision ?? 0) !== expectedRevision) return { ok: false, choice: current };
       const revision = expectedRevision + 1;
       this.stmt(
@@ -9040,7 +9117,50 @@ export class ControlPlaneDb {
            revision=excluded.revision,
            updated_at=excluded.updated_at`,
       ).run(runnerId, provider, accountId, revision, now);
-      return { ok: true, choice: { provider, accountId, revision } };
+      return { ok: true, choice: this.machineProviderAccountDefault(runnerId, provider)! };
+    });
+  }
+
+  /** A versioned policy write (#4353): all of it, or a conflict naming what is saved now. */
+  setMachineProviderAccountPolicy(
+    runnerId: string,
+    provider: RunnerProviderAccountDefault["provider"],
+    policy: { mode: ProviderAccountPolicyMode; fixedAccountId: string | null; priorityAccountIds: readonly string[] },
+    expectedRevision: number,
+    now: number,
+  ): { ok: true; policy: RunnerProviderAccountDefault } |
+     { ok: false; policy: RunnerProviderAccountDefault | null } {
+    return this.atomic(() => {
+      const current = this.machineProviderAccountDefault(runnerId, provider);
+      if ((current?.revision ?? 0) !== expectedRevision) return { ok: false, policy: current };
+      this.stmt(
+        `INSERT INTO machine_provider_account_defaults
+           (runner_id, provider, account_id, revision, updated_at, mode, priority_account_ids, schema_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(runner_id, provider) DO UPDATE SET
+           account_id=excluded.account_id,
+           revision=excluded.revision,
+           updated_at=excluded.updated_at,
+           mode=excluded.mode,
+           priority_account_ids=excluded.priority_account_ids,
+           schema_version=excluded.schema_version`,
+      ).run(runnerId, provider, policy.fixedAccountId, expectedRevision + 1, now, policy.mode,
+        JSON.stringify(policy.priorityAccountIds), PROVIDER_ACCOUNT_POLICY_SCHEMA_VERSION);
+      return { ok: true, policy: this.machineProviderAccountDefault(runnerId, provider)! };
+    });
+  }
+
+  /** The last reading of each of a Machine's accounts, however old. Selection reads only what a
+   * reading positively says, so callers need no freshness window. */
+  providerAccountUsageSnapshots(runnerId: string): SubscriptionUsageSnapshot[] {
+    const rows = this.stmt(
+      `SELECT source_id, snapshot FROM subscription_usage_snapshots
+       WHERE runner_id=? AND provider_account_id IS NOT NULL ORDER BY source_id`,
+    ).all(runnerId) as unknown as Array<{ source_id: string; snapshot: string }>;
+    return rows.flatMap((row) => {
+      const snapshot = parseJson<SubscriptionUsageSnapshot>(row.snapshot);
+      return snapshot && snapshot.runnerId === runnerId && snapshot.sourceId === row.source_id &&
+        Array.isArray(snapshot.buckets) && snapshot.providerAccountId ? [snapshot] : [];
     });
   }
 
@@ -13403,7 +13523,7 @@ export class ControlPlaneDb {
     const authorization = principal ? this.sessionAuthorizationSql(principal) : { sql: "1", params: [] };
     const userId = principal?.kind === "human" ? principal.userId : null;
     const columns = `id runner_id workspace_id project_id project_location_id agent_id
-      provider_account_id provider_account_label provider_account_automatically_selected provider_profile_id
+      provider_account_id provider_account_label provider_account_automatically_selected provider_account_selection provider_profile_id
       provider_home_wait worktree_switch title title_source provider_updated_at background_work_state background_follow_up background_work_tracking
       history_quarantine worktree_recovery queue_hold capacity_wait status board_column run_id
       use_worktree worktree_path archived preview pending_approval parent_control
@@ -15677,13 +15797,15 @@ export class ControlPlaneDb {
       | undefined;
     if (!row) return null;
     if (!targetBound && !options.allowAccountSelection) {
-      const provider = providerForDriver(row.driver as AgentDriverKind);
-      const accountId = options.providerAccountId ?? (provider &&
-        (parseJson<AgentContext>(row.context)?.kind ?? "native") === "native"
-        ? this.machineProviderAccountDefault(runnerId, provider)?.accountId ?? undefined : undefined);
-      if (!agentAvailableForImplicitLaunch({ available: true,
-        providerAccountReadiness: parseJson<AgentDefinition["providerAccountReadiness"]>(row.provider_account_readiness) ?? undefined,
-      }, accountId)) return null;
+      const driver = row.driver as AgentDriverKind;
+      const provider = providerForDriver(driver);
+      const context = parseJson<AgentContext>(row.context) ?? undefined;
+      const providerAccountReadiness = parseJson<AgentDefinition["providerAccountReadiness"]>(row.provider_account_readiness) ?? undefined;
+      const available = options.providerAccountId !== undefined
+        ? agentAvailableForImplicitLaunch({ available: true, providerAccountReadiness }, options.providerAccountId)
+        : agentAvailableForRunnerDefault({ available: true, providerAccountReadiness, driver, ...(context ? { context } : {}) },
+            provider ? this.machineProviderAccountDefaults(runnerId) : undefined);
+      if (!available) return null;
     }
     const family = harnessInstallationFamily(row.driver as AgentDriverKind);
     if (family && !targetBound) {
@@ -18379,6 +18501,10 @@ export class ControlPlaneDb {
         this.retireWorkflowDecisionResume(stale.occurrenceId, now);
         this.revokeUiEvidenceReviewReceipts(stale.occurrenceId, now);
       }
+      // The approval's own record of what it revoked (#4332), which can differ from what its request
+      // listed: a person's Full Control approval revokes whatever is outstanding now.
+      this.stmt("UPDATE workflow_decisions SET scope_revoked_decisions=? WHERE occurrence_id=?")
+        .run(JSON.stringify(revoked.map((stale) => stale.occurrenceId).sort()), occurrenceId);
       this.db.exec("COMMIT");
       return { decision: this.workflowDecisionByOccurrence(occurrenceId)!, revoked };
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
@@ -18650,6 +18776,10 @@ export class ControlPlaneDb {
       if (input.providerAccountId) {
         this.stmt("UPDATE sessions SET provider_account_id=?, provider_account_label=? WHERE id=?")
           .run(input.providerAccountId, input.providerAccountLabel ?? input.providerAccountId, input.id);
+      }
+      if (input.providerAccountSelection) {
+        this.stmt("UPDATE sessions SET provider_account_selection=? WHERE id=?")
+          .run(JSON.stringify(input.providerAccountSelection), input.id);
       }
       if (input.executionTarget) {
         this.stmt("UPDATE sessions SET execution_target=? WHERE id=?")
@@ -24043,7 +24173,12 @@ export class ControlPlaneDb {
    * the root for itself or a member, or by an Orchestrator nested in its membership for one of that
    * Orchestrator's own descendants, the one shape the owner can resolve there (resolveWorkflowDecision
    * admits a nested controller only through isSessionDescendant). The scope and repository requests
-   * stay the root's own. The count and the items read one predicate. */
+   * stay the root's own. The count and the items read one predicate.
+   * A scope request is listed by the server-derived mark of the route that gave it to the owner
+   * (#4334): an owner review (#4267), any grant review (#4102, #4103) or the proposal check's owner
+   * route (#4282). Only the server writes those, so the owner's own Campaign Status change carries
+   * none, and an admitted or Orchestrator-owned change is neither marked for the owner nor `human`.
+   * Listing grants nothing: the owner still decides the exact occurrence. */
   campaignOwnerDecisions(controllingSessionId: string): NonNullable<OrchestratorCampaignProjection["ownerDecisions"]> | null {
     const descendants = this.campaignDescendantIds(controllingSessionId);
     // Each [controller, requester] pair the campaign controls: the root over itself and every member,
@@ -24067,7 +24202,8 @@ export class ControlPlaneDb {
           AND EXISTS (SELECT 1 FROM json_each(?) pair WHERE json_extract(pair.value, '$[0]')=controlling_session_id
             AND json_extract(pair.value, '$[1]')=session_id)
         OR controlling_session_id=? AND (category='campaign_repository_addition'
-          OR category='campaign_issue_scope' AND session_id=controlling_session_id AND json_type(resource_snapshot, '$.ownerReview')='object'))`;
+          OR category='campaign_issue_scope' AND session_id=controlling_session_id AND (json_type(resource_snapshot, '$.ownerReview')='object'
+            OR json_type(resource_snapshot, '$.grantReview')='object' OR json_extract(resource_snapshot, '$.scopeProposal.route')='owner')))`;
     const params = [JSON.stringify(controllers), JSON.stringify(pairs), controllingSessionId];
     const total = Number((this.stmt(`SELECT COUNT(*) AS count FROM workflow_decisions WHERE ${where}`)
       .get(...params) as { count: number }).count);
@@ -24077,7 +24213,9 @@ export class ControlPlaneDb {
       .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null)
       .map((decision) => ({ occurrenceId: decision.occurrenceId, sessionId: decision.sessionId, category: decision.category,
         ...(isWorkflowQuestionSnapshot(decision.resourceSnapshot) ? { kind: "question" as const } : {}),
-        summary: ownerDecisionSummary(decision.resourceSnapshot), handedOff: decision.ownerHandoff !== undefined,
+        summary: decision.resourceSnapshot.category === "campaign_issue_scope"
+          ? campaignScopeChangeSummary(decision.resourceSnapshot, this.scopeApprovalIncrease(controllingSessionId, decision.resourceSnapshot))
+          : ownerDecisionSummary(decision.resourceSnapshot), handedOff: decision.ownerHandoff !== undefined,
         ...(decision.ownerRule ? { ownerRule: decision.ownerRule } : {}), createdAt: decision.createdAt }));
     return { total, items };
   }
@@ -25316,8 +25454,9 @@ export class ControlPlaneDb {
     ).all(decision.controllingSessionId, decision.controllingSessionId, revocations[0]!.created_at, revocations[0]!.created_at,
       decision.policyRevision) as unknown[]).map(workflowDecisionFromRow);
     const scope = scopes.length === 1 ? scopes[0] : null;
-    return scope?.resourceSnapshot.category === "campaign_issue_scope" && scope.resourceSnapshot.affectedDecisions.includes(decision.occurrenceId)
-      ? scope : null;
+    // The approval's record of what it revoked; one applied before that record reads what it listed.
+    return scope?.resourceSnapshot.category === "campaign_issue_scope" &&
+      (scope.scopeRevokedDecisions ?? scope.resourceSnapshot.affectedDecisions).includes(decision.occurrenceId) ? scope : null;
   }
 
   /** Atomically claim one reconciliation proof and consume either a live approval or the narrowly
@@ -29171,6 +29310,8 @@ export class ControlPlaneDb {
       providerAccountId: row.provider_account_id ?? undefined,
       providerAccountLabel: row.provider_account_label ?? undefined,
       providerAccountAutomaticallySelected: row.provider_account_automatically_selected === 1 || undefined,
+      ...(row.provider_account_selection
+        ? { providerAccountSelection: parseJson<ProviderAccountSelectionRecord>(row.provider_account_selection) ?? undefined } : {}),
       providerAccountSwitchFailure:
         parseJson<ProviderAccountSwitchFailureView>(row.provider_account_switch_failure) ?? undefined,
       ...(row.location_switch ? { locationSwitch: parseJson<NonNullable<SessionView["locationSwitch"]>>(row.location_switch) ?? undefined } : {}),
@@ -29300,9 +29441,9 @@ export class ControlPlaneDb {
       eventEpoch: row.event_epoch ?? 0,
       preview: row.preview,
       pendingApproval: pending ? {
-        ...this.campaignRecoveryRequest(row.id, pending),
+        ...this.scopeApprovalRequest(row.id, this.campaignRecoveryRequest(row.id, pending)),
         ...(pending.additionalRequests ? { additionalRequests: pending.additionalRequests.map(request =>
-          this.campaignRecoveryRequest(row.id, request)) } : {}),
+          this.scopeApprovalRequest(row.id, this.campaignRecoveryRequest(row.id, request))) } : {}),
       } : pending,
       attention: (() => {
         const facts = this.stmt("SELECT * FROM session_attention WHERE session_id=?").get(row.id) as
@@ -35543,6 +35684,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     withdrawal?: string | null;
     superseded_by?: string | null;
     closure_approval?: string | null;
+    scope_revoked_decisions?: string | null;
     owner_handoff?: string | null;
     owner_rule?: string | null;
     issue_closure_result?: string | null;
@@ -35620,14 +35762,29 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     ...(row.child_message ? { childMessage: row.child_message } : {}),
     ...(row.withdrawal ? { withdrawal: parseJson<NonNullable<WorkflowDecisionView["withdrawal"]>>(row.withdrawal) ?? undefined } : {}),
     ...(row.closure_approval ? { approval: parseJson<NonNullable<WorkflowDecisionView["approval"]>>(row.closure_approval) ?? undefined } : {}),
+    ...(row.scope_revoked_decisions ? { scopeRevokedDecisions: parseJson<string[]>(row.scope_revoked_decisions) ?? undefined } : {}),
     ...(row.status === "superseded" && row.superseded_by ? { supersededBy: row.superseded_by } : {}),
     ...(row.owner_handoff ? { ownerHandoff: parseJson<NonNullable<WorkflowDecisionView["ownerHandoff"]>>(row.owner_handoff) ?? undefined } : {}),
     ...(row.owner_rule ? { ownerRule: parseJson<NonNullable<WorkflowDecisionView["ownerRule"]>>(row.owner_rule) ?? undefined } : {}),
   };
 }
 
+/** A scope request's exact change for Campaign Status (#4267, #4334): every repository's part (#4118),
+ * each issue qualified by its own repository, and the Maximum Issues increase approving it applies.
+ * Never shortened, because the owner reads it to know what they approve; the scope's own limit bounds
+ * it. Only an initial proposal can change no issue: normalization refuses any other empty change. */
+function campaignScopeChangeSummary(snapshot: CampaignIssueScopeSnapshot, raise: { from: number; increase: number } | undefined): string {
+  const groups = campaignScopeChangeGroups(snapshot);
+  const refs = (pick: (group: (typeof groups)[number]) => number[]) =>
+    groups.flatMap((group) => pick(group).map((n) => `${group.repository}#${n}`)).join(", ");
+  const additions = refs((group) => group.additions), removals = refs((group) => group.removals);
+  const change = additions && removals ? `Add ${additions} and remove ${removals}`
+    : additions ? `Add ${additions}` : removals ? `Remove ${removals}` : "Start the campaign with no issues";
+  return change + (raise ? `, raising Maximum Issues from ${raise.from} to ${raise.from + raise.increase}` : "");
+}
+
 /** What a decision the owner kept decides, in a line Campaign Status can list (#4064). */
-function ownerDecisionSummary(snapshot: WorkflowDecisionView["resourceSnapshot"]): string {
+function ownerDecisionSummary(snapshot: Exclude<WorkflowDecisionView["resourceSnapshot"], { category: "campaign_issue_scope" }>): string {
   const text = (() => {
     switch (snapshot.category) {
       case "owner_decision":
@@ -35637,18 +35794,6 @@ function ownerDecisionSummary(snapshot: WorkflowDecisionView["resourceSnapshot"]
       case "merged_branch_deletion": return `Delete branch ${snapshot.branch} in ${snapshot.repository}`;
       case "issue_closure": return `Close ${snapshot.repository}#${snapshot.issue}`;
       case "follow_up_issue_publication": return `Publish ${JSON.stringify(snapshot.sanitizedTitle)} in ${snapshot.repository}`;
-      case "campaign_issue_scope": {
-        // An Orchestrator's proposal waiting for the owner names its exact change (#4267).
-        if (!snapshot.ownerReview) return `Change the campaign's issue scope in ${snapshot.repository}`;
-        // Every repository's part, each issue qualified by its own repository (#4118).
-        const groups = campaignScopeChangeGroups(snapshot);
-        const refs = (pick: (group: (typeof groups)[number]) => number[]) =>
-          groups.flatMap((group) => pick(group).map((n) => `${group.repository}#${n}`)).join(", ");
-        const removals = refs((group) => group.removals);
-        const raise = snapshot.ownerReview.maxIssuesIncrease;
-        return `Add ${refs((group) => group.additions)}${removals ? ` and remove ${removals}` : ""}` +
-          (raise ? `, raising Maximum Issues from ${raise.from} to ${raise.from + raise.increase}` : "");
-      }
       case "ui_evidence_approval": return `Review ${snapshot.evidence.length} UI evidence item${snapshot.evidence.length === 1 ? "" : "s"}`;
       case "campaign_repository_addition": return `Add ${snapshot.repository} to the campaign`;
       default: return snapshot.category;
@@ -35665,7 +35810,7 @@ function pendingApprovalWithOccurrenceIds(
     pendingRequests(prior).map((request) => [request.requestId, request]),
   );
   const identify = (request: PendingApproval): PendingApproval => {
-    const { campaignRecovery: _derivedRecovery, ...stored } = request;
+    const { campaignRecovery: _derivedRecovery, scopeMaxIssuesIncrease: _derivedIncrease, ...stored } = request;
     return {
       ...stored,
       occurrenceId: request.occurrenceId || priorByRequestId.get(request.requestId)?.occurrenceId ||

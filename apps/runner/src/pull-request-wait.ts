@@ -27,7 +27,8 @@ export const PULL_REQUEST_WAIT_MAX_INTERVAL_MS = 600_000;
  * own merge state to confirm it. */
 const CONTEXTS_PER_COMMIT = 100;
 const MAX_CONTEXT_PAGES = 10;
-/** At most one run list, ten check lookups, and ten attempt job lists per special-path poll. */
+/** Skip admission adds at most one run list, ten check lookups and ten attempt job lists per poll.
+ * Workflow identity can add one bounded list for each of the head and merge-group commits. */
 const MAX_SKIP_PROVENANCE_CHECKS = 10;
 const MAX_LISTED_CHECKS = 30;
 const MAX_FAILED_JOBS = 20;
@@ -280,7 +281,7 @@ export async function requiredCheckNames(
 
 const contextFields = (after: string) => `contexts(first:${CONTEXTS_PER_COMMIT}${after}){pageInfo{hasNextPage endCursor} nodes{
   __typename
-  ... on CheckRun{databaseId name status conclusion startedAt detailsUrl checkSuite{app{databaseId} branch{name} createdAt} isRequired(pullRequestNumber:$number)}
+  ... on CheckRun{databaseId name status conclusion startedAt detailsUrl checkSuite{databaseId app{databaseId} branch{name} createdAt} isRequired(pullRequestNumber:$number)}
   ... on StatusContext{context state createdAt targetUrl isRequired(pullRequestNumber:$number)}
 }}`;
 const CONTEXT_FIELDS = contextFields("");
@@ -320,6 +321,11 @@ interface CheckNode {
   at: string;
   /** The GitHub App that reported a check run. */
   appId?: number;
+  /** Suite identity is available without Actions access; workflow identity is optional REST provenance. */
+  suiteId?: number;
+  workflowId?: number;
+  workflowEvent?: string;
+  workflowContext?: string;
   /** The branch a check run's suite was created for, and when: the push or event that created it.
    * A re-run or a delayed start keeps its suite's time. */
   branch?: string;
@@ -349,10 +355,14 @@ function checkNode(raw: unknown): CheckNode | null {
     const suiteCreatedAt = record(node.checkSuite)?.createdAt;
     return {
       kind: "CheckRun",
+      ...(positiveId(record(node.checkSuite)?.databaseId) ? { suiteId: record(node.checkSuite)!.databaseId as number } : {}),
+      ...(positiveId(record(node.checkSuite)?.workflowId) ? { workflowId: record(node.checkSuite)!.workflowId as number } : {}),
+      ...(typeof record(node.checkSuite)?.workflowEvent === "string" ? { workflowEvent: record(node.checkSuite)!.workflowEvent as string } : {}),
+      ...(typeof record(node.checkSuite)?.workflowContext === "string" ? { workflowContext: record(node.checkSuite)!.workflowContext as string } : {}),
       name: node.name,
       state: !completed ? "pending" : PASS_CONCLUSIONS.has(conclusion) ? "passed" : "failed",
       conclusion: completed ? conclusion || "UNKNOWN" : String(node.status ?? "PENDING"),
-      ...(Number.isSafeInteger(node.databaseId) ? { id: node.databaseId as number } : {}),
+      ...(positiveId(node.databaseId) ? { id: node.databaseId } : {}),
       at: typeof node.startedAt === "string" ? node.startedAt : "",
       ...(Number.isSafeInteger(appId) ? { appId: appId as number } : {}),
       ...(typeof branch === "string" && branch ? { branch } : {}),
@@ -376,17 +386,43 @@ function checkNode(raw: unknown): CheckNode | null {
   return null;
 }
 
-/** Whether `node` supersedes `previous`, a run of the same kind and name: check run ids grow in
- * creation order, so a re-run (even one not started yet) has the larger id; otherwise the later
- * known time wins, and an unknown time never displaces a known one. */
+/** A missing or equal time cannot prove that a run supersedes another. */
 function newer(node: CheckNode, previous: CheckNode): boolean {
-  if (node.id !== undefined && previous.id !== undefined) return node.id > previous.id;
-  return node.at !== "" && (previous.at === "" || node.at > previous.at);
+  if (node.id !== undefined && previous.id !== undefined && node.id !== previous.id) return node.id > previous.id;
+  const time = timestamp(node.at);
+  const previousTime = timestamp(previous.at);
+  return time !== null && previousTime !== null && time >= Date.UTC(2000, 0, 1) &&
+    previousTime >= Date.UTC(2000, 0, 1) && time > previousTime;
+}
+
+/** Workflow, event and branch/PR context distinguish jobs; suites remain separate without proof.
+ * Without either, no cross-run supersession is provable. Keep the worst unbeaten candidate,
+ * including all candidates if inconsistent id/time comparisons form a cycle. */
+function latestChecks(rawNodes: unknown[], state: (node: CheckNode) => CheckState = (node) => node.state): CheckNode[] {
+  const groups = new Map<string, CheckNode[]>();
+  for (const raw of rawNodes) {
+    const node = checkNode(raw);
+    if (!node) continue;
+    const identity = node.workflowId !== undefined && node.workflowEvent && node.workflowContext ? `workflow:${node.workflowId}:${node.workflowEvent}:${node.workflowContext}`
+      : node.suiteId !== undefined ? `suite:${node.suiteId}` : "unknown";
+    const key = JSON.stringify([node.kind, node.appId ?? null, identity, node.name]);
+    const entries = groups.get(key) ?? [];
+    entries.push(node);
+    groups.set(key, entries);
+  }
+  return [...groups.values()].map((entries) => {
+    const known = entries[0]!.kind === "StatusContext" || entries[0]!.suiteId !== undefined || (entries[0]!.workflowId !== undefined && !!entries[0]!.workflowEvent);
+    const unbeaten = known ? entries.filter((entry) => !entries.some((other) => other !== entry && newer(other, entry))) : entries;
+    const candidates = unbeaten.length ? unbeaten : entries;
+    const severity = { passed: 0, pending: 1, failed: 2 };
+    return candidates.reduce((worst, node) => severity[state(node)] > severity[state(worst)] ? node : worst);
+  });
 }
 
 /**
- * Fold one commit's rollup into a bounded summary. Of several runs of one kind sharing a name
- * (re-runs), the newest wins. A check run and a status context that share a required name must
+ * Fold one commit's rollup into a bounded summary. Of provably ordered re-runs of the same
+ * workflow job (or suite when workflow access is unavailable), the newest wins. Unknown identity
+ * or ordering retains the worse result. A check run and a status context that share a required name must
  * both pass, and a name a rule restricts to particular apps counts only check runs from those apps
  * (a status context carries no app here, so it still matches by name). The verdict covers every
  * required check, including any cut from the bounded list; `complete` is false when GitHub had
@@ -408,31 +444,25 @@ export function evaluateCommitChecks(
   // Own properties only: a check may be named `constructor` or `__proto__`.
   const appsFor = (name: string): readonly number[] | undefined =>
     Object.hasOwn(requiredApps, name) ? requiredApps[name] : undefined;
-  const latest = new Map<string, CheckNode>();
-  for (const raw of rawNodes) {
-    const node = checkNode(raw);
-    if (!node) continue;
-    // Restricted names keep each app's runs apart, so another app's run cannot replace them.
-    const app = node.kind === "CheckRun" && appsFor(node.name) ? String(node.appId ?? "") : "";
-    const key = `${node.kind}\0${app}\0${node.name}`;
-    const previous = latest.get(key);
-    if (!previous || newer(node, previous)) latest.set(key, node);
-  }
   const counts = (node: CheckNode, name: string): boolean => {
     const apps = appsFor(name);
     return node.name === name &&
       (node.kind === "StatusContext" || !apps || (node.appId !== undefined && apps.includes(node.appId)));
   };
-  // Rules are the authority; a check GitHub itself marks required is added, never removed.
+  // Preserve required flags even if a newer run supersedes their reporting node.
   const required = new Set(requiredNames);
-  for (const node of latest.values()) if (node.isRequired && !appsFor(node.name)) required.add(node.name);
-  // A draft run can leave a skipped required job on the same head while a newly admitted
-  // ready_for_review run has not created its aggregator yet. With a PR observation, a skip
-  // needs confirmation or current admitted-run provenance; genuine successes and optional skips pass.
+  for (const raw of rawNodes) {
+    const node = checkNode(raw);
+    if (node?.isRequired && !appsFor(node.name)) required.add(node.name);
+  }
+  // Apply skip admission before choosing the worst unorderable candidate. Otherwise a SUCCESS
+  // could hide an unconfirmed SKIPPED requirement solely because it appears first in the rollup.
   const requiredNodeState = (node: CheckNode | undefined): CheckState | undefined =>
     node?.conclusion === "SKIPPED" && mergeStateStatus !== undefined && !REQUIREMENTS_MET.has(mergeStateStatus ?? "") &&
       !(node.id !== undefined && admittedSkippedRuns.has(node.id))
       ? "pending" : node?.state;
+  const latest = latestChecks(rawNodes, (node) =>
+    required.has(node.name) && counts(node, node.name) ? requiredNodeState(node)! : node.state);
   const requiredList: RequiredCheckSummary[] = [...required].sort().map((name) => {
     const named = [...latest.values()].filter((node) => node.name === name);
     const apps = appsFor(name);
@@ -442,7 +472,10 @@ export function evaluateCommitChecks(
     const statuses = named.filter((node) => node.kind === "StatusContext");
     const results: Array<CheckState | undefined> = apps
       ? [
-        ...apps.map((app) => requiredNodeState(named.find((node) => node.kind === "CheckRun" && node.appId === app) ?? statuses[0])),
+        ...apps.flatMap((app) => {
+          const runs = named.filter((node) => node.kind === "CheckRun" && node.appId === app);
+          return runs.length ? runs.map(requiredNodeState) : [requiredNodeState(statuses[0])];
+        }),
         ...statuses.map(requiredNodeState),
       ]
       : named.length > 0 ? named.map(requiredNodeState) : [undefined];
@@ -505,6 +538,7 @@ interface Observation {
   /** Latest ready event, or creation for a PR with a known empty ready-event timeline. */
   admittedAfter: number | null;
   admittedSkippedRuns?: ReadonlySet<number>;
+  workflowRetry?: ReadonlySet<string>;
   /** The pull request's head branch, which check suites name. */
   headRef: string | null;
   /** The latest merge-queue event, when it is a removal no force push has followed. */
@@ -623,16 +657,11 @@ async function admittedSkippedRuns(
   if (seen.isDraft || seen.queue || seen.mergeStateStatus !== "BLOCKED" || seen.admittedAfter === null ||
       seen.rollupSha !== seen.headSha) return admitted;
   const contexts = record(record(seen.rollup)?.contexts);
-  const nodes = (Array.isArray(contexts?.nodes) ? contexts.nodes : []).map(checkNode);
-  const latest = new Map<string, CheckNode>();
-  for (const node of nodes) {
-    if (!node || node.kind !== "CheckRun" || (!required.names.includes(node.name) && !node.isRequired)) continue;
+  const latest = latestChecks(Array.isArray(contexts?.nodes) ? contexts.nodes : []).filter((node) => {
     const apps = Object.hasOwn(required.apps, node.name) ? required.apps[node.name] : undefined;
-    if (apps && (node.appId === undefined || !apps.includes(node.appId))) continue;
-    const key = `${apps ? node.appId : ""}\0${node.name}`;
-    const previous = latest.get(key);
-    if (!previous || newer(node, previous)) latest.set(key, node);
-  }
+    return node.kind === "CheckRun" && (required.names.includes(node.name) || node.isRequired) &&
+      (!apps || (node.appId !== undefined && apps.includes(node.appId)));
+  });
   const candidates = [...latest.values()].filter((node) => node.conclusion === "SKIPPED" && positiveId(node.id));
   if (candidates.length === 0 || candidates.length > MAX_SKIP_PROVENANCE_CHECKS) return admitted;
   const possible = new Set(candidates.map((check) => check.id!));
@@ -679,6 +708,80 @@ async function admittedSkippedRuns(
         exactJob.conclusion === "skipped" && exactJob.name === check.name) admitted.add(check.id!);
   }
   return admitted;
+}
+
+/** At most one optional 100-run read per commit observation, only for shared names in distinct
+ * suites with uncached identity. Missing, denied, malformed or truncated provenance retains separate suites. No workflow
+ * name is trusted as identity: different workflows can themselves have the same display name. */
+type WorkflowIdentity = { workflowId: number; workflowEvent: string; workflowContext: string };
+async function workflowChecks(
+  gh: GhRunner, repository: string, sha: string | null, rollup: unknown, cache: Map<number, WorkflowIdentity | null>,
+): Promise<{ rollup: unknown; retry: ReadonlySet<string> }> {
+  let retry = false;
+  const contexts = record(record(rollup)?.contexts);
+  const nodes = Array.isArray(contexts?.nodes) ? contexts.nodes : [];
+  const suites = new Map<string, Set<number>>();
+  for (const raw of nodes) {
+    const node = checkNode(raw);
+    if (node?.suiteId === undefined) continue;
+    const key = JSON.stringify([node.appId, node.name]);
+    const ids = suites.get(key) ?? new Set<number>();
+    ids.add(node.suiteId);
+    suites.set(key, ids);
+  }
+  if (!sha || ![...suites.values()].some((ids) => ids.size > 1)) return { rollup, retry: new Set() };
+  const missing = [...suites.values()].some((ids) => ids.size > 1 && [...ids].some((id) => !cache.has(id)));
+  if (missing) {
+    let body: Record<string, unknown> | null = null;
+    try {
+      const response = await gh(["api", "--hostname", "github.com", `repos/${repository}/actions/runs?head_sha=${sha}&per_page=100`]);
+      retry = response.timedOut || transient(response);
+      if (response.code === null && !response.timedOut) body = record(parseJson(response.stdout));
+      if (body?.errors !== undefined && (!Array.isArray(body.errors) || body.errors.length > 0)) body = null;
+    } catch { /* An unclassified denial retains suites; it never fails the wait. */ }
+    const runs = body?.workflow_runs;
+    if (Array.isArray(runs) && runs.length <= 100 && body?.total_count === runs.length) {
+      const found = new Map<number, WorkflowIdentity | null>();
+      let valid = true;
+      for (const raw of runs) {
+        const run = record(raw);
+        if (!run || run.head_sha !== sha || !positiveId(run.check_suite_id) || !positiveId(run.workflow_id) ||
+            typeof run.event !== "string") { valid = false; break; }
+        const prs = Array.isArray(run.pull_requests) ? run.pull_requests.map(record) : [];
+        const prEvent = ["pull_request", "pull_request_target"].includes(run.event);
+        const branch = typeof run.head_branch === "string" && run.head_branch ? run.head_branch : null;
+        const comparable = branch !== null && (run.event === "push" || (prEvent && prs.length > 0 &&
+          prs.every((pr) => positiveId(pr?.number) && typeof record(pr?.base)?.ref === "string")));
+        const context = comparable ? JSON.stringify([branch, prEvent
+          ? prs.map((pr) => [pr!.number, record(pr!.base)!.ref]).sort((a, b) => Number(a[0]) - Number(b[0])) : []]) : null;
+        const identity = context === null ? null : { workflowId: run.workflow_id, workflowEvent: run.event, workflowContext: context };
+        if (found.has(run.check_suite_id) && JSON.stringify(found.get(run.check_suite_id)) !== JSON.stringify(identity)) {
+          valid = false; break;
+        }
+        const previous = cache.get(run.check_suite_id);
+        if (previous && identity && (previous.workflowId !== identity.workflowId || previous.workflowEvent !== identity.workflowEvent ||
+            previous.workflowContext !== identity.workflowContext)) { valid = false; break; }
+        found.set(run.check_suite_id, identity);
+      }
+      if (valid) for (const ids of suites.values()) for (const id of ids) {
+        // Absence from a list is not immutable evidence: only cache suites actually returned.
+        if (!found.has(id)) continue;
+        const identity = found.get(id) ?? cache.get(id) ?? null;
+        cache.set(id, identity);
+        if (cache.size > 2_000) cache.delete(cache.keys().next().value!);
+      }
+    }
+  }
+  const retryChecks = new Set<string>();
+  if (retry) for (const [key, ids] of suites) {
+    if (ids.size > 1 && [...ids].some((id) => !cache.has(id))) retryChecks.add(key);
+  }
+  return { retry: retryChecks, rollup: { ...record(rollup), contexts: { ...contexts, nodes: nodes.map((raw) => {
+    const node = record(raw);
+    const suite = record(node?.checkSuite);
+    const identity = cache.get(suite?.databaseId as number);
+    return !identity ? raw : { ...node, checkSuite: { ...suite, ...identity } };
+  }) } } };
 }
 
 type Read<T> = { ok: true; value: T } | { ok: false; retryable: boolean; error: string };
@@ -750,6 +853,9 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
   let confirming: string | null = null;
   let transientFailures = 0;
   let polls = 0;
+  // Immutable suite identities, local to this wait and bounded across changing queue heads.
+  const workflowCache = new Map<number, WorkflowIdentity | null>();
+  let workflowTransientFailures = 0;
 
   const summarize = (outcome: PullRequestWaitOutcome, seen: Observation): PullRequestWaitSummary => ({
     outcome,
@@ -846,9 +952,12 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     if (!head.ok) return head;
     const group = seen.queue ? await completeContexts(seen.queue.rollup, seen.queue.headSha) : null;
     if (group && !group.ok) return group;
+    const headChecks = await workflowChecks(gh, repository, seen.rollupSha, head.value, workflowCache);
+    const groupChecks = seen.queue && group ? await workflowChecks(gh, repository, seen.queue.headSha, group.value, workflowCache) : null;
     return {
       ok: true,
-      value: { ...seen, rollup: head.value, ...(seen.queue && group ? { queue: { ...seen.queue, rollup: group.value } } : {}) },
+      value: { ...seen, rollup: headChecks.rollup, workflowRetry: headChecks.retry,
+        ...(seen.queue && groupChecks ? { queue: { ...seen.queue, rollup: groupChecks.rollup } } : {}) },
     };
   };
 
@@ -925,6 +1034,30 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
         if (deps.signal?.aborted) return { ok: false, error: "request cancelled" };
       }
       const checks = evaluateCommitChecks(seen.headSha, seen.rollup, required.names, required.apps, seen.mergeStateStatus, seen.admittedSkippedRuns);
+      // Retry only classified transient optional reads, within a fixed budget. A denied read still
+      // retains observed failures; an unresolved transient at the deadline reports timeout.
+      const unresolved = seen.workflowRetry ?? new Set<string>();
+      const contexts = record(record(seen.rollup)?.contexts);
+      const independent = unresolved.size > 0 ? evaluateCommitChecks(seen.headSha, {
+        contexts: { ...contexts, nodes: (Array.isArray(contexts?.nodes) ? contexts.nodes : [])
+          .filter((raw) => {
+            const node = checkNode(raw);
+            return !unresolved.has(JSON.stringify([node?.appId, node?.name]));
+          }) },
+      }, required.names, required.apps, seen.mergeStateStatus, seen.admittedSkippedRuns) : checks;
+      const independentFailure = independent.requiredState === "failed" ||
+        (input.returnOnAnyFailure && independent.summary.failedJobs.length > 0);
+      const observedFailure = checks.requiredState === "failed" ||
+        (input.returnOnAnyFailure && checks.summary.failedJobs.length > 0);
+      const retryIdentity = observedFailure && unresolved.size > 0 && !independentFailure &&
+        ++workflowTransientFailures <= MAX_TRANSIENT_FAILURES;
+      if (unresolved.size === 0) workflowTransientFailures = 0;
+      if (retryIdentity) {
+        // A retry must bypass every terminal success outcome, including optional-only waits.
+        if (now() >= deadline) return { ok: true, summary: summarize("timeout", seen) };
+        if (!await pause(intervalMs)) return { ok: false, error: "request cancelled" };
+        continue;
+      }
       if (checks.requiredState === "failed" || (input.returnOnAnyFailure && checks.summary.failedJobs.length > 0)) {
         return { ok: true, summary: summarize("checks_failed", seen) };
       }

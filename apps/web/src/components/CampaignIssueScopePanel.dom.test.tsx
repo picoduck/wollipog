@@ -10,6 +10,8 @@ test("scope approval displays exact qualified changes, revision and affected aut
     affectedAssignments:[{sessionId:"child",issue:123}],affectedDecisions:["closure-old"],activeChildren:[{sessionId:"untracked-child",title:"Active Untracked Work",assignmentDigest:"a".repeat(64)}]}}/>);
   for(const expected of ["team/repo#124", "team/repo#125", "team/repo#123", "3 to 4", "child", "closure-old", "&lt;literal&gt;", "Issue closure still requires its own human approval"]) assert.ok(markup.includes(expected),expected);
   assert.equal(markup.includes("Maximum Issues"), false, "a change without an owner review states no limit");
+  assert.ok(markup.includes("Under Full Control, approving revokes every decision outstanding at that moment, including any filed after this request"),
+    "the list is what the request saw; the approval revokes what is outstanding when it happens (#4332)");
 });
 
 test("an Orchestrator's proposal without lineage says why it waits for the owner and the Maximum Issues increase approving applies (#4267)", () => {

@@ -1,4 +1,5 @@
 export * from "./shared-predicates.js";
+export * from "./provider-account-selection.js";
 import { isProviderHomeRecoveryCause, PROVIDER_HOME_RECOVERY_CAUSE_CODES, type ProviderHomeRecoveryCause, type ProviderHomeBlockingProcess } from "./provider-home-recovery.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, type OrchestratorReviewPolicy } from "./orchestrator-review-policy.js";
 export * from "./orchestrator-review-policy.js";
@@ -295,6 +296,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v180 current-identity inspection and account selection from an Authentication Required card. */
   providerAuthenticationAccountRecovery: 180,
   providerAccounts: 170,
+  /** v334 (#4353): a runner reports each account's billing and cooldown and rechecks a policy-chosen
+   * account at launch, so the control plane may enforce a non-fixed account selection policy. */
+  providerAccountSelectionPolicy: 334,
   providerLogin: 171,
   providerAccountRemoval: 188,
   accountScopedAgentSkills: 172,
@@ -2387,7 +2391,8 @@ export interface CampaignOwnerDecision {
   /** The session whose request it is: the root for an owner decision, else the requester. */
   sessionId: string;
   category: WorkflowDecisionCategory;
-  /** The owner decision's question, or what a handed-off occurrence decides ("Merge team/repo#7"). */
+  /** The owner decision's question, or what a handed-off occurrence decides ("Merge team/repo#7"). A
+   * scope request names its exact change and any Maximum Issues increase, and is never shortened (#4334). */
   summary: string;
   /** The root handed an Orchestrator-owned occurrence to the owner, rather than asking anew. */
   handedOff: boolean;
@@ -2997,6 +3002,12 @@ export interface ProviderAccountDefinition {
    * plane may use it. Absent means a legacy, unadopted HOME. Older control planes never receive
    * it, nor any profile-bearing account they are not granted. */
   profile?: ProviderAccountProfileView;
+  /** Protocol v334 (#4353): how this account's provider status check says it bills. Only
+   * `subscription` qualifies for automatic selection; absent or `unknown` is unverified. */
+  billing?: import("./provider-account-selection.js").ProviderAccountBilling;
+  /** Protocol v334 (#4353): an automatic switch left this account at a usage limit, so automatic
+   * selection passes over it until this time (epoch milliseconds). */
+  selectionCooldownUntil?: number;
 }
 
 /** `pending`: the runner holds this control plane's grant but the control plane has not yet
@@ -3495,12 +3506,24 @@ export interface RunnerAutomaticAccountSwitchConfiguration {
   revision: number;
 }
 
-/** Control-plane-owned default for new host sessions on one Machine and provider. */
+/** Control-plane-owned account policy for new host sessions on one Machine and provider. It holds
+ * account references and policy metadata only, never credentials. Every write advances `revision`,
+ * which detects conflicting edits across all of its fields. */
 export interface RunnerProviderAccountDefault {
   provider: ProviderAccountDefinition["provider"];
-  /** Null restores the existing agent/default-order behavior without losing the revision. */
+  /** The fixed default, as older clients read it: null under any other mode, so none of them shows a
+   * default the Machine isn't using. Null also restores the existing agent/default-order behavior
+   * without losing the revision. */
   accountId: string | null;
   revision: number;
+  /** Absent from a control plane before #4353, meaning `fixed`. */
+  mode?: import("./provider-account-selection.js").ProviderAccountStoredPolicyMode;
+  schemaVersion?: number;
+  /** The saved default, kept under any mode so returning to Default Account restores it. */
+  fixedAccountId?: string | null;
+  /** Rank order for Priority Order, kept under any mode. May name an account no longer on the
+   * Machine, which stays visible until a person removes it. */
+  priorityAccountIds?: string[];
 }
 
 export interface RunnerCapacityDimension {
@@ -5217,6 +5240,9 @@ export interface WorkflowDecisionView {
   resolvedAt?: number;
   /** v329 (#4301): durable issue-closure approval provenance; informational, never a grant. */
   approval?: { actor: GovernanceActor; at: number };
+  /** (#4332) An applied scope change: exactly the decisions it revoked, which a person's Full Control
+   * approval decides when it happens, so its request's `affectedDecisions` can differ. Sorted. */
+  scopeRevokedDecisions?: string[];
   consumedAt?: number;
   actionAdmission?: WorkflowDecisionActionAdmission;
   /** v284 (#4067): what Wollipog did when it performed this approved forge action itself. */
@@ -5328,6 +5354,9 @@ export interface PendingApproval {
   campaignRecovery?: import("./campaign-recovery.js").CampaignRecoveryRecord;
   /** Server-derived exception when a parked root callback could not be delivered. */
   standingAdmissionFailure?: "provider_delivery_unavailable";
+  /** Server-derived, never stored (#4334): the Maximum Issues increase approving this scope request
+   * applies, read when the session is read under the rule the approval applies. Informational. */
+  scopeMaxIssuesIncrease?: { from: number; increase: number };
   /** CP-derived mandatory human rule on this occurrence. Provider input cannot set it. */
   humanRequired?: boolean;
   /** CP-derived Decision Model screen of this request's text (#4104). The control plane overwrites
@@ -5669,6 +5698,8 @@ export interface GovernanceAuditEntry {
     publicationAuthority?: { authorizedByUserId: string; objectiveDigest: string };
     /** #3916: on a server revocation, why, and who acted when it happened. */
     revocation?: WorkflowDecisionRevocation;
+    /** #4332: on the record consuming a scope change, exactly the decisions it revoked. */
+    revokedDecisions?: string[];
   };
   timestamp: number;
 }
@@ -8268,6 +8299,9 @@ export interface SessionView {
   providerAccountLabel?: string;
   /** True when the current binding was chosen by the Machine's opt-in automatic policy. */
   providerAccountAutomaticallySelected?: boolean;
+  /** Protocol v334 (#4353): why this session started on its account. Fixed at creation, so a later
+   * policy change or usage-limit switch leaves it describing the launch. Names no account. */
+  providerAccountSelection?: import("./provider-account-selection.js").ProviderAccountSelectionRecord;
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView;
   /** (#4138) An approved Location switch waiting for the provider's turn to end, or one that failed
    * and left the session in its previous Location. */
@@ -10607,6 +10641,8 @@ export interface SessionLaunchSpec {
   campaignBudgetDispatch?: import("./campaign-budget.js").CampaignBudgetDispatch;
   artifactUploads?: ArtifactUploadPreference;
   projectMemory?: SessionProjectMemory;
+  /** Protocol v334 (#4353): why the control plane chose `providerAccountId`. Never names an account. */
+  providerAccountSelection?: import("./provider-account-selection.js").ProviderAccountSelectionRecord;
   sessionId: string;
   /** Opaque identity used to prove that an ambiguous replacement start reached the runner. */
   controlPlaneLaunchId?: string;

@@ -1929,6 +1929,87 @@ test("provider account defaults persist per Machine and provider across reconnec
   }
 });
 
+test("a Machine's account policy migrates, persists across restarts and detects conflicting edits (#4353)", () => {
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-account-policy-"));
+  const location = join(temp, "control-plane.db");
+  let db: ControlPlaneDb | undefined;
+  const accountMeta = meta({ providerAccounts: [
+    { id: "claude-work", label: "Work", provider: "claude", authStatus: "authenticated" },
+    { id: "claude-personal", label: "Personal", provider: "claude", authStatus: "authenticated" },
+  ] });
+  try {
+    db = ControlPlaneDb.open(location);
+    db.registerRunner(accountMeta, 100, PROTOCOL_VERSION);
+    db.close();
+    db = undefined;
+    // A database from before versioned policies, holding a default and a cleared preference.
+    const legacy = new DatabaseSync(location);
+    legacy.exec("DROP TABLE machine_provider_account_defaults");
+    legacy.exec(`CREATE TABLE machine_provider_account_defaults (
+      runner_id TEXT NOT NULL, provider TEXT NOT NULL CHECK (provider IN ('claude', 'codex')), account_id TEXT,
+      revision INTEGER NOT NULL CHECK (revision > 0), updated_at INTEGER NOT NULL,
+      PRIMARY KEY (runner_id, provider), FOREIGN KEY (runner_id) REFERENCES runners(runner_id) ON DELETE CASCADE)`);
+    legacy.exec(`INSERT INTO machine_provider_account_defaults VALUES ('runner-1', 'claude', 'claude-work', 4, 90), ('runner-1', 'codex', NULL, 2, 91)`);
+    legacy.close();
+
+    db = ControlPlaneDb.open(location);
+    db.registerRunner(accountMeta, 200, PROTOCOL_VERSION);
+    assert.deepEqual(db.getRunner("runner-1")?.providerAccountDefaults, [
+      { provider: "claude", accountId: "claude-work", revision: 4 },
+      { provider: "codex", accountId: null, revision: 2 },
+    ], "a migrated default keeps its account and revision, and a cleared one its legacy fallback");
+
+    const order = ["claude-personal", "claude-work"];
+    assert.deepEqual(db.setMachineProviderAccountPolicy("runner-1", "claude",
+      { mode: "priority", fixedAccountId: "claude-work", priorityAccountIds: order }, 3, 201), {
+      ok: false, policy: { provider: "claude", accountId: "claude-work", revision: 4 },
+    }, "a stale revision writes nothing and shows what is saved");
+    const saved = db.setMachineProviderAccountPolicy("runner-1", "claude",
+      { mode: "priority", fixedAccountId: "claude-work", priorityAccountIds: order }, 4, 202);
+    const expected = { provider: "claude" as const, accountId: null, revision: 5, mode: "priority" as const, schemaVersion: 1,
+      fixedAccountId: "claude-work", priorityAccountIds: order };
+    assert.deepEqual(saved, { ok: true, policy: expected });
+
+    assert.deepEqual(db.setMachineProviderAccountDefault("runner-1", "claude", "claude-personal", 5, 203), {
+      ok: false, choice: expected, notFixed: true,
+    }, "an older client can't overwrite a policy it can't show, even at the current revision");
+
+    db.close();
+    db = ControlPlaneDb.open(location);
+    db.registerRunner(accountMeta, 300, PROTOCOL_VERSION);
+    assert.deepEqual(db.machineProviderAccountDefault("runner-1", "claude"), expected, "the policy survives a restart");
+    db.updateRunnerAgents("runner-1", accountMeta.agents, 301, undefined, []);
+    assert.deepEqual(db.machineProviderAccountDefault("runner-1", "claude")?.priorityAccountIds, order,
+      "removed accounts stay ranked until a person removes them");
+
+    const restored = db.setMachineProviderAccountPolicy("runner-1", "claude",
+      { mode: "fixed", fixedAccountId: "claude-work", priorityAccountIds: order }, 5, 302);
+    assert.ok(restored.ok);
+    assert.equal(restored.policy.accountId, "claude-work", "returning to Default Account restores the default");
+    assert.deepEqual(restored.policy.priorityAccountIds, order, "and keeps the order for next time");
+    const overwritten = db.setMachineProviderAccountDefault("runner-1", "claude", "claude-personal", 6, 303);
+    assert.ok(overwritten.ok, "a fixed policy still accepts the older route");
+    assert.deepEqual(overwritten.choice.priorityAccountIds, order);
+  } finally {
+    db?.close();
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("account usage reaches selection only for accounts, whatever the reading's age (#4353)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    db.registerRunner(meta({}), 100, PROTOCOL_VERSION);
+    const base = { runnerId: "runner-1", agentId: "agent-1", provider: "claude" as const, state: "available" as const, buckets: [] };
+    db.upsertSubscriptionUsageSnapshot({ ...base, sourceId: "s-account", providerAccountId: "work", fetchedAt: 1 }, 2);
+    db.upsertSubscriptionUsageSnapshot({ ...base, sourceId: "s-legacy", fetchedAt: 1 }, 2);
+    assert.deepEqual(db.providerAccountUsageSnapshots("runner-1").map((snapshot) => snapshot.providerAccountId), ["work"]);
+    assert.deepEqual(db.providerAccountUsageSnapshots("another-runner"), []);
+  } finally {
+    db.close();
+  }
+});
+
 test("capacity dimensions and overflow diagnostics are accepted only from protocol-v135 runners", () => {
   const db = ControlPlaneDb.open(":memory:");
   const runtime = {

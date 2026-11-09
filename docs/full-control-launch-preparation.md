@@ -142,7 +142,9 @@ only) establishes the boundary before the Orchestrator's first turn:
   was checked and what it led to; a checked proposal also shows the Decision Model Verdict and each
   typed question with its answer, confidence and evidence (#4283's checklist). When the Full Control
   section already shows Maximum Issues and Operations, this section leaves those two rows out. Each
-  check, a refused one included, is also listed in Decision Model Checks as a Scope Proposal.
+  check, a refused one included, is also listed in Decision Model Checks as a Scope Proposal. A
+  proposal that became the owner's one approval is listed under **Waiting for You** too, with an Open
+  Request (#4334).
 - A campaign whose first message was read before #4282 keeps its stored grant and scope, and the
   rest of this section describes that grant. The issue scope came from a typed **scope grant**
   (#4102): the Decision Model (`scope_grant`) read only the exact message and returned explicit
@@ -150,7 +152,7 @@ only) establishes the boundary before the Orchestrator's first turn:
   deterministic floors (`scope-grant.ts`) only removed from that answer. A failed or uncertain grant
   left the scope empty and routed the Orchestrator's proposal to one typed, person-owned approval
   (`grantReview`), whose approval also sets a derived Maximum Issues. Campaign Status shows its
-  **Scope Grant** section.
+  **Scope Grant** section, and lists that approval under **Waiting for You** (#4334).
 - On the campaign's own Campaign Status, the owner can change a granted selection's count with
   Change Count (`POST /api/sessions/:id/orchestrator-campaign/scope-grant/selection-count`, Human
   only, compare-and-set on the policy revision, `setScopeGrantSelectionCount`). Only the person who

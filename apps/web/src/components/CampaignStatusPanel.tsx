@@ -400,7 +400,8 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
 }) {
   const headingId = useId();
   const hidden = ownerDecisions.total - ownerDecisions.items.length;
-  // An Orchestrator's scope proposal without lineage waits for the owner without the owner keeping it (#4267).
+  // A scope proposal the server routed to the owner waits for them without the owner keeping it: for
+  // want of lineage (#4267), after a grant review (#4102, #4103) or a proposal check (#4282), all #4334.
   const scopeApproval = (item: (typeof ownerDecisions.items)[number]) => item.category === "campaign_issue_scope" && !item.ownerRule && !item.handedOff;
   // So does its request to add a repository (#4117): the owner never kept it, it is always theirs.
   const repositoryAddition = (item: (typeof ownerDecisions.items)[number]) => item.category === "campaign_repository_addition" && !item.ownerRule && !item.handedOff;
@@ -416,10 +417,11 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
       </p>
       <ul className="campaign-detail-list">
         {ownerDecisions.items.map((item) => {
-          // The exact occurrence wherever this session lists it. Another session's decision this
+          // Only the exact occurrence, wherever this session lists it: no session fallback, which
+          // would open this session's first request instead (#4334). Another session's decision this
           // session does not list (a nested Orchestrator controls it, #4337) opens in its own
           // session at that request, never at another request of the same session.
-          const requestKey = findRequest({ occurrenceId: item.occurrenceId, sessionId: item.sessionId === sessionId ? item.sessionId : null });
+          const requestKey = findRequest({ occurrenceId: item.occurrenceId, sessionId: null });
           const openElsewhere = !requestKey && item.sessionId !== sessionId && onOpenSessionRequest
             ? () => onOpenSessionRequest(item.sessionId, item.occurrenceId) : null;
           const open = requestKey ? () => onOpenRequest(requestKey) : openElsewhere;
