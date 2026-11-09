@@ -1605,10 +1605,10 @@ export class ProviderHomeLeaseRegistry {
         let chain = owned();
         // Before a first anchor, a successor's in-lock name is the compare-and-swap for its predecessor,
         // and a contender that read that predecessor links there unfenced. Freeing the name this holder
-        // won would let that link succeed and leave a record no chain accepts, so it stays taken: the
-        // manifest already lists it, and the next holder's compaction removes it. (A contender would
-        // have to sleep through the whole lease to reach it then.) An anchored chain publishes
-        // successors through the fence at the root, so its in-lock names are only mirrors.
+        // won would let that link succeed and leave a record no chain accepts, so it stays taken while
+        // this lease lasts: the manifest already lists it, and the compaction at release removes it. (A
+        // contender would have to sleep through the whole lease to reach it then.) An anchored chain
+        // publishes successors through the fence at the root, so its in-lock names are only mirrors.
         unanchoredSuccessor = chain.anchor ? undefined : activeSuccessor(chain.tip);
         // A new journal has no historical successor to checkpoint yet. Its first
         // release remains bounded; the following acquisition migrates the chain.

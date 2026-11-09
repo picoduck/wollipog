@@ -442,12 +442,12 @@ test("a stale contender cannot publish over the successor name a winner's first 
   // The journal stays readable: the next contender is refused by the live winner, not by corruption.
   const verifier = new ProviderHomeLeaseRegistry(OWNER_A, { hostname: "host-a", isProcessAlive: alive });
   assert.throws(() => verifier.acquire(request(home)), /already in use by process/);
-  winner.releaseAll();
-  // The next holder finishes the retirement the first checkpoint deferred.
+  // The winner's release finishes the retirement its first checkpoint deferred, and the HOME moves on.
+  assert.equal(winner.releaseAll(), true);
+  assert.equal(existsSync(join(lock, `next-${LEGACY_ID}.json`)), false);
   const next = new ProviderHomeLeaseRegistry(OWNER_A, { hostname: "host-a", isProcessAlive: alive });
   next.acquire(request(home));
-  assert.equal(existsSync(join(lock, `next-${LEGACY_ID}.json`)), false);
-  next.releaseAll();
+  assert.equal(next.releaseAll(), true);
 });
 
 test("retained partial evidence and external canonical records are rechecked after recovery", (t) => {
