@@ -550,6 +550,9 @@ test("prepare refuses every request outside the requester's own pull request at 
   const attached = fixture(t, { requester: { worktrees: undefined } });
   assert.equal(await refusal(attached.launcher.prepare("s_review", attached.policy(), CODEX, "b")),
     "resume this session once so the runner can verify its automatic worktree before requesting a review");
+  const noWorktree = fixture(t, { requester: { worktreePath: undefined, worktrees: undefined } });
+  assert.equal(await refusal(noWorktree.launcher.prepare("s_review", noWorktree.policy(), CODEX, "b")),
+    "the review must cover the session's own native managed worktree");
   // A review session never requests a review of its own.
   const review = fixture(t, { requester: { review: { requesterSessionId: "s_x" } as SessionMeta["review"] } });
   assert.equal(await refusal(review.launcher.prepare("s_review", review.policy(), CODEX, "b")),

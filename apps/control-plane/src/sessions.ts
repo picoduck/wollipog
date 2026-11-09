@@ -11378,8 +11378,9 @@ export class SessionsService {
       costBudgetUsd = requesterCeiling - (session.costUsd ?? 0) - this.db.reviewSessions.spentFor(session.id)
         - this.db.reviewSessions.reservedFor(session.id);
       if (!(costBudgetUsd > 0)) return fail("this session has no cost budget left for a review", 409);
-      // Leave a share for another pull request. Campaign admission already splits its allowance.
-      if (concurrentReviews && !budgetRoot) costBudgetUsd /= 2;
+      // Leave a share of the original human ceiling for another pull request. Campaign admission
+      // still reserves each review's allowance share, capped by this requester remainder.
+      if (concurrentReviews) costBudgetUsd /= 2;
       if (!(costBudgetUsd > 0)) return fail("this session has no cost budget left for a review", 409);
     }
     const policy: ReviewLaunchPolicy = {

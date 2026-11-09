@@ -9,6 +9,7 @@ import {
   type ReviewSessionCapability, type ReviewSessionRequest, type RunnerMetadata, type StartSessionMessage,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
+import { ReviewSessions } from "./review-sessions.js";
 import { Hub } from "./hub.js";
 import { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { SessionsService } from "./sessions.js";
@@ -432,6 +433,44 @@ test("a requester has one active review; another starts once it settles", () => 
     assert.equal(older.data?.reviews[0]?.reviewSessionId, first.reviewSessionId);
     assert.equal(older.data?.nextAfterReviewSessionId, null);
   } finally { h.db.close(); }
+});
+
+test("install migrates the requester-wide index and retains per-PR uniqueness", () => {
+  const h = harness();
+  try {
+    const sql = h.db.raw();
+    sql.exec(`DROP INDEX review_sessions_one_active_pr;
+      CREATE UNIQUE INDEX review_sessions_one_active ON review_sessions(requester_session_id)
+      WHERE state IN ('requested','running')`);
+    const a = requested(h);
+    ReviewSessions.install(sql);
+    assert.equal(sql.prepare("SELECT name FROM sqlite_master WHERE name='review_sessions_one_active'").get(), undefined);
+    const b = h.svc.requestReviewSession("s1", request({ pullRequest: { repository: "picoduck/wollipog", number: 4329 } }));
+    assert.ok(b.ok, b.error ?? "request refused");
+    assert.throws(() => h.db.reviewSessions.record({ reviewSessionId: "duplicate", requesterSessionId: "s1", runnerId: "r",
+      pullRequest: { ...a.pullRequest, repository: "Picoduck/Wollipog" }, headSha: HEAD, reviewer: "codex" }, 10), /UNIQUE/);
+    // Older binaries must not be started on this database until these reviews settle.
+    assert.throws(() => sql.exec(`CREATE UNIQUE INDEX review_sessions_one_active ON review_sessions(requester_session_id)
+      WHERE state IN ('requested','running')`), /UNIQUE/);
+  } finally { h.db.close(); }
+});
+
+test("campaign reviews split a human ceiling while retaining independent allowance reservations", () => {
+  for (const costUsd of [undefined, 140]) {
+    const h = harness({ campaign: true });
+    try {
+      h.db.updateSessionCostBudget("s1", 8, 4);
+      h.enableCampaign({ costUsd });
+      h.db.addSessionUsage("s1", { costUsd: 3 }, 5);
+      const a = requested(h);
+      const b = h.svc.requestReviewSession("s1", request({ pullRequest: { repository: "picoduck/wollipog", number: 4329 } }));
+      assert.ok(b.ok && b.data, b.error ?? "request refused");
+      assert.equal(h.db.campaignBudgets.allocation(a.reviewSessionId)!.costUsd, 2.5);
+      assert.equal(h.db.campaignBudgets.allocation(b.data.reviewSessionId)!.costUsd, 1.25);
+      assert.equal(h.db.reviewSessions.reservedFor("s1"), 3.75);
+      if (costUsd !== undefined) assertConserved(h);
+    } finally { h.db.close(); }
+  }
 });
 
 test("different pull requests run concurrently and each delivers its own continuation", () => {
@@ -1569,8 +1608,8 @@ test("an authenticated prelaunch review checkpoint returns the reservation witho
   } finally { h.db.close(); }
 });
 
-test("campaign review ceilings preserve the requester's original human budget across attempts", () => {
-  const h = harness({ campaign: true });
+test("legacy campaign review ceilings preserve the requester's original human budget across attempts", () => {
+  const h = harness({ campaign: true, protocol: 334 });
   try {
     h.db.updateSessionCostBudget("s1", 8, 4);
     h.enableCampaign();
@@ -1751,7 +1790,7 @@ test("a requester's own ceiling lowers a campaign review's share but never raise
       const share = h.db.campaignBudgets.view("root")!.remaining.costUsd! / 2;
       assert.ok(share > 4 && share < 500, "the fixture's share lies between the two ceilings");
       const allocation = h.db.campaignBudgets.allocation(requested(h, "s1").reviewSessionId)!;
-      assert.equal(allocation.costUsd, Math.min(ceiling, share), `ceiling ${ceiling}`);
+      assert.equal(allocation.costUsd, Math.min(ceiling / 2, share), `ceiling ${ceiling}`);
       assertConserved(h);
     } finally { h.db.close(); }
   }

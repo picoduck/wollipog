@@ -149,6 +149,7 @@ export async function bindPullRequestScope(input: {
     refuseReview("the review must cover the session's own native managed worktree");
   }
   if (!meta!.worktrees?.length) {
+    if (!meta!.worktreePath) refuseReview("the review must cover the session's own native managed worktree");
     refuseReview("resume this session once so the runner can verify its automatic worktree before requesting a review");
   }
   input.beforeRepository?.();
