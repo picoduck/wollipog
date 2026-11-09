@@ -21138,7 +21138,7 @@ export class SessionsService {
       skipped: providerAccountSelectionRecord(result).skipped ?? {} }));
     const details = { errorDetails: { code: PROVIDER_ACCOUNT_CHOICE_REQUIRED }, providerAccountSelection: providerAccountChoiceRequired(result) };
     return refusal === "runner_update_required"
-      ? { ...capabilityFail<T>(runnerCapabilityRequirementError(runner.protocolVersion, "providerAccountSelectionPolicy", "Priority Order")), ...details }
+      ? { ...capabilityFail<T>(runnerCapabilityRequirementError(runner.protocolVersion, "providerAccountSelectionPolicy", "priority order")), ...details }
       : { ok: false, status: 409, error: providerAccountChoiceRequiredSentence(result.provider, refusal, result.candidates), ...details };
   }
 

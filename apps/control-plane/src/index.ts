@@ -3786,7 +3786,7 @@ app.put("/api/runners/:id/provider-account-policies/:provider", async (req, repl
   const capability = write.mode === "fixed" ? "providerAccounts" as const : "providerAccountSelectionPolicy" as const;
   if (!runnerSupportsProtocol(runner.protocolVersion, capability)) {
     return reply.code(409).send(runnerCapabilityRequirementError(
-      runner.protocolVersion, capability, write.mode === "fixed" ? "default provider account changes" : "Priority Order",
+      runner.protocolVersion, capability, write.mode === "fixed" ? "default provider account changes" : "priority order",
     ));
   }
   // A newly named account must exist here and be usable here. One the record already names may be
