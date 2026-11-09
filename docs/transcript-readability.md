@@ -4,6 +4,15 @@ The authenticated dashboard treats transcript presentation as a projection of tw
 the bounded event cache and the recovery state for that cache's current event epoch. An empty array
 is not proof of an empty transcript while the control plane is still hydrating runner-owned history.
 
+## Message timestamps
+
+Every user and assistant message with a known recorded time shows its full local date and time,
+including the year and seconds, above its content. Active and completed sessions use the same
+absolute format in the browser's locale and time zone. Turn footers also include the full date
+and time. Semantic `time` elements retain the ISO instant; unknown or invalid times are omitted
+rather than inferred from a neighbouring message. Adopted history may only retain runner-recorded
+times rather than the provider's original send times.
+
 ## Opening window
 
 Opening a session reads a bounded window at the **tail** of its cached history — one request for the

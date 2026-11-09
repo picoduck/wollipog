@@ -8698,6 +8698,15 @@ textarea {
 }
 .tl-message-stack { display: grid; gap: 4px; min-width: 0; max-width: 80%; }
 .tl-message-stack .tl-bubble { max-width: 100%; }
+.tl-message-timestamp {
+  display: block;
+  color: var(--text-faint);
+  font: var(--type-micro);
+  font-variant-numeric: tabular-nums;
+  margin-bottom: var(--space-1);
+}
+.tl-message-stack.user > .tl-message-timestamp { justify-self: end; margin-bottom: 0; }
+.tl-message-stack.user > .tl-bubble { justify-self: end; }
 .tl-timestamp-meta {
   display: inline-flex;
   flex-wrap: wrap;

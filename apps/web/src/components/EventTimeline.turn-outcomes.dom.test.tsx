@@ -259,8 +259,8 @@ test("a stopped turn has no Interrupted row; its footer reads Stopped at its tim
     const footer = view.container.querySelector(".tl-turn-footer")!;
     const stopped = footer.querySelector(".tl-turn-stopped")!;
     assert.ok(stopped, "the stop is a footer fact");
-    assert.match(stopped.textContent?.replace(stopped.querySelector(".tl-tooltip")?.textContent ?? "", "") ?? "",
-      /^Stopped at \d{1,2}:\d{2} [AP]M$/);
+    assert.equal(stopped.textContent?.replace(stopped.querySelector(".tl-tooltip")?.textContent ?? "", "") ?? "",
+      `Stopped at ${new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" }).format(new Date(at(25)))}`);
     assert.equal(stopped.querySelector("time")?.getAttribute("dateTime"), new Date(at(25)).toISOString());
     const icon = stopped.querySelector("svg")!;
     assert.equal(icon.getAttribute("width"), "14");

@@ -2580,8 +2580,7 @@ records; the request dock owns them (#2179). The row is a `<details class="discl
 summary is `--control-h` tall (44px on touch): the §5.5 chevron, a 16px outcome icon in its tone
 (`CircleCheck` success, `CircleX` neutral, `ShieldX` danger, `TimerOff` warning, §18), the
 `requestDecision` word in its tone, the request's title, "by" who decided, and when: how long ago
-while the session runs (the transcript's live clock), otherwise the clock time like every other
-transcript timestamp, with the absolute date and time as its tooltip. Who decided is "You" (relative to the viewer, #2527), a policy's
+while the session runs (the transcript's live clock), otherwise the clock time, with the absolute date and time as its tooltip. Who decided is "You" (relative to the viewer, #2527), a policy's
 display name from the organization's policies (never "Policy · <id>"; "Policy" until the names
 load; they reload once for a policy they lack and after a policy is saved), the parent session's title, the reviewer, or "Wollipog" for a fail-closed block. A permission
 row names who decided from its own `permission_resolved` (#2628): the control plane sends
