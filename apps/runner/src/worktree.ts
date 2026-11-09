@@ -3162,7 +3162,32 @@ export async function captureRollbackSnapshot(path: string, options: WorktreeOpt
   return `${head}:${tree}:${await adminDirectoryDigest(context, gitDir)}`;
 }
 
-export type WorktreeRollbackWork = { state: "unchanged" } | { state: "changed"; reason: string } | { state: "unavailable" };
+/** Whether a worktree may hold work that exists nowhere else: anything Git sees as changed or
+ * untracked, or a commit since `baseCommit` that no remote branch has. With no base, every commit no
+ * remote has counts. An answer Git cannot give counts as yes, and a directory that has gone as no.
+ * Ignored files are not looked at. */
+export async function worktreeHoldsUnsharedWork(
+  path: string,
+  baseCommit: string | undefined,
+  options: WorktreeOptions = {},
+): Promise<boolean> {
+  const context = options.context ?? nativeContext;
+  try {
+    if (await removalPathIdentity(context, path) === null) return false;
+  } catch {
+    return true;
+  }
+  try {
+    if ((await command(context, path, ["status", "--porcelain=v1", "--untracked-files=all"])).trim()) return true;
+    const unshared = await command(context, path,
+      ["rev-list", "--count", "HEAD", "--not", "--remotes", ...(baseCommit ? [safeGitArgument(baseCommit, "base commit")] : [])]);
+    return Number(unshared.trim()) !== 0;
+  } catch {
+    return true;
+  }
+}
+
+export type WorktreeRollbackWork ={ state: "unchanged" } | { state: "changed"; reason: string } | { state: "unavailable" };
 
 /** Whether a proved worktree is still exactly what the runner left. The proof says which worktree
  * this is, not what has happened in it since. No answer is not a change, so a passing Git failure
