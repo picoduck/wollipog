@@ -172,8 +172,8 @@ export function subscriptionUsageBucketExhausted(bucket: SubscriptionUsageBucket
 
 /** The used-up window that keeps an account unavailable longest: one with no reset time, else the
  * one that resets last. */
-export function longestExhaustedUsageBucket(exhausted: readonly SubscriptionUsageBucket[]): SubscriptionUsageBucket | undefined {
-  return exhausted.reduce<SubscriptionUsageBucket | undefined>((longest, bucket) =>
+export function longestExhaustedUsageBucket<T extends Pick<SubscriptionUsageBucket, "resetsAt">>(exhausted: readonly T[]): T | undefined {
+  return exhausted.reduce<T | undefined>((longest, bucket) =>
     !longest || (longest.resetsAt !== undefined &&
       (bucket.resetsAt === undefined || bucket.resetsAt > longest.resetsAt)) ? bucket : longest, undefined);
 }
@@ -241,10 +241,10 @@ export function providerAccountIneligibility(
   const reached = (usage?.spendControls ?? []).filter((control) =>
     control.reached === true && (control.resetsAt === undefined || control.resetsAt > now));
   if (reached.length) {
-    const resets = reached.map((control) => control.resetsAt);
-    return { reason: "spend_limit_reached",
-      ...(resets.every((value): value is number => value !== undefined) ? { retryAt: Math.max(...resets) } : {}),
-      ...(reached[0]?.label ? { limitLabel: reached[0].label } : {}) };
+    // The control that keeps the account unavailable longest, so its name and reset describe one limit.
+    const limiting = longestExhaustedUsageBucket(reached);
+    return { reason: "spend_limit_reached", ...(limiting?.resetsAt !== undefined ? { retryAt: limiting.resetsAt } : {}),
+      ...(limiting?.label ? { limitLabel: limiting.label } : {}) };
   }
   return null;
 }

@@ -11,7 +11,7 @@ import {
   type RunnerView,
   type UiSnapshotMessage,
 } from "@wollipog/protocol";
-import { providerAccountPolicyFixedId, resolveProviderAccountSelection, type SubscriptionUsageSnapshot } from "@wollipog/protocol";
+import { providerAccountPolicyFixedId, resolveProviderAccountSelection, RUNNER_CAPABILITY_MIN_PROTOCOL, type SubscriptionUsageSnapshot } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
@@ -288,6 +288,8 @@ let socket: FixtureSocket | null = null;
 let box: BoxView | null = null;
 // `outdated` gives Design Workstation an older runner protocol (#2988's Runner Update Required).
 if (fixtureParams.has("outdated") && runner) runner.protocolVersion = PROTOCOL_VERSION - 1;
+// Below Priority Order's own floor, however far the current protocol has moved past it.
+if (fixtureParams.has("policyOutdated") && runner) runner.protocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccountSelectionPolicy - 1;
 // `credentialImport` (#3719) makes Design Workstation a Linux machine whose runner can copy an
 // existing Codex API-key sign-in into a new managed profile. `credentialImport=unsupported` is a
 // Linux runner that reports no such capability (one inside WSL or a container).
@@ -650,11 +652,11 @@ const client = {
       agent: undefined,
       native: true,
       usage: fixturePolicyUsage(),
-      policySupported: !fixtureParams.has("outdated"),
+      policySupported: !fixtureParams.has("policyOutdated"),
       now: Date.now(),
     });
     return { ...result, enforcement: fixtureParams.has("offline") ? "machine_offline" as const
-      : fixtureParams.has("outdated") && result.mode !== "fixed" ? "runner_update_required" as const : "enforced" as const, generatedAt: Date.now() };
+      : fixtureParams.has("policyOutdated") && result.mode !== "fixed" ? "runner_update_required" as const : "enforced" as const, generatedAt: Date.now() };
   },
   updateMachineProviderAccountDefault: async (
     _runnerId: string,

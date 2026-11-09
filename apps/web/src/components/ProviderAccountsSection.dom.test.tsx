@@ -15,12 +15,14 @@ import { HIDE_ACCOUNT_EMAILS_STORAGE_KEY, setHideAccountEmails } from "../accoun
 import { ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
+import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import type { MachineAccountsIntent } from "../navigation.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { providerAccountSkipLabel } from "./ProviderAccountSelection.js";
 import { initialPriorityOrder, movedPriorityOrder, ProviderAccountsSection, providerAccountRemovalRefusal, providerProfileErrorMessage, PROFILES_UNSUPPORTED_ON_WINDOWS } from "./ProviderAccountsSection.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
+installDomTestCleanup(domWindow);
 for (const [name, value] of Object.entries({
   window: domWindow, document: domWindow.document, navigator: domWindow.navigator, localStorage: domWindow.localStorage,
   HTMLElement: domWindow.HTMLElement, HTMLButtonElement: domWindow.HTMLButtonElement, HTMLInputElement: domWindow.HTMLInputElement,
@@ -2205,4 +2207,23 @@ test("a skip reason names the limit, and a cooldown says when it ends rather tha
   assert.equal(providerAccountSkipLabel({ reason: "cooldown", retryAt: now + 5 * 60_000 }, now), "Skipped: recently hit a usage limit. Available again in 5 minutes.");
   assert.equal(providerAccountSkipLabel({ reason: "signed_out" }, now), "Skipped: needs sign-in.");
   assert.equal(providerAccountSkipLabel({ reason: "not_ranked" }, now), undefined);
+});
+
+test("the visible move status follows Hide Account Emails while it is on screen (#4353)", async () => {
+  const { api } = priorityClient();
+  const ui = await render({ runner: runnerView({ protocolVersion: POLICY, providerAccounts: RANKED,
+    providerAccountDefaults: [priorityPolicy(["first", "second", "third"])] }), api });
+  try {
+    await ui.settle();
+    await act(async () => { setHideAccountEmails(false); });
+    await act(async () => ui.container.querySelector<HTMLButtonElement>('[data-move="second:down"]')!.click()); await ui.settle();
+    const status = () => ui.container.querySelector('.provider-selection-status[role="status"]')?.textContent ?? "";
+    assert.match(status(), /Moved second@example\.com to position 3 of 3\./u);
+    await act(async () => { setHideAccountEmails(true); });
+    assert.doesNotMatch(status(), /second@example\.com/u, "turning the preference on hides it at once");
+    assert.match(status(), /Moved .* to position 3 of 3\./u);
+  } finally {
+    await act(async () => { setHideAccountEmails(false); });
+    await ui.unmount();
+  }
 });

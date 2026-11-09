@@ -480,7 +480,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   const defaultWrites = useRef(new Set<ProviderAccountDefinition["provider"]>());
   const [savedDefaults, setSavedDefaults] = useState<NonNullable<RunnerView["providerAccountDefaults"]>>([]);
   // A control whose row just moved takes focus back once the list has redrawn, and a reader hears where.
-  const [moved, setMoved] = useState<{ provider: AccountProvider; selector: string; fallback: string; message: string } | null>(null);
+  const [moved, setMoved] = useState<{ provider: AccountProvider; label: string; position: number; total: number; selector: string; fallback: string } | null>(null);
   const usage = useMachineAccountUsage(runner, online);
   const defaults = (["claude", "codex"] as const).flatMap(provider => {
     const live = runner.providerAccountDefaults?.find(value => value.provider === provider);
@@ -839,18 +839,21 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
     });
   };
 
-  const moveAccount = (provider: AccountProvider, accountId: string, direction: "up" | "down", name: string) => {
+  const moveAccount = (provider: AccountProvider, accountId: string, direction: "up" | "down", label: string) => {
     const order = defaults.find((value) => value.provider === provider)?.priorityAccountIds ?? [];
     const next = movedPriorityOrder(order, accountId, direction);
     void savePolicy(provider, { mode: "priority", priorityAccountIds: next }, () => {
       const position = next.indexOf(accountId) + 1;
       const atEdge = direction === "up" ? position === 1 : position === next.length;
       const opposite = direction === "up" ? "down" : "up";
+      // The label, not a finished sentence: Hide Account Emails can change while this is on screen.
       setMoved({
         provider,
+        label,
+        position,
+        total: next.length,
         selector: `${accountId}:${atEdge ? opposite : direction}`,
         fallback: `${accountId}:${direction}`,
-        message: `Moved ${name} to position ${position} of ${next.length}.`,
       });
     });
   };
@@ -1027,7 +1030,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
         const savingPolicy = busy[`policy:${provider}`] !== undefined;
         return <ProviderAccountGroup key={provider} runner={runner} online={online} provider={provider} policy={choice}
           canEdit={canEditDefaults} saving={savingPolicy} chooseMode={chooseMode}
-          moveStatus={moved?.provider === provider ? moved.message : ""}
+          moveStatus={moved?.provider === provider ? `Moved ${masked(moved.label)} to position ${moved.position} of ${moved.total}.` : ""}
           providerNotices={unavailable && <Notice compact tone="warning" title="Default Account Unavailable"
             actions={canEditDefaults && <button type="button" className="btn sm" disabled={defaultWrites.current.has(provider)}
               onClick={() => void saveDefault(provider, null)}>Clear {providerName(provider)} Default</button>}>
@@ -1076,9 +1079,9 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
                   <>
                     {canEditDefaults && prioritySupported && priority && position >= 0 && order.length > 1 && <>
                       <MoveButton accountId={account.id} direction="up" name={masked(account.label)} edge={position === 0} busy={savingPolicy}
-                        onMove={() => moveAccount(provider, account.id, "up", masked(account.label))} />
+                        onMove={() => moveAccount(provider, account.id, "up", account.label)} />
                       <MoveButton accountId={account.id} direction="down" name={masked(account.label)} edge={position === order.length - 1} busy={savingPolicy}
-                        onMove={() => moveAccount(provider, account.id, "down", masked(account.label))} />
+                        onMove={() => moveAccount(provider, account.id, "down", account.label)} />
                     </>}
                     {signingIn && cancelButton(login)}
                     {showSignIn && (

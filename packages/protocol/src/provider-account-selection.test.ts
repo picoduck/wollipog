@@ -102,6 +102,19 @@ test("a limit that has passed no longer disqualifies, and missing usage never do
   eligible({ usage: usage("a") }, account("a", { billing: undefined }));
 });
 
+test("a skip's limit name and reset describe the same limit (#4353)", () => {
+  const spending = (...controls: Array<{ label: string; resetsAt?: number }>) => providerAccountIneligibility(account("a"), { now: NOW, usage: usage("a", {
+    spendControls: controls.map((control, index) => ({ id: `s${index}`, reached: true, ...control })) }) });
+  assert.deepEqual(spending({ label: "Hourly", resetsAt: NOW + 3_600_000 }, { label: "Daily", resetsAt: NOW + 86_400_000 }),
+    { reason: "spend_limit_reached", retryAt: NOW + 86_400_000, limitLabel: "Daily" }, "the one that lasts longest, whichever comes first");
+  assert.deepEqual(spending({ label: "Hourly", resetsAt: NOW + 3_600_000 }, { label: "Lifetime" }),
+    { reason: "spend_limit_reached", limitLabel: "Lifetime" }, "one with no known reset lasts longest, and no reset is promised");
+  assert.deepEqual(providerAccountIneligibility(account("a"), { now: NOW, usage: usage("a", { buckets: [
+    { id: "s", label: "Session", status: "exhausted", resetsAt: NOW + 3_600_000 },
+    { id: "w", label: "Weekly", status: "exhausted", resetsAt: NOW + 86_400_000 },
+  ] }) }), { reason: "usage_exhausted", retryAt: NOW + 86_400_000, limitLabel: "Weekly" });
+});
+
 test("a reading with no reset time stays used up until a newer one says otherwise", () => {
   assert.equal(providerAccountIneligibility(account("a"), { now: NOW, usage: usage("a", {
     buckets: [{ id: "w", label: "Week", usedPercent: 100 }], fetchedAt: 1,

@@ -1165,9 +1165,9 @@ test.describe("Priority Order (#4353)", () => {
     await claude.getByRole("radio", { name: "Default Account" }).click();
     await expect(accountRow(page, "work@example.com").locator(".provider-default-marker"), "and returning restores it").toHaveText("Default");
 
-    await page.goto(`/machine-management-e2e.html?priority=off&outdated=1&${DESIGN_WORKSTATION}`);
+    await page.goto(`/machine-management-e2e.html?priority=off&policyOutdated=1&${DESIGN_WORKSTATION}`);
     await expect(providerAccounts(page).getByText("Update this machine's runner to use Priority Order.").first()).toBeVisible();
-    await page.goto(`/machine-management-e2e.html?priority=on&outdated=1&${DESIGN_WORKSTATION}`);
+    await page.goto(`/machine-management-e2e.html?priority=on&policyOutdated=1&${DESIGN_WORKSTATION}`);
     await expect(providerAccounts(page).getByText("Priority Order Isn't Being Applied")).toBeVisible();
     await expect(providerAccounts(page).locator("[data-move]"), "an order it can't enforce can't be changed").toHaveCount(0);
     await expect(providerAccounts(page).getByText(/^Skipped:/u), "nor read as if it were checked").toHaveCount(0);
