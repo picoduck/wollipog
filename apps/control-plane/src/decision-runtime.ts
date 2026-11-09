@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type {
   DecisionErrorClass,
+  DecisionPricingContext,
   DecisionKind,
   DecisionModelResolvedTarget,
   DecisionOccurrenceView,
@@ -31,7 +32,7 @@ import {
 import { deriveTypedVerdict, validateTypedAnswers } from "./decision-questions.js";
 import type { DecisionAutomaticHarness, DecisionModelSettings } from "./decision-model-settings.js";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
-import { priceUsage, type RateTable } from "./usage-pricing.js";
+import { priceUsage, sameRequestInputTier, type RateTable } from "./usage-pricing.js";
 
 /** Small and fixed: at most this many attempts per occurrence. */
 export const DECISION_MAX_ATTEMPTS = 3;
@@ -142,6 +143,21 @@ function count(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.min(Math.floor(value), 1e12) : 0;
 }
 
+/** A malformed coordinate is dropped, so a model whose rate depends on it stays unpriced. */
+function sanitizedPricing(pricing: unknown): DecisionPricingContext | undefined {
+  if (!pricing || typeof pricing !== "object") return undefined;
+  const { serviceTier, requestInputTokens: range } = pricing as Record<string, unknown>;
+  const tier = typeof serviceTier === "string" && serviceTier && serviceTier.length <= 64 ? serviceTier : undefined;
+  const { min, max } = (range && typeof range === "object" ? range : {}) as { min?: unknown; max?: unknown };
+  const requestInputTokens = Number.isSafeInteger(min) && Number.isSafeInteger(max) &&
+      (min as number) >= 0 && (min as number) <= (max as number)
+    ? { min: min as number, max: max as number }
+    : undefined;
+  return tier || requestInputTokens
+    ? { ...(tier ? { serviceTier: tier } : {}), ...(requestInputTokens ? { requestInputTokens } : {}) }
+    : undefined;
+}
+
 /** Validate the only runner fields allowed across the Decision boundary. */
 export function sanitizeRunDecisionResult(message: RunDecisionResultMessage): RunDecisionResultMessage | null {
   if (typeof message.requestId !== "string" || !message.requestId || message.requestId.length > 200) return null;
@@ -153,12 +169,14 @@ export function sanitizeRunDecisionResult(message: RunDecisionResultMessage): Ru
     cacheReadInputTokens: count(message.usage.cacheReadInputTokens),
     cacheCreationInputTokens: count(message.usage.cacheCreationInputTokens),
   } : undefined;
+  const pricing = sanitizedPricing(message.pricing);
   const common = {
     type: "run_decision_result" as const,
     requestId: message.requestId,
     ...(provider ? { provider } : {}),
     ...(model ? { model } : {}),
     ...(usage ? { usage } : {}),
+    ...(pricing ? { pricing } : {}),
   };
   if (message.ok === true) {
     if (typeof message.outputText !== "string" ||
@@ -289,14 +307,26 @@ export class DecisionRuntime {
     this.options.db.settleDecisionOccurrence(occurrenceId, { state: "failed", failureClass, now: this.now() });
   }
 
-  private cost(model: string | undefined, usage: RunDecisionResultMessage["usage"]): number | null {
+  /** The rate table is the only source, so a Claude and a Codex cost mean the same thing and a model
+   * the table can't price stays unpriced whatever the provider reports. A tier or size that's missing,
+   * or a range of request sizes that spans a rate threshold, leaves a model that depends on it unpriced. */
+  private cost(
+    model: string | undefined,
+    usage: RunDecisionResultMessage["usage"],
+    pricing: RunDecisionResultMessage["pricing"],
+  ): number | null {
     if (!usage) return null;
-    const priced = priceUsage(this.options.rateTable?.() ?? null, model, {
+    const table = this.options.rateTable?.() ?? null;
+    const input = pricing?.requestInputTokens;
+    const priced = priceUsage(table, model, {
       uncachedInputTokens: usage.inputTokens,
       cachedInputTokens: usage.cacheReadInputTokens,
       cacheCreationTokens: usage.cacheCreationInputTokens,
       outputTokens: usage.outputTokens,
-    }, null);
+    }, null, {
+      ...(pricing?.serviceTier ? { serviceTier: pricing.serviceTier } : {}),
+      ...(input && sameRequestInputTier(table, model, input.min, input.max) ? { requestInputTokens: input.max } : {}),
+    });
     return priced.costSource === "unpriced" ? null : priced.costUsd;
   }
 
@@ -377,7 +407,9 @@ export class DecisionRuntime {
         ...(result.provider ? { provider: result.provider } : {}),
         ...(result.model ? { model: result.model } : {}),
         ...(result.usage ? { usage: result.usage } : {}),
-        costUsd: this.cost(result.model ?? target.model, result.usage),
+        // The model that answered sets the rate. With none reported, an exact target id can still be
+        // priced, and an alias such as `haiku` can't: the table never prices a bare family name.
+        costUsd: this.cost(result.model ?? target.model, result.usage, result.pricing),
       });
       if (validated) {
         // Compare-and-set: whichever answer settles first is the only verdict. A late or duplicate

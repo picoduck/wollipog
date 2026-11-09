@@ -10435,6 +10435,19 @@ export type SessionNamingRunnerFailurePhase =
 
 /** One tool-less Decision attempt's answer. `outputText` is the provider's structured output as
  * JSON text; the control plane parses and validates it strictly against the kind's schema. */
+/**
+ * What one Decision attempt reported that can change its rate (#4368). Either field may be absent,
+ * and a model whose rate depends on a missing one stays unpriced: neither is ever assumed.
+ */
+export interface DecisionPricingContext {
+  /** The provider's own name for the tier that served the attempt. */
+  serviceTier?: string;
+  /** The smallest and largest input of any one provider request in the attempt. A rate threshold
+   * applies per request, so a total across requests only bounds it: `min` 0 when the provider did
+   * not report each request. */
+  requestInputTokens?: { min: number; max: number };
+}
+
 export interface RunDecisionResultMessage {
   type: "run_decision_result";
   requestId: string;
@@ -10442,10 +10455,12 @@ export interface RunDecisionResultMessage {
   outputText?: string;
   provider?: SessionNamingAccountBoundary["provider"];
   billingSource?: SessionNamingAccountBoundary["billingSource"];
-  /** Provider-resolved model id, for pricing; the requested alias when none was reported. */
+  /** The model the provider reported answering; absent when it named none. */
   model?: string;
   /** Present whenever the provider reported usage, including on a failed attempt. */
   usage?: Omit<DecisionUsageView, "costUsd">;
+  /** Absent from older runners, whose attempts on a request-rated model stay unpriced. */
+  pricing?: DecisionPricingContext;
   errorClass?: DecisionErrorClass;
   /** A provider Retry-After, in milliseconds, when it reported one. */
   retryAfterMs?: number;
