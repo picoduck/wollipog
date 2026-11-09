@@ -64,6 +64,8 @@ import {
   CONTROL_PLANE_SERVICE,
   providerSupportsConversationFork,
   runnerCapabilityRequirementError,
+  parseProviderAccountPolicyWrite,
+  PROVIDER_ACCOUNT_POLICY_NOT_FIXED,
   runnerCapabilityRequirementWithAlternative,
   type RunnerCapabilityRequirementDetails,
   type ProviderHomeLaunchRefusalView,
@@ -3751,12 +3753,82 @@ app.put("/api/runners/:id/provider-account-defaults/:provider", async (req, repl
   const changed = db.setMachineProviderAccountDefault(
     id, provider, body.accountId as string | null, body.expectedRevision as number, Date.now(),
   );
+  // An older client can't show this policy, so it can't replace it, and it sees why. No `current`:
+  // its conflict handling would read that as an ordinary lost race and invite another attempt.
+  if (!changed.ok && changed.notFixed) return reply.code(409).send({
+    error: "This machine uses another account selection mode for this provider. Update this client to change it.",
+    code: PROVIDER_ACCOUNT_POLICY_NOT_FIXED,
+  });
   if (!changed.ok) return reply.code(409).send({
     error: "Default Provider Account changed in another client",
     current: changed.choice,
   });
   hub.runnerChanged(id);
   return { providerAccountDefault: changed.choice };
+});
+
+// Versioned account selection policy (#4353). An offline Machine saves it, and a preview says it isn't
+// enforced until the Machine reconnects; one whose last-known runner can't enforce it refuses.
+app.put("/api/runners/:id/provider-account-policies/:provider", async (req, reply) => {
+  const { id, provider } = req.params as { id: string; provider: string };
+  const principal = requestPrincipal(req);
+  if (!principal || !db.canManageRunner(principal, id)) {
+    return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
+  }
+  if (provider !== "claude" && provider !== "codex") {
+    return reply.code(400).send({ error: "provider must be Claude or Codex" });
+  }
+  const runner = db.getRunner(id);
+  if (!runner) return reply.code(404).send({ error: "runner not found" });
+  const current = db.machineProviderAccountDefault(id, provider);
+  const write = parseProviderAccountPolicyWrite(req.body, current);
+  if (!write.ok) return reply.code(400).send({ error: write.error });
+  const capability = write.mode === "fixed" ? "providerAccounts" as const : "providerAccountSelectionPolicy" as const;
+  if (!runnerSupportsProtocol(runner.protocolVersion, capability)) {
+    return reply.code(409).send(runnerCapabilityRequirementError(
+      runner.protocolVersion, capability, write.mode === "fixed" ? "default provider account changes" : "Priority Order",
+    ));
+  }
+  // A newly named account must exist here and be usable here. One the record already names may be
+  // missing or lose access later: it stays visible until a person removes it, and doesn't block a reorder.
+  const accounts = (runner.providerAccounts ?? []).filter((account) => account.provider === provider);
+  const known = new Set([...(current?.priorityAccountIds ?? []), ...(current?.fixedAccountId ? [current.fixedAccountId] : [])]);
+  for (const accountId of [...write.priorityAccountIds, ...(write.fixedAccountId ? [write.fixedAccountId] : [])]) {
+    if (known.has(accountId)) continue;
+    const account = accounts.find((candidate) => candidate.id === accountId);
+    if (!account) return reply.code(409).send({ error: "The provider account is not available on this Machine." });
+    if (account.profile?.access === "not_granted") {
+      return reply.code(409).send({
+        error: "This account's provider profile isn't granted to this control plane. Adopt it as a profile first.",
+        code: "PROVIDER_PROFILE_NOT_GRANTED",
+      });
+    }
+  }
+  const changed = db.setMachineProviderAccountPolicy(id, provider, {
+    mode: write.mode, fixedAccountId: write.fixedAccountId, priorityAccountIds: write.priorityAccountIds,
+  }, write.expectedRevision, Date.now());
+  if (!changed.ok) return reply.code(409).send({
+    error: "This provider's account selection changed in another client",
+    current: changed.policy,
+  });
+  hub.runnerChanged(id);
+  return { providerAccountPolicy: changed.policy };
+});
+
+app.get("/api/runners/:id/provider-account-selection", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const principal = requestPrincipal(req);
+  if (!principal || !db.canAccessRunner(principal, id)) return reply.code(404).send({ error: "runner not found" });
+  const query = req.query as { agentId?: string; provider?: string; projectId?: string };
+  if (query.provider !== undefined && query.provider !== "claude" && query.provider !== "codex") {
+    return reply.code(400).send({ error: "provider must be Claude or Codex" });
+  }
+  if (!query.agentId && !query.provider) return reply.code(400).send({ error: "agentId or provider is required" });
+  return respond(reply, svc.providerAccountSelectionPreview(id, {
+    ...(query.agentId ? { agentId: query.agentId } : {}),
+    ...(query.provider ? { provider: query.provider as "claude" | "codex" } : {}),
+    ...(query.projectId ? { projectId: query.projectId } : {}),
+  }));
 });
 
 app.delete("/api/runners/:id", async (req, reply) => {
@@ -7682,6 +7754,7 @@ function respond(
   result: {
     ok: boolean; status: number; data?: unknown; error?: string;
     capabilityRequirement?: RunnerCapabilityRequirementDetails; errorDetails?: Record<string, string | number>;
+    providerAccountSelection?: import("@wollipog/protocol").ProviderAccountChoiceRequired;
   },
 ) {
   return reply.code(result.status).send(result.ok ? result.data : failureBody(result));

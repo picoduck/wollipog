@@ -37,7 +37,9 @@ import type {
   SteerSessionResultMessage,
   WorkspaceReference,
   WorkflowDefinitionSpec,
+  ProviderAccountDefinition,
 } from "@wollipog/protocol";
+import { PROVIDER_ACCOUNT_CHOICE_REQUIRED, supportsClaudeProjectMemory } from "@wollipog/protocol";
 import {
   BACKGROUND_JOB_STALL_MS,
   EVENT_PAYLOAD_PREVIEW_BYTES,
@@ -10656,6 +10658,277 @@ test("saved per-provider defaults govern new sessions but explicit choices and e
   assert.equal(override.data.providerAccountId, "personal");
 });
 
+/** A Machine with three subscription Claude accounts, ranked by the caller (#4353). */
+function priorityHarness(overrides: { protocolVersion?: number; accounts?: ProviderAccountDefinition[]; order?: string[] } = {}) {
+  const harness = makeHarness();
+  const meta = runnerMeta();
+  meta.providerAccounts = overrides.accounts ?? [
+    { id: "first-person-example-com", label: "first@example.com", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+    { id: "second", label: "second@example.com", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+    { id: "third", label: "third@example.com", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+    { id: "codex-account", label: "codex@example.com", provider: "codex", authStatus: "authenticated", billing: "subscription" },
+  ];
+  // A Claude Code with Wollipog's project memory, whose memory isn't held in the account's HOME.
+  meta.agents = meta.agents.map((agent) => agent.id === AGENT_ID ? { ...agent, version: "2.1.300" } : agent);
+  harness.db.registerRunner(meta, Date.now(), overrides.protocolVersion ?? PROTOCOL_VERSION);
+  const order = overrides.order ?? ["first-person-example-com", "second", "third"];
+  const saved = harness.db.setMachineProviderAccountPolicy(RUNNER_ID, "claude",
+    { mode: "priority", fixedAccountId: null, priorityAccountIds: order }, 0, Date.now());
+  assert.ok(saved.ok);
+  const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+  const setAccounts = (accounts: ProviderAccountDefinition[]) => {
+    harness.db.updateRunnerAgents(RUNNER_ID, meta.agents, Date.now(), undefined, accounts);
+  };
+  return { ...harness, meta, request, setAccounts };
+}
+
+test("Priority Order chooses at dispatch, records why, and tells the runner to recheck (#4353)", () => {
+  const { db, hub, svc, request, setAccounts, meta } = priorityHarness();
+  const created = svc.createSession(request);
+  assert.ok(created.ok && created.data, created.error);
+  assert.equal(created.data.providerAccountId, "first-person-example-com");
+  assert.deepEqual(created.data.providerAccountSelection, {
+    schemaVersion: 1, source: "priority", mode: "priority", policyRevision: 1, revalidateAtLaunch: true,
+  });
+  const spec = hub.sentOfType("start_session").at(-1)!.spec;
+  assert.equal(spec.providerAccountId, "first-person-example-com");
+  assert.equal(spec.providerAccountSelection?.revalidateAtLaunch, true);
+  assert.equal(db.getSession(created.data.id)?.providerAccountSelection?.source, "priority", "the reason survives a reload");
+
+  setAccounts(meta.providerAccounts!.map((account) => account.id === "first-person-example-com"
+    ? { ...account, authStatus: "unauthenticated" } : account));
+  const next = svc.createSession(request);
+  assert.ok(next.ok && next.data, next.error);
+  assert.equal(next.data.providerAccountId, "second", "the first eligible account wins");
+  assert.deepEqual(next.data.providerAccountSelection?.skipped, { signed_out: 1 });
+  assert.equal(db.getSession(created.data.id)?.providerAccountId, "first-person-example-com", "a policy outcome never moves an existing session");
+});
+
+test("an explicit account overrides Priority Order, even one the policy would skip (#4353)", () => {
+  const { hub, svc, request, setAccounts, meta } = priorityHarness();
+  setAccounts(meta.providerAccounts!.map((account) => account.id === "third" ? { ...account, billing: "api" } : account));
+  const explicit = svc.createSession({ ...request, providerAccountId: "third" });
+  assert.ok(explicit.ok && explicit.data, explicit.error);
+  assert.equal(explicit.data.providerAccountId, "third");
+  assert.equal(explicit.data.providerAccountSelection?.source, "explicit");
+  const spec = hub.sentOfType("start_session").at(-1)!.spec;
+  assert.equal(spec.providerAccountId, "third");
+  assert.equal(spec.providerAccountSelection?.revalidateAtLaunch, undefined, "a named account keeps its recovery path");
+});
+
+test("concurrent launches each resolve to the same first eligible account (#4353)", () => {
+  const { svc, request } = priorityHarness();
+  const results = [svc.createSession(request), svc.createSession(request), svc.createSession(request)];
+  assert.deepEqual(results.map((result) => result.data?.providerAccountId), Array(3).fill("first-person-example-com"));
+});
+
+test("no eligible account refuses with a structured result that names nobody (#4353)", () => {
+  const entries: string[] = [];
+  const { hub, svc, request, setAccounts, meta } = priorityHarness();
+  (svc as unknown as { log: { info(message: string): void } }).log = { ...NOOP_LOG, info: (message: string) => entries.push(message) };
+  setAccounts(meta.providerAccounts!.map((account) => account.provider === "claude"
+    ? { ...account, authStatus: "unauthenticated" } : account));
+  const before = hub.sentOfType("start_session").length;
+  const refused = svc.createSession(request);
+  assert.equal(refused.status, 409);
+  assert.equal(refused.errorDetails?.code, PROVIDER_ACCOUNT_CHOICE_REQUIRED);
+  assert.equal(refused.providerAccountSelection?.refusal, "no_eligible_account");
+  assert.deepEqual(refused.providerAccountSelection?.actions, ["choose_account", "sign_in", "review_provider_accounts"]);
+  assert.deepEqual(refused.providerAccountSelection?.candidates.map((candidate) => [candidate.accountId, candidate.reason]), [
+    ["first-person-example-com", "signed_out"], ["second", "signed_out"], ["third", "signed_out"],
+  ]);
+  assert.equal(hub.sentOfType("start_session").length, before);
+  // The Machine's accounts reach only the caller's response: its sentence and every log line name none.
+  for (const text of [refused.error ?? "", ...entries]) {
+    for (const personal of ["first-person", "second", "third", "example.com"]) assert.ok(!text.includes(personal), text);
+  }
+  assert.ok(entries.some((entry) => entry.includes("provider_account_selection_refused")));
+  const chosen = svc.createSession({ ...request, providerAccountId: "second" });
+  assert.ok(chosen.ok, chosen.error);
+});
+
+test("a retried staged launch keeps its account after the policy changes (#4353)", () => {
+  const { db, svc, request } = priorityHarness();
+  const stage = { sessionId: "s_staged_policy", stage() {}, activate() {} };
+  const first = svc.createSession(request, stage);
+  assert.ok(first.ok && first.data, first.error);
+  assert.equal(first.data.providerAccountId, "first-person-example-com");
+  const moved = db.setMachineProviderAccountPolicy(RUNNER_ID, "claude",
+    { mode: "priority", fixedAccountId: null, priorityAccountIds: ["third", "second"] }, 1, Date.now());
+  assert.ok(moved.ok);
+  const retried = svc.createSession(request, stage);
+  assert.ok(retried.ok && retried.data, retried.error);
+  assert.equal(retried.data.id, first.data.id);
+  assert.equal(retried.data.providerAccountId, "first-person-example-com", "the retry keeps the account it first resolved to");
+  assert.equal(svc.createSession(request).data?.providerAccountId, "third", "a new launch reads the new order");
+  const conflicting = svc.createSession({ ...request, providerAccountId: "second" }, stage);
+  assert.equal(conflicting.status, 409, "a different explicit account conflicts rather than moving the accepted launch");
+});
+
+test("a restart keeps the session's account whatever the policy says now (#4353)", async () => {
+  const { db, hub, svc, request } = priorityHarness();
+  const created = svc.createSession(request);
+  assert.ok(created.ok && created.data, created.error);
+  const moved = db.setMachineProviderAccountPolicy(RUNNER_ID, "claude",
+    { mode: "priority", fixedAccountId: null, priorityAccountIds: ["third"] }, 1, Date.now());
+  assert.ok(moved.ok);
+  svc.onSessionStatus(created.data.id, "stopped");
+  const restarted = await svc.restart(created.data.id);
+  assert.ok(restarted.ok, restarted.error);
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.providerAccountId, "first-person-example-com");
+  assert.equal(db.getSession(created.data.id)?.providerAccountId, "first-person-example-com");
+});
+
+test("a run's members resolve accounts the way a session does, before anything is created (#4353)", () => {
+  const { db, hub, svc, request, setAccounts, meta } = priorityHarness();
+  const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID], task: "Compare" });
+  assert.ok(run.ok && run.data, run.error);
+  const byAgent = new Map(run.data.sessions.map((session) => [session.agentId, session]));
+  assert.equal(byAgent.get(AGENT_ID)?.providerAccountId, "first-person-example-com", "the policy applies to its provider");
+  assert.equal(byAgent.get(AGENT_ID)?.providerAccountSelection?.source, "priority");
+  assert.equal(byAgent.get(CODEX_APP_AGENT_ID)?.providerAccountId, "codex-account", "never across providers");
+  const specs = hub.sentOfType("start_session").slice(-2).map((message) => message.spec.providerAccountId).sort();
+  assert.deepEqual(specs, ["codex-account", "first-person-example-com"]);
+
+  setAccounts(meta.providerAccounts!.map((account) => account.provider === "claude" ? { ...account, billing: "api" } : account));
+  const runsBefore = db.listRuns().length;
+  const refused = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID], task: "Compare" });
+  assert.equal(refused.status, 409);
+  assert.equal(refused.errorDetails?.code, PROVIDER_ACCOUNT_CHOICE_REQUIRED, "API credits are never spent automatically");
+  assert.equal(db.listRuns().length, runsBefore, "one member without an account refuses the whole run");
+});
+
+test("a run or workflow with no ready ranked account gets the structured refusal, not an unknown agent (#4353)", () => {
+  const { db, svc, meta } = priorityHarness();
+  meta.agents = meta.agents.map((agent) => agent.id === AGENT_ID
+    ? { ...agent, providerAccountReadiness: { defaultAuthStatus: "unauthenticated", readyAccountIds: [] } } : agent);
+  db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+  const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Compare" });
+  assert.equal(run.status, 409, run.error);
+  assert.equal(run.errorDetails?.code, PROVIDER_ACCOUNT_CHOICE_REQUIRED);
+  const workflow = svc.createWorkflowRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, task: "Build it",
+    workflowId: "builtin:build-review", agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID } });
+  assert.equal(workflow.status, 409, workflow.error);
+  assert.equal(workflow.errorDetails?.code, PROVIDER_ACCOUNT_CHOICE_REQUIRED);
+  assert.equal(db.listRuns().length, 0);
+});
+
+test("a run honors a fixed Default Account, which it used to ignore (#4353)", () => {
+  const { db, hub, svc } = makeHarness();
+  const meta = runnerMeta();
+  meta.providerAccounts = [
+    { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+    { id: "personal", label: "Personal", provider: "claude", authStatus: "authenticated" },
+  ];
+  db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+  db.setMachineProviderAccountDefault(RUNNER_ID, "claude", "personal", 0, Date.now());
+  const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Check" });
+  assert.ok(run.ok && run.data, run.error);
+  assert.equal(run.data.sessions[0]?.providerAccountId, "personal");
+  assert.equal(run.data.sessions[0]?.providerAccountSelection?.source, "fixed_default");
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.providerAccountId, "personal");
+});
+
+test("a workflow's members resolve accounts the way a session does (#4353)", () => {
+  const { hub, svc } = priorityHarness();
+  const run = svc.createWorkflowRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, task: "Build it",
+    workflowId: "builtin:build-review", agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID } });
+  assert.ok(run.ok && run.data, run.error);
+  const claude = run.data.sessions.find((session) => session.agentId === AGENT_ID);
+  assert.equal(claude?.providerAccountId, "first-person-example-com");
+  assert.equal(claude?.providerAccountSelection?.source, "priority");
+  assert.ok(hub.sentOfType("start_session").some((message) => message.spec.agentId === AGENT_ID &&
+    message.spec.providerAccountId === "first-person-example-com"));
+});
+
+test("a child session resolves its account the same way (#4353)", () => {
+  const { db, svc, request } = priorityHarness();
+  const parent = svc.createSession(request);
+  assert.ok(parent.ok && parent.data, parent.error);
+  svc.onSessionStatus(parent.data.id, "running");
+  const create = () => svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data!.id });
+  assert.equal(create().status, 428, "a child asks first, under its parent's ordinary approval");
+  assert.ok(svc.approve(parent.data.id, db.getSession(parent.data.id)!.pendingApproval!.requestId, "allow").ok);
+  const child = create();
+  assert.ok(child.ok && child.data, child.error);
+  assert.equal(child.data.providerAccountId, "first-person-example-com");
+  assert.equal(child.data.providerAccountSelection?.source, "priority");
+});
+
+test("an older runner can't appear to enforce Priority Order, yet keeps explicit choices (#4353)", () => {
+  const { db, hub, svc, request, meta } = priorityHarness();
+  db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccountSelectionPolicy - 1);
+  const refused = svc.createSession(request);
+  assert.equal(refused.status, 409);
+  assert.equal(refused.errorDetails?.code, PROVIDER_ACCOUNT_CHOICE_REQUIRED);
+  assert.equal(refused.capabilityRequirement?.requiredRunnerProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccountSelectionPolicy);
+  assert.ok(refused.providerAccountSelection?.actions.includes("update_runner"));
+  const explicit = svc.createSession({ ...request, providerAccountId: "second" });
+  assert.ok(explicit.ok && explicit.data, explicit.error);
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.providerAccountSelection, undefined, "an older runner receives no recheck it would ignore");
+  assert.equal(explicit.data.providerAccountSelection?.source, "explicit");
+  const preview = svc.providerAccountSelectionPreview(RUNNER_ID, { provider: "claude" });
+  assert.equal(preview.data?.enforcement, "runner_update_required");
+  assert.equal(preview.data?.status, "choice_required");
+});
+
+test("a policy saved under a newer schema also fails closed (#4353)", () => {
+  const { db, svc, request } = priorityHarness();
+  (db as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }).db
+    .prepare("UPDATE machine_provider_account_defaults SET schema_version=2 WHERE runner_id=?").run(RUNNER_ID);
+  assert.equal(db.machineProviderAccountDefault(RUNNER_ID, "claude")?.mode, "unsupported");
+  assert.equal(svc.createSession(request).providerAccountSelection?.refusal, "unsupported_mode");
+});
+
+test("a mode written by a newer server fails closed until it is replaced (#4353)", () => {
+  const { db, svc, request } = priorityHarness();
+  (db as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }).db
+    .prepare("UPDATE machine_provider_account_defaults SET mode='automatic_balance' WHERE runner_id=?").run(RUNNER_ID);
+  assert.equal(db.machineProviderAccountDefault(RUNNER_ID, "claude")?.mode, "unsupported");
+  const refused = svc.createSession(request);
+  assert.equal(refused.providerAccountSelection?.refusal, "unsupported_mode");
+  assert.equal(refused.errorDetails?.code, PROVIDER_ACCOUNT_CHOICE_REQUIRED);
+});
+
+test("the preview says what a launch would do and whether the Machine can enforce it (#4353)", () => {
+  const { hub, svc, request, setAccounts, meta } = priorityHarness();
+  const preview = svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID });
+  assert.ok(preview.ok && preview.data, preview.error);
+  assert.equal(preview.data.accountId, "first-person-example-com");
+  assert.equal(preview.data.enforcement, "enforced");
+  assert.equal(svc.createSession(request).data?.providerAccountId, preview.data.accountId, "the launch matches its preview");
+
+  setAccounts(meta.providerAccounts!.map((account) => account.id === "first-person-example-com"
+    ? { ...account, selectionCooldownUntil: Date.now() + 60_000 } : account));
+  const cooling = svc.providerAccountSelectionPreview(RUNNER_ID, { provider: "claude" });
+  assert.equal(cooling.data?.accountId, "second");
+  assert.equal(cooling.data?.candidates[0]?.reason, "cooldown");
+
+  hub.online = false;
+  assert.equal(svc.providerAccountSelectionPreview(RUNNER_ID, { provider: "claude" }).data?.enforcement, "machine_offline");
+  hub.online = true;
+  assert.equal(svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: "nope" }).status, 404);
+  assert.equal(svc.providerAccountSelectionPreview("nope", { provider: "claude" }).status, 404);
+});
+
+test("Priority Order won't move a project's account-held memory between accounts (#4353)", () => {
+  const { db, svc, request, meta } = priorityHarness();
+  const owner = db.localIdentityContext();
+  const project = db.createProject({ name: "Memory", scope: { organizationId: owner.organizationId, owner: { kind: "user", userId: owner.userId } } });
+  const location = db.addProjectLocation(project.id, { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID });
+  const inProject = { ...request, projectId: project.id, projectLocationId: location.id };
+  assert.ok(svc.createSession(inProject).ok, "Wollipog's project memory stays put whichever account runs");
+  // A Claude Code before Wollipog's project memory keeps it in the account's HOME.
+  meta.agents = meta.agents.map((agent) => agent.id === AGENT_ID ? { ...agent, version: "2.1.0" } : agent);
+  assert.equal(supportsClaudeProjectMemory("2.1.0"), false);
+  db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+  const refused = svc.createSession(inProject);
+  assert.equal(refused.providerAccountSelection?.refusal, "account_memory");
+  assert.equal(svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID, projectId: project.id }).data?.refusal, "account_memory");
+  const explicit = svc.createSession({ ...inProject, providerAccountId: "second" });
+  assert.ok(explicit.ok, explicit.error);
+});
+
 test("a session without a chosen account never takes a profile only other control planes may use (#3240)", () => {
   const { db, hub, svc } = makeHarness();
   const accountMeta = runnerMeta();
@@ -11821,7 +12094,7 @@ for (const durable of [false, true]) test(`createSession preserves ${durable ? "
     assert.equal(dispatchCalls, 1);
     const frame = durable ? staged! : hub.sentOfType("start_session").at(-1)!;
     const fields = [
-      "sessionId", "workspaceId", "workspacePath", "agentId", "providerAccountId", "providerAccountLabel",
+      "sessionId", "workspaceId", "workspacePath", "agentId", "providerAccountId", "providerAccountLabel", "providerAccountSelection",
       "agentVersion", "capabilities", "title", "titleSource", "command", "args", "env", "useWorktree",
       "executionTarget", "executionHandoff", "driver", "context", "config", "orchestrator", "acpSessionContext",
     ];

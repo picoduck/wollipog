@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtempSync } from "node:fs";
 import { test } from "node:test";
-import type { SessionLaunchSpec } from "@wollipog/protocol";
+import type { AgentDefinition, SessionLaunchSpec } from "@wollipog/protocol";
 import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
 import {
   agentForProviderAccount,
@@ -12,6 +12,7 @@ import {
   bindSessionProviderAccount,
   mergeProviderAccountAuthStatus,
   providerAccountAgentContextCompatible,
+  providerAccountCooldownUntil,
   providerAccountDefinition,
   providerAccountEnvironment,
   probeProviderAccountsForDiscovery,
@@ -487,4 +488,30 @@ test("container and cloud launches never bind runner-local provider accounts", (
       credentialHome: "/new/codex-home",
     })), undefined);
   }
+});
+
+test("an account's selection cooldown is the latest one any session recorded, while it lasts (#4353)", () => {
+  const sessions: Array<{ automaticProviderAccountCooldowns?: Record<string, number> }> = [
+    { automaticProviderAccountCooldowns: { work: 2_000, personal: 500 } },
+    { automaticProviderAccountCooldowns: { work: 5_000 } },
+    {},
+  ];
+  assert.equal(providerAccountCooldownUntil(sessions, "work", 1_000), 5_000);
+  assert.equal(providerAccountCooldownUntil(sessions, "personal", 1_000), undefined, "one that has passed reports nothing");
+  assert.equal(providerAccountCooldownUntil(sessions, "other", 1_000), undefined);
+  assert.equal(providerAccountCooldownUntil([], "work", 1_000), undefined);
+});
+
+test("discovery tells the probe which account it is checking, so its billing can be recorded (#4353)", async () => {
+  const account = { id: "work", label: "Work", provider: "claude" as const, directory: "/tmp/work" };
+  const seen: string[] = [];
+  await probeProviderAccountsForDiscovery({
+    accounts: [account],
+    agents: [{ id: "claude", name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code", available: true,
+      claudeCode: { status: "ready", effortLevels: [], auth: { status: "authenticated", billingSource: "subscription" } } } as unknown as AgentDefinition],
+    usable: () => true,
+    environment: () => ({}),
+    probe: async (_agent, _env, probed) => { seen.push(probed.id); return "authenticated"; },
+  });
+  assert.deepEqual(seen, ["work"]);
 });

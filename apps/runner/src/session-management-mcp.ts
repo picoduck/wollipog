@@ -1,3 +1,4 @@
+import { PROVIDER_ACCOUNT_CHOICE_REQUIRED } from "@wollipog/protocol";
 import { RETIRED_REVIEW_TOOL_NAMES, REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
 import { normalizeWorkflowDecisionOwnerRule, WORKFLOW_DECISION_OWNER_RULE_QUOTE_MAX_CHARS, WORKFLOW_DECISION_OWNER_RULE_SOURCE_MAX_CHARS } from "@wollipog/protocol";
 import { sessionCredentialRefusal } from "./session-credential-error.js";
@@ -278,9 +279,20 @@ async function cpFetch(
     if (res.status === 401 && deps.selfSessionId && actorHeader === WOLLIPOG_AGENT_ACTOR_SESSION_HEADER) {
       detail = sessionCredentialRefusal(detail);
     }
+    detail += providerAccountChoiceSuffix(data);
     return { ok: false, message: `HTTP ${res.status}: ${detail}`, status: res.status };
   }
   return { ok: true, data };
+}
+
+/** What an unattended caller can do about a launch with no eligible account (#4353). Candidates stay
+ * out of the model's context: account ids are derived from account labels. */
+function providerAccountChoiceSuffix(data: Json): string {
+  const selection = data?.providerAccountSelection;
+  if (data?.code !== PROVIDER_ACCOUNT_CHOICE_REQUIRED || !selection || typeof selection !== "object") return "";
+  const actions = Array.isArray(selection.actions) ? selection.actions.filter((action: unknown) => typeof action === "string").join(", ") : "";
+  const retryAt = typeof selection.retryAt === "number" ? ` retryAt=${new Date(selection.retryAt).toISOString()}` : "";
+  return ` [${PROVIDER_ACCOUNT_CHOICE_REQUIRED} refusal=${String(selection.refusal)} actions=${actions}${retryAt}]`;
 }
 
 /** How long one wait report may take: a slow control plane never holds the wait itself. */

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import {
+  codexBilling,
   compareProviderAuthIdentity,
   createRunnerProviderAuthRecovery,
   createTestProviderAuthRecovery,
@@ -535,4 +536,22 @@ test("Authentication Required Sign In reuses and can cancel the supervised accou
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("the status checks classify each account's billing without keeping provider output (#4353)", async () => {
+  const claude = (status: Record<string, unknown>) => createTestProviderAuthRecovery(async () => ({ stdout: JSON.stringify(status), stderr: "" }), "key")
+    .revalidate(meta({ driver: "claude-code", command: "claude" }));
+  const base = { loggedIn: true, email: "private@example.test" };
+  assert.equal((await claude({ ...base, authMethod: "claude.ai", apiProvider: "firstParty" })).billing, "subscription");
+  assert.equal((await claude({ ...base, authMethod: "console", apiProvider: "firstParty" })).billing, "api");
+  assert.equal((await claude({ ...base, authMethod: "claude.ai", apiProvider: "bedrock" })).billing, "api");
+  assert.equal((await claude({ ...base, apiProvider: "vertex" })).billing, "api");
+  assert.equal((await claude({ ...base, subscriptionType: "max" })).billing, "subscription");
+  assert.equal((await claude(base)).billing, "unknown", "an unrecognized method stays unverified");
+  assert.equal((await claude({ loggedIn: false })).billing, undefined);
+
+  assert.equal(codexBilling({ stdout: "Logged in using ChatGPT\n" }), "subscription");
+  assert.equal(codexBilling({ stderr: "Logged in using ChatGPT\n" }), "subscription", "either stream, by version");
+  assert.equal(codexBilling({ stderr: "Logged in using an API key - sk-***\n" }), "api");
+  assert.equal(codexBilling({ stdout: "Logged in\n" }), "unknown");
 });

@@ -1,5 +1,5 @@
 import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
-import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
+import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, agentAvailableForRunnerDefault, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
 import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, PROJECT_LOCATION_INSPECTION_FAILURES, validCampaignRepositoryList,
   type CampaignBoundaryRepository, type CampaignRepositoryAdditionResult,
   type CampaignExcludedLocation, type CampaignLocationJoin, type CampaignPendingLocation, type CampaignRepositoryBoundaryView } from "@wollipog/protocol";
@@ -258,6 +258,9 @@ import {
   type RunnerCapacityState,
   type RunnerAutomaticAccountSwitchConfiguration,
   type RunnerProviderAccountDefault,
+  type ProviderAccountPolicyMode,
+  type ProviderAccountSelectionRecord,
+  PROVIDER_ACCOUNT_POLICY_SCHEMA_VERSION,
   type RunnerRuntimeInfo,
   type RunnerCredentialView,
   type RunnerStatus,
@@ -478,6 +481,11 @@ function safeProviderAccounts(value: RunnerView["providerAccounts"]): NonNullabl
       provider: account.provider,
       authStatus: account.authStatus,
       ...(account.profile ? { profile: { id: account.profile.id, access: account.profile.access } } : {}),
+      // Protocol v333 (#4353). An unrecognized value reads as unverified, which selection passes over.
+      ...(account.billing === "subscription" || account.billing === "api" || account.billing === "unknown"
+        ? { billing: account.billing } : {}),
+      ...(Number.isSafeInteger(account.selectionCooldownUntil) && account.selectionCooldownUntil! > 0
+        ? { selectionCooldownUntil: account.selectionCooldownUntil! } : {}),
     };
   });
 }
@@ -689,6 +697,13 @@ CREATE TABLE IF NOT EXISTS machine_provider_account_defaults (
   account_id TEXT,
   revision INTEGER NOT NULL CHECK (revision > 0),
   updated_at INTEGER NOT NULL,
+  -- Versioned selection policy (#4353). account_id stays the fixed default under every mode. mode is
+  -- deliberately unconstrained, with mode_settings beside it, so a later mode needs no table rebuild;
+  -- a value this release doesn't know reads as unsupported and fails closed.
+  mode TEXT NOT NULL DEFAULT 'fixed',
+  priority_account_ids TEXT NOT NULL DEFAULT '[]',
+  mode_settings TEXT NOT NULL DEFAULT '{}',
+  schema_version INTEGER NOT NULL DEFAULT 1,
   PRIMARY KEY (runner_id, provider),
   FOREIGN KEY (runner_id) REFERENCES runners(runner_id) ON DELETE CASCADE
 );
@@ -3465,6 +3480,7 @@ interface SessionRow {
   agent_id: string | null;
   provider_account_id: string | null;
   provider_account_label: string | null;
+  provider_account_selection?: string | null;
   provider_account_automatically_selected: number;
   provider_account_switch_failure: string | null;
   location_switch?: string | null;
@@ -4975,6 +4991,7 @@ export interface NewSessionInput {
   agentId: string | null;
   providerAccountId?: string;
   providerAccountLabel?: string;
+  providerAccountSelection?: ProviderAccountSelectionRecord;
   title: string;
   titleSource?: SessionTitleSource;
   useWorktree: boolean;
@@ -7773,6 +7790,8 @@ export class ControlPlaneDb {
       "provider_account_label TEXT",
       "provider_account_automatically_selected INTEGER NOT NULL DEFAULT 0 CHECK (provider_account_automatically_selected IN (0, 1))",
       "provider_account_switch_failure TEXT",
+      // #4353: why this session started on its account, as reason codes that name no account.
+      "provider_account_selection TEXT",
       // #4138: the runner's pending or failed Location switch for the live session.
       "location_switch TEXT",
       // Provider profiles (#3239): the profile the session's account binding recorded.
@@ -7787,6 +7806,15 @@ export class ControlPlaneDb {
       try { db.exec(`ALTER TABLE sessions ADD COLUMN ${column}`); } catch { /* column already present */ }
     }
     try { db.exec("ALTER TABLE subscription_usage_snapshots ADD COLUMN provider_account_id TEXT"); } catch { /* column already present */ }
+    // #4353: existing rows become fixed policies, keeping their default, revision and legacy fallback.
+    for (const column of [
+      "mode TEXT NOT NULL DEFAULT 'fixed'",
+      "priority_account_ids TEXT NOT NULL DEFAULT '[]'",
+      "mode_settings TEXT NOT NULL DEFAULT '{}'",
+      "schema_version INTEGER NOT NULL DEFAULT 1",
+    ]) {
+      try { db.exec(`ALTER TABLE machine_provider_account_defaults ADD COLUMN ${column}`); } catch { /* column already present */ }
+    }
     for (const col of [
       "input_tokens INTEGER NOT NULL DEFAULT 0",
       "output_tokens INTEGER NOT NULL DEFAULT 0",
@@ -9005,12 +9033,35 @@ export class ControlPlaneDb {
 
   machineProviderAccountDefaults(runnerId: string): RunnerProviderAccountDefault[] {
     return (this.stmt(
-      "SELECT provider, account_id, revision FROM machine_provider_account_defaults WHERE runner_id=? ORDER BY provider",
+      `SELECT provider, account_id, revision, mode, priority_account_ids, schema_version
+       FROM machine_provider_account_defaults WHERE runner_id=? ORDER BY provider`,
     ).all(runnerId) as unknown as Array<{
       provider: RunnerProviderAccountDefault["provider"];
       account_id: string | null;
       revision: number;
-    }>).map((row) => ({ provider: row.provider, accountId: row.account_id, revision: row.revision }));
+      mode: string;
+      priority_account_ids: string;
+      schema_version: number;
+    }>).map((row) => {
+      const mode = row.schema_version <= PROVIDER_ACCOUNT_POLICY_SCHEMA_VERSION && (row.mode === "fixed" || row.mode === "priority")
+        ? row.mode : "unsupported" as const;
+      const order = parseJson<unknown>(row.priority_account_ids);
+      const priorityAccountIds = Array.isArray(order) ? order.filter((id): id is string => typeof id === "string") : [];
+      // A plain default reads exactly as it did before policies existed.
+      if (mode === "fixed" && priorityAccountIds.length === 0) {
+        return { provider: row.provider, accountId: row.account_id, revision: row.revision };
+      }
+      return {
+        provider: row.provider,
+        // What older clients read. Any other mode shows them no default they could mistake for this one.
+        accountId: mode === "fixed" ? row.account_id : null,
+        revision: row.revision,
+        mode,
+        schemaVersion: row.schema_version,
+        fixedAccountId: row.account_id,
+        priorityAccountIds,
+      };
+    });
   }
 
   machineProviderAccountDefault(
@@ -9020,6 +9071,8 @@ export class ControlPlaneDb {
     return this.machineProviderAccountDefaults(runnerId).find((choice) => choice.provider === provider) ?? null;
   }
 
+  /** The route older clients use. It writes a fixed default only, so it can never replace a policy
+   * those clients can't show; the refusal happens in the same transaction as the revision check. */
   setMachineProviderAccountDefault(
     runnerId: string,
     provider: RunnerProviderAccountDefault["provider"],
@@ -9027,9 +9080,10 @@ export class ControlPlaneDb {
     expectedRevision: number,
     now: number,
   ): { ok: true; choice: RunnerProviderAccountDefault } |
-     { ok: false; choice: RunnerProviderAccountDefault | null } {
+     { ok: false; choice: RunnerProviderAccountDefault | null; notFixed?: true } {
     return this.atomic(() => {
       const current = this.machineProviderAccountDefault(runnerId, provider);
+      if (current && (current.mode ?? "fixed") !== "fixed") return { ok: false, choice: current, notFixed: true };
       if ((current?.revision ?? 0) !== expectedRevision) return { ok: false, choice: current };
       const revision = expectedRevision + 1;
       this.stmt(
@@ -9040,7 +9094,50 @@ export class ControlPlaneDb {
            revision=excluded.revision,
            updated_at=excluded.updated_at`,
       ).run(runnerId, provider, accountId, revision, now);
-      return { ok: true, choice: { provider, accountId, revision } };
+      return { ok: true, choice: this.machineProviderAccountDefault(runnerId, provider)! };
+    });
+  }
+
+  /** A versioned policy write (#4353): all of it, or a conflict naming what is saved now. */
+  setMachineProviderAccountPolicy(
+    runnerId: string,
+    provider: RunnerProviderAccountDefault["provider"],
+    policy: { mode: ProviderAccountPolicyMode; fixedAccountId: string | null; priorityAccountIds: readonly string[] },
+    expectedRevision: number,
+    now: number,
+  ): { ok: true; policy: RunnerProviderAccountDefault } |
+     { ok: false; policy: RunnerProviderAccountDefault | null } {
+    return this.atomic(() => {
+      const current = this.machineProviderAccountDefault(runnerId, provider);
+      if ((current?.revision ?? 0) !== expectedRevision) return { ok: false, policy: current };
+      this.stmt(
+        `INSERT INTO machine_provider_account_defaults
+           (runner_id, provider, account_id, revision, updated_at, mode, priority_account_ids, schema_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(runner_id, provider) DO UPDATE SET
+           account_id=excluded.account_id,
+           revision=excluded.revision,
+           updated_at=excluded.updated_at,
+           mode=excluded.mode,
+           priority_account_ids=excluded.priority_account_ids,
+           schema_version=excluded.schema_version`,
+      ).run(runnerId, provider, policy.fixedAccountId, expectedRevision + 1, now, policy.mode,
+        JSON.stringify(policy.priorityAccountIds), PROVIDER_ACCOUNT_POLICY_SCHEMA_VERSION);
+      return { ok: true, policy: this.machineProviderAccountDefault(runnerId, provider)! };
+    });
+  }
+
+  /** The last reading of each of a Machine's accounts, however old. Selection reads only what a
+   * reading positively says, so callers need no freshness window. */
+  providerAccountUsageSnapshots(runnerId: string): SubscriptionUsageSnapshot[] {
+    const rows = this.stmt(
+      `SELECT source_id, snapshot FROM subscription_usage_snapshots
+       WHERE runner_id=? AND provider_account_id IS NOT NULL ORDER BY source_id`,
+    ).all(runnerId) as unknown as Array<{ source_id: string; snapshot: string }>;
+    return rows.flatMap((row) => {
+      const snapshot = parseJson<SubscriptionUsageSnapshot>(row.snapshot);
+      return snapshot && snapshot.runnerId === runnerId && snapshot.sourceId === row.source_id &&
+        Array.isArray(snapshot.buckets) && snapshot.providerAccountId ? [snapshot] : [];
     });
   }
 
@@ -13403,7 +13500,7 @@ export class ControlPlaneDb {
     const authorization = principal ? this.sessionAuthorizationSql(principal) : { sql: "1", params: [] };
     const userId = principal?.kind === "human" ? principal.userId : null;
     const columns = `id runner_id workspace_id project_id project_location_id agent_id
-      provider_account_id provider_account_label provider_account_automatically_selected provider_profile_id
+      provider_account_id provider_account_label provider_account_automatically_selected provider_account_selection provider_profile_id
       provider_home_wait worktree_switch title title_source provider_updated_at background_work_state background_follow_up background_work_tracking
       history_quarantine worktree_recovery queue_hold capacity_wait status board_column run_id
       use_worktree worktree_path archived preview pending_approval parent_control
@@ -15677,13 +15774,15 @@ export class ControlPlaneDb {
       | undefined;
     if (!row) return null;
     if (!targetBound && !options.allowAccountSelection) {
-      const provider = providerForDriver(row.driver as AgentDriverKind);
-      const accountId = options.providerAccountId ?? (provider &&
-        (parseJson<AgentContext>(row.context)?.kind ?? "native") === "native"
-        ? this.machineProviderAccountDefault(runnerId, provider)?.accountId ?? undefined : undefined);
-      if (!agentAvailableForImplicitLaunch({ available: true,
-        providerAccountReadiness: parseJson<AgentDefinition["providerAccountReadiness"]>(row.provider_account_readiness) ?? undefined,
-      }, accountId)) return null;
+      const driver = row.driver as AgentDriverKind;
+      const provider = providerForDriver(driver);
+      const context = parseJson<AgentContext>(row.context) ?? undefined;
+      const providerAccountReadiness = parseJson<AgentDefinition["providerAccountReadiness"]>(row.provider_account_readiness) ?? undefined;
+      const available = options.providerAccountId !== undefined
+        ? agentAvailableForImplicitLaunch({ available: true, providerAccountReadiness }, options.providerAccountId)
+        : agentAvailableForRunnerDefault({ available: true, providerAccountReadiness, driver, ...(context ? { context } : {}) },
+            provider ? this.machineProviderAccountDefaults(runnerId) : undefined);
+      if (!available) return null;
     }
     const family = harnessInstallationFamily(row.driver as AgentDriverKind);
     if (family && !targetBound) {
@@ -18605,6 +18704,10 @@ export class ControlPlaneDb {
       if (input.providerAccountId) {
         this.stmt("UPDATE sessions SET provider_account_id=?, provider_account_label=? WHERE id=?")
           .run(input.providerAccountId, input.providerAccountLabel ?? input.providerAccountId, input.id);
+      }
+      if (input.providerAccountSelection) {
+        this.stmt("UPDATE sessions SET provider_account_selection=? WHERE id=?")
+          .run(JSON.stringify(input.providerAccountSelection), input.id);
       }
       if (input.executionTarget) {
         this.stmt("UPDATE sessions SET execution_target=? WHERE id=?")
@@ -29126,6 +29229,8 @@ export class ControlPlaneDb {
       providerAccountId: row.provider_account_id ?? undefined,
       providerAccountLabel: row.provider_account_label ?? undefined,
       providerAccountAutomaticallySelected: row.provider_account_automatically_selected === 1 || undefined,
+      ...(row.provider_account_selection
+        ? { providerAccountSelection: parseJson<ProviderAccountSelectionRecord>(row.provider_account_selection) ?? undefined } : {}),
       providerAccountSwitchFailure:
         parseJson<ProviderAccountSwitchFailureView>(row.provider_account_switch_failure) ?? undefined,
       ...(row.location_switch ? { locationSwitch: parseJson<NonNullable<SessionView["locationSwitch"]>>(row.location_switch) ?? undefined } : {}),
