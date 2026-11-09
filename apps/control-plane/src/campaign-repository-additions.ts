@@ -9,7 +9,7 @@ import type { Hub } from "./hub.js";
 import type { AgentPrincipal, AuthPrincipal, HumanPrincipal } from "./identity.js";
 import type { ServiceResult, SessionsService } from "./sessions.js";
 
-type Inspector = (locationId: string, options: { projectId: string }) => Promise<ProjectLocationInspection>;
+type Inspector = (locationId: string, options: { projectId: string; joinsCampaign?: boolean }) => Promise<ProjectLocationInspection>;
 
 const fail = <T>(error: string, status = 409): ServiceResult<T> => ({ ok: false, status, error });
 const ok = <T>(data: T, status = 200): ServiceResult<T> => ({ ok: true, status, data });
@@ -114,7 +114,7 @@ export class CampaignRepositoryAdditions {
       return fail("The campaign's owner can't reach that Location, so it can't join the campaign");
     }
     // The same inspection as a launch, in the Location's own path, before the owner sees anything.
-    const inspection = await this.deps.inspect(location.id, { projectId: root.projectId! });
+    const inspection = await this.deps.inspect(location.id, { projectId: root.projectId!, joinsCampaign: true });
     if (!inspection.ok) return fail(`That Location failed inspection, so it can't be added: ${inspection.reason}`);
     const repository = inspection.location.repository.toLowerCase();
     if (covered?.some((entry) => entry.repository.toLowerCase() === repository)) {
@@ -176,7 +176,7 @@ export class CampaignRepositoryAdditions {
     if (this.executing.has(occurrenceId)) return fail("This repository addition is already being carried out");
     this.executing.add(occurrenceId);
     try {
-      const inspection = await this.deps.inspect(location.id, { projectId: root.projectId! });
+      const inspection = await this.deps.inspect(location.id, { projectId: root.projectId!, joinsCampaign: true });
       if (!inspection.ok || inspection.location.repository.toLowerCase() !== snapshot.repository) {
         return fail("That Location no longer verifies as the approved repository; ask again for a fresh approval");
       }

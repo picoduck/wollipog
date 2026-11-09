@@ -5935,7 +5935,9 @@ export class SessionsService {
     if (!settled || ownNow?.runnerId !== ownBefore.runnerId || ownNow.workspaceId !== ownBefore.workspaceId ||
         this.db.getWorkspacePath(ownNow.runnerId, ownNow.workspaceId) !== ownPath) return;
     const { repositories, excluded } = launchBoundaryRepositories({ launchRepository: own.location.repository, ...settled });
-    if (repositories.length > 1 && this.db.recordCustomCampaignRepositories(rootId, { projectId, projectLocationId: launchLocationId }, repositories, excluded, Date.now())) {
+    // A Location left out for its runner's version is recorded even beside one repository: otherwise
+    // nobody would see the exclusion and no reconnect could retry it (#4319).
+    if ((repositories.length > 1 || excluded.some((item) => item.failure === "runner_below_gates")) && this.db.recordCustomCampaignRepositories(rootId, { projectId, projectLocationId: launchLocationId }, repositories, excluded, Date.now())) {
       this.hub.sessionChangedById(rootId);
     }
   }

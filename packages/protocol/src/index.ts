@@ -57,6 +57,7 @@ export * from "./review-contract.js";
 export * from "./review-run.js";
 export * from "./rate-priced-usage.js";
 export * from "./campaign-recovery.js";
+import { CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL } from "./project-location-inspection.js";
 export * from "./project-location-inspection.js";
 import type { CampaignAuthorityOperation, CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
 export { CAMPAIGN_LAUNCH_INSPECTION_ERRORS } from "./campaign-control-launch.js";
@@ -640,6 +641,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   locationForgeObservation: 326,
   /** v327 creates an approved follow-up issue in a named Location's repository (#4119). */
   locationIssuePublication: 327,
+  /** The highest floor of the three gates above: a Location on an older runner doesn't join a campaign (#4319). */
+  campaignLocationGates: CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL,
   /** v330 reads a consumed merge's closures in any state and dequeues it (#4323). */
   mergeClosureWatch: 330,
   /** v317 asks for and carries out a campaign repository addition (#4117). */

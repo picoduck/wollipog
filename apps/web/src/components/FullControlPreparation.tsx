@@ -1,5 +1,5 @@
 import { useId } from "react";
-import type { CampaignControlMode, CampaignLaunchPreflight, CreateSessionRequest, FullControlLaunchRequest, SessionView } from "@wollipog/protocol";
+import type { CampaignControlMode, CampaignExcludedLocation, CampaignLaunchPreflight, CreateSessionRequest, FullControlLaunchRequest, SessionView } from "@wollipog/protocol";
 import { ApiError, type ApiClient } from "../api.js";
 import { ChoiceRows, SegmentedControl } from "./ui/ChoiceControls.js";
 
@@ -55,6 +55,27 @@ function blocked(preflight: CampaignLaunchPreflight): FullControlBlockedError | 
     "Full Control can't run on this machine.");
 }
 
+/** What the person is told when Full Control starts without a Location because its runner can't
+ * perform the campaign's gates (#4319). Nothing is asked: a left-out Location never blocks a start,
+ * and Campaign Status keeps listing it. It can join once its runner updates: the person's own Location
+ * by itself, and someone else's through Include in Campaign. */
+export interface FullControlLocationWarning { message: string; detail: string }
+
+export function locationGatesWarning(excluded: readonly CampaignExcludedLocation[]): FullControlLocationWarning | null {
+  const left = excluded.filter((item) => item.failure === "runner_below_gates");
+  if (!left.length) return null;
+  return {
+    message: left.length === 1 ? `${left[0]!.name} isn't in this campaign yet.` : `${left.length} Locations aren't in this campaign yet.`,
+    detail: left.length === 1 ? `${left[0]!.reason} Campaign Status lists it until it can join.`
+      : `${left.map((item) => item.name).join(", ")}: ${left[0]!.reason} Campaign Status lists them until they can join.`,
+  };
+}
+
+function warnAbout(preflight: CampaignLaunchPreflight, warn?: (warning: FullControlLocationWarning) => void): void {
+  const warning = locationGatesWarning(preflight.summary.excludedLocations ?? []);
+  if (warning) warn?.(warning);
+}
+
 function newRequestId(): string {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -74,7 +95,8 @@ async function withOneRefresh<T>(attempt: () => Promise<T>): Promise<T> {
  * server derives the repository, budget and settings; the campaign starts idle, and the person's
  * first message in it is the task and the issue scope. The server's own check is authorized as
  * the one start action, so there is nothing to fill in or review first. */
-export function launchFullControlCampaign(api: ApiClient, request: CreateSessionRequest): Promise<SessionView> {
+export function launchFullControlCampaign(api: ApiClient, request: CreateSessionRequest,
+  warn?: (warning: FullControlLocationWarning) => void): Promise<SessionView> {
   // Run On and Harness travel with the root, so the server honors or refuses them rather than
   // starting on the host default. ACP session context is never sent: only ACP agents carry it, and
   // the server refuses an ACP root for Full Control on its own.
@@ -95,16 +117,21 @@ export function launchFullControlCampaign(api: ApiClient, request: CreateSession
     const { preflight } = await api.fullControlLaunchPreflight(launch);
     const refusal = blocked(preflight);
     if (refusal) throw refusal;
-    return api.createFullControlCampaign({ ...launch, requestId, preflightDigest: preflight.digest });
+    const session = await api.createFullControlCampaign({ ...launch, requestId, preflightDigest: preflight.digest });
+    warnAbout(preflight, warn);
+    return session;
   });
 }
 
 /** Enable Full Control on a live root campaign: one action, the same server check. */
-export function enableFullControlCampaign(api: ApiClient, sessionId: string): Promise<SessionView> {
+export function enableFullControlCampaign(api: ApiClient, sessionId: string,
+  warn?: (warning: FullControlLocationWarning) => void): Promise<SessionView> {
   return withOneRefresh(async () => {
     const { preflight, expectedRevision } = await api.fullControlEnablePreflight(sessionId, {});
     const refusal = blocked(preflight);
     if (refusal) throw refusal;
-    return api.enableFullControl(sessionId, { expectedRevision, preflightDigest: preflight.digest });
+    const session = await api.enableFullControl(sessionId, { expectedRevision, preflightDigest: preflight.digest });
+    warnAbout(preflight, warn);
+    return session;
   });
 }

@@ -166,6 +166,23 @@ Custom scope change, and any other Location joins only through an approved repos
 created before this list keeps its launch repository and any its owner approved adding. A first-message
 limit outlives Full Control: back in Custom, a gate of a repository it leaves out is the person's, and no
 child is placed in such a repository, as far as the campaign knows the Location's repository.
+
+A Location joins only on a runner that can perform the campaign's gates there (#4319): protocol v327,
+the highest floor of closing an issue, reading forge facts and publishing a follow-up through a
+Location. An older runner is never asked to inspect. Its Location is excluded with a reason naming the
+version, in the launch or enable preflight (and the warning the app shows when that action succeeds,
+since neither has a review step), in Campaign Status, and in the refusal of a repository addition. A
+repository whose only Location is excluded has no entry until that Location joins. Registering again
+is the only way a runner's version changes, so each reconnect retries the exclusion: the owner's own
+Location joins at a new boundary revision, or stays available under a first-message limit, and someone
+else's waits for Include in Campaign. A Custom list retries this exclusion too, for the owner's own
+Location. An offline runner reads as offline, whatever version it last reported.
+
+This narrows only what joins. A Location the campaign already holds keeps its place on any runner, so a
+re-authorization or enable never drops a repository, and each gate still refuses a runner below its own
+floor by name, with no other login standing in. The launch Location is exempt, because its repository's
+gates run in the root's own checkout. A revoke to Custom ends the boundary, so an enable after one
+surveys the Project again, and a Location on an old runner is then excluded rather than carried.
 `owner/app#5` and `owner/api#5` are separate entries with separate authority. `repository` and
 `issueNumbers` stay as the launch repository's part for older clients and runners. A scope saved before
 #4118 reads as its numbers in its repository, at the same revision; nothing is rewritten and no

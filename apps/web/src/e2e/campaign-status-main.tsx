@@ -28,8 +28,10 @@
  * section (#2940); see `fullControlProjection`.
  * With `budget=1`, `slots=held` lists two ended workers whose slots only the person can release, and
  * `slots=released` one of them released, with its record (#4331).
+ * `locationWarning=1` adds the warning Start shows when Full Control starts without a Location because
+ * its runner can't perform the campaign's gates (#4319).
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   CAMPAIGN_AUTOMATION_HOLD_REASONS,
@@ -37,6 +39,7 @@ import {
   CAMPAIGN_WORK_ITEM_PRIMARY_STATES,
   campaignIssueLimitsRequirement,
   campaignIssueScopeChangesRequirement,
+  PROJECT_LOCATION_INSPECTION_FAILURES,
   PROTOCOL_VERSION,
   worktreeRefusalAction,
   type CampaignWorkItemDetail,
@@ -48,6 +51,8 @@ import {
 } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
+import { FeedbackProvider, useFeedback } from "../components/FeedbackProvider.js";
+import { locationGatesWarning } from "../components/FullControlPreparation.js";
 import { RightPanel, type RightPanelState } from "../components/RightPanel.js";
 import { useCampaignStatusAvailability } from "../components/useCampaignStatus.js";
 import { applyCampaignWorkFilters, type CampaignWorkFilters } from "../campaign-status.js";
@@ -570,8 +575,8 @@ const projectionFor = (rev: number) => campaignProjection(
       excludedLocations: [
         { locationId: "loc_scratch", name: "Scratch Folder", failure: "not_repository" as const,
           reason: "The Location's folder is not a git repository with a valid HEAD." },
-        { locationId: "loc_old", name: "Wollipog on Old Mac", failure: "runner_too_old" as const,
-          reason: "The Location's runner is too old to verify it; update the runner." },
+        { locationId: "loc_old", name: "Wollipog on Old Mac", failure: "runner_below_gates" as const,
+          reason: PROJECT_LOCATION_INSPECTION_FAILURES.runner_below_gates },
         { locationId: "loc_away", name: "Wollipog on Travel Laptop", failure: "runner_offline" as const,
           reason: "The Location's machine is offline." },
       ],
@@ -1326,10 +1331,20 @@ window.__WOLLIPOG_CAMPAIGN_STATUS_E2E__ = {
   forgeRefreshes: () => [...forgeRefreshes],
 };
 
+function LocationGatesWarning() {
+  const { showToast } = useFeedback();
+  useEffect(() => {
+    const warning = locationGatesWarning([{ locationId: "loc_old", name: "Wollipog on Old Mac", failure: "runner_below_gates",
+      reason: PROJECT_LOCATION_INSPECTION_FAILURES.runner_below_gates }]);
+    if (warning) showToast(warning.message, { tone: "warning", detail: warning.detail });
+  }, [showToast]);
+  return null;
+}
+
 createRoot(document.getElementById("root")!).render(
   <ApiProvider client={client}>
     <StoreProvider connection={connection} navigation={navigation}>
-      <Fixture />
+      {params.get("locationWarning") === "1" ? <FeedbackProvider><Fixture /><LocationGatesWarning /></FeedbackProvider> : <Fixture />}
     </StoreProvider>
   </ApiProvider>,
 );
