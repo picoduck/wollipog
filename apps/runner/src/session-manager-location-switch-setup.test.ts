@@ -1967,6 +1967,24 @@ test("a worktree a person remade on a path in the session's history gets no old 
   });
 });
 
+test("a registered worktree on the slot that was never checked out is refused, not landed in, and says what to do", async () => {
+  await withSession("slot-empty", async (h) => {
+    const slot = await docsSlot(h, "fix/install-link");
+    git(h.docs, "worktree", "add", "--quiet", "--no-checkout", slot, "fix/install-link");
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => failure(h) !== undefined || h.providers[1]?.prompts.length === 1, "the switch did not settle");
+    assert.equal(h.providers.length, 1, "no provider started in an empty tree");
+    assert.match(failure(h)!.reason!, /never checked out/u);
+    assert.ok(failure(h)!.reason!.includes(slot), "it names the worktree");
+    assert.match(failure(h)!.reason!, /git worktree remove --force/u);
+    assert.equal(h.store.readMeta(h.sessionId)?.repoPath, h.app);
+
+    git(h.docs, "worktree", "remove", "--force", slot);
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message({ occurrenceId: "occurrence-2" })), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1, "the attempt after following that did not finish");
+  });
+});
+
 test("a refused stale directory keeps the session's own row, since that attempt replaced nothing", async () => {
   await withSession("stale-keeps-row", async (h) => {
     const worktree = await leaveWorkBehind(h, "fix/install-link", {});
