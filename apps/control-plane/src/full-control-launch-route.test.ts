@@ -7476,6 +7476,70 @@ test("a Custom campaign's update joins only the owner's Location, a first-messag
   } finally { f.db.close(); }
 });
 
+test("a Custom campaign's owner losing access during the inspection keeps the Location out of its list, and it stays retried (#4319)", async () => {
+  const f = fixture();
+  try {
+    const c = await customBesideOldRunner(f);
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    const target = holdInspection(f, "/fixture/below");
+    const reconnected = c.locations.runnerReconnected("below");
+    await target.taken();
+    const access = f.db.canAccessWorkspace.bind(f.db);
+    f.db.canAccessWorkspace = (principal, runnerId, workspaceId) => runnerId !== "below" && access(principal, runnerId, workspaceId);
+    target.release("below/repo", "below");
+    await reconnected;
+    assert.deepEqual(c.policy().repositories, [{ repository: "owner/repo", locationIds: [c.launchLocation.id] }]);
+    assert.equal(c.policy().locationJoins, undefined);
+    assert.deepEqual(c.policy().excludedLocations, [belowExclusion(c.below.id)]);
+    // Access back, and the next registration joins it.
+    f.db.canAccessWorkspace = access;
+    await c.locations.runnerReconnected("below");
+    assert.deepEqual(c.policy().repositories!.map((entry) => entry.repository), ["owner/repo", "below/repo"]);
+  } finally { f.db.close(); }
+});
+
+test("a transient failure after the update doesn't end a Custom Location's way back, and a folder that fails does (#4319)", async () => {
+  const f = fixture();
+  const online = f.hub.isRunnerOnline;
+  try {
+    const c = await customBesideOldRunner(f);
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    const answers = f.state.inspect;
+    const failing = (failure: string) => {
+      f.state.inspect = (message) => message.workspacePath === "/fixture/below"
+        ? { type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId, ok: false, failure: failure as never, error: "failed" }
+        : answers(message);
+    };
+    // The first read fails, then the runner drops: each keeps a retry that an offline creation lacks.
+    failing("not_a_runner_failure");
+    await c.locations.runnerReconnected("below");
+    assert.deepEqual(c.policy().excludedLocations!.map((item) => [item.failure, item.rejoinsOnReconnect]), [["read_failed", true]]);
+    f.hub.isRunnerOnline = (runnerId) => runnerId !== "below" && online(runnerId);
+    await c.locations.runnerReconnected("below");
+    assert.deepEqual(c.policy().excludedLocations!.map((item) => [item.failure, item.rejoinsOnReconnect]), [["runner_offline", true]]);
+    f.hub.isRunnerOnline = online;
+    // The flag survives being stored and read back, as every retry above depends on.
+    assert.equal(f.db.getSession(c.id)!.orchestratorPolicy!.excludedLocations![0]!.rejoinsOnReconnect, true);
+
+    // A failure that describes the folder itself is not retried, as under Full Control.
+    failing("not_repository");
+    await c.locations.runnerReconnected("below");
+    assert.deepEqual(c.policy().excludedLocations!.map((item) => [item.failure, item.rejoinsOnReconnect]), [["not_repository", undefined]]);
+    const asked = askedBelow(f);
+    await c.locations.runnerReconnected("below");
+    assert.equal(askedBelow(f), asked, "it isn't asked again");
+
+    // A retried one joins once a read succeeds.
+    const policy = c.policy();
+    policy.excludedLocations = [{ locationId: c.below.id, name: "below z", failure: "read_failed", reason: PROJECT_LOCATION_INSPECTION_FAILURES.read_failed, rejoinsOnReconnect: true }];
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), c.id);
+    f.state.inspect = answers;
+    await c.locations.runnerReconnected("below");
+    assert.deepEqual(c.policy().repositories!.map((entry) => entry.repository), ["owner/repo", "below/repo"]);
+    assert.equal(c.policy().excludedLocations, undefined);
+  } finally { f.hub.isRunnerOnline = online; f.db.close(); }
+});
+
 test("a stored exclusion always reads as today's fixed sentence, so raising the floor neither drops the list nor shows stored text (#4319)", () => {
   const f = fixture();
   try {

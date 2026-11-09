@@ -38,6 +38,9 @@ export interface CampaignExcludedLocation {
   name: string;
   failure: ProjectLocationInspectionFailure;
   reason: string;
+  /** A Custom campaign only (#4319): this exclusion began as `runner_below_gates`, so a reconnect still
+   * retries it whatever the last read found. Full Control retries by `failure` alone. */
+  rejoinsOnReconnect?: true;
 }
 
 /** A Project Location someone other than the campaign's owner added mid-campaign (#4117). It joins

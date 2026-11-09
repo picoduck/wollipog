@@ -35372,7 +35372,8 @@ function validExcludedLocations(value: unknown): boolean {
   return Array.isArray(value) && value.length <= CAMPAIGN_BOUNDARY_LOCATIONS_MAX && value.every((item) => {
     const entry = item as Record<string, unknown> | null;
     return Boolean(entry && typeof entry === "object" && !Array.isArray(entry) &&
-      Object.keys(entry).every((key) => ["locationId", "name", "failure", "reason"].includes(key)) &&
+      Object.keys(entry).every((key) => ["locationId", "name", "failure", "reason", "rejoinsOnReconnect"].includes(key)) &&
+      (entry.rejoinsOnReconnect === undefined || entry.rejoinsOnReconnect === true) &&
       typeof entry.locationId === "string" && entry.locationId.length > 0 && entry.locationId.length <= 256 &&
       typeof entry.name === "string" && entry.name.length <= 256 &&
       typeof entry.failure === "string" && Object.hasOwn(PROJECT_LOCATION_INSPECTION_FAILURES, entry.failure) &&

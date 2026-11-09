@@ -10,9 +10,6 @@ import { inspectProjectLocation } from "./project-location-inspection.js";
 /** Exclusions that a reconnecting runner may have cleared. The others describe the folder itself. A
  * runner's protocol version changes only by registering again, so an update is a reconnect (#4319). */
 const RETRIED_ON_RECONNECT: ReadonlySet<string> = new Set(["runner_offline", "read_failed", "runner_too_old", "runner_below_gates"]);
-/** A Custom campaign retries only what #4319 excludes there: one that was offline when it was created
- * stays out, as it always has, until an approved repository addition. */
-const RETRIED_ON_CUSTOM_RECONNECT: ReadonlySet<string> = new Set(["runner_below_gates"]);
 
 type Outcome = { ok: true; data: { joined: boolean; revision: number } } | { ok: false; status: number; error: string };
 
@@ -70,17 +67,27 @@ export class CampaignLocations {
     const { db } = this.deps;
     return this.forRoots([...db.campaignRepositoryRoots({ runnerId }), ...db.customCampaignRepositoryRoots(runnerId)], (root) => {
       const custom = root.orchestratorPolicy?.control?.mode !== "full_control";
-      const owner = this.owner(root);
-      const principal = custom && owner ? db.operatingHumanPrincipal(owner, db.sessionScope(root.id)?.organizationId ?? "") : null;
-      const retry = (root.orchestratorPolicy?.excludedLocations ?? []).filter((item) => (custom ? RETRIED_ON_CUSTOM_RECONNECT : RETRIED_ON_RECONNECT).has(item.failure))
+      const retry = (root.orchestratorPolicy?.excludedLocations ?? [])
+        // Custom retries only what #4319 excludes there, and that exclusion's later transient failures:
+        // one that was offline when the campaign was created stays out, as it always has.
+        .filter((item) => custom ? item.failure === "runner_below_gates" || item.rejoinsOnReconnect === true : RETRIED_ON_RECONNECT.has(item.failure))
         .map((item) => db.getProjectLocation(item.locationId))
         .filter((location): location is ProjectLocationView => Boolean(location && location.runnerId === runnerId &&
           location.projectId === root.projectId && location.availability !== "runner_removed" &&
-          // Nobody reviews a Custom campaign's list, so only what its survey would list joins it.
-          (!custom || Boolean(principal && db.projectLocationAddedBy(location.id) === owner &&
-            db.canAccessWorkspace(principal, location.runnerId, location.workspaceId)))));
+          (!custom || this.customSurveyLists(root, location))));
       return retry.length ? this.inspectAndRecord(root, retry, "runner_reconnected") : Promise.resolve();
     }).then(() => undefined);
+  }
+
+  /** Nobody reviews a Custom campaign's list, so only what its survey would list joins it: a Location
+   * its owner added and, as they are now, can reach. A role can change while a runner inspects. */
+  private customSurveyLists(root: SessionView, location: ProjectLocationView): boolean {
+    const { db } = this.deps;
+    const owner = this.owner(root);
+    const organizationId = db.sessionScope(root.id)?.organizationId;
+    const principal = owner && organizationId ? db.operatingHumanPrincipal(owner, organizationId) : null;
+    return Boolean(principal && root.projectId && db.projectLocationAddedBy(location.id) === owner &&
+      db.canAccessProject(principal, root.projectId) && db.canAccessWorkspace(principal, location.runnerId, location.workspaceId));
   }
 
   /** The campaign owner's Include in Campaign of a Location in its Project. */
@@ -137,6 +144,7 @@ export class CampaignLocations {
     const fresh = db.getSession(root.id);
     if (!fresh) return { ok: false, status: 409, error: "This campaign ended." };
     const owner = this.owner(fresh);
+    const custom = fresh.orchestratorPolicy?.control?.mode !== "full_control";
     const joins: Array<{ locationId: string; name: string; repository: string; source: CampaignLocationJoin["source"] }> = [];
     const excluded: CampaignExcludedLocation[] = [];
     const pending: CampaignPendingLocation[] = [];
@@ -148,6 +156,7 @@ export class CampaignLocations {
       const eligible = Boolean(owner && now && now.projectId === fresh.projectId && now.availability !== "runner_removed" &&
         now.runnerId === was.runnerId && now.workspaceId === was.workspaceId && db.projectLocationAddedBy(location.id) === was.addedBy &&
         !this.inBoundary(fresh, location.id) &&
+        (!custom || this.customSurveyLists(fresh, now)) &&
         (source !== "owner_added" || was.addedBy === owner) &&
         (source !== "runner_reconnected" || fresh.orchestratorPolicy?.excludedLocations?.some((item) =>
           item.locationId === location.id && RETRIED_ON_RECONNECT.has(item.failure))) &&
@@ -161,7 +170,9 @@ export class CampaignLocations {
         return;
       }
       if (result.ok) joins.push({ locationId: location.id, name: location.name, repository: result.location.repository, source });
-      else excluded.push({ locationId: location.id, name: location.name, failure: result.failure, reason: result.reason });
+      else excluded.push({ locationId: location.id, name: location.name, failure: result.failure, reason: result.reason,
+        // A transient read after the update must not end this Location's way back into a Custom list.
+        ...(custom && result.failure !== "runner_below_gates" && RETRIED_ON_RECONNECT.has(result.failure) ? { rejoinsOnReconnect: true as const } : {}) });
     });
     if (changed && source === "owner_included") return { ok: false, status: 409, error: "That Location changed while it was inspected; try again." };
     return this.record(fresh, { joins, excluded, pending });
