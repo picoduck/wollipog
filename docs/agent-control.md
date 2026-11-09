@@ -531,7 +531,9 @@ attempt, mode, base and the files in scope):
   (#975) removes the version-line conflict, but not the renumber when main passes a claim. A
   conflict block's resolution is never equivalent; its round always has a reviewer, who gets the
   pull request's diff of the scoped files both before and after the merge, so a change the
-  resolution dropped is visible. Older peers keep counting every round.
+  resolution dropped is visible. Each diff is capped per file, so one oversized file cannot hide the
+  others, and the prompt names any file it left out. A round that cannot show its whole effect that
+  way is charged like an ordinary round. Older peers keep counting every round.
 - An epoch that used its rounds takes more only through a typed
   `review_round_extension` workflow decision (`request_workflow_decision`).
   - **Snapshot:** the repository, pull request, epoch, head, rounds used, the open blocking findings

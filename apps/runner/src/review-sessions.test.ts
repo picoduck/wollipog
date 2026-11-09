@@ -11,7 +11,7 @@ import {
 } from "@wollipog/protocol";
 import { repositoryKey, ReviewScopeRefusal, ReviewSnapshotter, type PullRequestFacts } from "./review-snapshot.js";
 import {
-  defaultReviewSessionDependencies, gitlabHostConfigured, gitlabMergeRequestFacts, prepareCodexReviewWorkingDirectory, reviewLaunchArgs, reviewPrompt, ReviewSessionLauncher, verifySpawnedCommand,
+  boundedFileDiffs, defaultReviewSessionDependencies, gitlabHostConfigured, gitlabMergeRequestFacts, prepareCodexReviewWorkingDirectory, reviewLaunchArgs, reviewPrompt, ReviewSessionLauncher, verifySpawnedCommand,
   REVIEW_PATCH_LIMIT_BYTES, reviewSessionDiscoveryReason, type ReviewSessionDependencies,
 } from "./review-sessions.js";
 import { configuredSessionWritableGrants, explainSessionWritableRefusal, SessionWritableRootError } from "./review-trust.js";
@@ -967,22 +967,92 @@ test("a resolution that drops the pull request's own change shows the reviewer w
   f.launcher.release("s_review");
 });
 
-test("the diff at the reviewed head says so when it cannot be shown, and is fenced on its own", async (t) => {
-  // Too large to inline: the reviewer is told this round cannot show what the merge dropped.
-  const large = fixture(t);
-  writeFileSync(join(large.worktree, "big.txt"), `${"x".repeat(REVIEW_PATCH_LIMIT_BYTES + 1024)}\n`);
-  git(large.worktree, "add", "big.txt");
-  const upvoted = push(large, "-m", "a very large file");
-  moveBase(large, { "big.txt": "main's\n" });
-  assert.throws(() => git(large.worktree, "merge", "--quiet", "--no-edit", "main"));
-  writeFileSync(join(large.worktree, "big.txt"), "main's\n");
-  git(large.worktree, "add", "big.txt");
-  push(large, "--no-edit");
-  const tooLarge = await large.launcher.prepare("s_review", large.policy({ history: exhausted(large, "UPVOTE", upvoted) }), CODEX, "b");
-  assert.deepEqual(tooLarge.round.scopeFiles, ["big.txt"]);
-  assert.match(tooLarge.prompt, /too large to inline and the checkout does not hold it, so this round cannot show what the merge dropped/u);
-  large.launcher.release("s_review");
+test("one oversized file cannot hide a dropped change in another, and a round missing evidence is charged", async (t) => {
+  const f = fixture(t);
+  writeFileSync(join(f.worktree, "big.txt"), `${"x".repeat(REVIEW_PATCH_LIMIT_BYTES + 1024)}\n`);
+  git(f.worktree, "add", "big.txt");
+  const upvoted = push(f, "-m", "a very large file");
+  const base = moveBase(f, { "big.txt": "main's\n", "app.ts": "export const answer = 40;\n" });
+  assert.throws(() => git(f.worktree, "merge", "--quiet", "--no-edit", "main"));
+  // Both conflicts resolve to the base's side, dropping the pull request's change to each.
+  writeFileSync(join(f.worktree, "big.txt"), "main's\n");
+  writeFileSync(join(f.worktree, "app.ts"), "export const answer = 40;\n");
+  git(f.worktree, "add", "big.txt", "app.ts");
+  push(f, "--no-edit");
 
+  const history = { ...reviewed(f, "UPVOTE", upvoted), baseMergeRounds: true as const };
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history }), CODEX, "b");
+  assert.deepEqual(prepared.round, {
+    epoch: 1, round: 2, attempt: 1, mode: "delta", baseSha: base, scopeFiles: ["app.ts", "big.txt"], since: upvoted,
+  }, "reviewed, and charged: there is no baseMerge mark");
+  const section = prepared.prompt.split("## Pull Request's Diff at the Reviewed Head")[1]!;
+  assert.match(section, /-export const answer = 41;\n\+export const answer = 42;/u, "the small file's dropped change is shown");
+  assert.match(section, /could not be read, and the checkout does not hold it, so this round cannot show what the merge dropped from them\. Say so in your report:\n- `big\.txt`/u);
+  assert.doesNotMatch(section, /x{1000}/u, "the oversized diff stays out");
+  f.launcher.release("s_review");
+
+  // With no budget left, the same merge needs an extension: it cannot show what it would spare.
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ history: exhausted(f, "UPVOTE", upvoted) }), CODEX, "b")),
+    REVIEW_ROUND_REFUSALS.roundLimit);
+  assert.equal(existsSync(join(f.root, "snapshots", "checkouts", "s_review")), false);
+});
+
+test("a pinned patch over the limit keeps the files that fit, and names the rest for the checkout", async (t) => {
+  const f = fixture(t);
+  const lines = (edge: string) => `${edge}\n${"y\n".repeat(30)}z\n`;
+  const big = `${"x".repeat(REVIEW_PATCH_LIMIT_BYTES + 1024)}\n`;
+  moveBase(f, { "big.txt": lines("top"), "small.txt": lines("top") });
+  git(f.worktree, "merge", "--quiet", "--no-edit", "main");
+  writeFileSync(join(f.worktree, "big.txt"), `${big}${lines("top")}`);
+  writeFileSync(join(f.worktree, "small.txt"), lines("top-pr"));
+  git(f.worktree, "add", "big.txt", "small.txt");
+  const upvoted = push(f, "-m", "edit both files");
+  moveBase(f, { "big.txt": lines("top").replace(/z\n$/u, "z-main\n"), "small.txt": lines("top").replace(/z\n$/u, "z-main\n") });
+  git(f.worktree, "merge", "--quiet", "--no-edit", "main");
+  f.facts.headSha = git(f.worktree, "rev-parse", "HEAD");
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: { ...reviewed(f, "UPVOTE", upvoted), baseMergeRounds: true } }), CODEX, "b");
+  assert.deepEqual(prepared.round.scopeFiles, ["big.txt", "small.txt"]);
+  assert.equal(prepared.round.baseMerge, undefined, "charged");
+  const [pinned] = prepared.prompt.split("## Pull Request's Diff at the Reviewed Head");
+  assert.match(pinned!, /\+top-pr/u, "the small file's diff is kept");
+  assert.doesNotMatch(pinned!, /x{1000}/u);
+  assert.match(pinned!, /so the patch above leaves them out\. Read them from the checkout:\n- `big\.txt`/u);
+  f.launcher.release("s_review");
+});
+
+test("a resolution padded past the limit is charged, though the diff before the merge still fits", async (t) => {
+  const f = fixture(t);
+  const base = moveBase(f, { "app.ts": "export const answer = 40;\n" });
+  assert.throws(() => git(f.worktree, "merge", "--quiet", "--no-edit", "main"));
+  writeFileSync(join(f.worktree, "app.ts"), `export const answer = 42;\n// ${"p".repeat(REVIEW_PATCH_LIMIT_BYTES + 1024)}\n`);
+  git(f.worktree, "add", "app.ts");
+  push(f, "--no-edit");
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: { ...reviewed(f, "UPVOTE"), baseMergeRounds: true } }), CODEX, "b");
+  assert.deepEqual(prepared.round, {
+    epoch: 1, round: 2, attempt: 1, mode: "delta", baseSha: base, scopeFiles: ["app.ts"], since: f.head,
+  }, "charged: there is no baseMerge mark");
+  const [pinned, before] = prepared.prompt.split("## Pull Request's Diff at the Reviewed Head");
+  assert.match(pinned!, /so the patch above leaves them out\. Read them from the checkout:\n- `app\.ts`/u);
+  assert.match(before!, /-export const answer = 41;\n\+export const answer = 42;/u);
+  f.launcher.release("s_review");
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ history: exhausted(f, "UPVOTE") }), CODEX, "b")),
+    REVIEW_ROUND_REFUSALS.roundLimit);
+});
+
+test("bounded file diffs keep what fits, and name a file that was too large or could not be read", async () => {
+  const sizes: Record<string, string> = { "a.txt": "a".repeat(40), "b.txt": "b".repeat(30), "big.txt": "c".repeat(200) };
+  const read = async (paths: string[]) => {
+    if (paths.includes("broken.txt")) throw new Error("git failed");
+    return paths.map((path) => sizes[path]!).join("");
+  };
+  assert.deepEqual(await boundedFileDiffs(read, ["a.txt", "b.txt"], 100), { patch: `${sizes["a.txt"]}${sizes["b.txt"]}`, omitted: [] });
+  assert.deepEqual(await boundedFileDiffs(read, ["a.txt", "big.txt", "b.txt"], 100),
+    { patch: `${sizes["a.txt"]}${sizes["b.txt"]}`, omitted: ["big.txt"] }, "kept in path order");
+  assert.deepEqual(await boundedFileDiffs(read, ["a.txt", "broken.txt"], 100), { patch: sizes["a.txt"], omitted: ["broken.txt"] });
+  assert.deepEqual(await boundedFileDiffs(read, ["a.txt", "b.txt"], 50), { patch: sizes["b.txt"], omitted: ["a.txt"] }, "the smallest are kept");
+});
+
+test("the diff at the reviewed head says so when it cannot be shown, and is fenced on its own", async (t) => {
   // A file of the head's own diff that the reviewed head did not change.
   const added = fixture(t);
   moveBase(added);
