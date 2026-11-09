@@ -2983,6 +2983,8 @@ export class SessionManager {
    * no new ones, since each checks that the session can still open first. */
   private async settleWorktreeOperations(sessionId: string): Promise<void> {
     for (let tail = this.worktreeOperations.get(sessionId); tail; tail = this.worktreeOperations.get(sessionId)) {
+      // Setup that began before deletion's own cancel, but registered its trust card after it, ends here.
+      void this.abortWorktreeSetup(sessionId);
       await tail.catch(() => undefined);
       if (this.worktreeOperations.get(sessionId) === tail) return;
     }
@@ -3096,6 +3098,10 @@ export class SessionManager {
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
   }
 
+  private deletionUnderWay(sessionId: string): boolean {
+    return this.deleting.has(sessionId) || this.deleted.has(sessionId) || this.store.isDeleted(sessionId);
+  }
+
   private abortWorktreeSetup(sessionId: string): Promise<void> | undefined {
     const active = this.worktreeSetupRuns.get(sessionId);
     active?.controller.abort();
@@ -3166,6 +3172,10 @@ export class SessionManager {
     approvalSessionId = meta.sessionId,
     discoverConfig = false,
   ): Promise<"none" | "invalid" | "declined" | "cancelled" | "completed" | "failed"> {
+    // Deletion cancels setup once, as it begins, then waits for the worktree operations under way. One
+    // of those reaching setup only after that would wait on a trust card nobody can answer, and keep
+    // the deletion waiting with it, so no setup starts for a session being deleted.
+    if (this.deletionUnderWay(meta.sessionId)) return "cancelled";
     const active = this.worktreeSetupRuns.get(meta.sessionId);
     if (active) {
       await active.done;
@@ -3323,12 +3333,15 @@ export class SessionManager {
           resolve(decision);
         };
         this.worktreeSetupApprovals.set(`${approvalSessionId}:${requestId}`, resolveApproval);
-        signal.addEventListener("abort", () => {
+        const cancelOnAbort = () => {
           const pending = this.worktreeSetupApprovals.get(`${approvalSessionId}:${requestId}`);
           if (pending !== resolveApproval) return;
           this.worktreeSetupApprovals.delete(`${approvalSessionId}:${requestId}`);
           resolveApproval("cancelled");
-        }, { once: true });
+        };
+        signal.addEventListener("abort", cancelOnAbort, { once: true });
+        // An abort that came first fires no listener, and would leave this waiting for good.
+        if (signal.aborted) cancelOnAbort();
       });
       const emitted = this.emitEvent(approvalSessionId, {
         kind: "permission_request",

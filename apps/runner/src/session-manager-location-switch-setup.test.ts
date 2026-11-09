@@ -3030,6 +3030,52 @@ test("selecting a worktree a launch rollback still names ends that rollback, so 
   });
 });
 
+test("a request that reaches setup only after its session's deletion began cancels it, so the deletion finishes", async () => {
+  if (process.platform === "win32") return;
+  await withSession("setup-after-delete", async (h) => {
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    git(h.docs, "checkout", "--quiet", "-b", "config-base");
+    writeFileSync(join(h.docs, ".wollipog.json"), JSON.stringify({ version: 1, setup: [LOG_STEP(h)] }));
+    git(h.docs, "add", ".wollipog.json");
+    git(h.docs, "commit", "--quiet", "-m", "a setup nobody has trusted yet");
+    git(h.docs, "checkout", "--quiet", "main");
+    // The request's checkout waits at a gate, after the request has checked that the session can open.
+    const hooks = join(h.root, "hooks");
+    const started = join(h.root, "checkout-started");
+    const gate = join(h.root, "checkout-gate");
+    mkdirSync(hooks);
+    writeFileSync(join(hooks, "post-checkout"), `#!/bin/sh\n: > ${JSON.stringify(started)}\nwhile [ ! -e ${JSON.stringify(gate)} ]; do sleep 0.05; done\n`,
+      { mode: 0o755 });
+    execFileSync("git", ["-C", h.docs, "config", "core.hooksPath", hooks]);
+    const requesting = h.manager.requestWorktree(h.sessionId, { baseRef: "config-base", branch: "fix/late" }).then(() => "created", () => "failed");
+    await waitFor(() => existsSync(started), "the request did not reach its checkout");
+
+    // The deletion begins, and its provider takes a while to go, so the session's row is still there
+    // when the request reaches setup.
+    const internals = h.manager as unknown as { beginProviderRetirement: (...args: unknown[]) => { promise: Promise<unknown> } };
+    const retire = internals.beginProviderRetirement.bind(h.manager);
+    let letGo!: () => void;
+    const retirementHeld = new Promise<void>((resolve) => { letGo = resolve; });
+    internals.beginProviderRetirement = (...args) => {
+      const retirement = retire(...args);
+      return { ...retirement, promise: retirement.promise.then(async (value) => { await retirementHeld; return value; }) };
+    };
+    const deleting = h.manager.delete(h.sessionId).then(() => "deleted", (error: Error) => `failed: ${error.message}`);
+    await waitFor(() => h.store.isDeleted(h.sessionId), "the deletion did not begin");
+    writeFileSync(gate, "");
+    await new Promise<void>((resolve) => setTimeout(resolve, 500));
+    letGo();
+    const settled = (promise: Promise<string>) => Promise.race([promise,
+      new Promise<string>((resolve) => setTimeout(() => resolve("still waiting"), 20_000))]);
+    assert.equal(await settled(requesting), "failed", "the request ends without anyone answering a trust card");
+    assert.equal(await settled(deleting), "deleted", "and the deletion finishes");
+    const cardsShown = h.sent.filter((message) => message.type === "session_event" && message.sessionId === h.sessionId &&
+      message.payload.kind === "permission_request" && message.payload.title === "Trust Worktree Setup Configuration?");
+    assert.equal(cardsShown.length, 0, "no trust card was shown for a session being deleted");
+  });
+});
+
 test("a kept mark goes once the runner itself removes that worktree", async () => {
   await withSession("mark-forgotten-on-removal", async (h) => {
     serveOriginLocally(h);
