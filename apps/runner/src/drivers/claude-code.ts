@@ -601,6 +601,8 @@ export class ClaudeCodeDriver implements Driver {
   /** Bound sibling worktrees (by path) found retired since launch. Once one is left out of a spawn it
    * stays out, even if a directory appears at its path again: binding that needs a fresh launch. */
   private readonly retiredOwnedWorktrees = new Set<string>();
+  /** Retired siblings a spawn actually left out, each reported once in the Agent Logs. */
+  private readonly announcedRetiredWorktrees = new Set<string>();
   /** The top-level request streaming now: its `message_start` usage, completed by `message_delta`.
    * Published live on `message_stop` when the control plane can settle it (#3086). */
   private liveRequest: { model: string; usage: Record<string, unknown> } | null = null;
@@ -799,8 +801,9 @@ export class ClaudeCodeDriver implements Driver {
    * work is unfinished (#4210), and this driver can still spawn in that window: a model, effort or
    * permission-mode change once its own tasks have ended, a resume usage probe, or a process that
    * exited. bubblewrap refuses the stored bind of a removed worktree, so that spawn, and the
-   * person's turn, would fail. Leaving the retired binds out only narrows the boundary, and the
-   * session manager's own relaunch still follows once the work ends.
+   * person's turn, would fail. Leaving the retired binds out only narrows the boundary (see
+   * `isolationWithoutRetiredWorktrees` for what is kept), and the session manager's own relaunch
+   * still follows once the work ends.
    */
   private spawnIsolation(): SpawnIsolation | undefined {
     const isolation = this.opts.isolation;
@@ -810,16 +813,21 @@ export class ClaudeCodeDriver implements Driver {
     const managed = this.opts.managedWorktreeProtections
       ? new Set(this.managedProtections().map((protection) => protection.worktreePath))
       : undefined;
-    const newlyRetired: string[] = [];
     for (const worktree of owned) {
-      if (this.retiredOwnedWorktrees.has(worktree.path) || !ownedWorktreeRetired(worktree, managed)) continue;
-      this.retiredOwnedWorktrees.add(worktree.path);
-      newlyRetired.push(worktree.path);
+      if (!this.retiredOwnedWorktrees.has(worktree.path) && ownedWorktreeRetired(worktree, managed)) {
+        this.retiredOwnedWorktrees.add(worktree.path);
+      }
     }
-    if (newlyRetired.length) {
-      this.cb.onStderr(`Claude launch leaves out retired worktree ${newlyRetired.join(", ")} from its sandbox.`);
+    const result = isolationWithoutRetiredWorktrees(isolation,
+      owned.filter((worktree) => this.retiredOwnedWorktrees.has(worktree.path)));
+    const kept = result?.backend === "bwrap" ? result.protectedWorktree?.ownedWorktrees ?? [] : [];
+    const leftOut = owned.filter((worktree) => !this.announcedRetiredWorktrees.has(worktree.path) &&
+      !kept.some((entry) => entry.path === worktree.path));
+    for (const worktree of leftOut) this.announcedRetiredWorktrees.add(worktree.path);
+    if (leftOut.length) {
+      this.cb.onStderr(`Claude launch leaves out retired worktree ${leftOut.map((worktree) => worktree.path).join(", ")} from its sandbox.`);
     }
-    return isolationWithoutRetiredWorktrees(isolation, owned.filter((worktree) => this.retiredOwnedWorktrees.has(worktree.path)));
+    return result;
   }
 
   private effectivePermissionMode(): string {

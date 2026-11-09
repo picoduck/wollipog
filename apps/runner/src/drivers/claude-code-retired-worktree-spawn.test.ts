@@ -127,6 +127,10 @@ function fixture() {
 
 const names = (isolation: BwrapSpawnIsolation, ...paths: string[]) =>
   paths.some((path) => JSON.stringify(isolation).includes(path));
+/** Whether any writable mount (or owned-worktree entry) still names one of the paths. */
+const writableNames = (isolation: BwrapSpawnIsolation, ...paths: string[]) => paths.some((path) =>
+  JSON.stringify([isolation.writableBinds, isolation.protectedWorktree?.gitWritableRoots,
+    isolation.protectedWorktree?.ownedWorktrees]).includes(path));
 
 /** One turn on the live process that starts a watcher, then the watcher ends: the driver's own task
  * list is empty again while the session still owes the watcher's continuation. */
@@ -220,14 +224,16 @@ test("a one-shot turn after the sibling is retired leaves it out", async () => {
   }
 });
 
-test("a sibling the session no longer manages is left out even while its directory remains", async () => {
+test("a sibling the session no longer manages loses its writable binds even while its directory remains", async () => {
   const f = fixture();
   const driver = f.make({ env: { [CLAUDE_PERSISTENT_FLAG]: "0" } });
   try {
     f.unmanage();
     const turn = driver.prompt("one");
     await settle();
-    assert.equal(names(f.launches[0].isolation, f.sibling, f.siblingAdmin), false);
+    assert.equal(writableNames(f.launches[0].isolation, f.sibling, f.siblingAdmin), false);
+    assert.deepEqual(f.launches[0].isolation.readOnlyBinds, f.isolation.readOnlyBinds,
+      "its read-only overlays stay while their sources exist");
     f.write(f.children[0], { type: "result", subtype: "success" });
     f.children[0].emit("close", 0);
     assert.equal(await turn, "end_turn");
@@ -255,7 +261,8 @@ test("a sibling left out stays out when its path reappears: only a fresh launch 
     f.restoreRow();
     const second = driver.prompt("two");
     await settle();
-    assert.equal(names(f.launches[1].isolation, f.sibling, f.siblingAdmin), false);
+    assert.equal(writableNames(f.launches[1].isolation, f.sibling, f.siblingAdmin), false);
+    assert.deepEqual(f.launches[1].isolation.readOnlyBinds, f.isolation.readOnlyBinds);
     f.write(f.children[1], { type: "result", subtype: "success" });
     f.children[1].emit("close", 0);
     assert.equal(await second, "end_turn");
@@ -284,12 +291,12 @@ test("a sibling that is still managed and present stays bound on every spawn", a
   }
 });
 
-test("leaving a retired worktree out removes exactly its binds and nothing else", () => {
+test("leaving a retired worktree out removes exactly its writable binds and its missing overlays", () => {
   const f = fixture();
   try {
-    const result = isolationWithoutRetiredWorktrees(f.isolation, [{ path: f.sibling, gitAdmin: f.siblingAdmin }]);
+    const sibling = [{ path: f.sibling, gitAdmin: f.siblingAdmin }];
     const { protectedWorktree } = f.isolation;
-    assert.deepEqual(result, {
+    const narrowed = {
       backend: "bwrap",
       command: "/usr/bin/bwrap",
       args: [],
@@ -300,14 +307,67 @@ test("leaving a retired worktree out removes exactly its binds and nothing else"
         path: protectedWorktree!.path,
         gitWritableRoots: protectedWorktree!.gitWritableRoots.slice(0, 2),
       },
-      readOnlyBinds: [join(f.selected, ".git")],
-    });
+    };
+    // Its files still exist: every read-only overlay stays, since dropping one only widens.
+    assert.deepEqual(isolationWithoutRetiredWorktrees(f.isolation, sibling),
+      { ...narrowed, readOnlyBinds: f.isolation.readOnlyBinds });
+    // Once removed, an overlay of a missing source would make bwrap refuse the launch.
+    f.retire();
+    assert.deepEqual(isolationWithoutRetiredWorktrees(f.isolation, sibling),
+      { ...narrowed, readOnlyBinds: [join(f.selected, ".git")] });
     assert.equal(isolationWithoutRetiredWorktrees(f.isolation, []), f.isolation);
     // A "retired" root that holds the selected worktree is never removed: the provider runs there.
     assert.deepEqual(
       isolationWithoutRetiredWorktrees(f.isolation, [{ path: protectedWorktree!.parent, gitAdmin: "/nowhere" }]),
       f.isolation,
     );
+  } finally {
+    f.cleanup();
+  }
+});
+
+/** The mount that decides whether `path` is writable in a rendered bwrap argv: the last one covering it. */
+function decidingMount(args: string[], path: string): string | undefined {
+  let mount: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] !== "--bind" && args[index] !== "--ro-bind") continue;
+    const target = args[index + 2]!;
+    if (path === target || path.startsWith(`${target}/`)) mount = args[index];
+  }
+  return mount;
+}
+
+test("a retired sibling that a retained writable mount still covers never loses its read-only overlays", () => {
+  const f = fixture();
+  try {
+    // A requested-worktree boundary, separate from the selected worktree's parent, holds a sibling.
+    const boundary = join(f.root, "requested");
+    const sibling = join(boundary, "sibling");
+    const admin = join(f.root, "repo.git", "worktrees", "covered");
+    mkdirSync(sibling, { recursive: true });
+    mkdirSync(admin, { recursive: true });
+    writeFileSync(join(sibling, ".git"), `gitdir: ${admin}\n`);
+    writeFileSync(join(admin, "gitdir"), `${sibling}/.git\n`);
+    const base = f.isolation.protectedWorktree!;
+    const isolation: BwrapSpawnIsolation = {
+      ...f.isolation,
+      writableBinds: [...f.isolation.writableBinds!, { source: boundary, target: boundary }, { source: sibling, target: sibling }],
+      protectedWorktree: { ...base, gitWritableRoots: [...base.gitWritableRoots, admin],
+        ownedWorktrees: [...base.ownedWorktrees!, { path: sibling, gitAdmin: admin }] },
+      readOnlyBinds: [...f.isolation.readOnlyBinds!, join(sibling, ".git"), join(admin, "gitdir")],
+    };
+    const covered = [{ path: sibling, gitAdmin: admin }];
+    const render = (spawn: BwrapSpawnIsolation) => buildBwrapArgs({ command: "claude", args: [], cwd: f.selected }, spawn);
+    assert.equal(decidingMount(render(isolation), join(sibling, ".git")), "--ro-bind");
+
+    // Still on disk: the overlay stays read-only, whatever the transform keeps.
+    const present = isolationWithoutRetiredWorktrees(isolation, covered) as BwrapSpawnIsolation;
+    assert.equal(decidingMount(render(present), join(sibling, ".git")), "--ro-bind");
+    // Removed: its overlays could only go by leaving the path writable through the boundary, so the
+    // stored isolation is used unchanged, as before this change.
+    rmSync(sibling, { recursive: true, force: true });
+    rmSync(admin, { recursive: true, force: true });
+    assert.equal(isolationWithoutRetiredWorktrees(isolation, covered), isolation);
   } finally {
     f.cleanup();
   }

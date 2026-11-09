@@ -1,4 +1,4 @@
-import { lstatSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 import { posix } from "node:path";
 import type { SpawnIsolation } from "../spawn.js";
 
@@ -26,31 +26,51 @@ function withinOrEqual(root: string, path: string): boolean {
 }
 
 /**
- * The stored launch isolation with nothing left of the given retired worktrees: no writable bind of
- * the worktree or under it, no writable bind of its Git admin directory, and no read-only bind of an
- * entry inside either. bubblewrap refuses a bind whose source is missing, so a spawn from the stored
- * list fails once the worktree is removed (#3402). This only takes binds away; it never adds one, so
- * the result is never wider than the launch the session manager proved. A worktree that holds the
- * selected one is never treated as retired.
+ * The stored launch isolation without the writable mounts of the given retired worktrees: no
+ * writable bind of the worktree or under it, and no writable bind of its Git admin directory.
+ * bubblewrap refuses a bind whose source is missing, so a spawn from the stored list fails once the
+ * worktree is removed (#3402).
+ *
+ * The result is never wider than the launch the session manager proved:
+ * - Only writable mounts of a retired worktree go. A read-only overlay inside one stays while its
+ *   source exists, and goes only once it is missing, when bwrap would refuse it.
+ * - A retired worktree that a mount this launch keeps writable still covers (a requested-worktree
+ *   boundary, say) is left exactly as stored: removing its overlays there would make them writable.
+ * - A worktree that holds the selected one is never treated as retired.
  *
  * Returns the same object when there is nothing to remove.
  */
 export function isolationWithoutRetiredWorktrees(
   isolation: SpawnIsolation | undefined,
   retired: readonly OwnedWorktree[],
+  exists: (path: string) => boolean = existsSync,
 ): SpawnIsolation | undefined {
   if (isolation?.backend !== "bwrap" || !isolation.protectedWorktree || retired.length === 0) return isolation;
-  const selected = isolation.protectedWorktree.path;
-  const roots = retired
-    .flatMap((owned) => [owned.path, owned.gitAdmin])
-    .filter((root) => posix.isAbsolute(root) && !withinOrEqual(root, selected));
-  if (roots.length === 0) return isolation;
-  const gone = (path: string) => roots.some((root) => withinOrEqual(root, path));
   const { protectedWorktree } = isolation;
+  const selected = protectedWorktree.path;
+  const rootsOf = (owned: OwnedWorktree) => [owned.path, owned.gitAdmin];
+  let removable = retired.filter((owned) =>
+    rootsOf(owned).every((root) => posix.isAbsolute(root) && !withinOrEqual(root, selected)));
+  let gone: (path: string) => boolean = () => false;
+  let writableBinds = isolation.writableBinds;
+  let gitWritableRoots = protectedWorktree.gitWritableRoots;
+  // Dropping one worktree's mounts can uncover another only if they nest; repeat until it settles.
+  for (;;) {
+    const roots = removable.flatMap(rootsOf);
+    gone = (path) => roots.some((root) => withinOrEqual(root, path));
+    writableBinds = isolation.writableBinds?.filter((bind) => !gone(bind.source) && !gone(bind.target));
+    gitWritableRoots = protectedWorktree.gitWritableRoots.filter((path) => !gone(path));
+    const retainedWritable = [selected, ...gitWritableRoots, ...(writableBinds ?? []).map((bind) => bind.target)];
+    const uncovered = removable.filter((owned) =>
+      !rootsOf(owned).some((root) => retainedWritable.some((mount) => withinOrEqual(mount, root))));
+    if (uncovered.length === removable.length) break;
+    removable = uncovered;
+  }
+  if (removable.length === 0) return isolation;
+  const stale = (path: string) => gone(path) && !exists(path);
   const ownedWorktrees = protectedWorktree.ownedWorktrees?.filter((owned) => !gone(owned.path));
-  const writableBinds = isolation.writableBinds?.filter((bind) => !gone(bind.source) && !gone(bind.target));
-  const readOnlyBinds = isolation.readOnlyBinds?.filter((path) => !gone(path));
-  const codexPackageReadOnlyPaths = isolation.codexPackageReadOnlyPaths?.filter((path) => !gone(path));
+  const readOnlyBinds = isolation.readOnlyBinds?.filter((path) => !stale(path));
+  const codexPackageReadOnlyPaths = isolation.codexPackageReadOnlyPaths?.filter((path) => !stale(path));
   const { ownedWorktrees: _owned, ...protectedRest } = protectedWorktree;
   const {
     writableBinds: _writable, readOnlyBinds: _readOnly, codexPackageReadOnlyPaths: _packages, ...rest
@@ -60,7 +80,7 @@ export function isolationWithoutRetiredWorktrees(
     ...(writableBinds?.length ? { writableBinds } : {}),
     protectedWorktree: {
       ...protectedRest,
-      gitWritableRoots: protectedWorktree.gitWritableRoots.filter((path) => !gone(path)),
+      gitWritableRoots,
       ...(ownedWorktrees?.length ? { ownedWorktrees } : {}),
     },
     ...(readOnlyBinds?.length ? { readOnlyBinds } : {}),
