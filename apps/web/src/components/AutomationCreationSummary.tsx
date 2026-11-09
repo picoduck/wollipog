@@ -27,7 +27,7 @@ export function AutomationCreationSummary({ snapshot }: { snapshot: AutomationCr
         <div><dt>Provider Account</dt><dd>{action.request.providerAccountId ?? "Default"}</dd></div>
         <div><dt>Execution Target</dt><dd>{action.request.executionTargetId ?? "Host"}</dd></div>
         <div><dt>Recurring Child Tasks</dt><dd>{action.request.campaign.tasks.map(task => <div key={task.key}>
-          <strong>{task.title}</strong><pre>{task.prompt}</pre>
+          <strong>{task.title}</strong><div className="code-well"><pre>{task.prompt}</pre></div>
         </div>)}</dd></div>
       </>}
       <div><dt>Schedule</dt><dd><code>{spec.cron}</code> · {spec.timezone}</dd></div>

@@ -34815,6 +34815,37 @@ export class ControlPlaneDb {
     return row ? this.automationCommand(row) : null;
   }
 
+  /** Persist the authenticated cancellation separately from the command's transport outcome.
+   * A paused scheduled campaign stays active after its initial command fails; the marker must
+   * survive the owner answering the card, so reconnect cannot reclassify it as a rejected launch. */
+  recordAutomationCampaignCommandPause(commandId: string, trip: NonNullable<AutomationExecution["governancePause"]>, now: number): boolean {
+    const command = this.getAutomationCommand(commandId);
+    const execution = command && this.getAutomationExecution(command.executionId);
+    if (!command || !execution || execution.specSnapshot?.action.kind !== "create_session" ||
+        !execution.specSnapshot.action.request.campaign || command.sessionId !== execution.sessionId ||
+        command.sessionId !== trip.sessionId ||
+        !this.hasRunnerGovernanceTripForCommand(command.sessionId, trip, trip.commandId,
+          trip.commandId ? execution.createdAt : Math.max(execution.createdAt, command.startedAt ?? Infinity),
+          command.completedAt ?? now) ||
+        (trip.commandId !== undefined && trip.commandId !== commandId)) return false;
+    if (!this.automationCampaignCommandPaused(commandId)) this.insertAutomationEvent({
+      automationId: execution.automationId, executionId: execution.executionId, kind: "command_status_changed",
+      actor: { kind: "system", id: "runner-governance" },
+      detail: { ...trip, commandId, campaignGovernancePause: true }, now,
+    });
+    return true;
+  }
+
+  automationCampaignCommandPaused(commandId: string): boolean {
+    return Boolean(this.stmt(`SELECT 1 FROM automation_commands command
+      JOIN automation_executions execution ON execution.execution_id=command.execution_id
+      JOIN automation_events event ON event.automation_id=execution.automation_id AND event.execution_id=execution.execution_id
+      WHERE command.command_id=? AND event.kind='command_status_changed'
+      AND event.actor_kind='system' AND event.actor_id='runner-governance'
+      AND json_extract(event.detail,'$.commandId')=command.command_id AND json_extract(event.detail,'$.campaignGovernancePause')=1
+      LIMIT 1`).get(commandId));
+  }
+
   settleAutomationExecution(input: {
     executionId: string;
     status: "running" | "succeeded" | "failed" | "ceiling_paused";

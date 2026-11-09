@@ -166,10 +166,73 @@ test("a validated governance pause holds the campaign overlap lock while a child
     assert.equal(f.sessions.onGovernanceTripped("r", { type: "governance_tripped", sessionId: root.id,
       tripId: "root-allocation", kind: "cost_budget", threshold, observed: threshold + 1, commandId: command.commandId }), true);
     f.service.onGovernanceTripped(root.id, Date.now());
+    f.service.onDurableCommandReceipt("r", { type: "durable_session_command_update", commandId: command.commandId,
+      sessionId: root.id, state: "failed", revision: 2, error: "provider cancelled" }, Date.now());
+    assert.equal(f.db.getSession(root.id)!.status, "input_required");
+    assert.equal(f.db.getAutomationCommand(command.commandId)!.state, "rejected", "retain the actual transport outcome");
+    // The owner can answer and resume the existing session; its cleared card must not erase
+    // the classification of the first command on the next reconnect.
+    f.db.setPendingApproval(root.id, null);
+    f.db.updateSessionStatus(root.id, "idle", Date.now());
+    const restarted = new AutomationsService(f.db, f.hub, f.sessions, { info() {}, warn() {} }, undefined, f.runtime);
+    restarted.recover();
+    restarted.onDurableCommandReceipt("r", { type: "durable_session_command_update", commandId: command.commandId,
+      sessionId: root.id, state: "failed", revision: 3, error: "Service temporarily unavailable, please retry later" }, Date.now());
+    assert.equal(f.db.listAutomationCommands(execution.executionId).length, 1, "a pause never creates a replacement launch");
+    assert.equal(f.db.getSession(root.id)!.status, "idle");
     f.service.tick(saved.nextFireAt! + 60_000);
     await f.drain();
     assert.equal(f.db.getAutomationExecution(execution.executionId)!.status, "running");
     assert.equal(f.db.listSessions().length, 2, "a waiting root and live child keep one campaign");
+  } finally { f.db.close(); }
+});
+
+test("terminal-first governance replay keeps its campaign active without replacing the launch", async t => {
+  const f = fixture();
+  try {
+    const saved = f.service.create(f.spec("custom"), f.actor).data!;
+    f.service.tick(saved.nextFireAt!);
+    await f.drain();
+    const execution = f.db.listAutomationExecutions(saved.automationId)[0]!;
+    const root = f.db.getSession(execution.sessionId!)!;
+    const command = f.db.listAutomationCommands(execution.executionId)[0]!;
+    assert.equal(command.startedAt, undefined, "the start receipt was lost");
+    t.mock.method(Date, "now", () => execution.createdAt + 10);
+    f.db.updateSessionStatus(root.id, "running", Date.now());
+    const threshold = root.maxToolCalls!;
+    const trip = { type: "governance_tripped" as const, sessionId: root.id, tripId: "terminal-first",
+      kind: "max_tool_calls" as const, threshold, observed: threshold + 1, commandId: command.commandId };
+    assert.equal(f.db.recordAutomationCampaignCommandPause(command.commandId, trip, Date.now()), false,
+      "an unvalidated claim cannot classify a launch");
+    assert.equal(f.sessions.onGovernanceTripped("r", trip), true);
+    // Reconnect reports the stored trip then the terminal receipt; the original automation
+    // callback and its started receipt were both lost.
+    const restarted = new AutomationsService(f.db, f.hub, f.sessions, { info() {}, warn() {} }, undefined, f.runtime);
+    restarted.onDurableCommandReceipt("r", { type: "durable_session_command_update", commandId: command.commandId,
+      sessionId: root.id, state: "failed", revision: 2, error: "Service temporarily unavailable, please retry later" }, Date.now());
+    assert.equal(f.db.getAutomationExecution(execution.executionId)!.status, "running");
+    assert.equal(f.db.getSession(root.id)!.status, "input_required");
+    assert.equal(f.db.listAutomationCommands(execution.executionId).length, 1);
+    assert.equal(f.db.getAutomationCommand(command.commandId)!.state, "rejected");
+  } finally { f.db.close(); }
+});
+
+test("a genuine provider failure after delegation holds overlap until its children finish", async () => {
+  const f = fixture();
+  try {
+    const { saved, execution, root, command } = await start(f);
+    const child = createChild(f, root.id);
+    f.service.onDurableCommandReceipt("r", { type: "durable_session_command_update", commandId: command.commandId,
+      sessionId: root.id, state: "failed", revision: 2, error: "Service temporarily unavailable, please retry later" }, Date.now());
+    assert.equal(f.db.listAutomationCommands(execution.executionId).length, 1, "a campaign that delegated work cannot retry its initial prompt");
+    assert.equal(f.db.getSession(root.id)!.status, "stopped");
+    f.service.tick(saved.nextFireAt! + 60_000);
+    await f.drain();
+    assert.equal(f.db.getAutomationExecution(execution.executionId)!.status, "running");
+    assert.equal(f.db.listSessions().length, 2);
+    f.db.updateSessionStatus(child.id, "completed", Date.now());
+    f.service.tick(execution.createdAt + 1);
+    assert.equal(f.db.getAutomationExecution(execution.executionId)!.status, "failed");
   } finally { f.db.close(); }
 });
 

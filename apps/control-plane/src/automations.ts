@@ -950,11 +950,7 @@ export class AutomationsService {
           const unfinished = this.db.campaignWorkLedger.page(session.id, { state: "unfinished", limit: 1 }, now);
           if (session.orchestratorCampaign?.status === "verified_complete" && unfinished.ok && unfinished.data.items.length === 0) terminal = "succeeded";
           else if (session.status === "failed" || session.status === "stopped" || session.status === "completed") {
-            const unfinishedChildren = this.db.campaignDescendantIds(session.id).some(id => {
-              const child = this.db.getSession(id);
-              return child && !child.archived && !["completed", "failed", "stopped"].includes(child.status);
-            });
-            if (!unfinishedChildren) {
+            if (!this.campaignHasUnfinishedChildren(session.id)) {
               terminal = "failed";
               error = `campaign root ${session.status} before verified completion`;
             }
@@ -1020,10 +1016,14 @@ export class AutomationsService {
     }
   }
 
+  private campaignHasUnfinishedChildren(rootId: string): boolean {
+    return this.db.campaignDescendantIds(rootId).some(id => {
+      const child = this.db.getSession(id);
+      return child && !child.archived && !["completed", "failed", "stopped"].includes(child.status);
+    });
+  }
+
   private pauseForGovernance(execution: AutomationExecution, now: number, onlySessionId?: string): boolean {
-    // A root allocation is only one share of a campaign allowance. Its pause is a live campaign
-    // decision, not the end of the occurrence; keep wait/skip held through children and cleanup.
-    if (execution.specSnapshot?.action.kind === "create_session" && execution.specSnapshot.action.request.campaign) return false;
     const commands = this.db.listAutomationCommands(execution.executionId);
     const sources = [
       ...commands.filter((command) => command.supersededBy === undefined)
@@ -1064,6 +1064,12 @@ export class AutomationsService {
           this.db.hasRunnerGovernanceTripForCommand(sessionId, evidence, evidence.commandId, since, until);
       })?.runnerGuardrail;
       if (!trip) continue;
+      if (execution.specSnapshot?.action.kind === "create_session" && execution.specSnapshot.action.request.campaign) {
+        // This allocation is one share of a live campaign. Retain the exact command's validated
+        // pause through trailing failure receipts, owner responses and control-plane restarts.
+        if (commandId) this.db.recordAutomationCampaignCommandPause(commandId, { sessionId, ...trip }, now);
+        continue;
+      }
       if (execution.actionKind === "workflow_run") {
         this.failWorkflowExecution(execution, commands, sessionId,
           commands.find((command) => command.sessionId === sessionId && command.supersededBy === undefined)?.commandId,
@@ -1124,20 +1130,23 @@ export class AutomationsService {
     const schedule = this.executionSchedule(execution);
     // A superseded command was replaced by a live retry; the replacement carries the verdict.
     const failed = commands.find((command) =>
-      (command.state === "rejected" || command.state === "uncertain") && command.supersededBy === undefined);
+      (command.state === "rejected" || command.state === "uncertain") && command.supersededBy === undefined &&
+      !this.db.automationCampaignCommandPaused(command.commandId));
     if (failed) {
       if (execution.actionKind === "workflow_run") {
         this.failWorkflowExecution(execution, commands, failed.sessionId, failed.commandId,
           failed.lastError ?? `workflow sibling '${failed.commandId}' became ${failed.state}`, now);
       } else if (execution.actionKind === "create_session" && execution.sessionId && failed.state === "rejected") {
-        // A rejected launch is a runner failure receipt, or a command never sent: either way no
-        // provider process started for it.
+        // A genuine failed launch stops its root. Validated campaign governance cancellation
+        // was classified above; it keeps the root resumable instead.
         this.db.updateSessionStatus(execution.sessionId, "stopped", now, {
           cause: "launch_rejected",
           confirmation: "launch_rejected",
         });
         this.hub.sessionChangedById(execution.sessionId);
       }
+      if (execution.specSnapshot?.action.kind === "create_session" && execution.specSnapshot.action.request.campaign &&
+          execution.sessionId && this.campaignHasUnfinishedChildren(execution.sessionId)) return;
       const settled = this.db.settleAutomationExecution({
         executionId,
         status: "failed",
@@ -1151,7 +1160,8 @@ export class AutomationsService {
 
     let current = execution;
     if (current.status === "dispatching" &&
-        commands.some((command) => command.state === "started" || command.state === "completed")) {
+        commands.some((command) => command.state === "started" || command.state === "completed" ||
+          this.db.automationCampaignCommandPaused(command.commandId))) {
       const running = this.db.settleAutomationExecution({
         executionId,
         status: "running",
