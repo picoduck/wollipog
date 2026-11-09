@@ -2089,13 +2089,31 @@ test("Priority Order lists its ranking, expected account and skip reasons, and m
 
 test("a move that lost a race shows the saved order and asks for another action (#4353)", async () => {
   const current = priorityPolicy(["third", "first", "second"], 5);
-  const { api, writes } = priorityClient({ write: async () => { throw new ApiError("changed", 409, undefined, { current }); } });
+  const { api: base, writes } = priorityClient({ write: async () => { throw new ApiError("changed", 409, undefined, { current }); } });
+  // The server already holds revision 5; the runner props below stay at 4 until its stream arrives.
+  let readings = 0;
+  let revision = 4;
+  const api = { ...base, providerAccountSelection: async () => {
+    readings += 1;
+    return { provider: "claude", mode: "priority", policyRevision: revision, status: "selected", source: "priority",
+      accountId: revision === 4 ? "second" : "third", enforcement: "enforced", generatedAt: 1,
+      candidates: revision === 4
+        ? [{ accountId: "first", position: 1, eligible: false, reason: "signed_out" }, { accountId: "second", position: 2, eligible: true, selected: true }]
+        : [{ accountId: "third", position: 1, eligible: true, selected: true }] };
+  } } as unknown as ApiClient;
   const ui = await render({ runner: runnerView({ protocolVersion: POLICY, providerAccounts: RANKED,
     providerAccountDefaults: [priorityPolicy(["first", "second", "third"])] }), api });
   try {
     await ui.settle();
+    assert.match(ui.container.textContent ?? "", /Skipped: needs sign-in\./u);
+    const before = readings;
+    revision = 5;
     await act(async () => ui.container.querySelector<HTMLButtonElement>('[data-move="second:up"]')!.click()); await ui.settle();
     assert.equal(writes.length, 1, "nothing retries on its own");
+    assert.ok(readings > before, "the saved order is read again at once, not at the next minute's poll");
+    assert.doesNotMatch(ui.container.textContent ?? "", /Skipped: needs sign-in\./u, "the earlier revision's reasons are gone");
+    assert.equal(ui.container.querySelector('[data-move="third:up"]')?.closest(".row")?.textContent?.includes("Next Session"), true,
+      "the expectation matches the order on screen");
     assert.match(ui.container.textContent ?? "", /changed in another client\. Review it, then choose again/);
     assert.equal(ui.container.querySelector('[data-move="third:up"]')?.getAttribute("aria-disabled"), "true", "the saved order shows");
   } finally { await ui.unmount(); }
@@ -2158,5 +2176,17 @@ test("a viewer sees the mode but gets no controls for it (#4353)", async () => {
     assert.equal(ui.container.querySelectorAll('[role="radio"]').length, 0);
     assert.equal(ui.container.querySelectorAll("[data-move]").length, 0);
     assert.match(ui.container.textContent ?? "", /Priority Order/);
+  } finally { await ui.unmount(); }
+});
+
+test("an expectation from another revision is never shown beside the order on screen (#4353)", async () => {
+  const { api } = priorityClient();
+  const ui = await render({ runner: runnerView({ protocolVersion: POLICY, providerAccounts: RANKED,
+    providerAccountDefaults: [priorityPolicy(["first", "second", "third"], 9)] }), api });
+  try {
+    await ui.settle();
+    assert.doesNotMatch(ui.container.textContent ?? "", /New sessions use|Next Session|Skipped:/u,
+      "the fixture's reading is revision 4, and the list holds revision 9");
+    assert.match(ui.container.textContent ?? "", /Priority Order/u);
   } finally { await ui.unmount(); }
 });

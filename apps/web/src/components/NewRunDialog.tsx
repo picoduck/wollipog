@@ -494,7 +494,7 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
                 }))}
               />
             )}
-            {runner && chosenAgentIds.map((id) => <RunMemberExpectedAccount key={id} runner={runner} agentId={id} />)}
+            {runner && chosenAgentIds.map((id) => <RunMemberExpectedAccount key={id} runner={runner} agentId={id} projectId={selectedProject?.id} />)}
           </div>
         ) : (
           <>
@@ -562,11 +562,12 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-/** The account one chosen agent would use, when its Machine has more than one to choose from (#4353). */
-function RunMemberExpectedAccount({ runner, agentId }: { runner: RunnerView; agentId: string }) {
+/** The account one chosen agent would use, when its Machine has more than one to choose from (#4353).
+ * The project matters: a policy won't move a project's account-held memory, and the run would refuse. */
+function RunMemberExpectedAccount({ runner, agentId, projectId }: { runner: RunnerView; agentId: string; projectId: string | undefined }) {
   const agent = runner.agents.find((candidate) => candidate.id === agentId);
   const provider = agent ? providerForDriver(agent.driver ?? "acp") : null;
   const several = (runner.providerAccounts ?? []).filter((account) => account.provider === provider).length > 1;
-  const preview = useProviderAccountSelection(runner.runnerId, provider && several ? { agentId } : null, providerAccountSelectionRefreshKey(runner, runner.status === "online"));
+  const preview = useProviderAccountSelection(runner.runnerId, provider && several ? { agentId, ...(projectId ? { projectId } : {}) } : null, providerAccountSelectionRefreshKey(runner, runner.status === "online"));
   return preview ? <ExpectedProviderAccount runner={runner} preview={preview} providerName={agent ? agentDisplayName(agent) : undefined} /> : null;
 }

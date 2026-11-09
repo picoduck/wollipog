@@ -400,8 +400,11 @@ function ProviderAccountGroup({ runner, online, provider, policy, canEdit, savin
 }) {
   const mode = providerAccountPolicyMode(policy);
   const accounts = (runner.providerAccounts ?? []).filter((account) => account.provider === provider);
-  const preview = useProviderAccountSelection(runner.runnerId, mode === "priority" ? { provider } : null,
-    providerAccountSelectionRefreshKey(runner, online));
+  // The list can show a revision the Machine's stream hasn't delivered, such as a conflict's saved
+  // order. Read again for it, and never pair an earlier revision's expectation with this order.
+  const reading = useProviderAccountSelection(runner.runnerId, mode === "priority" ? { provider } : null,
+    `${providerAccountSelectionRefreshKey(runner, online)}\0${policy?.revision ?? 0}`);
+  const preview = reading?.policyRevision === (policy?.revision ?? 0) ? reading : null;
   const prioritySupported = runnerSupportsProtocol(runner.protocolVersion, "providerAccountSelectionPolicy");
   const anyUsable = accounts.some((account) => account.profile?.access !== "not_granted");
   // One account has nothing to rank, and an older runner can't enforce an order, so the choice appears

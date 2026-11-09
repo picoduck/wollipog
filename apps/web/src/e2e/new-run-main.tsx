@@ -57,7 +57,7 @@ const runners = [
 ].map((runner) => ({
   ...runner, os: "linux", version: "1", connectedAt: NOW, lastSeen: NOW, protocolVersion: 141,
 })) as unknown as RunnerView[];
-if (scenario === "account-priority") {
+if (scenario.startsWith("account-priority")) {
   // #4353: one Claude agent, with two ranked accounts and the first signed out.
   agents.splice(1);
   agents[0] = { ...agents[0]!, providerAccountReadiness: { defaultAuthStatus: "unknown", readyAccountIds: ["b"] } };
@@ -151,7 +151,11 @@ const refuse = () => {
 const client = {
   ...api,
   workflowDefinitions: async () => [workflow],
-  providerAccountSelection: async () => ({
+  // `account-priority-memory`: inside a project, a policy won't move memory held by the account.
+  providerAccountSelection: async (_runnerId: string, target: { projectId?: string }) => (scenario === "account-priority-memory" && target.projectId ? {
+    provider: "claude", mode: "priority", policyRevision: 2, status: "choice_required", source: "none", refusal: "account_memory",
+    enforcement: "enforced", generatedAt: NOW, candidates: [],
+  } : {
     provider: "claude", mode: "priority", policyRevision: 2, status: "selected", source: "priority", accountId: "b",
     enforcement: "enforced", generatedAt: NOW, candidates: [
       { accountId: "a", position: 1, eligible: false, reason: "signed_out" },

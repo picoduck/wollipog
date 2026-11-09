@@ -72,6 +72,14 @@ for (const width of [1440, 390]) {
       await page.screenshot({ path: `playwright-report/provider-accounts/new-run-expected-${width}.png`, fullPage: true });
     });
 
+    test("a project whose memory is held by the account says so instead of promising an account (#4353)", async ({ page }) => {
+      await open(page, "account-priority-memory");
+      await dialog(page).getByRole("textbox", { name: "Task" }).fill("Compare the account setup");
+      await chooseProject(page, "Wollipog");
+      await expect(dialog(page).getByText(/memory is stored with each Claude account/u)).toBeVisible();
+      await expect(dialog(page).getByText(/sessions use Personal/u)).toHaveCount(0);
+    });
+
     test("the primary's reason is in the footer, in view, and follows the fields", async ({ page }) => {
       await open(page);
       const run = dialog(page).getByRole("button", { name: /^Run (\d )?Agents?$/ });
