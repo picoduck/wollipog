@@ -48,6 +48,9 @@ const execFileAsync = promisify(execFile);
 
 /** The pinned patch is inlined up to this size; a larger change is reviewed from the checkout. */
 export const REVIEW_PATCH_LIMIT_BYTES = 400 * 1024;
+/** How far `boundedFileDiffs` goes file by file before it names the rest as left out. */
+const REVIEW_INDIVIDUAL_DIFFS_LIMIT = 256;
+const REVIEW_INDIVIDUAL_DIFFS_BUDGET_MS = 2 * 60_000;
 const REVIEW_DIFF_TIMEOUT_MS = 120_000;
 /** How long a pre-launch outcome is still re-sent after it was first sent at a registration. */
 const OUTCOME_RETENTION_MS = 7 * 24 * 60 * 60_000;
@@ -325,25 +328,43 @@ export interface ReviewPromptInput {
 
 /**
  * A diff of `paths` within the patch limit. When the whole diff does not fit or cannot be read, each
- * file is read alone and the smallest are kept, so one oversized file cannot hide the others;
- * `omitted` names every file left out.
+ * file is read alone and the smallest are kept, so one oversized file cannot hide the others. The
+ * fallback holds at most `limit` bytes and stops at `maxFiles` reads or `budgetMs`; `omitted` names
+ * every file left out, for any of those reasons.
  */
-export async function boundedFileDiffs(read: (paths: string[]) => Promise<string>, paths: string[],
-  limit = REVIEW_PATCH_LIMIT_BYTES): Promise<{ patch: string; omitted: string[] }> {
+export async function boundedFileDiffs(read: (paths: string[]) => Promise<string>, paths: string[], options: {
+  limit?: number; maxFiles?: number; budgetMs?: number; now?: () => number;
+} = {}): Promise<{ patch: string; omitted: string[] }> {
+  const { limit = REVIEW_PATCH_LIMIT_BYTES, maxFiles = REVIEW_INDIVIDUAL_DIFFS_LIMIT, budgetMs = REVIEW_INDIVIDUAL_DIFFS_BUDGET_MS, now = Date.now } = options;
   const whole = await read(paths).catch(() => null);
   if (whole !== null && Buffer.byteLength(whole) <= limit) return { patch: whole, omitted: [] };
-  const diffs: Array<{ path: string; text: string | null }> = [];
-  for (const path of paths) diffs.push({ path, text: await read([path]).catch(() => null) });
-  const bySize = diffs.flatMap(({ path, text }) => text === null ? [] : [{ path, text, bytes: Buffer.byteLength(text) }])
-    .sort((a, b) => a.bytes - b.bytes);
-  const kept = new Map<string, string>();
+  const kept = new Map<string, { text: string; bytes: number }>();
   let used = 0;
-  for (const { path, text, bytes } of bySize) {
-    if (used + bytes > limit) break;
-    kept.set(path, text);
+  const deadline = now() + budgetMs;
+  for (const path of paths.slice(0, maxFiles)) {
+    if (now() >= deadline) break;
+    const text = await read([path]).catch(() => null);
+    if (text === null) continue;
+    const bytes = Buffer.byteLength(text);
+    if (bytes > limit) continue;
+    kept.set(path, { text, bytes });
     used += bytes;
+    // Past the limit, the largest diff held so far goes, so what is held never grows past it.
+    while (used > limit) {
+      const [largest, { bytes: size }] = [...kept].reduce((a, b) => b[1].bytes > a[1].bytes ? b : a);
+      kept.delete(largest);
+      used -= size;
+    }
   }
-  return { patch: paths.flatMap((path) => kept.get(path) ?? []).join(""), omitted: paths.filter((path) => !kept.has(path)) };
+  return { patch: paths.flatMap((path) => kept.get(path)?.text ?? []).join(""), omitted: paths.filter((path) => !kept.has(path)) };
+}
+
+/** A path as a review prompt lists it. A pull request's author chooses its paths, so a name with a
+ * control character or backtick is encoded and cannot break out of its list item. */
+export function reviewPromptPath(path: string): string {
+  if (!/[\p{Cc}\p{Zl}\p{Zp}`]/u.test(path)) return `- \`${path}\``;
+  // JSON escapes C0 controls but leaves C1 controls and the Unicode line separators as they are.
+  return `- ${JSON.stringify(path).replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, (char) => `\\u${char.codePointAt(0)!.toString(16).padStart(4, "0")}`)}`;
 }
 
 /** The mode line of a review prompt. */
@@ -385,12 +406,12 @@ export function reviewPrompt(input: ReviewPromptInput): string {
       : "- The working directory is a checkout of the reviewed head.",
     "",
     "Changed files to classify (each exactly once):",
-    ...(input.changedFiles.length ? input.changedFiles.map((path) => `- \`${path}\``) : ["- (none)"]),
+    ...(input.changedFiles.length ? input.changedFiles.map(reviewPromptPath) : ["- (none)"]),
     "",
   ];
   if (input.contextFiles?.length) {
     lines.push("Other files changed by the pull request (context only; do not classify):",
-      ...input.contextFiles.map((path) => `- \`${path}\``), "");
+      ...input.contextFiles.map(reviewPromptPath), "");
   }
   if (input.openFindings?.length) {
     lines.push("Open findings from earlier rounds:", ...input.openFindings.map(compactReviewFinding), "");
@@ -407,10 +428,9 @@ export function reviewPrompt(input: ReviewPromptInput): string {
     lines.push(`## ${title}`, "", ...fenced(input.patch, input.mode === "rebase" ? "text" : "diff"));
   }
   if (input.mergedBase) {
-    const quoted = (paths: string[]) => paths.map((path) => `- \`${path}\``);
     if (input.patchOmitted?.length) {
       lines.push("These files' diff is too large to inline or could not be read, so the patch above leaves them out. Read them from the checkout:",
-        ...quoted(input.patchOmitted), "");
+        ...input.patchOmitted.map(reviewPromptPath), "");
     }
     const omitted = input.reviewedOmitted ?? [];
     lines.push("## Pull Request's Diff at the Reviewed Head", "");
@@ -422,7 +442,7 @@ export function reviewPrompt(input: ReviewPromptInput): string {
     }
     if (omitted.length) {
       lines.push(`These files' diff at ${input.since} is too large to inline or could not be read, and the checkout does not hold it, so this round cannot show what the merge dropped from them. Say so in your report:`,
-        ...quoted(omitted), "");
+        ...omitted.map(reviewPromptPath), "");
     }
   }
   return lines.join("\n");
