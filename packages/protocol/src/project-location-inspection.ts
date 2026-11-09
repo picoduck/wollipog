@@ -41,6 +41,10 @@ export interface CampaignExcludedLocation {
   /** A Custom campaign only (#4319): this exclusion began as `runner_below_gates`, so a reconnect still
    * retries it whatever the last read found. Full Control retries by `failure` alone. */
   rejoinsOnReconnect?: true;
+  /** A Custom campaign only (#4319): this Location was left out for another reason at creation, such
+   * as its machine being offline. A reconnect reads it only to name its repository, so that repository
+   * can be refused. It never joins on a reconnect, as a Location offline at creation never has. */
+  nameOnly?: true;
   /** What a `runner_below_gates` Location verified as, when its runner can still read one (v288+):
    * while it is left out, that repository's gates refuse by this Location's name (#4319). */
   repository?: string;

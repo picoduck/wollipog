@@ -214,9 +214,20 @@ stands, since it can't tell them apart. The approval stays armed, because its co
 run. Reconciling it, a new request for the same pull request, or the join that ends the refusal lifts that.
 That join revokes the armed approval, in Full Control and in Custom, so the block never lifts with it still
 armed; a revoke to Custom revokes it too. A requester running in that very Location still acts in its own
-repository. An unknown repository keeps its rule: a person's approval lets the requester act with its own
-login. A runner too old to read a Location (below v288) names no repository, and neither does a read that
-fails, so until a later read names it that repository can't be told apart from an unknown one.
+repository. The record keeps one repository per Location, the latest a read named, so a runner naming a
+new one each time can't grow it.
+
+A Location excluded with no repository named, on a runner below the gates' floor or with no recorded
+version, may hold any repository. That covers a runner too old to read a Location (below v288), a read
+that failed (a timeout, say), an offline machine, a missing folder, and an exclusion recorded before
+these records existed. While one stands, every repository without an entry is refused the same way,
+including one the campaign never had, and none of them has a forge reader. The refusal names the Location
+and what ends it: updating its runner so a read can name the repository, or removing the Location from
+the Project. A requester in that Location isn't exempt, since nothing shows which repository it acts in.
+A reconnect reads such a Location again, a missing folder included. A Custom campaign records one even
+beside a single repository, and reads one that was offline or missing at creation only to name its
+repository: it never joins on a reconnect, as such a Location never has. Otherwise an unknown repository
+keeps its rule: a person's approval lets the requester act with its own login.
 
 This narrows only what joins. A Location the campaign already holds keeps its place on any runner, so a
 re-authorization or enable never drops a repository, and each gate still refuses a runner below its own

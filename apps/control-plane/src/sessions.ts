@@ -5938,8 +5938,12 @@ export class SessionsService {
         this.db.getWorkspacePath(ownNow.runnerId, ownNow.workspaceId) !== ownPath) return;
     const { repositories, excluded } = launchBoundaryRepositories({ launchRepository: own.location.repository, ...settled });
     // A Location left out for its runner's version is recorded even beside one repository: otherwise
-    // nobody would see the exclusion and no reconnect could retry it (#4319).
-    if ((repositories.length > 1 || excluded.some((item) => item.failure === "runner_below_gates")) && this.db.recordCustomCampaignRepositories(rootId, { projectId, projectLocationId: launchLocationId }, repositories, excluded, Date.now())) {
+    // nobody would see the exclusion and no reconnect could retry it (#4319). So is one an old runner
+    // left unnamed some other way, such as by being offline: until a reconnect names its repository,
+    // every repository without an entry is refused.
+    if ((repositories.length > 1 || excluded.some((item) => item.failure === "runner_below_gates") ||
+        this.db.unnamedBelowGatesLocations(excluded, projectId).length) &&
+        this.db.recordCustomCampaignRepositories(rootId, { projectId, projectLocationId: launchLocationId }, repositories, excluded, Date.now())) {
       this.hub.sessionChangedById(rootId);
     }
   }
@@ -12577,12 +12581,25 @@ export class SessionsService {
     // The durable record, not the latest read: a later read that fails, a move to waiting or a revoke
     // never turns a refused repository back into an unknown one. Only an entry ends it.
     const excluded = campaignRefusedRepositories(root).filter((item) => item.repository === named);
-    if (!excluded.length || excluded.some((item) => {
+    const here = (item: { locationId: string }) => {
       const location = this.db.getProjectLocation(item.locationId);
       return location?.runnerId === requester.runnerId && location?.workspaceId === requester.workspaceId;
-    })) return null;
-    return `${named} isn't in this campaign because the runner of ${excluded.map((item) => item.name).join(", ")} can't perform its gates. ` +
-      `Update and restart it to protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer, and it can join. Until then no other login stands in, and nothing was performed.`;
+    };
+    if (excluded.length) {
+      if (excluded.some(here)) return null;
+      return `${named} isn't in this campaign because the runner of ${excluded.map((item) => item.name).join(", ")} can't perform its gates. ` +
+        `Update and restart it to protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer, and it can join. Until then no other login stands in, and nothing was performed.`;
+    }
+    // A Location whose repository no read has named may hold this one (#4319), so every repository
+    // without an entry is refused while it stands, including ones the campaign never had. Even a
+    // requester in that Location can't show which repository it acts in.
+    if (campaignScopeRepositories(root).some((entry) => entry.repository === named)) return null;
+    const unnamed = this.db.unnamedBelowGatesLocations(root.orchestratorPolicy?.excludedLocations, root.projectId);
+    if (!unnamed.length) return null;
+    return `${named} can't be acted on while the runner of ${unnamed.map((item) => item.name).join(", ")} can't perform this campaign's gates ` +
+      "and no read has named the repository it holds, which may be this one. " +
+      `Update and restart that runner to protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer so it can be read, or remove that Location from the Project. ` +
+      "Until then no other login stands in, and nothing was performed.";
   }
 
   /** The campaign entry a publication must be created through (#4119), or null when its requester

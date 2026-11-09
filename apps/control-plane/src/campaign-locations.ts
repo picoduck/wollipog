@@ -7,14 +7,26 @@ import type { Hub } from "./hub.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { inspectProjectLocation } from "./project-location-inspection.js";
 
-/** Exclusions that a reconnecting runner may have cleared. The others describe the folder itself. A
- * runner's protocol version changes only by registering again, so an update is a reconnect (#4319). */
-const RETRIED_ON_RECONNECT: ReadonlySet<string> = new Set(["runner_offline", "read_failed", "runner_too_old", "runner_below_gates"]);
+/** Exclusions that a reconnecting runner may have cleared. The others describe what the folder holds. A
+ * runner's protocol version changes only by registering again, so an update is a reconnect (#4319). A
+ * missing folder is retried too: until a read names its repository, every repository without an entry
+ * is refused, and updating the runner is what that refusal asks for. */
+const RETRIED_ON_RECONNECT: ReadonlySet<string> = new Set(["runner_offline", "read_failed", "runner_too_old", "runner_below_gates", "path_missing"]);
 
-/** Custom retries only what #4319 excludes there, and that exclusion's later transient failures: one
- * that was offline when the campaign was created stays out, as it always has. */
+/** What a Custom campaign reads again on a reconnect only to name the repository (#4319). */
+const NAMED_ON_RECONNECT: ReadonlySet<string> = new Set(["runner_offline", "path_missing"]);
+
+/** Whether a Custom exclusion can join on a reconnect: one #4319 excluded there for its runner's version,
+ * and that exclusion's later transient failures. One left out for another reason at creation, such as
+ * its machine being offline, stays out, as it always has. */
+function customRejoins(item: CampaignExcludedLocation): boolean {
+  return item.nameOnly !== true && (item.failure === "runner_below_gates" || item.rejoinsOnReconnect === true);
+}
+
+/** Custom reads again what can join, and also what is only read to name its repository, so that a
+ * repository behind an old runner is refused by name rather than leaving every repository refused. */
 function retriedOnReconnect(item: CampaignExcludedLocation, custom: boolean): boolean {
-  return custom ? item.failure === "runner_below_gates" || item.rejoinsOnReconnect === true : RETRIED_ON_RECONNECT.has(item.failure);
+  return custom ? customRejoins(item) || item.nameOnly === true || NAMED_ON_RECONNECT.has(item.failure) : RETRIED_ON_RECONNECT.has(item.failure);
 }
 
 type Outcome = { ok: true; data: { joined: boolean; revision: number } } | { ok: false; status: number; error: string };
@@ -168,6 +180,14 @@ export class CampaignLocations {
         (source !== "owner_included" || Boolean(includer && includer.userId === owner &&
           db.canAccessWorkspace(includer, now.runnerId, now.workspaceId))));
       if (!eligible) { changed = true; return; }
+      // A Custom Location read only to name its repository never joins: a read that succeeds leaves it
+      // as it was, and one that fails records what it found, with any repository it named (#4319).
+      const previous = fresh.orchestratorPolicy?.excludedLocations?.find((item) => item.locationId === location.id);
+      if (custom && source === "runner_reconnected" && previous && !customRejoins(previous)) {
+        if (!result.ok) excluded.push({ locationId: location.id, name: location.name, failure: result.failure, reason: result.reason,
+          ...(result.repository ? { repository: result.repository } : {}), nameOnly: true });
+        return;
+      }
       // Only the owner's own Location joins on a reconnect. Anyone else's, or one with no recorded
       // adder, waits for Include in Campaign however it read: nobody has seen its repository.
       // While its runner is still too old, Include in Campaign can't help, so it keeps the reason that says why.

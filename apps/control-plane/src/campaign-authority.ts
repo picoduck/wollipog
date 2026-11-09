@@ -169,22 +169,21 @@ export function campaignScopeRepositories(root: Pick<SessionView, "orchestratorP
 }
 
 /** The repositories this campaign refuses because a Location's runner can't perform its gates (#4319):
- * each one a read found, recorded durably or still on an exclusion written before that record existed,
- * that holds no entry now. Holding an entry is the only thing that ends a refusal. */
+ * one per Location, the latest a read named, recorded durably or on the exclusion that stands now,
+ * which wins. Holding an entry is the only thing that ends a refusal. A Location's earlier repository
+ * goes only when a later read names another, so the record is bounded by the Project's Locations,
+ * which people add, and a runner naming a new repository each time can't grow it. */
 export function campaignRefusedRepositories(root: Pick<SessionView, "orchestratorPolicy">): CampaignRefusedRepository[] {
   const policy = root.orchestratorPolicy;
   const entries = new Set(campaignScopeRepositories(root).map((entry) => entry.repository));
-  const seen = new Set<string>();
-  return [...policy?.refusedRepositories ?? [],
-    ...(policy?.excludedLocations ?? []).flatMap((item) => item.failure === "runner_below_gates" && item.repository
-      ? [{ repository: item.repository, locationId: item.locationId, name: item.name }] : [])]
-    .map((item) => ({ repository: item.repository.toLowerCase(), locationId: item.locationId, name: item.name }))
-    .filter((item) => {
-      const key = `${item.repository}\n${item.locationId}`;
-      if (entries.has(item.repository) || seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+  const latest = new Map<string, CampaignRefusedRepository>();
+  for (const item of [...policy?.refusedRepositories ?? [],
+    ...(policy?.excludedLocations ?? []).flatMap((exclusion) => exclusion.failure === "runner_below_gates" && exclusion.repository
+      ? [{ repository: exclusion.repository, locationId: exclusion.locationId, name: exclusion.name }] : [])]) {
+    latest.delete(item.locationId);
+    latest.set(item.locationId, { repository: item.repository.toLowerCase(), locationId: item.locationId, name: item.name });
+  }
+  return [...latest.values()].filter((item) => !entries.has(item.repository));
 }
 
 /** Keep every repository `policy` refuses now in its durable record (#4319), so no later change to

@@ -6574,6 +6574,19 @@ export class ControlPlaneDb {
     return this.campaignForgeObservationStore;
   }
 
+  /** The excluded Locations whose repository no read has named, on a runner that can't perform the
+   * campaign's gates or whose version isn't known (#4319). Any of them may hold any repository without
+   * an entry, so while one stands each of those is refused. A Location no longer in the campaign's
+   * Project is gone and counts no more. A folder that isn't a repository holds none. */
+  unnamedBelowGatesLocations(excluded: readonly CampaignExcludedLocation[] | undefined, projectId: string | null | undefined): Array<{ locationId: string; name: string }> {
+    return (excluded ?? []).filter((item) => {
+      if (item.repository || !UNNAMED_REPOSITORY_FAILURES.has(item.failure)) return false;
+      const location = this.getProjectLocation(item.locationId);
+      if (!location || location.projectId !== projectId) return false;
+      return !runnerSupportsProtocol(this.getRunner(location.runnerId)?.protocolVersion, "campaignLocationGates");
+    }).map((item) => ({ locationId: item.locationId, name: item.name }));
+  }
+
   /** Who reads forge status about this repository's pull requests (slice 8, #4119). Another campaign
    * repository's are read by the runner of one of its Locations, with that runner's own login: the
    * first that can answer now, or the first at all so a fact can name why it can't. A repository
@@ -6592,8 +6605,14 @@ export class ControlPlaneDb {
     // A repository refused for a runner's version (#4319) has no reader until a Location of it joins:
     // the root's login no more stands in than it does for a repository that holds an entry, and a
     // Location outside the boundary is a runner nobody approved. Asked before the launch repository is
-    // known, since a Custom campaign may have none.
-    if (root && campaignRefusedRepositories(root).some((item) => item.repository === repository!.toLowerCase())) return null;
+    // known, since a Custom campaign may have none. While an excluded Location's repository is still
+    // unnamed, that is every repository without an entry.
+    if (root) {
+      const named = repository!.toLowerCase();
+      if (campaignRefusedRepositories(root).some((item) => item.repository === named)) return null;
+      if (!campaignScopeRepositories(root).some((entry) => entry.repository === named) &&
+        this.unnamedBelowGatesLocations(root.orchestratorPolicy?.excludedLocations, root.projectId).length) return null;
+    }
     const other = root ? campaignOtherRepository(root, repository) : null;
     const entry = other ? campaignScopeRepositories(root!).find((candidate) => candidate.repository === other) : undefined;
     if (!root || !entry) return reader(row.runner_id);
@@ -18145,17 +18164,6 @@ export class ControlPlaneDb {
     }
   }
 
-  /** Record what a mid-campaign Location inspection found (#4117). Verified Locations join their
-   * repository's boundary entry, or a new entry, at one new boundary revision authorized by the
-   * campaign's owner, exactly as any owner-authorized boundary change: every Full Control member
-   * gets the re-minted boundary and unconsumed decisions under the old revision are revoked.
-   * Exclusions and pending Locations are informational and never change the revision. The caller
-   * proves each join's provenance; this only refuses a boundary that is stale or not the owner's.
-   *
-   * `consume` names an approved campaign_repository_addition carried out by these joins: it is
-   * consumed in the same transaction, only for its own approver, and never revoked by the revision
-   * it creates. A Custom campaign has no authority boundary, so an approved addition extends its
-   * repository list instead, starting from `customBase` (its own Location's repository). */
   /** Revoke what is approved in each repository a Custom join or addition stops refusing (#4319). A
    * Custom list has no revision, so nothing else would: an armed merge's block would lift with its
    * approval still armed. A Full Control join revokes every authority-bound decision already. */
@@ -18174,6 +18182,17 @@ export class ControlPlaneDb {
     return revoked;
   }
 
+  /** Record what a mid-campaign Location inspection found (#4117). Verified Locations join their
+   * repository's boundary entry, or a new entry, at one new boundary revision authorized by the
+   * campaign's owner, exactly as any owner-authorized boundary change: every Full Control member
+   * gets the re-minted boundary and unconsumed decisions under the old revision are revoked.
+   * Exclusions and pending Locations are informational and never change the revision. The caller
+   * proves each join's provenance; this only refuses a boundary that is stale or not the owner's.
+   *
+   * `consume` names an approved campaign_repository_addition carried out by these joins: it is
+   * consumed in the same transaction, only for its own approver, and never revoked by the revision
+   * it creates. A Custom campaign has no authority boundary, so an approved addition extends its
+   * repository list instead, starting from `customBase` (its own Location's repository). */
   recordCampaignLocations(rootId: string, ownerUserId: string, update: {
     joins: Array<{ locationId: string; name: string; repository: string; source: CampaignLocationJoin["source"] }>;
     excluded: CampaignExcludedLocation[];
@@ -35561,12 +35580,17 @@ function validLocationJoins(value: unknown): boolean {
   });
 }
 
+/** The exclusions that leave a Location's repository unnamed though its folder may hold one (#4319).
+ * A folder that isn't a repository, has an unsupported origin, or isn't in the Project holds none. */
+const UNNAMED_REPOSITORY_FAILURES: ReadonlySet<string> = new Set(["runner_below_gates", "runner_offline", "runner_too_old", "path_missing", "read_failed"]);
+
 function validExcludedLocations(value: unknown): boolean {
   return Array.isArray(value) && value.length <= CAMPAIGN_BOUNDARY_LOCATIONS_MAX && value.every((item) => {
     const entry = item as Record<string, unknown> | null;
     return Boolean(entry && typeof entry === "object" && !Array.isArray(entry) &&
-      Object.keys(entry).every((key) => ["locationId", "name", "failure", "reason", "rejoinsOnReconnect", "repository"].includes(key)) &&
+      Object.keys(entry).every((key) => ["locationId", "name", "failure", "reason", "rejoinsOnReconnect", "repository", "nameOnly"].includes(key)) &&
       (entry.rejoinsOnReconnect === undefined || entry.rejoinsOnReconnect === true) &&
+      (entry.nameOnly === undefined || entry.nameOnly === true) &&
       (entry.repository === undefined || (typeof entry.repository === "string" && campaignRepositoryLocation(entry.repository) !== null)) &&
       typeof entry.locationId === "string" && entry.locationId.length > 0 && entry.locationId.length <= 256 &&
       typeof entry.name === "string" && entry.name.length <= 256 &&
