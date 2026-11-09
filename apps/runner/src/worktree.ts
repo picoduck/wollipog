@@ -2955,8 +2955,8 @@ export async function worktreeRollbackProofState(
 /** A linked worktree's directory outlived its Git registration: `git worktree prune` ran while a
  * volume was away, say. Nothing distinguishes what is in it from a person's uncommitted work. */
 function staleWorktreeRefusal(path: string): Error {
-  return new Error(`the directory ${path} holds a Git worktree that is no longer registered, perhaps with uncommitted work, so it ` +
-    "was left as it is. Move anything you want to keep out of it, delete the directory, then try again");
+  return new Error("a Git worktree that is no longer registered, perhaps with uncommitted work, was left as it is. Move anything you " +
+    `want to keep out of it, delete the directory, then try again: ${path}`);
 }
 
 async function removeExternalDirectory(
@@ -3051,8 +3051,9 @@ async function removeExternalDirectory(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
       throw new Error(
-        `refusing to recursively remove an unproved runner-owned path: ${(error as Error).message}. ` +
-        `Move or delete ${path} if it is not needed, then try again`,
+        // The error names the path. The instruction comes first, since a failure reason is bounded.
+        "refusing to recursively remove an unproved runner-owned path. Move or delete it if it is not needed, " +
+        `then try again: ${(error as Error).message}`,
       );
     }
   }
