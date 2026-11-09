@@ -7184,6 +7184,10 @@ export interface SubscriptionUsageBucket {
   windowDurationMinutes?: number;
   /** Unix epoch milliseconds. */
   resetsAt?: number;
+  /** Protocol v341, Unix epoch milliseconds: when this window's percentage was reported. The
+   * snapshot's `fetchedAt` moves on with any update, so only this dates a retained reading. Absent
+   * on a window with no percentage, or from an older runner. */
+  observedAt?: number;
   /** Provider-reported availability of this exact window, independent of the source state. */
   status?: "available" | "warning" | "exhausted";
 }
@@ -7223,16 +7227,23 @@ export interface SubscriptionUsageSnapshot {
   accountLabel?: string;
   /** Opaque runner account coordinate; absent preserves the legacy per-agent source. */
   providerAccountId?: string;
+  /** Protocol v341: 64 hex digits, a one-way fingerprint of the provider's own account identity, so
+   * the same subscription hashes alike on every machine. Display grouping only, never an
+   * authorization key. Absent when the identity is unknown or incomplete, which never groups. */
+  subscriptionIdentity?: string;
   credits?: SubscriptionUsageCredits;
   spendControls?: SubscriptionUsageSpendControl[];
 }
 
 /** Principal-scoped control-plane projection. Last-known data remains present while stale/offline. */
-export interface SubscriptionUsageSourceView extends SubscriptionUsageSnapshot {
+export interface SubscriptionUsageSourceView extends Omit<SubscriptionUsageSnapshot, "subscriptionIdentity"> {
   runnerName: string;
   agentName: string;
   runnerStatus: RunnerStatus;
   freshness: SubscriptionUsageFreshness;
+  /** Protocol v341: sources sharing this opaque, organization-scoped key are one subscription. The
+   * runner's fingerprint itself is never projected. Absent means this source stands alone. */
+  subscriptionKey?: string;
 }
 
 export interface SubscriptionUsageResponse {

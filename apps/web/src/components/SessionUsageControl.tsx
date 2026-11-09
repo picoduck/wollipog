@@ -212,7 +212,7 @@ function SessionCostFigures({ session, models, detail }: {
             {loaded?.pricing?.status === "cached" && " Cached rates."}
           </p>
         ) : provenance && <p className="usage-popover-note">{provenance}</p>}
-        {navigate && <button type="button" className="btn sm ghost" onClick={() => navigate({ name: "usage" })}>Usage and Cost</button>}
+        {navigate && <button type="button" className="btn sm ghost" onClick={() => navigate({ name: "usage", tab: "api" })}>Usage and Cost</button>}
       </div>
     </>
   );

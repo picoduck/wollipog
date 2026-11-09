@@ -3,7 +3,7 @@ import { interceptTraversal } from "./leave-guard.js";
 import {
   decodeResourceId,
   encodeResourceId,
-  isSettingsAlias,
+  isRouteAlias,
   viewFromPath,
   viewPath,
   type View,
@@ -40,9 +40,9 @@ export function instanceRouteFromPath(pathname: string, search = ""): InstanceRo
   const scopedPath = remainder.slice(slash) || "/";
   const view = viewFromPath(scopedPath, search);
   if (!view) return null;
-  // An old Settings address (`/settings/keyboard`, #3023) is still that instance's route; callers
+  // An old address (`/settings/keyboard`, #3023) is still that instance's route; callers
   // replace it with the canonical one, as `BrowserNavigation` does for an unscoped address.
-  const aliased = isSettingsAlias(scopedPath) && search === "" && encodeResourceId(instanceId) === encodedInstanceId;
+  const aliased = isRouteAlias(scopedPath) && search === "" && encodeResourceId(instanceId) === encodedInstanceId;
   if (!aliased && instanceViewPath(instanceId, view) !== `${pathname}${search}`) return null;
   return { instanceId, view };
 }
@@ -166,7 +166,7 @@ export class DesktopInstanceNavigation implements ViewNavigation {
     return move.traversal !== undefined && interceptTraversal(move.traversal);
   }
 
-  /** An old Settings address replaces its own entry with the view's canonical route. */
+  /** An old address replaces its own entry with the view's canonical route. */
   private replaceAlias(view: View): void {
     const path = instanceViewPath(this.instanceId, view);
     if (`${this.target.location.pathname}${this.target.location.search}` === path) return;

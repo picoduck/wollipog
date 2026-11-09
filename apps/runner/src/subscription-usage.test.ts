@@ -7,8 +7,12 @@ import {
   hasSubscriptionUtilization,
   normalizeClaudeRateLimits,
   normalizeCodexRateLimits,
+  probeClaudeSubscriptionIdentity,
   probeCodexSubscriptionUsage,
+  readCodexSubscriptionIdentity,
   shouldPublishSubscriptionUsageInventory,
+  SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS,
+  subscriptionIdentityFingerprint,
   SubscriptionUsageManager,
   subscriptionUsageSourceId,
 } from "./subscription-usage.js";
@@ -1029,6 +1033,7 @@ test("a quota reset inside one window applies once a second event confirms it", 
     usedPercent: 29,
     remainingPercent: 71,
     resetsAt: WEEK_RESET * 1000,
+    observedAt: OBSERVED_AT + 61_000,
     status: "available",
   });
   assert.equal(usageWindowRejection(manager.inventory()[0], now), null,
@@ -1379,6 +1384,403 @@ test("configured accounts have independent sources, homes, and targeted refreshe
   assert.deepEqual(probedHomes, ["/accounts/work", "/accounts/personal"]);
   assert.equal(manager.inventory().find((snapshot) => snapshot.providerAccountId === "personal")
     ?.buckets[0]?.usedPercent, 75);
+});
+
+function identityManager(options: {
+  resolve: NonNullable<ConstructorParameters<typeof SubscriptionUsageManager>[0]["resolveSubscriptionIdentity"]>;
+  published?: SubscriptionUsageSnapshot[];
+  now?: () => number;
+  authStatus?: "authenticated" | "unauthenticated";
+  probeFails?: () => boolean;
+}) {
+  return new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent()],
+    providerAccounts: () => [
+      { id: "work", label: "Work", provider: "codex", authStatus: options.authStatus ?? "authenticated" },
+    ],
+    resolveEnv: (_agentId, _driver, _context, accountId) => ({ CODEX_HOME: `/accounts/${accountId}` }),
+    authorizeProbe: () => ({ cwd: "/safe/subscription-probe" }),
+    publish: (snapshot) => options.published?.push(snapshot),
+    now: options.now ?? (() => 20_000),
+    resolveSubscriptionIdentity: options.resolve,
+    probeCodex: async () => {
+      if (options.probeFails?.()) throw new Error("provider is unavailable");
+      return {
+        state: "available",
+        rateLimits: { rateLimits: { limitId: "codex", primary: { usedPercent: 25 } } },
+      };
+    },
+  });
+}
+
+test("an old account's windows never carry a new identity, even with no identity in between", async () => {
+  const published: SubscriptionUsageSnapshot[] = [];
+  let now = 20_000;
+  let probeFails = false;
+  let identity: string | undefined = JSON.stringify(["codex", "user-1", "workspace-1"]);
+  const manager = identityManager({ resolve: async () => identity, published, now: () => now, probeFails: () => probeFails });
+  manager.syncSources();
+  await manager.refreshAccount("work");
+  assert.equal(manager.inventory()[0]?.buckets.length, 1);
+
+  now += SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS;
+  identity = undefined;
+  await manager.refreshIdentities();
+  assert.equal(manager.inventory()[0]?.subscriptionIdentity, undefined);
+  assert.equal(manager.inventory()[0]?.buckets.length, 0, "the windows have no known owner once the identity is gone");
+
+  now += SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS;
+  identity = JSON.stringify(["codex", "user-2", "workspace-2"]);
+  probeFails = true;
+  const seen = published.length;
+  await manager.refreshAccount("work");
+  const carryingNew = published.slice(seen).filter((snapshot) => snapshot.subscriptionIdentity !== undefined);
+  assert.ok(carryingNew.length > 0);
+  assert.ok(carryingNew.every((snapshot) => snapshot.buckets.length === 0), "a failed probe leaves nothing of the old account");
+});
+
+test("a selection change during Claude's authorization stops the old harness from starting", async () => {
+  let grant: (authorization: { cwd: string; settle: (children: readonly AgentProcess[]) => Promise<void> }) => void = () => {};
+  const settled: Array<readonly AgentProcess[]> = [];
+  let started = false;
+  let authorizing = false;
+  const logs: string[] = [];
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent()],
+    resolveEnv: () => ({}),
+    publish: () => {},
+    now: () => 20_000,
+    log: (message) => logs.push(message),
+    authorizeProbe: () => new Promise((resolve) => {
+      authorizing = true;
+      grant = resolve;
+    }),
+    resolveSubscriptionIdentity: async (request) => {
+      await request.authorize();
+      started = true;
+      return JSON.stringify(["claude", "person@example.test", "org-1"]);
+    },
+  });
+  manager.syncSources();
+  const pending = manager.refreshIdentities();
+  while (!authorizing) await new Promise((resolve) => setImmediate(resolve));
+  manager.selectionChanged();
+  grant({ cwd: "/safe/subscription-probe", settle: async (children) => { settled.push(children); } });
+  await pending;
+  assert.equal(started, false, "the old harness never runs");
+  assert.deepEqual(settled, [[]], "the authorization it took is released with no process");
+  assert.equal(manager.inventory()[0]?.subscriptionIdentity, undefined);
+  assert.deepEqual(logs, [], "a superseded read is not a failure");
+});
+
+test("each window records when its percentage was reported, through sparse and status-only updates", () => {
+  let now = OBSERVED_AT;
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent()],
+    resolveEnv: () => ({}),
+    publish: () => {},
+    now: () => now,
+  });
+  const observe = (info: Record<string, unknown>) => manager.observe("claude", "claude-code", { kind: "native" }, {
+    provider: "claude",
+    kind: "sparse",
+    payload: rateLimitEvent(info),
+  });
+  const window = (id: string) => manager.inventory()[0]?.buckets.find((bucket) => bucket.id === id);
+
+  observe({ unifiedWindows: { seven_day: { utilization: 0.2, resetsAt: WEEK_RESET } } });
+  assert.equal(window("seven_day")?.observedAt, OBSERVED_AT);
+
+  now = OBSERVED_AT + 1_000;
+  observe({ unifiedWindows: { five_hour: { utilization: 0.1, resetsAt: FIVE_HOUR_RESET } } });
+  assert.equal(window("five_hour")?.observedAt, OBSERVED_AT + 1_000);
+  assert.equal(window("seven_day")?.observedAt, OBSERVED_AT, "a window the update did not report keeps its own time");
+
+  now = OBSERVED_AT + 2_000;
+  observe({ status: "allowed_warning", rateLimitType: "seven_day", resetsAt: WEEK_RESET });
+  assert.equal(window("seven_day")?.status, "warning");
+  assert.equal(window("seven_day")?.observedAt, OBSERVED_AT, "a status-only event reports no percentage");
+
+  now = OBSERVED_AT + 3_000;
+  observe({ unifiedWindows: { seven_day: { utilization: 0.5, resetsAt: WEEK_RESET } } });
+  assert.equal(window("seven_day")?.observedAt, OBSERVED_AT + 3_000);
+});
+
+test("a Codex refresh records when each window was read", async () => {
+  const manager = identityManager({ resolve: async () => undefined, now: () => 50_000 });
+  manager.syncSources();
+  await manager.refreshAccount("work");
+  assert.equal(manager.inventory()[0]?.buckets[0]?.observedAt, 50_000);
+});
+
+test("a repeated event is still deduplicated although its receipt time differs", () => {
+  let now = OBSERVED_AT;
+  const published: SubscriptionUsageSnapshot[] = [];
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent()],
+    resolveEnv: () => ({}),
+    publish: (snapshot) => published.push(snapshot),
+    now: () => now,
+  });
+  const event = () => manager.observe("claude", "claude-code", { kind: "native" }, {
+    provider: "claude",
+    kind: "sparse",
+    payload: rateLimitEvent({ unifiedWindows: { seven_day: { utilization: 0.2, resetsAt: WEEK_RESET } } }),
+  });
+  event();
+  now += 1_000;
+  event();
+  assert.equal(published.length, 1);
+});
+
+test("a resolved subscription identity is published as a one-way fingerprint and survives refreshes", async () => {
+  const published: SubscriptionUsageSnapshot[] = [];
+  const identity = JSON.stringify(["codex", "user-1", "workspace-1"]);
+  const manager = identityManager({ resolve: async () => identity, published });
+  manager.syncSources();
+  assert.equal(manager.inventory()[0]?.subscriptionIdentity, undefined, "syncing sources starts no identity read");
+  await manager.refreshIdentities();
+  const fingerprint = manager.inventory()[0]?.subscriptionIdentity;
+  assert.match(fingerprint ?? "", /^[a-f0-9]{64}$/);
+  assert.equal(fingerprint, subscriptionIdentityFingerprint(identity));
+  assert.equal(published.at(-1)?.subscriptionIdentity, fingerprint, "learning the identity publishes it");
+  assert.doesNotMatch(JSON.stringify(manager.inventory()), /user-1|workspace-1/);
+
+  await manager.refreshAccount("work");
+  assert.equal(published.at(-1)?.buckets.length, 1);
+  assert.equal(published.at(-1)?.subscriptionIdentity, fingerprint, "a provider refresh keeps it");
+  assert.equal(manager.syncSources()[0]?.subscriptionIdentity, fingerprint, "a resync keeps it");
+});
+
+test("a partial identity is not enough to fingerprint: a shared org or a bare email could be another subscription", () => {
+  assert.equal(subscriptionIdentityFingerprint(JSON.stringify(["claude", null, "org-1"])), undefined);
+  assert.equal(subscriptionIdentityFingerprint(JSON.stringify(["claude", "person@example.test", null])), undefined);
+  assert.equal(subscriptionIdentityFingerprint(undefined), undefined);
+  assert.notEqual(
+    subscriptionIdentityFingerprint(JSON.stringify(["claude", "person@example.test", "org-1"])),
+    subscriptionIdentityFingerprint(JSON.stringify(["claude", "person@example.test", "org-2"])),
+    "one email in two organizations is two subscriptions",
+  );
+});
+
+test("signing in to another subscription in one home drops the old account's windows", async () => {
+  const published: SubscriptionUsageSnapshot[] = [];
+  let now = 20_000;
+  let identity = JSON.stringify(["codex", "user-1", "workspace-1"]);
+  const manager = identityManager({ resolve: async () => identity, published, now: () => now });
+  manager.syncSources();
+  await manager.refreshIdentities();
+  await manager.refreshAccount("work");
+  assert.equal(manager.inventory()[0]?.buckets.length, 1);
+  const before = manager.inventory()[0]?.subscriptionIdentity;
+
+  now += SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS;
+  identity = JSON.stringify(["codex", "user-2", "workspace-2"]);
+  await manager.refreshIdentities();
+  const after = manager.inventory()[0];
+  assert.notEqual(after?.subscriptionIdentity, before);
+  assert.equal(after?.buckets.length, 0, "the old subscription's windows are gone");
+  assert.equal(published.at(-1)?.subscriptionIdentity, after?.subscriptionIdentity);
+  assert.equal(published.at(-1)?.buckets.length, 0);
+});
+
+test("a failed identity read keeps the known identity, and a proven absence clears it", async () => {
+  let now = 20_000;
+  let outcome: () => string | undefined = () => JSON.stringify(["codex", "user-1", "workspace-1"]);
+  const logs: string[] = [];
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent()],
+    providerAccounts: () => [{ id: "work", label: "Work", provider: "codex", authStatus: "authenticated" }],
+    resolveEnv: () => ({}),
+    publish: () => {},
+    now: () => now,
+    log: (message) => logs.push(message),
+    resolveSubscriptionIdentity: async () => outcome(),
+  });
+  manager.syncSources();
+  await manager.refreshIdentities();
+  const known = manager.inventory()[0]?.subscriptionIdentity;
+  assert.ok(known);
+
+  now += SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS;
+  outcome = () => { throw new Error("credential file is being rewritten"); };
+  await manager.refreshIdentities();
+  assert.equal(manager.inventory()[0]?.subscriptionIdentity, known);
+  assert.match(logs.join("\n"), /subscription identity read failed/);
+
+  now += SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS;
+  outcome = () => undefined;
+  await manager.refreshIdentities();
+  assert.equal(manager.inventory()[0]?.subscriptionIdentity, undefined);
+});
+
+test("a signed-out source has no identity and is never asked for one", async () => {
+  let asked = 0;
+  const manager = identityManager({
+    authStatus: "unauthenticated",
+    resolve: async () => { asked += 1; return JSON.stringify(["codex", "user-1", "workspace-1"]); },
+  });
+  manager.syncSources();
+  await manager.refreshIdentities();
+  assert.equal(asked, 0);
+  assert.equal(manager.inventory()[0]?.subscriptionIdentity, undefined);
+});
+
+test("repeated identity refreshes inside the dedupe window read the provider once", async () => {
+  let asked = 0;
+  const manager = identityManager({
+    resolve: async () => { asked += 1; return JSON.stringify(["codex", "user-1", "workspace-1"]); },
+  });
+  manager.syncSources();
+  await manager.refreshIdentities();
+  await manager.refreshIdentities();
+  assert.equal(asked, 1);
+});
+
+test("a manual refresh does not wait for a slow Claude status command", async () => {
+  let release: (identity: string) => void = () => {};
+  let asked = false;
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [{ ...agent(), id: "claude", command: "claude", driver: "claude-code" }],
+    resolveEnv: () => ({}),
+    publish: () => {},
+    now: () => 20_000,
+    resolveSubscriptionIdentity: () => {
+      asked = true;
+      return new Promise((resolve) => { release = resolve; });
+    },
+  });
+  manager.syncSources();
+  await manager.refreshAll();
+  while (!asked) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(manager.inventory()[0]?.subscriptionIdentity, undefined, "the refresh returned with the read still pending");
+  release(JSON.stringify(["claude", "person@example.test", "org-1"]));
+  await manager.refreshIdentities();
+  assert.ok(manager.inventory()[0]?.subscriptionIdentity);
+});
+
+test("a Codex refresh learns its identity before the probe, and a changed sign-in keeps the new windows", async () => {
+  const published: SubscriptionUsageSnapshot[] = [];
+  let now = 20_000;
+  let identity = JSON.stringify(["codex", "user-1", "workspace-1"]);
+  const manager = identityManager({ resolve: async () => identity, published, now: () => now });
+  manager.syncSources();
+  await manager.refreshAll();
+  assert.equal(manager.inventory()[0]?.buckets.length, 1);
+  const before = manager.inventory()[0]?.subscriptionIdentity;
+  assert.ok(before);
+
+  now += SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS;
+  identity = JSON.stringify(["codex", "user-2", "workspace-2"]);
+  await manager.refreshAll();
+  const after = manager.inventory()[0];
+  assert.notEqual(after?.subscriptionIdentity, before);
+  assert.equal(after?.buckets.length, 1, "the probe that followed filled the new account's windows");
+});
+
+test("without an identity resolver a source never reports one", async () => {
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent()],
+    providerAccounts: () => [{ id: "work", label: "Work", provider: "codex", authStatus: "authenticated" }],
+    resolveEnv: () => ({}),
+    authorizeProbe: () => ({ cwd: "/safe/subscription-probe" }),
+    publish: () => {},
+    now: () => 20_000,
+    probeCodex: async () => ({
+      state: "available",
+      rateLimits: { rateLimits: { limitId: "codex", primary: { usedPercent: 25 } } },
+    }),
+  });
+  manager.syncSources();
+  await manager.refreshAll();
+  await manager.refreshIdentities();
+  assert.equal(manager.inventory()[0]?.subscriptionIdentity, undefined);
+});
+
+test("an identity read that finishes after shutdown is dropped", async () => {
+  let release: (identity: string) => void = () => {};
+  const published: SubscriptionUsageSnapshot[] = [];
+  const manager = identityManager({ published, resolve: () => new Promise((resolve) => { release = resolve; }) });
+  manager.syncSources();
+  const pending = manager.refreshIdentities();
+  manager.shutdown();
+  release(JSON.stringify(["codex", "user-1", "workspace-1"]));
+  await pending;
+  assert.equal(published.length, 0);
+});
+
+test("the Claude identity probe reads auth status for a claude.ai sign-in and reaps the process", async () => {
+  const stdout = (payload: unknown) => JSON.stringify(payload);
+  const run = async (payload: string | null) => {
+    const child = new EventEmitter() as unknown as AgentProcess;
+    const output = new PassThrough();
+    Object.assign(child, { stdout: output, stderr: new PassThrough(), stdin: new PassThrough() });
+    const spawned: SpawnAgentOptions[] = [];
+    let killed = 0;
+    let finished = 0;
+    const result = probeClaudeSubscriptionIdentity(
+      { ...agent(), id: "claude", command: "claude", args: ["--flag"], driver: "claude-code" },
+      { HOME: "/accounts/personal" },
+      { cwd: "/safe/subscription-probe" },
+      {
+        spawn: (options) => { spawned.push(options); return child; },
+        kill: () => { killed += 1; },
+        onSpawn: () => {},
+        onFinish: () => { finished += 1; },
+      },
+    );
+    // A child process reports `close` only after its output streams have ended.
+    output.once("end", () => (child as unknown as EventEmitter).emit("close", payload === null ? 1 : 0));
+    if (payload !== null) output.write(payload);
+    output.end();
+    return { identity: await result, spawned, killed, finished };
+  };
+
+  const signedIn = await run(stdout({
+    loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty", email: "Person@Example.test", orgId: "org-1",
+  }));
+  assert.equal(signedIn.identity, JSON.stringify(["claude", "person@example.test", "org-1"]));
+  assert.deepEqual(signedIn.spawned[0]?.args, ["--flag", "auth", "status"]);
+  assert.equal(signedIn.spawned[0]?.cwd, "/safe/subscription-probe");
+  assert.equal(signedIn.killed, 1);
+  assert.equal(signedIn.finished, 1);
+
+  assert.equal((await run(stdout({ loggedIn: true, authMethod: "console", email: "p@example.test", orgId: "org-1" }))).identity,
+    undefined, "API billing is not a subscription");
+  assert.equal((await run(stdout({ loggedIn: true, authMethod: "claude.ai", apiProvider: "bedrock", email: "p@example.test", orgId: "org-1" }))).identity,
+    undefined, "Bedrock is not a subscription");
+  assert.equal((await run(stdout({ loggedIn: false }))).identity, undefined);
+  await assert.rejects(run("not json"), "unreadable status is a failed read, not proof of no identity");
+});
+
+test("the Codex identity reader uses the source's credential home and native context only", async () => {
+  const claims = Buffer.from(JSON.stringify({
+    "https://api.openai.com/auth": { chatgpt_user_id: "user-1", chatgpt_account_id: "workspace-1" },
+  })).toString("base64url");
+  const files = new Map([["/accounts/work/auth.json", JSON.stringify({ tokens: { id_token: `h.${claims}.s` } })]]);
+  const read = async (path: string) => {
+    const content = files.get(path);
+    if (content === undefined) throw Object.assign(new Error("missing"), { code: "ENOENT" });
+    return content;
+  };
+  assert.equal(
+    await readCodexSubscriptionIdentity(agent(), { CODEX_HOME: "/accounts/work" }, read),
+    JSON.stringify(["codex", "user-1", "workspace-1"]),
+  );
+  assert.equal(await readCodexSubscriptionIdentity(agent(), { CODEX_HOME: "/accounts/other" }, read), undefined,
+    "no credential file means no ChatGPT sign-in here");
+  assert.equal(
+    await readCodexSubscriptionIdentity({ ...agent(), context: { kind: "wsl", distro: "Ubuntu" } }, { CODEX_HOME: "/accounts/work" }, read),
+    undefined,
+    "a WSL home is not readable as a host path",
+  );
 });
 
 test("provider events without an advertised account source are ignored", () => {

@@ -62,17 +62,19 @@ export type MachineAccountsIntent =
 export type SettingsFocusTarget = "keyboard-shortcuts";
 export type SettingsFocus = { target: SettingsFocusTarget; activationId?: number };
 
-/** Old Settings addresses and the view each now opens; each replaces its own history entry. */
-const SETTINGS_ALIASES: Readonly<Record<string, View>> = {
+/** Old addresses and the view each now opens; each replaces its own history entry. */
+const ROUTE_ALIASES: Readonly<Record<string, View>> = {
   // Session Naming lives compactly under Behavior.
   "/settings/session-naming": { name: "settings", section: "behavior" },
   // Keyboard folded into Behavior › Input (#3023): the old section's address lands on its one row.
   "/settings/keyboard": { name: "settings", section: "behavior", focus: { target: "keyboard-shortcuts" } },
+  // Subscriptions had its own path while API Usage opened first.
+  "/usage/subscriptions": { name: "usage" },
 };
 
-/** Whether `path` is an old Settings address that opens another view (see `SETTINGS_ALIASES`). */
-export function isSettingsAlias(path: string): boolean {
-  return Object.hasOwn(SETTINGS_ALIASES, path);
+/** Whether `path` is an old address that opens another view (see `ROUTE_ALIASES`). */
+export function isRouteAlias(path: string): boolean {
+  return Object.hasOwn(ROUTE_ALIASES, path);
 }
 
 /** Where a section's settings are kept, when every one of them is kept in the same place. */
@@ -168,10 +170,10 @@ export type AutomationEditorRoute = { kind: "new" } | { kind: "edit"; automation
 export type AutomationsTab = "outbound";
 
 /**
- * Usage and Cost's tabs (#3010): API Usage at `/usage`, and Subscriptions at `/usage/subscriptions`.
- * Absent is API Usage.
+ * Usage and Cost's tabs (#3010): Subscriptions at `/usage`, and API Usage at `/usage/api`. Absent is
+ * Subscriptions, what's left on each plan being the usual reason to open the page.
  */
-export type UsageTab = "subscriptions";
+export type UsageTab = "api";
 
 /**
  * Agent Skills panes that are not a skill (docs/design-system.md §6): the Orphaned Copies pane and
@@ -537,7 +539,7 @@ export function viewPath(view: View): string {
         : view.tab === "outbound" ? "/automations/outbound" : "/automations";
     case "automation": return `/automations/~${encodeResourceId(view.id)}`;
     case "skills": return view.id ? `/skills/~${encodeResourceId(view.id)}` : view.pane ? `/skills/${view.pane}` : "/skills";
-    case "usage": return view.tab === "subscriptions" ? "/usage/subscriptions" : "/usage";
+    case "usage": return view.tab === "api" ? "/usage/api" : "/usage";
     case "archived": return "/archived";
     case "projects": return view.id ? `/projects/~${encodeResourceId(view.id)}` : view.pane ? `/projects/${view.pane}` : "/projects";
     case "session": return view.location
@@ -667,12 +669,12 @@ export function viewFromPath(pathname: string, search = ""): View | null {
     return id === null ? null : { name: "skills", id };
   }
   if (path === "/usage") return { name: "usage" };
-  if (path === "/usage/subscriptions") return { name: "usage", tab: "subscriptions" };
+  if (path === "/usage/api") return { name: "usage", tab: "api" };
   if (path === "/archived") return { name: "archived" };
   // No section: a phone shows the section index, and wider layouts open the first section (§6.1, §6.2).
   if (path === "/settings") return { name: "settings" };
   // Keep old bookmarks useful: a copy, so a caller that annotates the view cannot change the table.
-  if (isSettingsAlias(path)) return structuredClone(SETTINGS_ALIASES[path]!);
+  if (isRouteAlias(path)) return structuredClone(ROUTE_ALIASES[path]!);
   const settingsMatch = /^\/settings\/(appearance|notifications|behavior|approvals|reviews|orchestrator|network|storage|experimental|about)$/.exec(path);
   if (settingsMatch) return { name: "settings", section: settingsMatch[1] as SettingsSection };
   const approvalsPolicyMatch = /^\/settings\/approvals\/~([^/]+)$/.exec(path);

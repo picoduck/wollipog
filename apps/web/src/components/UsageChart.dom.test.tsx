@@ -130,7 +130,7 @@ async function render(data: UsageAggregationResponse, wrap: (view: React.ReactEl
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<ApiProvider client={client(data)}>{wrap(<UsageView />)}</ApiProvider>);
+    root.render(<ApiProvider client={client(data)}>{wrap(<UsageView tab="api" />)}</ApiProvider>);
   });
   await act(async () => {
     await settleLoad();
