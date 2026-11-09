@@ -24,6 +24,38 @@ test("port allocations are contiguous, stable across restart, released, and exha
   assert.deepEqual(restarted.allocate("session-d\0tree-d"), { start: 42_002, end: 42_003, size: 2 });
 });
 
+test("revalidating a view's block keeps it unless another owner took it, and never replaces it over a failure to find out", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "wollipog-ports-revalidate-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const range = { start: 42_000, end: 42_009, blockSize: 2 };
+  const allocator = new WorktreePortAllocator(root, range);
+  const owned = allocator.allocate("a\0one");
+  assert.deepEqual(allocator.revalidate("a\0one", owned), { block: owned, replaced: false }, "it holds it");
+  allocator.release("a\0one");
+  assert.deepEqual(allocator.revalidate("a\0one", owned), { block: owned, replaced: false }, "free again, so it gets it back");
+
+  allocator.release("a\0one");
+  allocator.allocate("b\0other", owned);
+  const replaced = allocator.revalidate("a\0one", owned);
+  assert.equal(replaced.replaced, true, "taken, so it moves");
+  assert.notDeepEqual(replaced.block, owned);
+  assert.deepEqual(allocator.get("b\0other"), owned, "and the other owner keeps it");
+  assert.deepEqual(allocator.revalidate("a\0one", owned), replaced, "this owner holds another, which is the one it uses");
+
+  // A block that is free, and a journal that cannot be written: that is no conflict, so nothing moves.
+  const free = allocator.allocate("c\0free");
+  allocator.release("c\0free");
+  const internals = allocator as unknown as { flush(): void };
+  const flush = internals.flush.bind(allocator);
+  // Only the first write fails, so a retry that took some other block would succeed unnoticed.
+  internals.flush = () => {
+    internals.flush = flush;
+    throw new Error("disk full");
+  };
+  assert.throws(() => allocator.revalidate("c\0free", free), /disk full/u);
+  assert.equal(allocator.get("c\0free"), undefined);
+});
+
 test("configuration changes grandfather live blocks while new blocks avoid every collision", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "wollipog-ports-reconfigure-"));
   t.after(() => rm(root, { recursive: true, force: true }));
