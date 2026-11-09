@@ -1106,6 +1106,42 @@ denial, the Codex installation is unsupported with failure code `codex_sandbox_u
 `unavailableReason` names the fix and appears in Machine settings and `get_agent_capabilities`,
 and `create_session` refuses it with that reason. Contexts other than native Linux are unchanged.
 
+### Ordinary Git in This Boundary
+
+The boundary makes the worktree, its admin directory and the shared `objects`, `refs` and `logs`
+writable. The shared Git directory itself stays read-only, with its `config`, `packed-refs` and
+`rr-cache`, and so does every other session's admin directory. What that means for everyday commands,
+measured with Git 2.43:
+
+| Command | Inside the boundary | Supported Way |
+| --- | --- | --- |
+| Conflicted `git merge`, then `git commit` | Works | |
+| Conflicted `git rebase`, `git cherry-pick` | Finish with exit status 0, printing a `packed-refs.lock` error | Clear what they leave (below) |
+| `git push -u` | The push lands and exits 0, but prints `could not lock config file` and records no upstream | `git push origin HEAD:refs/heads/<branch>` |
+| `git branch --set-upstream-to`, `git config` | Fail: the shared `config` is read-only | None inside the boundary |
+| `git fetch origin main` | Moves `origin/main` as well as `FETCH_HEAD` | |
+| `git fetch --prune`, `git branch -d`, `git update-ref -d` | Cannot delete a ref | `delete_worktree_refs` (below) |
+| `git stash pop`, `git stash drop` of the last entry | Work, printing a `packed-refs.lock` error | |
+| `git switch` on the selected worktree | Works, and the next turn is held for worktree recovery unless the branch is restored first | `create_worktree` for a new branch |
+| Committing in a worktree created this turn | Fails until the session relaunches there | End the turn (`isolation.nextStep`) |
+
+**Rerere stays off.** A protected launch sets `GIT_CONFIG_PARAMETERS='rerere.enabled=false'` for
+everything in the boundary. Rerere's shared `rr-cache` has to stay read-only, because Git replays
+what it holds into other merges, so anything a session wrote there would reach another session's or
+a person's merge. With rerere on, the boundary already denied its writes: a conflict made `git commit`
+crash after the commit landed (exit status 139) and left `MERGE_RR.lock` in the admin directory, so
+every later commit in that worktree exited 128 even though it landed, and `git rebase --continue` and
+`git cherry-pick --continue` died the same way. The setting makes nothing writable, and a lock left
+by an earlier launch stops mattering because Git no longer takes it. A provider that filters this
+variable from its commands gets the old behavior back, not a new failure. The Git the runner itself
+runs on the host is unaffected. This applies to native Linux managed worktrees only: every other
+execution context has no such boundary, so its repository's `rerere.enabled` applies as before.
+
+**SSH stalls are not this boundary.** The boundary shares the host's network. Fetches and pushes
+over SSH can stall or time out when port 22 is throttled, usually after a few quick connections,
+with or without a sandbox. HTTPS through `gh` keeps working then:
+`git -c credential.helper= -c 'credential.helper=!gh auth git-credential' fetch https://github.com/<owner>/<repo>.git <ref>`.
+
 ### Deleting the Session's Own Refs
 
 Git takes `packed-refs.lock` in the shared Git directory before it deletes any ref: a worktree's
@@ -1118,6 +1154,8 @@ still needs the lock beside it and pins a stale copy once host Git repacks, a sy
 worktrees. So, inside the sandbox, `git rebase` and `git cherry-pick` still print
 `Unable to create '…/packed-refs.lock'` and leave `CHERRY_PICK_HEAD` or `AUTO_MERGE` behind, and
 `git cherry-pick --quit`, `git branch -d` and `git update-ref -d` fail with the same error (#3316).
+A finished rebase also leaves `REBASE_HEAD`, which the runner does not delete. `git status` ignores
+it once the rebase has ended.
 
 The runner deletes those refs instead, outside the sandbox, through `delete_worktree_refs` (CLI
 `wollipog worktree delete-refs`, protocol v227). Only the session's own credential can call it,

@@ -372,6 +372,31 @@ export function buildCloudArgs(
   ];
 }
 
+/**
+ * Git configuration every process in a protected worktree's boundary runs with, in the form `git -c`
+ * hands its children. Rerere keeps its shared resolutions in the common `rr-cache`, which stays
+ * read-only here because another session's or a person's merge would replay anything written to it.
+ * With rerere on, a conflict there makes `git commit` crash after the commit lands and leaves
+ * `MERGE_RR.lock`, so every later commit exits non-zero. This turns off a feature the boundary already
+ * denies, and makes nothing writable.
+ *
+ * This variable rather than `GIT_CONFIG_COUNT` and `GIT_CONFIG_KEY_0`: a provider that filters
+ * environment names containing `KEY` would keep the count and drop the key, and Git then fails every
+ * command. Filtering this one only restores the behavior above.
+ */
+export const PROTECTED_WORKTREE_GIT_CONFIG = "'rerere.enabled=false'";
+
+/**
+ * The launch environment's `GIT_CONFIG_PARAMETERS` for a protected worktree: whatever it already
+ * carried, such as `core.hooksPath` or `core.fsmonitor` overrides, with rerere turned off after it.
+ * Git reads the entries in order and the last one wins, so nothing earlier is lost. It goes into the
+ * environment itself rather than a bubblewrap `--setenv`, because the Claude namespace provider
+ * re-executes its worker with the serialized launch environment, not the supervisor's.
+ */
+export function protectedWorktreeGitConfig(existing: string | undefined): string {
+  return existing?.trim() ? `${existing.trimEnd()} ${PROTECTED_WORKTREE_GIT_CONFIG}` : PROTECTED_WORKTREE_GIT_CONFIG;
+}
+
 export function buildBwrapArgs(opts: Pick<SpawnAgentOptions, "command" | "args" | "cwd">, isolation: BwrapSpawnIsolation): string[] {
   const bridge = isolation.wslAgentControl;
   const socketDir = bridge?.socketPath ? posix.dirname(bridge.socketPath) : undefined;
@@ -855,6 +880,9 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
     worktreeDescendantMarker ? { [WORKTREE_DESCENDANT_MARKER_ENV]: worktreeDescendantMarker } : {},
   ]);
   if (bwrapOptions) Object.assign(launchEnv, bwrapTemporaryEnvironment(launchEnv, bwrapOptions));
+  if (opts.isolation?.backend === "bwrap" && opts.isolation.protectedWorktree) {
+    launchEnv.GIT_CONFIG_PARAMETERS = protectedWorktreeGitConfig(launchEnv.GIT_CONFIG_PARAMETERS);
+  }
   if (opts.claudeNamespaceProvider && opts.isolation?.backend === "bwrap" &&
       opts.context?.kind !== "wsl" && opts.descendantOwner) {
     return spawnClaudeNamespaceProvider(

@@ -150,6 +150,29 @@ test("protected Claude namespace retains tasks across provider exits and reaps d
   }
 });
 
+test("protected Claude namespace runs its worker with rerere off, in every generation", {
+  skip: !available, timeout: 30_000,
+}, async () => {
+  // The worker is re-executed from the serialized launch environment, not the supervisor's, so the
+  // setting has to travel in that environment. A second launch is a later provider generation.
+  const owner = {};
+  const script = "process.stdout.write(process.env.GIT_CONFIG_PARAMETERS ?? 'unset')";
+  const previous = process.env.GIT_CONFIG_PARAMETERS;
+  process.env.GIT_CONFIG_PARAMETERS = "'core.fsmonitor=false'";
+  try {
+    for (const generation of ["first", "second"]) {
+      const result = await closed(launch(owner, script, "33333333-3333-4333-8333-333333333333"));
+      assert.equal(result.stdout, "'core.fsmonitor=false' 'rerere.enabled=false'", `${generation} generation`);
+    }
+  } finally {
+    if (previous === undefined) delete process.env.GIT_CONFIG_PARAMETERS;
+    else process.env.GIT_CONFIG_PARAMETERS = previous;
+    // The namespace outlives its workers; end it, as every other test here does, even on failure.
+    terminateDescendantBoundaries(owner);
+    assert.equal(await waitForPendingKills(6_000), true);
+  }
+});
+
 test("new namespace reconciles a stale task root for its exact session key", {
   skip: !available, timeout: 30_000,
 }, async () => {
