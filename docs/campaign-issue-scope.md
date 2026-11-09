@@ -443,7 +443,9 @@ approving it applies: the one an owner review states, or the derived limit a fai
 or a proposal grows to fit, read under the rule the approval itself applies. An initial proposal that
 adds nothing says the campaign starts with no issues. Its Open Request opens that exact occurrence and
 no other. When the session doesn't list that occurrence, the entry offers no Open Request rather than
-another request.
+another request. The request's own card and the Owner Question state the same increase. The server
+derives it on each read of the session (`PendingApproval.scopeMaxIssuesIncrease`) and never stores it,
+so it isn't part of the request's snapshot or digest and changes nothing about what approving does.
 
 An entry leaves the list once its request is approved, denied, revoked or superseded. Orchestrator-owned
 and admitted changes aren't listed, and neither is the owner's own Campaign Status change, because none

@@ -468,9 +468,9 @@ test("decisions the owner kept wait for them in Campaign Status, and each opens 
 
 for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "phone", width: 390, height: 844 }]) {
   for (const route of [
-    { name: "a proposal without lineage (#4267)", scope: "1", request: "wd_scope_141", summary: "Add team/repo#141, team/repo#142, raising Maximum Issues from 6 to 7" },
-    { name: "a failed grant's proposal (#4334)", scope: "grant", request: "wd_scope_143", summary: "Add team/repo#143, team/docs#7, raising Maximum Issues from 6 to 9" },
-    { name: "a proposal check's owner route (#4334)", scope: "proposal", request: "wd_scope_151", summary: "Add team/repo#151, team/repo#152" },
+    { name: "a proposal without lineage (#4267)", scope: "1", request: "wd_scope_141", summary: "Add team/repo#141, team/repo#142, raising Maximum Issues from 6 to 7", limit: "6 to 7" },
+    { name: "a failed grant's proposal (#4334)", scope: "grant", request: "wd_scope_143", summary: "Add team/repo#143, team/docs#7, raising Maximum Issues from 6 to 9", limit: "6 to 9" },
+    { name: "a proposal check's owner route (#4334)", scope: "proposal", request: "wd_scope_151", summary: "Add team/repo#151, team/repo#152, raising Maximum Issues from 6 to 8", limit: "6 to 8" },
   ]) {
     test(`${route.name} waits for the owner as a Scope Approval and opens its own request, ${viewport.name}`, async ({ page }) => {
       await page.setViewportSize({ width: viewport.width, height: viewport.height });
@@ -485,6 +485,8 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
       const card = page.locator(`[data-session-request-id="${route.request}"]`);
       await expect(card).toBeVisible();
       await expect(card.locator(":focus")).toHaveCount(1);
+      // The card it opens states the same increase the entry names (#4334).
+      await expect(card).toContainText(`Maximum Issues${route.scope === "proposal" ? ": " : ""}${route.limit}`);
     });
   }
 
@@ -495,7 +497,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
     await expect(waiting.locator("dt")).toHaveText(["Scope Approval", "Scope Approval", "Scope Approval"]);
     await expect(waiting.getByText("Only you can make these decisions.")).toBeVisible();
     // The third request waits behind the first in the dock, so reaching it can't be an accident.
-    await waiting.getByRole("button", { name: "Open Request: Add team/repo#151, team/repo#152", exact: true }).click();
+    await waiting.getByRole("button", { name: "Open Request: Add team/repo#151, team/repo#152, raising Maximum Issues from 6 to 8", exact: true }).click();
     const card = page.locator('[data-session-request-id="wd_scope_151"]');
     await expect(card).toBeVisible();
     await expect(card.locator(":focus")).toHaveCount(1);

@@ -378,7 +378,7 @@ const escapeMarkdown = (value: string) => value.replace(/([\\`*_[\]<>#|])/gu, "\
 
 /** The question's Markdown background: the owner's words, each issue with its origin and rationale,
  * the count, constraints and withheld operations, and why it came to the owner. */
-export function scopeProposalMaterial(snapshot: ScopeProposalSnapshot): string {
+export function scopeProposalMaterial(snapshot: ScopeProposalSnapshot, maxIssuesIncrease?: PendingApproval["scopeMaxIssuesIncrease"]): string {
   const proposal = snapshot.scopeProposal;
   const lines: string[] = [];
   if (proposal.ownerMessage) lines.push("**Your message**", "", `> ${escapeMarkdown(proposal.ownerMessage)}`, "");
@@ -395,6 +395,8 @@ export function scopeProposalMaterial(snapshot: ScopeProposalSnapshot): string {
   }
   if (proposal.constraints.length) lines.push("**Constraints it read**", "", ...proposal.constraints.map((c) => `- ${escapeMarkdown(c)}`), "");
   if (proposal.withheldOperations.length) lines.push(`**Withheld operations:** ${proposal.withheldOperations.map(campaignOperationLabel).join(", ")}`, "");
+  const raisedTo = maxIssuesIncrease ? maxIssuesIncrease.from + maxIssuesIncrease.increase : null;
+  if (maxIssuesIncrease) lines.push(`**Maximum Issues:** ${maxIssuesIncrease.from} to ${raisedTo}`, "");
   lines.push("**Rationale**", "", escapeMarkdown(snapshot.explanation), "");
   const includes = listed(proposal.checks.map((check) => CHECK_PHRASES[check])) || "nothing the server could check";
   const reason = proposal.constraintCheck?.reason ? ` (${escapeMarkdown(proposal.constraintCheck.reason.replace(/\.$/u, ""))})` : "";
@@ -409,19 +411,19 @@ export function scopeProposalMaterial(snapshot: ScopeProposalSnapshot): string {
         : `it includes ${includes}, which no Decision Model has checked`;
   const limits = scopeProposalRepositoryLimits(proposal);
   lines.push(`This needs your approval because ${why}. ` +
-    `Approving admits exactly these issues${limits.length && proposal.initial
+    `Approving admits exactly these issues${maxIssuesIncrease ? ` and raises Maximum Issues from ${maxIssuesIncrease.from} to ${raisedTo}` : ""}${limits.length && proposal.initial
       ? ` and limits the campaign to ${listed(limits.map(escapeMarkdown))}; another repository can come back only if you approve adding it` : ""}. ` +
     "Something Else declines it and sends your words to the Orchestrator.");
   return lines.join("\n");
 }
 
 /** The proposal as one agent question: approve, decline, or answer in the owner's own words. */
-export function scopeProposalAgentQuestions(snapshot: ScopeProposalSnapshot): AgentQuestion[] {
+export function scopeProposalAgentQuestions(snapshot: ScopeProposalSnapshot, maxIssuesIncrease?: PendingApproval["scopeMaxIssuesIncrease"]): AgentQuestion[] {
   return [{
     id: SCOPE_PROPOSAL_ANSWER_ID,
     header: "Scope Proposal",
     question: snapshot.scopeProposal.initial ? "Approve the Orchestrator's proposed initial scope?" : "Approve the Orchestrator's proposed scope addition?",
-    context: scopeProposalMaterial(snapshot),
+    context: scopeProposalMaterial(snapshot, maxIssuesIncrease),
     options: [
       { label: SCOPE_PROPOSAL_APPROVE_LABEL, description: "Admit exactly the proposed issues." },
       { label: SCOPE_PROPOSAL_DECLINE_LABEL, description: "Admit nothing; the Orchestrator revises its proposal." },
@@ -445,5 +447,5 @@ export function scopeProposalAnswer(answers: Record<string, string | string[]>):
 export function presentScopeProposalRequest(request: PendingApproval): PendingApproval {
   const snapshot = scopeProposalOfRequest(request);
   if (!snapshot) return request;
-  return { ...request, kind: "question", title: "Scope Proposal", async: true, questions: scopeProposalAgentQuestions(snapshot) };
+  return { ...request, kind: "question", title: "Scope Proposal", async: true, questions: scopeProposalAgentQuestions(snapshot, request.scopeMaxIssuesIncrease) };
 }

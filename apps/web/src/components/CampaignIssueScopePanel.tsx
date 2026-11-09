@@ -1,5 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from "react";
-import { campaignScopeChangeGroups, type CampaignIssueScopeSnapshot, type CampaignIssueScopeView, type SessionView } from "@wollipog/protocol";
+import { campaignScopeChangeGroups, type CampaignIssueScopeSnapshot, type CampaignIssueScopeView, type PendingApproval, type SessionView } from "@wollipog/protocol";
 import { browserRandomUUID } from "../browser-crypto.js";
 import { Checkbox, Select } from "./ui/ChoiceControls.js";
 import { useApi } from "../api-context.js";
@@ -22,19 +22,24 @@ function ScopeOwnerReviewFacts({ review }: { review: NonNullable<CampaignIssueSc
   </p>;
 }
 
-export function CampaignIssueScopeSummary({ snapshot }: { snapshot: CampaignIssueScopeSnapshot }) {
+export function CampaignIssueScopeSummary({ snapshot, derivedIncrease }: {
+  snapshot: CampaignIssueScopeSnapshot;
+  /** The server's read of the derived limit approving this request grows, which the snapshot doesn't record (#4334). */
+  derivedIncrease?: PendingApproval["scopeMaxIssuesIncrease"];
+}) {
   // Every repository's part of the change, each issue qualified by its own repository (#4118).
   const groups = campaignScopeChangeGroups(snapshot);
   const refs = (pick: (group: (typeof groups)[number]) => number[]) => {
     const list = groups.flatMap((group) => pick(group).map((n) => `${group.repository}#${n}`));
     return list.length ? list.join(", ") : "None";
   };
-  const raise = snapshot.ownerReview?.maxIssuesIncrease;
+  const raise = snapshot.ownerReview?.maxIssuesIncrease ?? derivedIncrease;
   return <>
     {snapshot.grantReview && <ScopeGrantReviewFacts review={snapshot.grantReview} />}
     {snapshot.ownerReview && <ScopeOwnerReviewFacts review={snapshot.ownerReview} />}
     {snapshot.scopeProposal ? <ScopeProposalFacts repository={snapshot.repository} proposal={snapshot.scopeProposal} explanation={snapshot.explanation} />
       : <p>{snapshot.explanation}</p>}
+    {raise && !snapshot.ownerReview && <p>Approving also raises Maximum Issues from {raise.from} to {raise.from + raise.increase}; denying leaves it unchanged.</p>}
     <dl className="facts">
       <div><dt>Scope Revision</dt><dd>{snapshot.expectedRevision} to {snapshot.expectedRevision + 1}</dd></div>
       {raise && <div><dt>Maximum Issues</dt><dd>{raise.from} to {raise.from + raise.increase}</dd></div>}

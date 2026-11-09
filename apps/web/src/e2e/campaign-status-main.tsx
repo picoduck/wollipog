@@ -707,18 +707,18 @@ const ownerProjection = ownerScenario === "after" ? { status: "waiting_human" as
  * Orchestrator's proposal without lineage with the Maximum Issues increase its additions need, `grant`
  * a failed grant's across two repositories, `proposal` a proposal check's owner route, and `routed` all
  * three, so opening one shows it is that one. A revision bump settles them all. */
-const ownerScopeBase = { category: "campaign_issue_scope" as const, repository: "team/repo", expectedRevision: 3,
-  before: [130, 131, 132, 133, 134], removals: [], affectedAssignments: [], affectedDecisions: ["occ_1"], activeChildren: [] };
+const ownerScopeBase = { category: "campaign_issue_scope" as const, repository: "team/repo", expectedRevision: 0,
+  before: [], removals: [], affectedAssignments: [], affectedDecisions: ["occ_1"], activeChildren: [] };
 const ownerScopeRoutes = {
   owner: { occurrenceId: "wd_scope_141", summary: "Add team/repo#141, team/repo#142, raising Maximum Issues from 6 to 7", snapshot: { ...ownerScopeBase, additions: [141, 142],
     explanation: "You asked me to start #141 and #142 after launch. Neither is an epic member or a published follow-up.",
     ownerReview: { cause: "lineage_missing" as const, maxIssuesIncrease: { from: 6, increase: 1 } } } },
-  grant: { occurrenceId: "wd_scope_143", summary: "Add team/repo#143, team/docs#7, raising Maximum Issues from 6 to 9", snapshot: { ...ownerScopeBase, additions: [143],
+  grant: { occurrenceId: "wd_scope_143", summary: "Add team/repo#143, team/docs#7, raising Maximum Issues from 6 to 9", derivedIncrease: { from: 6, increase: 3 }, snapshot: { ...ownerScopeBase, additions: [143],
     otherRepositories: [{ repository: "team/docs", before: [], additions: [7], removals: [] }],
     explanation: "Reading your first message failed, so I chose the two issues it seems to mean.",
     grantReview: { cause: "grant_failed" as const, ownerMessage: "Fix the worst bugs in the app and its docs", messageDigest: "a".repeat(64),
       grantOccurrenceId: "dec_grant_143", failureClass: "provider_overloaded" as const } } },
-  proposal: { occurrenceId: "wd_scope_151", summary: "Add team/repo#151, team/repo#152", snapshot: { ...ownerScopeBase, additions: [151, 152],
+  proposal: { occurrenceId: "wd_scope_151", summary: "Add team/repo#151, team/repo#152, raising Maximum Issues from 6 to 8", derivedIncrease: { from: 6, increase: 2 }, snapshot: { ...ownerScopeBase, additions: [151, 152],
     explanation: "Both are open UI bugs. I ranked them by priority label, then by age.",
     scopeProposal: { initial: false, messageDigest: "a".repeat(64), requestedCount: 2, constraints: ["open", "UI only"], withheldOperations: [],
       checks: ["chosen_issues", "requested_count", "constraints"] as ScopeProposalCheck[], route: "owner" as const, ownerCause: "constraint_check_failed" as const,
@@ -730,10 +730,12 @@ const ownerScopeRoutes = {
       ] } } },
 };
 const ownerScopeParam = params.get("ownerScope");
-const ownerScopeChosen = ownerScopeParam === "1" ? [ownerScopeRoutes.owner] : ownerScopeParam === "grant" ? [ownerScopeRoutes.grant]
+const ownerScopeChosen: Array<{ occurrenceId: string; summary: string; derivedIncrease?: { from: number; increase: number };
+  snapshot: import("@wollipog/protocol").CampaignIssueScopeSnapshot }> = ownerScopeParam === "1" ? [ownerScopeRoutes.owner] : ownerScopeParam === "grant" ? [ownerScopeRoutes.grant]
   : ownerScopeParam === "proposal" ? [ownerScopeRoutes.proposal]
     : ownerScopeParam === "routed" ? [ownerScopeRoutes.owner, ownerScopeRoutes.grant, ownerScopeRoutes.proposal] : [];
-const ownerScopeCards: import("@wollipog/protocol").PendingApproval[] = ownerScopeChosen.map(({ occurrenceId, snapshot }, index) => ({
+const ownerScopeCards: import("@wollipog/protocol").PendingApproval[] = ownerScopeChosen.map(({ occurrenceId, snapshot, derivedIncrease }, index) => ({
+  ...(derivedIncrease ? { scopeMaxIssuesIncrease: derivedIncrease } : {}),
   requestId: occurrenceId, occurrenceId, kind: "workflow_decision" as const, title: "Campaign Issue Scope Approval Required", async: true,
   options: [{ optionId: "approve", name: "Approve", kind: "allow_once" as const }, { optionId: "deny", name: "Deny", kind: "reject_once" as const }],
   workflowDecision: { requestId: `scope-${occurrenceId}`, occurrenceId, sessionId: "s_root", controllingSessionId: "s_root",
@@ -1271,7 +1273,7 @@ function Fixture() {
     consumeSubagentFocusRequest: () => {},
   };
   return (
-    <main className="app" style={{ display: "block", height: "100dvh" }}>
+    <main className="app" style={{ display: "block", height: ownerScopeCards.length && window.innerWidth <= 760 ? "calc(100dvh - var(--bottom-bar-h))" : "100dvh" }}>
       <section className="session-detail expanded" style={{ height: "100%" }}>
         <header className="detail-bar session-bar">
           <h1 className="detail-bar-title session-bar-title">{session.title}</h1>

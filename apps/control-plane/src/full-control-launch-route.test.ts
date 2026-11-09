@@ -7183,6 +7183,8 @@ const listedOnRootCard = (f: ReturnType<typeof fixture>, id: string, occurrenceI
   pendingRequests(f.db.getSession(id)!.pendingApproval).some((request) => request.occurrenceId === occurrenceId);
 const maxIssuesOf = (f: ReturnType<typeof fixture>, id: string) => boundaryOf(f, id).issueAuthority!.maxIssues;
 const raising = (from: number, to: number) => to > from ? `, raising Maximum Issues from ${from} to ${to}` : "";
+const cardIncrease = (f: ReturnType<typeof fixture>, id: string, occurrenceId: string) =>
+  pendingRequests(f.db.getSession(id)!.pendingApproval).find((request) => request.occurrenceId === occurrenceId)?.scopeMaxIssuesIncrease;
 
 for (const status of ["failed", "uncertain"] as const) {
   test(`the ${status} grant's scope approval waits under Waiting for You, naming the Maximum Issues increase approving it applies (#4334)`, async () => {
@@ -7200,11 +7202,13 @@ for (const status of ["failed", "uncertain"] as const) {
       const occurrenceId = proposed.data!.occurrenceId;
       const before = maxIssuesOf(f, id);
       const listed = waitingForYou(f, id);
+      const onCard = cardIncrease(f, id, occurrenceId);
       assert.ok(listedOnRootCard(f, id, occurrenceId), "Open Request has this exact card to open");
       // The owner's approval sets the derived limit: what the entry says is what approving does.
       assert.equal(f.sessions.resolveWorkflowDecision(id, id, occurrenceId, { outcome: "approve" }, "human", { kind: "human", id: f.human.userId }, () => true).ok, true);
       const after = maxIssuesOf(f, id);
       assert.ok(after > before, "the fixture's derived limit grows on approval");
+      assert.deepEqual(onCard, { from: before, increase: after - before }, "the card states the limit approving it applies");
       assert.deepEqual(listed, [scopeEntry(id, occurrenceId, `Add owner/repo#13, owner/repo#14${raising(before, after)}`)]);
       assert.deepEqual(waitingForYou(f, id), [], "an approved request leaves the list");
     } finally { await server.close(); f.db.close(); }
@@ -7226,6 +7230,7 @@ for (const route of [
       const occurrenceId = proposed.data!.occurrenceId;
       assert.equal((proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).grantReview!.cause, route.cause);
       assert.deepEqual(waitingForYou(f, c.id), [scopeEntry(c.id, occurrenceId, "Add owner/repo#30, owner/repo#31")]);
+      assert.equal(cardIncrease(f, c.id, occurrenceId), undefined, "a selection's approval raises nothing, so its card says nothing");
       assert.ok(listedOnRootCard(f, c.id, occurrenceId));
       assert.equal(f.sessions.resolveWorkflowDecision(c.id, c.id, occurrenceId, { outcome: "deny" }, "human", { kind: "human", id: f.human.userId }, () => true).ok, true);
       assert.deepEqual(waitingForYou(f, c.id), [], "a denied request leaves the list");
@@ -7266,12 +7271,18 @@ for (const route of [
       const occurrenceId = proposed.data!.occurrenceId;
       const before = maxIssuesOf(f, c.id);
       const listed = waitingForYou(f, c.id);
+      const pending = pendingRequests(f.db.getSession(c.id)!.pendingApproval).find((request) => request.occurrenceId === occurrenceId)!;
       assert.ok(listedOnRootCard(f, c.id, occurrenceId));
       // Re-proposing while it is pending returns the same request, so the list keeps one entry.
       assert.equal((await c.propose([chosen(32), chosen(31)], { requestedCount: 2, constraints: ["open"] })).data!.occurrenceId, occurrenceId);
       assert.equal(waitingForYou(f, c.id).length, 1);
       assert.equal(c.answer({ scope_proposal_answer: "Approve Scope" }).ok, true);
-      assert.deepEqual(listed, [scopeEntry(c.id, occurrenceId, `Add owner/repo#31, owner/repo#32${raising(before, maxIssuesOf(f, c.id))}`)]);
+      const after = maxIssuesOf(f, c.id);
+      assert.deepEqual(listed, [scopeEntry(c.id, occurrenceId, `Add owner/repo#31, owner/repo#32${raising(before, after)}`)]);
+      // The question the owner answers states the same increase as the entry, and approving applied it.
+      assert.ok(after > before, "the fixture's derived limit grows on approval");
+      assert.deepEqual(pending.scopeMaxIssuesIncrease, { from: before, increase: after - before });
+      assert.match(presentOwnerQuestionRequest(pending).questions![0]!.context!, new RegExp(`\\*\\*Maximum Issues:\\*\\* ${before} to ${after}`, "u"));
       assert.deepEqual(waitingForYou(f, c.id), [], "an approved request leaves the list");
     } finally { await server.close(); f.db.close(); }
   });
@@ -7324,6 +7335,7 @@ test("Orchestrator-owned and admitted scope changes and the owner's own change a
     assert.equal(own.data!.authority, "human");
     assert.equal(own.data!.status, "pending");
     assert.deepEqual(waitingForYou(f, failed), []);
+    assert.equal(cardIncrease(f, failed, own.data!.occurrenceId), undefined, "the owner's own change raises nothing");
   } finally { await server.close(); f.db.close(); }
 });
 
@@ -7348,5 +7360,24 @@ test("a scope approval leaves Waiting for You when a newer proposal supersedes i
     assert.equal(f.sessions.stop(c.id).ok, true);
     assert.equal(f.db.workflowDecisionByOccurrence(second.data!.occurrenceId)!.status, "revoked");
     assert.deepEqual(waitingForYou(f, c.id), [], "a revoked request leaves the list");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a scope card's Maximum Issues increase is only ever derived: a stored or forged value is dropped and never persisted (#4334)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const c = await proposalCampaign(f, server, "Find the 2 highest-priority open issues and fix them.");
+    f.decision.state.check = uncertainCheck;
+    const proposed = await c.propose([chosen(31), chosen(32)], { requestedCount: 2, constraints: ["open"] });
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    const occurrenceId = proposed.data!.occurrenceId;
+    const stored = () => JSON.parse((f.db.raw().prepare("SELECT pending_approval FROM sessions WHERE id=?").get(c.id) as { pending_approval: string }).pending_approval) as { scopeMaxIssuesIncrease?: unknown };
+    const derived = cardIncrease(f, c.id, occurrenceId);
+    assert.ok(derived, "the view derives the increase");
+    assert.equal(stored().scopeMaxIssuesIncrease, undefined, "the stored card holds no derived value");
+    assert.equal(f.db.workflowDecisionByOccurrence(occurrenceId)!.resourceDigest, proposed.data!.resourceDigest, "the decision itself is unchanged");
+    f.db.raw().prepare("UPDATE sessions SET pending_approval=? WHERE id=?").run(JSON.stringify({ ...stored(), scopeMaxIssuesIncrease: { from: 1, increase: 99 } }), c.id);
+    assert.deepEqual(cardIncrease(f, c.id, occurrenceId), derived, "a forged value is replaced by the derived one");
   } finally { await server.close(); f.db.close(); }
 });
