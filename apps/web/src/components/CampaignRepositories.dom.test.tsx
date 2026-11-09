@@ -71,6 +71,39 @@ test("Repositories lists each boundary repository's Locations, exclusions and Lo
   } finally { unmount(); }
 });
 
+test("each waiting Location says why it waits, as recorded, and an entry stored before claims nothing (#4312)", async () => {
+  const waiting: CampaignRepositoryBoundaryView = { ...boundary, excludedLocations: [], pendingLocations: [
+    { locationId: "loc_theirs", name: "Their Folder", reason: "added_by_other", cause: "added_by_other" },
+    { locationId: "loc_nobody", name: "Old Folder", reason: "added_by_other", cause: "no_recorded_adder" },
+    { locationId: "loc_sibling", name: "Second Checkout", reason: "added_by_other", cause: "repository_added" },
+    { locationId: "loc_owner", name: "My Folder", reason: "added_by_other", cause: "owner_added" },
+    { locationId: "loc_stored", name: "Stored Folder", reason: "added_by_other" },
+  ] };
+  const { container, unmount } = await render(<CampaignRepositories campaignId="s_root" boundary={waiting} canInclude />);
+  try {
+    const section = container.querySelector('ul[aria-label="Locations Waiting to Be Included"]')!;
+    const rows = Object.fromEntries([...section.querySelectorAll("li")].map((row) => [row.firstChild!.textContent!.trim(),
+      row.querySelector(".campaign-status-meta")?.textContent ?? null]));
+    assert.deepEqual(rows, {
+      "Their Folder": "Someone other than the campaign's owner added this Location to the Project.",
+      "Old Folder": "No one is recorded as having added this Location to the Project.",
+      "Second Checkout": "The campaign's owner approved adding another Location of its repository, and this one wasn't part of that approval.",
+      "My Folder": "The campaign's owner added this Location, and it hasn't joined on its own.",
+      "Stored Folder": null,
+    });
+    // The note says only how they join, true of every row, whoever added it.
+    const note = container.querySelector('ul[aria-label="Locations Waiting to Be Included"]')!.previousElementSibling!;
+    assert.equal(note.textContent, "These Locations join this campaign only when its owner includes them.");
+    assert.doesNotMatch(container.textContent!, /Someone else added these Locations/);
+    // Each still joins only through its own Include in Campaign, named for it.
+    for (const name of ["Their Folder", "Old Folder", "Second Checkout", "My Folder", "Stored Folder"]) {
+      const button = container.querySelector<HTMLButtonElement>(`button[aria-label="Include ${name} in Campaign"]`);
+      assert.ok(button, name);
+      assert.equal(button.textContent, "Include in Campaign");
+    }
+  } finally { unmount(); }
+});
+
 test("a limited launch Location says why under its row, and a left-out Location names its repository (#4319)", async () => {
   const { container, unmount } = await render(<CampaignRepositories campaignId="s_root" canInclude boundary={{ ...boundary,
     limitedLocations: [{ locationId: "loc_desk", name: "Wollipog on Desk", reason: CAMPAIGN_LIMITED_LOCATION_REASON }],

@@ -5,6 +5,7 @@ import type {
 import type { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
+import { campaignPendingCause } from "@wollipog/protocol";
 import { inspectProjectLocation } from "./project-location-inspection.js";
 
 /** Exclusions that a reconnecting runner may have cleared. The others describe what the folder holds. A
@@ -76,7 +77,9 @@ export class CampaignLocations {
       // Only the owner's own addition, by the owner's own request, joins on its own.
       if (principal.userId !== owner || this.deps.db.projectLocationAddedBy(locationId) !== owner ||
           !this.deps.db.canAccessWorkspace(principal, location.runnerId, location.workspaceId)) {
-        return this.record(root, { joins: [], excluded: [], pending: [{ locationId, name: location.name, reason: "added_by_other" }] });
+        // Why it waits, by who is on record as adding it, never assumed someone else (#4312).
+        return this.record(root, { joins: [], excluded: [], pending: [{ locationId, name: location.name, reason: "added_by_other",
+          cause: campaignPendingCause(this.deps.db.projectLocationAddedBy(locationId), owner) }] });
       }
       return this.inspectAndRecord(root, [location], "owner_added");
     }).then(() => undefined);
@@ -205,7 +208,7 @@ export class CampaignLocations {
       // adder, waits for Include in Campaign however it read: nobody has seen its repository.
       // While its runner is still too old, Include in Campaign can't help, so it keeps the reason that says why.
       if (source === "runner_reconnected" && was.addedBy !== owner && (result.ok || result.failure !== "runner_below_gates")) {
-        pending.push({ locationId: location.id, name: location.name, reason: "added_by_other" });
+        pending.push({ locationId: location.id, name: location.name, reason: "added_by_other", cause: campaignPendingCause(was.addedBy, owner) });
         if (result.ok) read.push(location.id);
         return;
       }

@@ -185,6 +185,32 @@ for (const theme of ["dark", "light"] as const) {
   }
 }
 
+/** Wheels the scrolling region holding `heading` until the heading sits 12px below whatever covers that
+ * region's top (the panel's sticky header). Wheeling, unlike a forced scroll, never moves the phone's
+ * overflow-hidden panel. */
+async function wheelBelowStickyHeader(page: import("@playwright/test").Page, heading: import("@playwright/test").Locator): Promise<void> {
+  const geometry = () => heading.evaluate((target) => {
+    let scroller = target.parentElement;
+    while (scroller && !(scroller.scrollHeight > scroller.clientHeight && /auto|scroll/.test(getComputedStyle(scroller).overflowY))) scroller = scroller.parentElement;
+    const area = scroller!.getBoundingClientRect();
+    const x = target.getBoundingClientRect().left + 2;
+    const covers = (element: Element | null) => {
+      for (let at = element; at && at !== scroller; at = at.parentElement) if (/sticky|fixed/.test(getComputedStyle(at).position)) return true;
+      return !element || !scroller!.contains(element);
+    };
+    let visibleTop = Math.max(area.top, 0);
+    while (visibleTop < area.bottom && covers(document.elementFromPoint(x, visibleTop))) visibleTop += 1;
+    return { gap: target.getBoundingClientRect().top - visibleTop - 12, middle: { x: area.left + area.width / 2, y: (visibleTop + Math.min(area.bottom, innerHeight)) / 2 } };
+  });
+  const { middle } = await geometry();
+  await page.mouse.move(middle.x, middle.y);
+  for (let step = 0; step < 6 && Math.abs((await geometry()).gap) > 2; step += 1) {
+    await page.mouse.wheel(0, (await geometry()).gap);
+    await page.waitForTimeout(100);
+  }
+  expect(Math.abs((await geometry()).gap)).toBeLessThanOrEqual(2);
+}
+
 // UI evidence for #4117: set CAMPAIGN_REPOSITORIES_EVIDENCE_DIR to capture the Repositories section.
 const REPOSITORIES_EVIDENCE_DIR = process.env.CAMPAIGN_REPOSITORIES_EVIDENCE_DIR;
 for (const theme of ["dark", "light"] as const) {
@@ -262,6 +288,32 @@ for (const theme of ["dark", "light"] as const) {
         expect(shown!.y + shown!.height).toBeLessThanOrEqual(band!.y);
       }
       if (REPOSITORIES_EVIDENCE_DIR) await page.screenshot({ path: `${REPOSITORIES_EVIDENCE_DIR}/location-gates-listed-${device}-${theme}.png` });
+    });
+
+    test(`each Location waiting to be included says why it waits, and an entry stored before claims nothing, on a ${device} ${theme} viewport (#4312)`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.goto(`/campaign-status-e2e.html?scenario=campaign&repositories=1&waiting=causes&theme=${theme}`);
+      const section = page.locator("section.campaign-detail-section", { has: page.locator("h3", { hasText: /^Repositories$/ }) });
+      const list = section.getByRole("list", { name: "Locations Waiting to Be Included" });
+      const row = (name: string) => list.getByRole("listitem").filter({ hasText: name });
+      await expect(row("Shared Docs")).toContainText("Someone other than the campaign's owner added this Location to the Project.");
+      await expect(row("Old Scripts Folder")).toContainText("No one is recorded as having added this Location to the Project.");
+      await expect(row("Wollipog Second Checkout")).toContainText(
+        "The campaign's owner approved adding another Location of its repository, and this one wasn't part of that approval.");
+      await expect(row("Archive Checkout").locator(".campaign-status-meta")).toHaveCount(0);
+      await expect(section).toContainText("These Locations join this campaign only when its owner includes them.");
+      await expect(section).not.toContainText("Someone else added these Locations");
+      for (const name of ["Shared Docs", "Old Scripts Folder", "Wollipog Second Checkout", "Archive Checkout"]) {
+        await expect(row(name).getByRole("button", { name: `Include ${name} in Campaign` })).toHaveText("Include in Campaign");
+      }
+      await assertNoHorizontalOverflow(page, ".campaign-status");
+      // Show the whole section: its heading just below the panel's sticky header, wheeled (#4319's capture).
+      await wheelBelowStickyHeader(page, section.getByRole("heading", { name: "Waiting to Be Included" }));
+      expect(await page.locator("aside.rpanel").evaluate((panel) => panel.scrollTop)).toBe(0);
+      const listBox = await list.boundingBox();
+      const band = device === "phone" ? await page.getByRole("navigation", { name: "App Navigation" }).boundingBox() : null;
+      expect(listBox!.y + listBox!.height).toBeLessThanOrEqual(band ? band.y : viewport.height);
+      if (REPOSITORIES_EVIDENCE_DIR) await page.screenshot({ path: `${REPOSITORIES_EVIDENCE_DIR}/waiting-causes-${device}-${theme}.png` });
     });
 
     test(`a repository the first message left out shows as available on a ${device} ${theme} viewport (#4117)`, async ({ page }) => {

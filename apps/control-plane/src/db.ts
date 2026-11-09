@@ -1,7 +1,7 @@
 import { CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS } from "@wollipog/protocol";
 import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
 import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, agentAvailableForRunnerDefault, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
-import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, PROJECT_LOCATION_INSPECTION_FAILURES, validCampaignRepositoryList,
+import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, CAMPAIGN_PENDING_CAUSES, PROJECT_LOCATION_INSPECTION_FAILURES, validCampaignRepositoryList,
   type CampaignBoundaryRepository, type CampaignRepositoryAdditionResult,
   type CampaignExcludedLocation, type CampaignLocationJoin, type CampaignPendingLocation, type CampaignRepositoryBoundaryView } from "@wollipog/protocol";
 import { CAMPAIGN_CLEANUP_ITEMS_LIMIT, CAMPAIGN_LIVE_WORK_KINDS, CAMPAIGN_STUCK_ITEMS_LIMIT, mergedBranchDeletionCommand,
@@ -35784,7 +35784,12 @@ const locationRecord = (item: unknown, keys: string[]): Record<string, unknown> 
 
 function validPendingLocations(value: unknown): boolean {
   return Array.isArray(value) && value.length <= CAMPAIGN_BOUNDARY_LOCATIONS_MAX &&
-    value.every((item) => locationRecord(item, ["locationId", "name", "reason"])?.reason === "added_by_other");
+    value.every((item) => {
+      // `cause` arrived with #4312; an entry stored before has none.
+      const entry = locationRecord(item, ["locationId", "name", "reason", "cause"]);
+      return entry?.reason === "added_by_other" &&
+        (entry.cause === undefined || (CAMPAIGN_PENDING_CAUSES as readonly unknown[]).includes(entry.cause));
+    });
 }
 
 function validAvailableLocations(value: unknown): boolean {
@@ -35807,7 +35812,9 @@ function widenCampaignRepositoryLimit(policy: OrchestratorCampaignPolicy, join: 
   const moved = (policy.availableLocations ?? []).filter((item) => item.repository === repository && item.locationId !== join.locationId);
   const available = (policy.availableLocations ?? []).filter((item) => item.repository !== repository);
   if (available.length) policy.availableLocations = available; else delete policy.availableLocations;
-  const pending = [...policy.pendingLocations ?? [], ...moved.map((item) => ({ locationId: item.locationId, name: item.name, reason: "added_by_other" as const }))];
+  // Whoever added them, these wait because the approval named another Location of their repository (#4312).
+  const pending = [...policy.pendingLocations ?? [], ...moved.map((item) => ({ locationId: item.locationId, name: item.name,
+    reason: "added_by_other" as const, cause: "repository_added" as const }))];
   if (pending.length) policy.pendingLocations = pending.slice(-CAMPAIGN_BOUNDARY_LOCATIONS_MAX);
 }
 

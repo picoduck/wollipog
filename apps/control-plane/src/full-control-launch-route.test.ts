@@ -4960,6 +4960,10 @@ test("while a limit stands, another repository's Location stays available howeve
     assert.equal(c.policy().availableLocations, undefined, "nothing of that repository is left out any more");
     // Its other Locations wait for Include in Campaign: the approval named one.
     assert.deepEqual(c.policy().pendingLocations!.map((item) => item.locationId).sort(), [owned.id, theirs.id].sort());
+    // Neither is said to be someone else's: the owner's own included, both wait for that reason (#4312).
+    assert.deepEqual(c.policy().pendingLocations!.map((item) => item.cause), ["repository_added", "repository_added"]);
+    assert.equal(c.boundary().repositories!.some((entry) => entry.locationIds.includes(owned.id) || entry.locationIds.includes(theirs.id)), false,
+      "neither joins without Include in Campaign");
     const inside = await c.propose([otherChosen(61)]);
     assert.equal(inside.ok, true, inside.error ?? "");
     assert.deepEqual((await c.propose([chosen(62)])).errorDetails, { code: "repository_constraint_mismatch", issue: 62 });
@@ -6354,6 +6358,27 @@ test("a detached Location revived without a person loses its exclusion and never
   } finally { await c.server.close(); f.db.close(); }
 });
 
+test("a waiting entry stored before causes were recorded is kept and shown with no cause, and the owner's own Location reported by someone else isn't called theirs (#4312)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  try {
+    // As a control plane before #4312 stored it.
+    const stored = f.db.addProjectLocation(c.p.project.id, { runnerId: "r2", workspaceId: "c", addedByUserId: f.human.userId });
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?")
+      .run(JSON.stringify({ ...c.policy(), pendingLocations: [{ locationId: stored.id, name: "r2 c", reason: "added_by_other" }] }), c.rootId);
+    assert.deepEqual(c.policy().pendingLocations, [{ locationId: stored.id, name: "r2 c", reason: "added_by_other" }], "kept as it was");
+    const shown = f.db.campaignProjection(c.rootId)!.repositoryBoundary!.pendingLocations.find((item) => item.locationId === stored.id)!;
+    assert.equal(shown.cause, undefined, "nothing is claimed about who added it");
+
+    // The owner is on record as adding this one; someone else's request reported it.
+    const other: HumanPrincipal = { ...f.human, userId: "usr_other", actorId: "usr_other" };
+    const owners = f.db.addProjectLocation(c.p.project.id, { runnerId: "r2", workspaceId: "d", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(owners.id, other);
+    assert.equal(c.policy().pendingLocations!.find((item) => item.locationId === owners.id)?.cause, "owner_added");
+    assert.equal(c.boundary().repositories!.some((entry) => entry.locationIds.includes(owners.id)), false, "it still waits for Include in Campaign");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
 test("a Location another person or no person added waits for the owner's Include in Campaign (#4117)", async () => {
   const f = fixture();
   const c = await launchedMultiRepositoryCampaign(f);
@@ -6369,8 +6394,11 @@ test("a Location another person or no person added waits for the owner's Include
     await c.locations.locationAdded(nobodys.id, f.human);
     assert.equal(c.boundary().revision, before);
     assert.equal(f.sent.filter((message) => message.type === "campaign_launch_inspect").length, inspections, "nothing is inspected before the owner asks");
-    assert.deepEqual(c.policy().pendingLocations!.map((item) => [item.locationId, item.reason]),
-      [[theirs.id, "added_by_other"], [nobodys.id, "added_by_other"]]);
+    // Each says why, as recorded: someone else added one, and nobody is on record for the other (#4312).
+    assert.deepEqual(c.policy().pendingLocations!.map((item) => [item.locationId, item.reason, item.cause]),
+      [[theirs.id, "added_by_other", "added_by_other"], [nobodys.id, "added_by_other", "no_recorded_adder"]]);
+    assert.deepEqual(f.db.campaignProjection(c.rootId)!.repositoryBoundary!.pendingLocations.map((item) => item.cause),
+      ["added_by_other", "no_recorded_adder"], "Campaign Status gets the same");
     // Only the owner's own request can include it; the other person and agents cannot.
     for (const auth of ["Bearer other", "Bearer agent", "Bearer nobody"]) {
       const refused = await c.server.inject({ method: "POST", url: `/api/sessions/${c.rootId}/orchestrator-campaign/locations/${theirs.id}/include`,
@@ -6947,6 +6975,11 @@ test("an enable never admits a Location the owner didn't add: nobody sees its pr
     assert.equal(enabled.statusCode, 200, enabled.body);
     assert.equal(c.boundary().repositories!.some((entry) => entry.locationIds.some((id) => left.includes(id))), false, "none of them joined");
     assert.deepEqual(c.policy().pendingLocations!.map((item) => item.locationId).sort(), [...left].sort());
+    // The enable records why each waits, as recorded, never assuming someone else (#4312).
+    const causes = (items: ReadonlyArray<{ locationId: string; cause?: string }>) => Object.fromEntries(items.map((item) => [item.locationId, item.cause]));
+    const expected = { [waiting.id]: "added_by_other", [theirs.id]: "added_by_other", [nobodys.id]: "no_recorded_adder" };
+    assert.deepEqual(causes(reviewed.summary.pendingLocations!), expected, "in the preflight");
+    assert.deepEqual(causes(c.policy().pendingLocations!), expected, "and in what the enable stored");
     assert.equal(c.policy().excludedLocations?.some((item) => left.includes(item.locationId)) ?? false, false, "an exclusion would join on reconnect");
     assert.deepEqual(f.db.campaignProjection(c.rootId)!.repositoryBoundary!.pendingLocations.map((item) => item.locationId).sort(), [...left].sort());
     // The owner's own Include in Campaign is what adds one.
@@ -7176,7 +7209,8 @@ for (const [who, addedByUserId] of [["another person", "usr_other"], ["nobody on
       assert.equal(boundary().revision, before, "reconnecting widens nothing");
       assert.equal(boundary().repositories!.some((entry) => entry.locationIds.includes(p.offline.id)), false);
       assert.equal(policy().excludedLocations!.some((item) => item.locationId === p.offline.id), false);
-      assert.deepEqual(policy().pendingLocations!.map((item) => [item.locationId, item.reason]), [[p.offline.id, "added_by_other"]]);
+      assert.deepEqual(policy().pendingLocations!.map((item) => [item.locationId, item.reason, item.cause]),
+        [[p.offline.id, "added_by_other", addedByUserId ? "added_by_other" : "no_recorded_adder"]], "it says why, as recorded (#4312)");
       // A later reconnect changes nothing, and the owner's Include adds it after inspecting it.
       await locations.runnerReconnected("offline");
       assert.equal(boundary().revision, before);
