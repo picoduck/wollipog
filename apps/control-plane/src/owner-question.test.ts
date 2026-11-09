@@ -79,6 +79,118 @@ function harness(options: { runnerProtocol?: number; issueScope?: boolean } = {}
   return { db, hub, svc, principal, owner, control, material, askQuestion, askApproval, card, prompts, answer, toRunner, uncertain };
 }
 
+test("a child clarification reaches the owner as a question and returns free text without action authority (#4359)", async () => {
+  const h = harness();
+  try {
+    const snapshot = { category: "implementation_question" as const, kind: "question" as const,
+      question: "Which approach should we use?", options: [{ optionId: "a", label: "Approach A" }, { optionId: "b", label: "Approach B" }],
+      recommendedOptionId: "a" };
+    const asked = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "child-question", resourceKey: "child-question",
+      resourceSnapshot: snapshot, ownerRule: { source: "AGENTS.md", quote: "Ask the owner about design choices." } });
+    assert.ok(asked.ok && asked.data, asked.error ?? "created");
+    const decision = asked.data;
+    assert.equal(h.db.campaignProjection("root")!.ownerDecisions!.items[0]!.kind, "question");
+    const stored = pendingRequests(h.db.getSession("child")!.pendingApproval).find((card) => card.occurrenceId === decision.occurrenceId)!;
+    const shown = presentOwnerQuestionRequest(stored);
+    assert.equal(shown.kind, "question");
+    assert.equal(shown.questions![0]!.allowOther, true);
+    assert.equal(shown.async, undefined, "a child question keeps its existing blocking behavior");
+    assert.equal(sessionAttentionStatus({ status: "running", pendingApproval: stored })?.label, "Needs Your Input");
+    assert.equal(h.svc.answerQuestion("child", decision.occurrenceId, { [OWNER_QUESTION_ANSWER_ID]: "Use both approaches." },
+      { kind: "agent", id: "root" }, "submit", undefined, decision.occurrenceId).status, 403);
+    const answered = h.svc.answerQuestion("child", decision.occurrenceId,
+      { [OWNER_QUESTION_ANSWER_ID]: "Use both approaches.", [OWNER_QUESTION_NOTE_ID]: "Keep the existing API." },
+      h.owner, "submit", undefined, decision.occurrenceId);
+    assert.ok(answered.ok, answered.error ?? "answered");
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "consumed", "an answer leaves no consumable grant");
+    const prompt = h.prompts("child").find((text) => text.includes(decision.occurrenceId))!;
+    assert.match(prompt, /Use both approaches\.\n\nKeep the existing API\./u);
+    assert.match(prompt, /grants no authority/u);
+    assert.doesNotMatch(prompt, /approved your implementation_question/u);
+    const consumed = await h.svc.consumeWorkflowDecision("child", decision.occurrenceId, { resourceSnapshot: snapshot });
+    assert.equal(consumed.status, 403);
+  } finally { h.db.close(); }
+});
+
+test("child questions preserve delegated ownership, choices, dismissal and legacy action approvals (#4359)", async () => {
+  const h = harness();
+  try {
+    const snapshot = { category: "implementation_question" as const, kind: "question" as const, question: "Which approach?",
+      options: [{ optionId: "a", label: "Approach A" }, { optionId: "b", label: "Approach B" }] };
+    const create = (key: string, resourceSnapshot = snapshot) => h.svc.createWorkflowDecisionWithVideo("child",
+      { requestId: key, resourceKey: key, resourceSnapshot });
+    const asked = await create("delegated");
+    assert.ok(asked.ok && asked.data, asked.error ?? "created");
+    assert.equal(asked.data.authority, "orchestrator");
+    const deniedHuman = h.svc.answerQuestion("child", asked.data.occurrenceId, { [OWNER_QUESTION_ANSWER_ID]: "Approach A" },
+      h.owner, "submit", undefined, asked.data.occurrenceId);
+    assert.equal(deniedHuman.status, 403, "normal question presentation does not change who answers");
+    const answered = h.svc.resolveWorkflowDecision("root", "child", asked.data.occurrenceId,
+      { outcome: "approve", selectedOptionId: "b", childMessage: "Keep the existing API." },
+      "orchestrator", { kind: "agent", id: "root" }, () => true);
+    assert.ok(answered.ok && answered.data, answered.error ?? "answered");
+    assert.equal(answered.data.status, "consumed");
+    assert.equal(answered.data.selectedOptionId, "b");
+    assert.match(h.prompts("child").find((text) => text.includes(asked.data!.occurrenceId))!, /Approach B/u);
+    const plain = await create("plain", { ...snapshot, options: [] });
+    assert.ok(plain.ok && plain.data, plain.error ?? "created");
+    const free = h.svc.resolveWorkflowDecision("root", "child", plain.data.occurrenceId,
+      { outcome: "approve", childMessage: "Use a third approach." }, "orchestrator", { kind: "agent", id: "root" }, () => true);
+    assert.ok(free.ok && free.data, free.error ?? "answered");
+    assert.equal(free.data.status, "consumed");
+    const dismiss = await create("dismiss");
+    assert.ok(dismiss.ok && dismiss.data);
+    assert.ok(h.svc.resolveWorkflowDecision("root", "child", dismiss.data.occurrenceId,
+      { outcome: "deny" }, "orchestrator", { kind: "agent", id: "root" }, () => true).ok);
+    assert.equal(h.db.workflowDecisionByOccurrence(dismiss.data.occurrenceId)!.status, "denied");
+    const { kind: _kind, ...legacySnapshot } = snapshot;
+    const legacy = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "legacy", resourceKey: "legacy", resourceSnapshot: legacySnapshot });
+    assert.ok(legacy.ok && legacy.data);
+    assert.equal(presentOwnerQuestionRequest(pendingRequests(h.db.getSession("child")!.pendingApproval)[0]!).kind, "workflow_decision");
+    assert.equal(h.svc.resolveWorkflowDecision("root", "child", legacy.data.occurrenceId, { outcome: "approve", childMessage: "Use anything." },
+      "orchestrator", { kind: "agent", id: "root" }, () => true).status, 400, "legacy approval still requires its offered option");
+    const approved = h.svc.resolveWorkflowDecision("root", "child", legacy.data.occurrenceId, { outcome: "approve", selectedOptionId: "a" },
+      "orchestrator", { kind: "agent", id: "root" }, () => true);
+    assert.ok(approved.ok && approved.data, approved.error ?? "approved");
+    assert.equal(approved.data.status, "approved");
+    assert.ok((await h.svc.consumeWorkflowDecision("child", legacy.data.occurrenceId, { resourceSnapshot: legacySnapshot })).ok);
+  } finally { h.db.close(); }
+});
+
+test("new child questions require capable peers, distinct labels and credential screening (#4359)", async () => {
+  for (const runnerProtocol of [331, PROTOCOL_VERSION]) {
+    const h = harness({ runnerProtocol });
+    try {
+      const request = (key: string, question: string, options: Array<{ optionId: string; label: string }> = []) =>
+        h.svc.createWorkflowDecisionWithVideo("child", { requestId: key, resourceKey: key,
+          resourceSnapshot: { category: "implementation_question", kind: "question", question, options } });
+      const normal = await request("normal", "Which approach?");
+      if (runnerProtocol === 331) {
+        assert.equal(normal.status, 409);
+        assert.match(normal.error!, /newer runner/u);
+        assert.equal(h.db.workflowDecisionByRequestId("child", "normal"), null);
+        continue;
+      }
+      assert.ok(normal.ok && normal.data);
+      h.svc.setDecisionRuntime(fakeScreenRuntime(h.db, () => ({ verdict: "ask" })).runtime);
+      const credentials = await request("credentials", "Please give me your API key.");
+      assert.equal(credentials.status, 403);
+      h.svc.setDecisionRuntime(fakeScreenRuntime(h.db, () => ({ verdict: "discusses" })).runtime);
+      const duplicate = await request("duplicate", "Which?", [{ optionId: "a", label: "Same" }, { optionId: "b", label: "Same" }]);
+      assert.equal(duplicate.status, 400);
+      h.uncertain.add("Which credential design?");
+      h.svc.setDecisionRuntime(fakeScreenRuntime(h.db, () => ({ verdict: "uncertain" })).runtime);
+      const uncertain = await request("uncertain", "Which credential design?");
+      assert.ok(uncertain.ok && uncertain.data);
+      assert.equal(uncertain.data.authorityEvaluation?.reason, "credential_screen_review");
+      const card = pendingRequests(h.db.getSession("child")!.pendingApproval).find((entry) => entry.occurrenceId === uncertain.data!.occurrenceId)!;
+      assert.equal(presentOwnerQuestionRequest(card).kind, "workflow_decision", "classification is not a question answer");
+      assert.equal(h.svc.answerQuestion("child", uncertain.data.occurrenceId, { [OWNER_QUESTION_ANSWER_ID]: "Use a broker." },
+        h.owner, "submit", undefined, uncertain.data.occurrenceId).status, 409);
+    } finally { h.db.close(); }
+  }
+});
+
 test("the owner's Decline of an Owner Question the screen could not settle dismisses it and tells the root (#4270 review)", async () => {
   const h = harness();
   try {

@@ -24,6 +24,22 @@ const APPROVAL: OwnerDecisionSnapshot = { category: "owner_decision", question: 
 const BLOCKING: PendingApproval = { requestId: "perm", occurrenceId: "perm", title: "Run Command", kind: "permission",
   options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }] };
 
+test("child questions share question presentation, attention and Inbox metadata without becoming async (#4359)", () => {
+  const card = ownerCard("child-q", { category: "implementation_question", kind: "question", question: "Which approach?",
+    options: [{ optionId: "a", label: "Approach A" }] });
+  delete card.async;
+  const shown = withPresentedOwnerQuestions({ status: "running" as const, pendingApproval: card });
+  assert.equal(shown.pendingApproval.kind, "question");
+  assert.equal(shown.pendingApproval.async, undefined);
+  assert.equal(shown.pendingApproval.questions![0]!.allowOther, true);
+  assert.equal(sessionAttentionStatus(shown)?.label, "Needs Your Input");
+  assert.equal(requestKindMeta(card).label, "Question", "Inbox and request lists identify the stored card as a question");
+  assert.equal(approvalOptionForIntent(card, "approve"), null, "question choices cannot be approved by a one-key shortcut");
+  const legacy = ownerCard("legacy", { category: "implementation_question", question: "May I proceed?",
+    options: [{ optionId: "yes", label: "Proceed" }, { optionId: "no", label: "Stop" }] });
+  assert.equal(withPresentedOwnerQuestions({ pendingApproval: legacy }).pendingApproval.kind, "workflow_decision");
+});
+
 test("an Owner Question is presented as a question card the composer answers (#4270)", () => {
   const approval = ownerCard("approval", APPROVAL);
   const question = ownerCard("question", QUESTION);

@@ -249,6 +249,17 @@ function scopeProposalCard(requestId: string): PendingApproval {
   };
 }
 const ownerQuestion = params.get("set") === "owner-question";
+const childQuestion = params.get("set") === "child-question";
+const childRaw = params.get("set") === "child-raw";
+const childQuestionSnapshot = { category: "implementation_question" as const, kind: "question" as const,
+  question: "Which approach should the child session use?", recommendedOptionId: "retry", options: ownerDecision.options };
+function childQuestionCard(requestId: string): PendingApproval {
+  const card = ownerRawCard(requestId);
+  const { kind: _kind, ...legacy } = childQuestionSnapshot;
+  return { ...card, async: undefined, title: childRaw ? "Implementation Decision Required" : "Question",
+    workflowDecision: { ...card.workflowDecision!, category: "implementation_question", controllingSessionId: "campaign-root",
+      resourceSnapshot: childRaw ? legacy : childQuestionSnapshot } };
+}
 /** The owner decision card as the control plane stores it: an Owner Approval (`owner-raw`), or the
  * Owner Question clients present as a question card (`owner-question`). */
 function ownerRawCard(requestId: string, snapshot: OwnerDecisionSnapshot = ownerDecision): PendingApproval {
@@ -383,7 +394,9 @@ function Fixture() {
   const responseStyle = useQuestionResponseStyle();
   const [requestId, setRequestId] = useState("ask-1");
   const [questions, setQuestions] = useState(
-    params.get("set") === "owner-question" || ownerRaw
+    childQuestion || childRaw
+      ? ownerQuestionAgentQuestions(childQuestionSnapshot)
+      : params.get("set") === "owner-question" || ownerRaw
       ? ownerQuestionSet
       : scopeProposalSet || scopeProposalRaw
       ? scopeProposalAgentQuestions(scopeProposalSnapshot)
@@ -474,6 +487,7 @@ function Fixture() {
     ...Array.from({ length: rowsAfter }, (_, index) => transcriptRow(QUESTION_EVENT_ID + 1 + index, index, "Later")),
   ], [dismissed, lastCall, questions, requestId, resolved]);
   const request = useMemo<PendingApproval | null>(() => resolved ? null : ownerRaw ? ownerRawCard(requestId)
+    : childRaw ? childQuestionCard(requestId) : childQuestion ? presentOwnerQuestionRequest(childQuestionCard(requestId))
     : scopeProposalRaw ? scopeProposalCard(requestId) : scopeProposalSet ? presentOwnerQuestionRequest(scopeProposalCard(requestId)) : {
     kind: "question",
     requestId,
@@ -492,9 +506,9 @@ function Fixture() {
   useQuestionDraftRetirement(session);
   // The session header's badges (#4270): from the Owner Question card the control plane stores, as the
   // session detail presents it, on a root that keeps working while it waits.
-  const ownerStatusSession = useMemo(() => ownerQuestion ? withPresentedOwnerQuestions({
+  const ownerStatusSession = useMemo(() => ownerQuestion || childQuestion || childRaw ? withPresentedOwnerQuestions({
     id: SESSION_ID, runnerId: "runner-1", title: "Agent Questions", status: "running",
-    pendingApproval: resolved ? undefined : ownerRawCard(requestId, ownerQuestionSnapshot),
+    pendingApproval: resolved ? undefined : childQuestion || childRaw ? childQuestionCard(requestId) : ownerRawCard(requestId, ownerQuestionSnapshot),
   } as SessionView) : null, [requestId, resolved]);
 
   // Reading back and Show Where Asked work as in a session: the reader follows its tail, and a reveal
@@ -537,7 +551,7 @@ function Fixture() {
 
   // Composer Response answers in the composer (#2212): the dock's card is compact, and while Answer
   // Mode is open the question is shown there alone.
-  const composerAnswers = !resolved && !ownerRaw && responseStyle === "composer" && (!recoveryRequired || recoveryCanResume);
+  const composerAnswers = !resolved && !ownerRaw && !childRaw && responseStyle === "composer" && (!recoveryRequired || recoveryCanResume);
   const answering = composerAnswers && answerActive;
   const composerContent = answering ? (
     <div className="composer-box answer-mode">

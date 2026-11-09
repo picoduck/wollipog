@@ -442,6 +442,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * the control plane by the runner, because an older control plane would ignore the field and ask
    * the question as an approval, and against the root's runner by the control plane. */
   ownerQuestions: 303,
+  /** v332 (#4359): explicit child clarifications, with free text and no consumable action grant. */
+  childQuestions: 332,
   /** v308 (#4282): structured scope proposals, `proposal` on request_campaign_issue_scope_change.
    * Checked against the control plane by the runner, and against the root's runner by the control
    * plane, which sends an older runner's proposal to the owner. */
@@ -2377,6 +2379,8 @@ export const CAMPAIGN_HANDOFFS_LIMIT = 50;
 /** One pending decision the campaign's owner kept (#4064), as Campaign Status lists it. */
 export interface CampaignOwnerDecision {
   occurrenceId: string;
+  /** v332: a question is presented as input, never as an action approval. */
+  kind?: "question";
   /** The session whose request it is: the root for an owner decision, else the requester. */
   sessionId: string;
   category: WorkflowDecisionCategory;
@@ -5016,6 +5020,8 @@ export type WorkflowDecisionResourceSnapshot =
   | CampaignFollowUpAdmissionSnapshot
   | {
       category: "implementation_question";
+      /** v332: a clarification, never an action approval. Absent preserves legacy approvals. */
+      kind?: "question";
       question: string;
       options: WorkflowDecisionOption[];
       recommendedOptionId?: string;

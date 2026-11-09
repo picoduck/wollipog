@@ -12,6 +12,16 @@ import { presentScopeProposalRequest, scopeProposalOfRequest } from "./scope-pro
  * that validates an answer and every client that presents the card build the same form.
  */
 export type OwnerQuestionSnapshot = OwnerDecisionSnapshot & { kind: "question" };
+export type ChildQuestionSnapshot = Extract<WorkflowDecisionResourceSnapshot, { category: "implementation_question" }> & { kind: "question" };
+export type WorkflowQuestionSnapshot = OwnerQuestionSnapshot | ChildQuestionSnapshot;
+
+export function isChildQuestionSnapshot(snapshot: WorkflowDecisionResourceSnapshot | null | undefined): snapshot is ChildQuestionSnapshot {
+  return snapshot?.category === "implementation_question" && snapshot.kind === "question";
+}
+
+export function isWorkflowQuestionSnapshot(snapshot: WorkflowDecisionResourceSnapshot | null | undefined): snapshot is WorkflowQuestionSnapshot {
+  return isOwnerQuestionSnapshot(snapshot) || isChildQuestionSnapshot(snapshot);
+}
 
 /** The answer field's id: the owner's choice among the suggested options, or their own words. */
 export const OWNER_QUESTION_ANSWER_ID = "owner_question_answer";
@@ -26,15 +36,16 @@ export function isOwnerQuestionSnapshot(snapshot: WorkflowDecisionResourceSnapsh
   return snapshot?.category === "owner_decision" && snapshot.kind === "question";
 }
 
-/** The owner question a pending card carries, when it is one: only an `owner_decision` workflow
- * card whose snapshot is a question. */
-export function ownerQuestionOfRequest(request: Pick<PendingApproval, "kind" | "workflowDecision"> | null | undefined): OwnerQuestionSnapshot | null {
+/** A stored question card: a root's Owner Question or an explicit child clarification (#4359).
+ * Keep the public helper names for existing clients; only presentation and form helpers accept
+ * children. isOwnerQuestionSnapshot stays root-only for ownership and lifecycle rules. */
+export function ownerQuestionOfRequest(request: Pick<PendingApproval, "kind" | "workflowDecision"> | null | undefined): WorkflowQuestionSnapshot | null {
   if (request?.kind !== "workflow_decision") return null;
   const snapshot = request.workflowDecision?.resourceSnapshot;
-  return isOwnerQuestionSnapshot(snapshot) ? snapshot : null;
+  return isWorkflowQuestionSnapshot(snapshot) ? snapshot : null;
 }
 
-/** Whether a pending card is answered as an Owner Question: an owner question, or the owner's one
+/** Whether a pending card is answered as a question: a child clarification, an owner question, or the owner's one
  * approval of an Orchestrator's scope proposal (#4282), which is presented the same way. */
 export function isOwnerQuestionRequest(request: Pick<PendingApproval, "kind" | "workflowDecision"> | null | undefined): boolean {
   return ownerQuestionOfRequest(request) !== null || scopeProposalOfRequest(request) !== null;
@@ -45,10 +56,10 @@ export function isOwnerQuestionRequest(request: Pick<PendingApproval, "kind" | "
  * shows the presented card, and its badge must still read as the owner's question. */
 export function isOwnerQuestionCard(request: Pick<PendingApproval, "kind" | "workflowDecision"> | null | undefined): boolean {
   return isOwnerQuestionRequest(request) ||
-    (request?.kind === "question" && isOwnerQuestionSnapshot(request.workflowDecision?.resourceSnapshot));
+    (request?.kind === "question" && isWorkflowQuestionSnapshot(request.workflowDecision?.resourceSnapshot));
 }
 
-function optionLabel(snapshot: OwnerQuestionSnapshot, option: OwnerQuestionSnapshot["options"][number]): string {
+function optionLabel(snapshot: WorkflowQuestionSnapshot, option: WorkflowQuestionSnapshot["options"][number]): string {
   return option.optionId === snapshot.recommendedOptionId ? `${option.label}${OWNER_QUESTION_RECOMMENDED_SUFFIX}` : option.label;
 }
 
@@ -57,12 +68,12 @@ function optionLabel(snapshot: OwnerQuestionSnapshot, option: OwnerQuestionSnaps
  * context and the suggested options (the recommended one marked), answered by choosing one or by
  * typing an answer; then, when there are options, an optional note to go with the choice.
  */
-export function ownerQuestionAgentQuestions(snapshot: OwnerQuestionSnapshot): AgentQuestion[] {
+export function ownerQuestionAgentQuestions(snapshot: WorkflowQuestionSnapshot): AgentQuestion[] {
   const answer: AgentQuestion = {
     id: OWNER_QUESTION_ANSWER_ID,
-    header: "Owner Question",
+    header: isChildQuestionSnapshot(snapshot) ? "Question" : "Owner Question",
     question: snapshot.question,
-    ...(snapshot.material ? { context: snapshot.material } : {}),
+    ...("material" in snapshot && snapshot.material ? { context: snapshot.material } : {}),
     options: snapshot.options.map((option) => ({ label: optionLabel(snapshot, option),
       ...(option.description ? { description: option.description } : {}) })),
     allowOther: true,
@@ -72,7 +83,7 @@ export function ownerQuestionAgentQuestions(snapshot: OwnerQuestionSnapshot): Ag
   return [answer, {
     id: OWNER_QUESTION_NOTE_ID,
     header: "Note",
-    question: "Anything to add for the Orchestrator?",
+    question: isChildQuestionSnapshot(snapshot) ? "Anything to add for the session?" : "Anything to add for the Orchestrator?",
     options: [],
     allowOther: true,
     required: false,
@@ -91,7 +102,7 @@ export interface OwnerQuestionAnswer {
  * Read a submitted answer map against the question form. The caller has already validated it with
  * `validateQuestionAnswers` against `ownerQuestionAgentQuestions`. Null when nothing was answered.
  */
-export function ownerQuestionAnswer(snapshot: OwnerQuestionSnapshot, answers: Record<string, string | string[]>): OwnerQuestionAnswer | null {
+export function ownerQuestionAnswer(snapshot: WorkflowQuestionSnapshot, answers: Record<string, string | string[]>): OwnerQuestionAnswer | null {
   const answer = Object.hasOwn(answers, OWNER_QUESTION_ANSWER_ID) ? answers[OWNER_QUESTION_ANSWER_ID] : undefined;
   const note = Object.hasOwn(answers, OWNER_QUESTION_NOTE_ID) ? answers[OWNER_QUESTION_NOTE_ID] : undefined;
   if (Array.isArray(answer) || Array.isArray(note)) return null;
@@ -115,5 +126,6 @@ export function presentOwnerQuestionRequest(request: PendingApproval): PendingAp
   const snapshot = ownerQuestionOfRequest(request);
   // A question the Decision Model could not screen is classified on its own card first (#4104).
   if (!snapshot || request.workflowDecision?.authorityEvaluation?.reason === "credential_screen_review") return request;
-  return { ...request, kind: "question", title: "Owner Question", async: true, questions: ownerQuestionAgentQuestions(snapshot) };
+  return { ...request, kind: "question", title: isChildQuestionSnapshot(snapshot) ? "Question" : "Owner Question",
+    ...(isOwnerQuestionSnapshot(snapshot) ? { async: true } : {}), questions: ownerQuestionAgentQuestions(snapshot) };
 }

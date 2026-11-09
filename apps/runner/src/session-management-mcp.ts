@@ -1242,8 +1242,9 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
       type: "object",
       properties: {
         category: { const: "implementation_question" },
+        kind: { const: "question", description: "Required for clarifications, preferences and design choices. A normal question with free text; its answer grants no action authority. Omit only for legacy exact-action approvals." },
         question: { type: "string" },
-        options: { type: "array", minItems: 2, maxItems: 12, items: {
+        options: { type: "array", minItems: 0, maxItems: 12, items: {
           type: "object",
           properties: { optionId: { type: "string" }, label: { type: "string" }, description: { type: "string" } },
           required: ["optionId", "label"], additionalProperties: false,
@@ -2640,7 +2641,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_workflow_decision",
-    description: "Create an explicit typed workflow gate bound to this session, its controlling Orchestrator, the current human-owned policy revision, and an exact resource snapshot. Generic questions and approvals cannot satisfy this gate. A pr_merge is created only when the issues the forge would close on merge are exactly its intendedClosures (GitHub, and GitLab from v295); reference an issue that must stay open as \"Refs #N\".",
+    description: "Request a typed action approval, or a child clarification with category implementation_question and kind question (v332). Clarifications appear as normal questions with free-text answers and grant no action authority; never consume them. Action approvals remain bound to the exact resource and current owner. A pr_merge is created only when the issues the forge would close on merge are exactly its intendedClosures; reference an issue that must stay open as \"Refs #N\".",
     inputSchema: {
       type: "object",
       properties: {
@@ -2665,6 +2666,11 @@ export const TOOLS: McpTool[] = [
     },
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      if (args?.resourceSnapshot?.category === "implementation_question" && args.resourceSnapshot.kind === "question" &&
+          !await controlPlaneSupports(deps, RUNNER_CAPABILITY_MIN_PROTOCOL.childQuestions)) {
+        return controlPlaneUpdateRequired("Child questions need a newer Wollipog. Update Wollipog; nothing was requested. Do not retry as an approval.",
+          RUNNER_CAPABILITY_MIN_PROTOCOL.childQuestions, deps.controlPlaneProtocolVersion);
+      }
       if (args?.ownerRule !== undefined) {
         const rule = normalizeWorkflowDecisionOwnerRule(args.ownerRule);
         if (!rule.ok) return errorResult(rule.message);

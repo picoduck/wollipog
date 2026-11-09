@@ -427,7 +427,7 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
             <li key={item.occurrenceId}>
               <dl className="facts">
                 <div>
-                  <dt>{item.ownerRule ? "Kept by Rule" : item.handedOff ? "Handed to You" : scopeApproval(item) ? "Scope Approval"
+                  <dt>{item.kind === "question" ? "Question" : item.ownerRule ? "Kept by Rule" : item.handedOff ? "Handed to You" : scopeApproval(item) ? "Scope Approval"
                     : repositoryAddition(item) ? "Add Repository" : "Owner Decision"}</dt>
                   <dd>
                     {item.summary}

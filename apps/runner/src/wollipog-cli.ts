@@ -1085,6 +1085,10 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions
     : ["request_campaign_repository_addition", "get_campaign_repository_addition", "execute_campaign_repository_addition"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryAddition
+    : parsed.tool === "request_workflow_decision" &&
+      (parsed.input.resourceSnapshot as { category?: string; kind?: string } | undefined)?.category === "implementation_question" &&
+      (parsed.input.resourceSnapshot as { kind?: string }).kind === "question"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.childQuestions
     : parsed.tool === "request_workflow_decision" && parsed.input.ownerRule !== undefined
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule
     : ["get_campaign_issue_scope", "request_campaign_issue_scope_change"].includes(parsed.tool)

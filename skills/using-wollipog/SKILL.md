@@ -132,7 +132,14 @@ Every child creation receives a server-derived campaign-policy block in its init
 For Automatic model or effort, use `get_agent_capabilities` and send the selected pair in the same
 `create_session` call; fixed values are server-enforced. The block is not blanket approval. Children
 must use `request_workflow_decision`, `get_workflow_decision`, and `consume_workflow_decision` for
-implementation questions, PR merge, merged-branch deletion, follow-up publication, and UI evidence.
+action approvals: PR merge, merged-branch deletion, follow-up publication, and UI evidence.
+For a child's clarification, preference or design choice, use `request_workflow_decision` with
+`category: "implementation_question"` and `kind: "question"` (protocol v332). Supply the question,
+0–12 suggested options and an optional recommended option. It appears as a normal question, accepts
+free text and follows the existing decision owner. Read its answer with `get_workflow_decision`
+or the Question Answer prompt; never consume it as an approval. An answer grants no action authority.
+Omitting `kind` preserves legacy fixed-choice approval semantics; never omit it to work around an
+older peer's refusal. Update the unsupported peers instead.
 When those MCP tools are unavailable, use the equivalent self-scoped `wollipog decision request`,
 `get`, and `consume` commands above; the exact resource snapshot and optional PR-merge action are
 JSON objects. The CLI refuses `--session` for request, consume, and reconcile and exposes no resolution operation.

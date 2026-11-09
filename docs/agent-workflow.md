@@ -53,6 +53,12 @@ only as prose (#4137):
   `request_owner_decision` with `kind: "question"`, answered in the owner's own words.
 - Nobody ends a turn with such a gate only in prose.
 
+Child clarifications use `implementation_question` with `kind: "question"` (protocol v332).
+They accept suggested options and free text through the ordinary question interface and preserve
+the occurrence's current owner and credential screen. Their answers grant nothing; do not consume
+them as action approvals. Missing `kind` preserves legacy approval behavior, not a compatibility
+fallback for unsupported peers.
+
 ## Worktree Bases and Checkout Maintenance
 
 Create new issue worktrees with `wollipog worktree create --branch <branch>` and omit `--base`.

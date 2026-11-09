@@ -148,6 +148,7 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   OWNER_DECISION_LIMITS,
   isOwnerQuestionRequest,
   isOwnerQuestionSnapshot,
+  isChildQuestionSnapshot,
   OWNER_QUESTION_ANSWER_ID,
   ownerQuestionAgentQuestions,
   ownerQuestionAnswer,
@@ -946,6 +947,18 @@ function decisionLiteral(value: string): string {
  * provider turn, so a child that ended its turn behind the card has nothing else to wake it. The
  * decision record stays authoritative: a child polling inside its turn may already have read it. */
 function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): string {
+  if (isChildQuestionSnapshot(decision.resourceSnapshot)) {
+    const snapshot = decision.resourceSnapshot;
+    const option = snapshot.options.find((entry) => entry.optionId === decision.selectedOptionId);
+    return [
+      `[Wollipog Question Answer — ${decision.occurrenceId}]`,
+      decision.status === "consumed" ? "Your clarification question was answered." : "Your clarification question ended unanswered.",
+      ...(decision.status === "consumed" && option ? [`Selected option: ${decisionLiteral(option.label)}.`] : []),
+      ...(decision.childMessage ? [decision.childMessage] : []),
+      "This answer grants no authority. Actions still require their exact typed approvals. Do not consume this question as an approval.",
+      "[End Wollipog Question Answer]",
+    ].join("\n");
+  }
   if (isOwnerQuestionSnapshot(decision.resourceSnapshot) && !decision.withdrawal) return ownerQuestionAnswerPrompt(decision, decision.resourceSnapshot);
   // A decision the owner kept (#4064), or an owner rule kept for them (#4137), is answered by that
   // owner, never by an agent or a reviewer.
@@ -1374,8 +1387,15 @@ export function normalizeWorkflowDecisionSnapshot(
     }
   };
   if (category === "implementation_question") {
-    const question = normalizeDecisionQuestion(value, "implementation questions", 4000);
-    return question.ok && question.data ? ok({ category, ...question.data }) : failAs(question);
+    if (value.kind !== undefined && value.kind !== "question") return fail("an implementation question's kind is question or absent");
+    const question = normalizeDecisionQuestion(value, "implementation questions", 4000, value.kind === "question" ? 0 : 2);
+    if (!question.ok || !question.data) return failAs(question);
+    const normalized = { category: "implementation_question" as const, ...question.data, ...(value.kind === "question" ? { kind: "question" as const } : {}) };
+    if (isChildQuestionSnapshot(normalized)) {
+      const labels = ownerQuestionAgentQuestions(normalized)[0]!.options.map((option) => option.label);
+      if (new Set(labels).size !== labels.length) return fail("question options must have distinct labels, including the Recommended mark");
+    }
+    return ok(normalized);
   }
   if (category === "pr_merge") {
     if (value.reviewSessionId !== undefined && (!boundedDecisionString(value.reviewSessionId, 128) ||
@@ -14305,6 +14325,12 @@ export class SessionsService {
     if (!canAccess(child.id) || !canAccess(controller.session.id)) {
       return fail("workflow decision controller is outside the current audience", 404);
     }
+    if (isChildQuestionSnapshot(normalized.data)) {
+      for (const session of [child, controller.session]) {
+        const incompatible = this.capabilityFailure(session.runnerId, "childQuestions", "child clarification questions");
+        if (incompatible) return incompatible;
+      }
+    }
     const category = normalized.data.category;
     if (category === "follow_up_issue_publication" && normalized.data.category === category && normalized.data.issueAdmission && !internal?.trustedPublication) return fail("Use the inspected publication request route; admission cannot be supplied by an agent", 403);
     let evaluated = this.evaluateWorkflowDecisionAuthority(
@@ -15341,7 +15367,7 @@ export class SessionsService {
     else this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
     this.recordWorkflowDecisionAudit(
       resolved,
-      normalizedResolution.outcome === "approve" ? "allowed" : "denied",
+      normalizedResolution.outcome === "approve" ? isChildQuestionSnapshot(decision.resourceSnapshot) ? "answered" : "allowed" : "denied",
       actor,
       now,
       normalizedResolution.rationale,
@@ -15360,6 +15386,7 @@ export class SessionsService {
   ): Promise<ServiceResult<WorkflowDecisionView>> {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== sessionId) return fail("workflow decision not found", 404);
+    if (isChildQuestionSnapshot(decision.resourceSnapshot)) return fail("a question answer grants no authority and cannot be consumed as an approval", 403);
     if (decision.category === "campaign_issue_scope") return fail("Scope resolution applies and consumes the exact authorized proposal atomically", 403);
     if (decision.category === "automation_creation") return fail("use execute_automation_creation to consume and create the approved automation atomically", 403);
     if (decision.category === "location_switch") return fail("use execute_location_switch to carry out the exact Location its owner chose", 403);
@@ -17224,7 +17251,7 @@ export class SessionsService {
           // Declining a Location switch keeps the session where it is (#4138).
           // An Owner Question (#4270) grants nothing to refuse: the owner may only dismiss it unanswered.
           { optionId: "__workflow_deny__", name: snapshot.category === "location_switch" ? "Stay Here"
-            : isOwnerQuestionSnapshot(snapshot) ? "Dismiss Question" : "Do Not Proceed",
+            : isOwnerQuestionSnapshot(snapshot) || isChildQuestionSnapshot(snapshot) ? "Dismiss Question" : "Do Not Proceed",
           kind: "reject_once" as const },
         ]
       : [
@@ -17236,7 +17263,7 @@ export class SessionsService {
       occurrenceId: decision.occurrenceId,
       // Clients present an Owner Question as a question card (`presentOwnerQuestionRequest`); an
       // older client still shows this card with its options.
-      title: isOwnerQuestionSnapshot(snapshot) ? "Owner Question" : categoryTitle[decision.category],
+      title: isChildQuestionSnapshot(snapshot) ? "Question" : isOwnerQuestionSnapshot(snapshot) ? "Owner Question" : categoryTitle[decision.category],
       options,
       kind: "workflow_decision",
       // A root's own decision its owner kept (#4064) waits for that person without parking the root:
@@ -17264,16 +17291,19 @@ export class SessionsService {
         (!boundedDecisionString(resolution.rationale, 4000))) {
       return fail("workflow decision rationale is invalid", 400);
     }
+    const messageLimit = isChildQuestionSnapshot(decision.resourceSnapshot) ? 8002 : WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS;
     if (resolution.childMessage !== undefined &&
-        !boundedDecisionString(resolution.childMessage, WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS)) {
+        !boundedDecisionString(resolution.childMessage, messageLimit)) {
       return fail(
-        `workflow decision childMessage must be non-empty text of at most ${WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS} characters`,
+        `workflow decision childMessage must be non-empty text of at most ${messageLimit} characters`,
         400,
       );
     }
     const snapshot = decision.resourceSnapshot;
     if (snapshot.category === "implementation_question" || snapshot.category === "owner_decision" ||
         snapshot.category === "location_switch") {
+      if (isChildQuestionSnapshot(snapshot) && resolution.outcome === "approve" &&
+          resolution.selectedOptionId === undefined && resolution.childMessage) return ok(resolution);
       if (resolution.outcome === "approve" &&
           (typeof resolution.selectedOptionId !== "string" ||
             !snapshot.options.some((option) => option.optionId === resolution.selectedOptionId))) {
@@ -18455,6 +18485,20 @@ export class SessionsService {
     if (ownerQuestionCard) {
       if (occurrenceId !== undefined && occurrenceId !== ownerQuestionCard.occurrenceId) return fail("question occurrence is stale or missing", 409);
       if (scopeProposalOfRequest(ownerQuestionCard)) return this.answerScopeProposal(sessionId, ownerQuestionCard, answers, action, actor);
+      if (isChildQuestionSnapshot(ownerQuestionCard.workflowDecision?.resourceSnapshot)) {
+        const decision = this.db.workflowDecisionByOccurrence(ownerQuestionCard.occurrenceId ?? requestId);
+        if (!decision || !isChildQuestionSnapshot(decision.resourceSnapshot)) return fail("question not found", 404);
+        const invalid = validateQuestionAnswers(ownerQuestionAgentQuestions(decision.resourceSnapshot), answers, action);
+        if (invalid) return fail(`invalid answers: ${invalid}`, 400);
+        const answer = action === "submit" ? ownerQuestionAnswer(decision.resourceSnapshot, answers) : null;
+        if (action === "submit" && !answer) return fail("choose an option or type an answer", 400);
+        if (actor.kind !== "human" && resolvedByParentSessionId !== decision.controllingSessionId) return fail("this question requires its authorized responder", 403);
+        const resolved = this.resolveWorkflowDecision(decision.controllingSessionId, sessionId, decision.occurrenceId,
+          { outcome: answer ? "approve" : "deny", ...(answer?.selectedOptionId ? { selectedOptionId: answer.selectedOptionId } : {}),
+            ...(answer?.text ? { childMessage: answer.text } : {}) },
+          actor.kind === "human" ? "human" : "orchestrator", actor, () => true);
+        return resolved.ok ? ok(this.db.getSession(sessionId)!) : failAs(resolved);
+      }
       return this.answerOwnerQuestion(sessionId, ownerQuestionCard.occurrenceId ?? requestId, answers, action, actor);
     }
     // The exec driver never asked questions, so an answer here is to a recovered one, and submitting

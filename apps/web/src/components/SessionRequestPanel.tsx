@@ -9,6 +9,7 @@ import {
   type MouseEvent,
 } from "react";
 import {
+  presentOwnerQuestionRequest,
   type DescendantRequestView,
   type PendingApproval,
   type SessionView,
@@ -176,7 +177,7 @@ export function SessionRequestPanel({
     createdAt: item.createdAt,
     responseOwner: item.responseOwner,
     occurrenceId: item.occurrenceId,
-    request: item.request,
+    request: presentOwnerQuestionRequest(item.request),
     descendant: item,
   })).sort((left, right) => left.responseOwner === right.responseOwner
     ? 0

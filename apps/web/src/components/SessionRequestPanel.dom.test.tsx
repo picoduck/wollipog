@@ -627,6 +627,22 @@ test("the replacement keeps the request's place in its own group when the other 
   }
 });
 
+test("a typed child clarification opens as a normal free-text question in the parent's Requests panel (#4359)", async () => {
+  const child = asDescendant(evidenceSession());
+  child.request = { ...child.request, title: "Question", kind: "workflow_decision", options: [],
+    workflowDecision: { category: "implementation_question", authority: "human",
+      resourceSnapshot: { category: "implementation_question", kind: "question", question: "Which approach should the child use?", options: [] } } as never };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<ChildPanel child={child} client={api} />));
+    assert.ok(container.querySelector(".question-input"));
+    assert.match(container.textContent ?? "", /Which approach should the child use\?/u);
+    assert.doesNotMatch(container.textContent ?? "", /Approve|Do Not Proceed/u);
+  } finally { await act(async () => root.unmount()); container.remove(); }
+});
+
 test("switching between descendant questions preserves each request's draft", async () => {
   const session = { ...evidenceSession(), pendingApproval: null } as SessionView;
   const question = (suffix: string): DescendantRequestView => ({

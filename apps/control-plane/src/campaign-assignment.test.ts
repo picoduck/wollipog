@@ -58,6 +58,8 @@ test("Full Control describes the exact boundary and effective owners without cre
   assert.match(text, /without a native fallback/);
   assert.match(text, /Never update or restart the hosting stack/);
   assert.match(text, /one-shot runner permission completes consumption/);
+  assert.match(text, /implementation_question with kind: "question"/);
+  assert.match(text, /must never be consumed as an action approval/);
   // #4137: a gate an installed or user-authored rule keeps for a person reaches the owner typed.
   assert.match(text, /File the exact typed decision, such as pr_merge, with request_workflow_decision and name the rule in ownerRule/);
   assert.match(text, /hand_workflow_decision_to_owner/);
