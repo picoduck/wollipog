@@ -1,6 +1,6 @@
 import {
   campaignAuthorityPreflight, campaignBoundaryRepositories, campaignBoundaryRepository, campaignScopeHolds, initialScopeRepositoryLimits, resolveCampaignAuthority, runnerSupportsProtocol, validCampaignControl,
-  type CampaignAuthorityEvaluation, type CampaignBoundaryRepository, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope, type CredentialScreenFact,
+  type CampaignAuthorityEvaluation, type CampaignBoundaryRepository, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope, type CampaignRefusedRepository, type CredentialScreenFact,
   type OrchestratorCampaignPolicy, type ParentControlPolicy, type PendingApproval, type SessionView, type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
 import type { HumanPrincipal } from "./identity.js";
@@ -166,6 +166,49 @@ export function campaignScopeRepositories(root: Pick<SessionView, "orchestratorP
   const listed = (root.orchestratorPolicy?.repositories ?? []).map((entry) => ({ repository: entry.repository.toLowerCase(), locationIds: entry.locationIds }));
   const own = listed.find((entry) => entry.repository === launch);
   return [...(launch ? [own ?? { repository: launch, locationIds: [] }] : []), ...listed.filter((entry) => entry.repository !== launch)];
+}
+
+/** The repositories this campaign refuses because a Location's runner can't perform its gates (#4319):
+ * one per Location, the latest a read named, recorded durably or on the exclusion that stands now,
+ * which wins. Holding an entry is the only thing that ends a refusal. A Location's earlier repository
+ * goes only when a later read names another, so the record is bounded by the Project's Locations,
+ * which people add, and a runner naming a new repository each time can't grow it. */
+export function campaignRefusedRepositories(root: Pick<SessionView, "orchestratorPolicy">): CampaignRefusedRepository[] {
+  const policy = root.orchestratorPolicy;
+  const entries = new Set(campaignScopeRepositories(root).map((entry) => entry.repository));
+  const latest = new Map<string, CampaignRefusedRepository>();
+  for (const item of [...policy?.refusedRepositories ?? [],
+    // A Custom Location read only to name its repository refuses it whatever its runner now is (#4319).
+    ...(policy?.excludedLocations ?? []).flatMap((exclusion) => (exclusion.failure === "runner_below_gates" || exclusion.nameOnly) && exclusion.repository
+      ? [{ repository: exclusion.repository, locationId: exclusion.locationId, name: exclusion.name }] : [])]) {
+    latest.delete(item.locationId);
+    latest.set(item.locationId, { repository: item.repository.toLowerCase(), locationId: item.locationId, name: item.name });
+  }
+  return [...latest.values()].filter((item) => !entries.has(item.repository));
+}
+
+/** The campaign's own record of Locations whose repository no read has named, excluded on a runner
+ * that couldn't perform its gates (#4319). Each may hold any repository without an entry. */
+export function campaignUnreadLocations(policy: OrchestratorCampaignPolicy | undefined): Array<{ locationId: string; name: string }> {
+  return (policy?.unreadLocations ?? []).map((item) => ({ locationId: item.locationId, name: item.name }));
+}
+
+/** The person whose consent a campaign's Locations rest on (#4319): a Full Control boundary's author,
+ * otherwise the Custom campaign's owner. */
+export function campaignOwnerId(policy: OrchestratorCampaignPolicy | undefined, customOwner: string | null): string | null {
+  return policy?.control?.mode === "full_control" ? policy.control.boundary.authorizedByUserId : customOwner;
+}
+
+/** Keep every repository `policy` refuses now in its durable record (#4319), so no later change to
+ * its exclusions forgets one, and drop those that now hold an entry. Call it at the start of every
+ * write that can replace or drop an exclusion. Until such a write, the exclusion itself names the
+ * repository, and every reader reads both. The record has no bound, so it never drops a refusal to
+ * make room: it grows only when a read names a new repository behind a Location below the gates,
+ * and shrinks when one gains an entry. */
+export function rememberRefusedRepositories(policy: OrchestratorCampaignPolicy): void {
+  const refused = campaignRefusedRepositories({ orchestratorPolicy: policy });
+  if (refused.length) policy.refusedRepositories = refused;
+  else delete policy.refusedRepositories;
 }
 
 /** Under Full Control the issue scope bounds what the Orchestrator may deliver (#4062): a child is

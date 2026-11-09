@@ -180,28 +180,79 @@ Control boundary's entries, or for Custom its list. A Custom campaign starts wit
 of its Project that its owner added and can reach, each inspected in its own path when the campaign is
 created, and any of those that fails is excluded with its reason. As with an enable, nobody sees this
 survey, so another person's Location stays out, and an enable can't carry it in as one the campaign holds.
-A Project with one such repository records no list. The list grants nothing: a person still approves every
-Custom scope change, and any other Location joins only through an approved repository addition. A campaign
+A Project with one such repository records no list, unless a Location was left out for its runner's
+version, when a one-entry list shows that exclusion and lets a reconnect retry it. The list grants nothing:
+a person still approves every Custom scope change, and any other Location joins only through an approved
+repository addition, which a one-entry list still takes for its own repository. A campaign
 created before this list keeps its launch repository and any its owner approved adding. A first-message
 limit outlives Full Control: back in Custom, a gate of a repository it leaves out is the person's, and no
 child is placed in such a repository, as far as the campaign knows the Location's repository.
 
 A Location joins only on a runner that can perform the campaign's gates there (#4319): protocol v327,
 the highest floor of closing an issue, reading forge facts and publishing a follow-up through a
-Location. An older runner is never asked to inspect. Its Location is excluded with a reason naming the
-version, in the launch or enable preflight (and the warning the app shows when that action succeeds,
-since neither has a review step), in Campaign Status, and in the refusal of a repository addition. A
-repository whose only Location is excluded has no entry until that Location joins. Registering again
-is the only way a runner's version changes, so each reconnect retries the exclusion: the owner's own
-Location joins at a new boundary revision, or stays available under a first-message limit, and someone
-else's waits for Include in Campaign. A Custom list retries this exclusion too, for the owner's own
-Location. An offline runner reads as offline, whatever version it last reported.
+Location. An older runner that can still read a Location (v288+) is asked only which repository it is.
+Its Location is excluded with a reason naming the version, in the launch or enable preflight, in Campaign
+Status, and in the refusal of a repository addition. The person sees it before authorizing: New Session
+reads the check ahead of Create Session when the Project has several Locations, and Create Session or
+Enable Full Control stops once to show anything the person wasn't yet shown, then proceeds on the next
+click. A campaign whose runners are all current sees none of this. Registering again is the only way a
+runner's version changes, so each reconnect retries the exclusion: the owner's own Location joins at a
+new boundary revision, or stays available under a first-message limit, and someone else's waits for
+Include in Campaign once its runner is current. A Custom list retries this exclusion too, for the
+owner's own Location. An offline runner reads as offline, whatever version it last reported.
+
+A repository whose only Location is excluded has no entry until that Location joins, and it is not treated
+like a repository the campaign never knew of. Once a read has named it, the campaign keeps it refused in a
+record of its own (`refusedRepositories`) until the repository holds an entry: a Location of it joining,
+or the owner's approved addition. Nothing else ends it: not a later read that fails, a move to waiting, a
+re-authorization, a revoke to Custom, nor the Location leaving the Project. A follow-up, merge, branch
+deletion or closure naming it is refused by the Location's name and version, at request and again at
+consume, arming and execute. Nothing reads its forge, since its Location isn't in the boundary, so no other
+login stands in. An exclusion recorded mid-action stops it too. An armed merge is refused where its command
+can be seen, and as with a merge hold Claude's policy hook denies the session's shell commands while it
+stands, since it can't tell them apart. The approval stays armed, because its command may already have
+run. Reconciling it, a new request for the same pull request, or the join that ends the refusal lifts that.
+That join revokes the armed approval, in Full Control and in Custom, so the block never lifts with it still
+armed; a revoke to Custom revokes it too. A requester running in that very Location still acts in its own
+repository. The record keeps one repository per Location, the latest a read named, so a runner naming a
+new one each time can't grow it.
+
+A Location the campaign holds by consent (the owner's own, or one the owner included), excluded with no
+repository named on a runner that, when it was excluded, was below the gates' floor or had no known
+version, may hold any repository. That covers a runner too old to read a Location (below v288), a read
+that failed (a timeout, say), an offline machine, a missing folder, and the owner's exclusion #4372
+recorded with no repository. The campaign keeps each such Location in a record of its own
+(`unreadLocations`). While one is still in the Project, every repository without an entry is refused the
+same way, including one the campaign never had, and none of them has a forge reader. Only two things end
+it: a read that resolves it (it names the repository, which is then refused by name, or the Location
+joins, or it reads on a current runner), or the Location leaving the Project. A runner's update before
+its read, a failed read, a move to waiting, a revoke, a re-authorization and a revival never do. Leaving
+the Project revokes the root's follow-ups, merges and branch deletions in repositories without an entry,
+since nothing read the repository. The refusal names the Location and those two ways out. A requester in
+that Location isn't exempt, nor is one in a Location refused by name, since nothing shows which
+repository it acts in. Someone else's Location, waiting or excluded, counts only once the owner includes
+it, which reads it. A reconnect reads such a Location again, a missing folder included. A Custom campaign
+records one even beside a single repository, including its own Location when that can't be read at
+creation, and reads one that was offline or missing at creation only to name its repository: it never
+joins on a reconnect, as such a Location never has, and the repository a read names stays refused until
+an approved addition. After a revoke, a re-authorization listing no exclusions or a revival drops the
+exclusion, nothing re-reads it, so removing it is the way out. Otherwise an unknown repository keeps its
+rule: a person's approval lets the requester act with its own login.
 
 This narrows only what joins. A Location the campaign already holds keeps its place on any runner, so a
 re-authorization or enable never drops a repository, and each gate still refuses a runner below its own
-floor by name, with no other login standing in. The launch Location is exempt, because its repository's
-gates run in the root's own checkout. A revoke to Custom ends the boundary, so an enable after one
-surveys the Project again, and a Location on an old runner is then excluded rather than carried.
+floor by name, with no other login standing in. A revoke to Custom ends the boundary and its exclusions,
+though not the repositories they refused, children stay live across it, and an enable after one surveys the Project again: a Location on an old
+runner is then excluded rather than carried. If a live child runs in it, the preflight reports that by
+the child's and Location's names and the version, and the enable is refused in the same words.
+
+The launch Location is never excluded, because the root runs there and its repository's closures, forge
+reads and own publications run in the root's own checkout. One gate does need the floor: a follow-up
+routed to its repository from another of the campaign's. With a root below v327 and no other Location of
+that repository on a current runner, that follow-up is refused, so the Location is reported as limited,
+by name and version, in the same preflight and under its row in Campaign Status, live until the root
+updates.
+
 `owner/app#5` and `owner/api#5` are separate entries with separate authority. `repository` and
 `issueNumbers` stay as the launch repository's part for older clients and runners. A scope saved before
 #4118 reads as its numbers in its repository, at the same revision; nothing is rewritten and no

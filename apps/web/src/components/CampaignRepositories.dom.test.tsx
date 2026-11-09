@@ -3,7 +3,7 @@ import { test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { PROJECT_LOCATION_INSPECTION_FAILURES, type CampaignRepositoryBoundaryView } from "@wollipog/protocol";
+import { CAMPAIGN_LIMITED_LOCATION_REASON, PROJECT_LOCATION_INSPECTION_FAILURES, type CampaignRepositoryBoundaryView } from "@wollipog/protocol";
 import { api, ApiError } from "../api.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { CampaignRepositories } from "./CampaignRepositories.js";
@@ -68,6 +68,18 @@ test("Repositories lists each boundary repository's Locations, exclusions and Lo
     const button = includeButton(container);
     assert.ok(button, "the owner's campaign session offers Include in Campaign");
     assert.equal(button.textContent, "Include in Campaign");
+  } finally { unmount(); }
+});
+
+test("a limited launch Location says why under its row, and a left-out Location names its repository (#4319)", async () => {
+  const { container, unmount } = await render(<CampaignRepositories campaignId="s_root" canInclude boundary={{ ...boundary,
+    limitedLocations: [{ locationId: "loc_desk", name: "Wollipog on Desk", reason: CAMPAIGN_LIMITED_LOCATION_REASON }],
+    excludedLocations: [{ locationId: "loc_old", name: "Old Machine", failure: "runner_below_gates", reason: PROJECT_LOCATION_INSPECTION_FAILURES.runner_below_gates, repository: "owner/old" }] }} />);
+  try {
+    const rows = [...container.querySelector('ul[aria-label="Locations of picoduck/wollipog"]')!.querySelectorAll("li")];
+    assert.ok(rows.find((row) => row.textContent!.includes("Wollipog on Desk"))!.textContent!.includes(CAMPAIGN_LIMITED_LOCATION_REASON));
+    assert.equal(rows.some((row) => !row.textContent!.includes("Wollipog on Desk") && row.textContent!.includes(CAMPAIGN_LIMITED_LOCATION_REASON)), false);
+    assert.equal(container.querySelector('ul[aria-label="Excluded Locations"] li')!.textContent, `Old Machineowner/old${PROJECT_LOCATION_INSPECTION_FAILURES.runner_below_gates}`);
   } finally { unmount(); }
 });
 

@@ -6205,8 +6205,10 @@ test("a child created in a second boundary repository's Location gets only that 
 });
 
 /** A launched multi-repository campaign plus the mid-campaign Location machinery (#4117). */
-async function launchedMultiRepositoryCampaign(f: ReturnType<typeof fixture>) {
+async function launchedMultiRepositoryCampaign(f: ReturnType<typeof fixture>, beforeLaunch?: (p: ReturnType<typeof multiRepositoryProject>) => void,
+  options: { keepUnreadOld?: boolean } = {}) {
   const p = multiRepositoryProject(f);
+  beforeLaunch?.(p);
   const { server: launchServer } = await app(f);
   const { preflight: checked } = await preflight(launchServer, p.body);
   const admitted = await launchServer.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
@@ -6214,6 +6216,13 @@ async function launchedMultiRepositoryCampaign(f: ReturnType<typeof fixture>) {
   assert.equal(admitted.statusCode, 201, admitted.body);
   await launchServer.close();
   const rootId = admitted.json().id as string;
+  // Its runner is too old to read, so until its repository is named every repository without an entry
+  // is refused (#4319). These campaigns are about the others, so it leaves the Project, which ends that.
+  if (!options.keepUnreadOld) {
+    const defaultLocation = f.db.getProject(p.project.id)!.locations.find((location) => location.isDefault)?.id ?? null;
+    f.db.removeProjectLocation(p.old.id);
+    f.db.setProjectDefaultLocation(p.project.id, defaultLocation);
+  }
   const locations = new CampaignLocations({ db: f.db, hub: f.hub, synchronize: (id) => f.sessions.synchronizeCampaignIssueScope(id),
     settle: (before, revoked, owner, now) => f.sessions.settleCampaignBoundaryChange(before, revoked, owner, now),
     log: { warn() {} } });
@@ -6241,7 +6250,10 @@ async function launchedMultiRepositoryCampaign(f: ReturnType<typeof fixture>) {
 
 test("a Location the owner adds mid-campaign is inspected and joins at a new boundary revision (#4117)", async () => {
   const f = fixture();
-  const c = await launchedMultiRepositoryCampaign(f);
+  // Run as it always has, with the launch's unread old-runner Location still in the Project (#4319):
+  // that refuses gates in repositories without an entry, and joins go on as before.
+  const c = await launchedMultiRepositoryCampaign(f, undefined, { keepUnreadOld: true });
+  assert.ok(c.policy().unreadLocations?.some((item) => item.locationId === c.p.old.id), "the launch recorded it unread");
   try {
     const before = c.boundary().revision;
     const policyRevision = f.db.getSession(c.rootId)!.parentControlPolicy!.revision;
@@ -7284,10 +7296,11 @@ function answerBelow(f: ReturnType<typeof fixture>): void {
     : inspect(message);
 }
 const askedBelow = (f: ReturnType<typeof fixture>) => f.sent.filter((message) => message.type === "campaign_launch_inspect" && message.workspacePath === "/fixture/below").length;
-const belowExclusion = (locationId: string, name = "below z") => ({ locationId, name, failure: "runner_below_gates" as const,
-  reason: `The Location's runner can't perform this campaign's gates. Update and restart it to protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer.` });
+const belowExclusion = (locationId: string, name = "below z", repository: string | null = "below/repo") => ({ locationId, name, failure: "runner_below_gates" as const,
+  reason: `The Location's runner can't perform this campaign's gates. Update and restart it to protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer.`,
+  ...(repository ? { repository } : {}) });
 
-test("a launch excludes a Location its runner can't perform the gates for, shows the version in the preflight, and never asks that runner (#4319)", async () => {
+test("a launch excludes a Location its runner can't perform the gates for, shows the version in the preflight, and asks that runner only which repository it is (#4319)", async () => {
   const f = fixture();
   const p = multiRepositoryProject(f);
   answerBelow(f);
@@ -7300,16 +7313,25 @@ test("a launch excludes a Location its runner can't perform the gates for, shows
     assert.deepEqual(checked!.summary.excludedLocations!.find((item) => item.locationId === below.id), belowExclusion(below.id));
     assert.deepEqual(checked!.summary.repositories!.map((entry) => entry.repository), ["owner/repo", "other/repo"],
       "a repository whose only Location is excluded has no entry");
-    assert.equal(askedBelow(f), 0, "its runner is never asked to inspect anything");
+    assert.equal(askedBelow(f), 1, "its runner is asked once, so that repository's gates can refuse by name");
 
-    // The floor is exact: a runner on it joins, and that is a different reviewed launch.
+    // The floor is exact: a runner on it joins.
     registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
     const { preflight: current } = await preflight(server, p.body);
     assert.deepEqual(current!.summary.repositories!.map((entry) => entry.repository).sort(), ["below/repo", "other/repo", "owner/repo"]);
     assert.equal(current!.summary.excludedLocations!.some((item) => item.locationId === below.id), false);
-    assert.notEqual(current!.digest, checked!.digest);
 
+    // The reviewed digest covers the reason on its own: the same repositories, with only the
+    // exclusion's reason different, is a different reviewed launch.
     registerBelow(f);
+    const online = f.hub.isRunnerOnline;
+    f.hub.isRunnerOnline = (runnerId) => runnerId !== "below" && online(runnerId);
+    const { preflight: offline } = await preflight(server, p.body);
+    f.hub.isRunnerOnline = online;
+    assert.equal(offline!.summary.excludedLocations!.find((item) => item.locationId === below.id)?.failure, "runner_offline");
+    assert.deepEqual(offline!.summary.repositories, checked!.summary.repositories);
+    assert.notEqual(offline!.digest, checked!.digest);
+
     const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
       payload: { ...p.body, requestId: "below-gates", preflightDigest: checked!.digest } });
     assert.equal(admitted.statusCode, 201, admitted.body);
@@ -7320,12 +7342,16 @@ test("a launch excludes a Location its runner can't perform the gates for, shows
 test("a root runner below the gates' floor keeps its own Location, whose gates run in its own checkout, and every other Location on it is excluded (#4319)", async () => {
   const f = fixture({ protocolVersion: CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1 });
   const p = multiRepositoryProject(f);
+  const extraFolder = f.db.createWorkspace("r", { name: "r extra", path: "/fixture/two/other" }, f.scope);
+  const extra = f.db.addProjectLocation(p.project.id, { runnerId: "r", workspaceId: extraFolder.id, addedByUserId: f.human.userId });
   const { server } = await app(f);
   try {
     const { preflight: checked } = await preflight(server, p.body);
     assert.ok(checked!.summary.repositories![0]!.locations.some((location) => location.locationId === p.launchLocation.id), "the launch Location stays");
     assert.equal(checked!.summary.excludedLocations!.some((item) => item.locationId === p.launchLocation.id), false);
-    assert.deepEqual(checked!.summary.excludedLocations!.find((item) => item.locationId === p.plain.id), belowExclusion(p.plain.id, p.plain.name));
+    assert.deepEqual(checked!.summary.excludedLocations!.find((item) => item.locationId === extra.id), belowExclusion(extra.id, extra.name, "other/repo"));
+    // A folder that isn't a repository is still described as what it is; updating wouldn't help it.
+    assert.equal(checked!.summary.excludedLocations!.find((item) => item.locationId === p.plain.id)?.failure, "not_repository");
   } finally { await server.close(); f.db.close(); }
 });
 
@@ -7340,19 +7366,19 @@ test("a Location added mid-campaign on an old runner is excluded with its versio
     await c.locations.locationAdded(below.id, f.human);
     assert.deepEqual(c.policy().excludedLocations!.find((item) => item.locationId === below.id), belowExclusion(below.id));
     assert.equal(c.boundary().revision, revision, "an exclusion changes no authority");
-    // Reconnecting without updating changes nothing, and still asks it nothing.
+    // Reconnecting without updating changes nothing.
     await c.locations.runnerReconnected("below");
     assert.deepEqual(c.policy().excludedLocations!.find((item) => item.locationId === below.id), belowExclusion(below.id));
     assert.equal(c.boundary().revision, revision);
-    assert.equal(askedBelow(f), 0);
 
+    const asked = askedBelow(f);
     registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
     await c.locations.runnerReconnected("below");
     assert.deepEqual(c.boundary().repositories!.find((entry) => entry.repository === "below/repo"), { repository: "below/repo", locationIds: [below.id] });
     assert.equal(c.boundary().revision, revision + 1);
     assert.equal(c.policy().excludedLocations!.some((item) => item.locationId === below.id), false);
     assert.equal(c.policy().locationJoins!.find((join) => join.locationId === below.id)?.source, "runner_reconnected");
-    assert.equal(askedBelow(f), 1, "it is inspected in its own path before it joins");
+    assert.equal(askedBelow(f), asked + 1, "it is inspected in its own path before it joins");
   } finally { await c.server.close(); f.db.close(); }
 });
 
@@ -7372,8 +7398,10 @@ test("an offline runner reads as offline, not too old, and what it reports on re
     f.hub.isRunnerOnline = online;
     await c.locations.runnerReconnected("below");
     assert.deepEqual(exclusion(), belowExclusion(below.id));
-    // Going offline again changes nothing until it registers again.
+    // Going offline again changes nothing until it registers again: another runner's registration
+    // doesn't touch this exclusion.
     f.hub.isRunnerOnline = (runnerId) => runnerId !== "below" && online(runnerId);
+    await c.locations.runnerReconnected("r2");
     assert.deepEqual(exclusion(), belowExclusion(below.id));
     f.hub.isRunnerOnline = online;
     registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
@@ -7408,10 +7436,14 @@ test("an update never brings in someone else's Location by itself: it waits for 
 test("a re-authorization and a reviewed enable keep every repository and Location the campaign holds, whatever its runner's version (#4319)", async () => {
   const f = fixture();
   const c = await launchedMultiRepositoryCampaign(f);
+  answerBelow(f);
+  registerBelow(f);
   const { server } = await app(f);
   try {
     const held = structuredClone(c.boundary().repositories);
     assert.deepEqual(held!.map((entry) => entry.repository), ["owner/repo", "other/repo"]);
+    // Held or not is the whole difference: a new Location on an old runner stays out in the same enable.
+    const notHeld = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
     // The second machine holds other/repo's only Location, and is now below the floor.
     const r2 = f.db.getRunner("r2")!;
     f.db.registerRunner({ runnerId: "r2", hostname: "r2", os: "linux", version: "test", agents: r2.agents, runtime: { ...runtime, campaignLaunchInspection: { version: 3 } },
@@ -7427,6 +7459,7 @@ test("a re-authorization and a reviewed enable keep every repository and Locatio
     assert.equal(reviewed.ready, true, JSON.stringify(reviewed.summary.blockers));
     const heldIds = held!.flatMap((entry) => entry.locationIds);
     assert.equal(reviewed.summary.excludedLocations!.some((item) => heldIds.includes(item.locationId)), false, "what it holds is never listed as excluded");
+    assert.deepEqual(reviewed.summary.excludedLocations!.find((item) => item.locationId === notHeld.id), belowExclusion(notHeld.id));
     const enabled = await server.inject({ method: "POST", url: `/api/sessions/${c.rootId}/orchestrator-campaign/full-control`, headers: { authorization: "Bearer human" },
       payload: { expectedRevision, preflightDigest: reviewed.digest } });
     assert.equal(enabled.statusCode, 200, enabled.body);
@@ -7476,9 +7509,9 @@ test("in Custom, an addition from a root below the gates' floor still reads its 
 });
 
 /** A new Custom campaign in a Project of the launch Location and one on an old runner (#4319). */
-async function customBesideOldRunner(f: ReturnType<typeof fixture>) {
+async function customBesideOldRunner(f: ReturnType<typeof fixture>, belowVersion = CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1) {
   answerBelow(f);
-  registerBelow(f);
+  registerBelow(f, belowVersion);
   const project = f.db.createProject({ name: "Custom Below", scope: f.scope });
   const launchLocation = f.db.addProjectLocation(project.id, { runnerId: "r", workspaceId: "w", addedByUserId: f.human.userId });
   const below = f.db.addProjectLocation(project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
@@ -7487,8 +7520,9 @@ async function customBesideOldRunner(f: ReturnType<typeof fixture>) {
   const id = created.data.id;
   for (let attempt = 0; attempt < 200 && !f.db.getSession(id)!.orchestratorPolicy!.repositories; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
   const policy = () => f.db.getSession(id)!.orchestratorPolicy!;
+  // A Custom join revokes only what was approved in a repository it stops refusing (#4319).
   const locations = new CampaignLocations({ db: f.db, hub: f.hub, synchronize: () => { throw new Error("a Custom list has no boundary to synchronize"); },
-    settle: () => { throw new Error("a Custom list revokes nothing"); }, log: { warn(message) { throw new Error(message); } } });
+    settle: (before, revoked, owner, now) => f.sessions.settleCampaignBoundaryChange(before, revoked, owner, now), log: { warn(message) { throw new Error(message); } } });
   return { id, project, launchLocation, below, policy, locations };
 }
 
@@ -7501,7 +7535,6 @@ test("a Custom campaign beside an old runner shows the exclusion, and the owner'
     assert.deepEqual(f.db.campaignRepositoryBoundaryView(c.id, c.policy())!.excludedLocations, [belowExclusion(c.below.id)], "Campaign Status lists it");
     await c.locations.runnerReconnected("below");
     assert.deepEqual(c.policy().excludedLocations, [belowExclusion(c.below.id)], "still old");
-    assert.equal(askedBelow(f), 0);
 
     registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
     await c.locations.runnerReconnected("below");
@@ -7554,10 +7587,11 @@ test("a Custom campaign's update joins only the owner's Location, a first-messag
     // Someone else's Location never joins by itself: nobody reviews this list.
     store((policy) => { policy.excludedLocations = [belowExclusion(c.below.id)]; });
     f.db.raw().prepare("UPDATE project_locations SET added_by_user_id='usr_other' WHERE id=?").run(c.below.id);
+    const askedBefore = askedBelow(f);
     await c.locations.runnerReconnected("below");
     assert.deepEqual(c.policy().excludedLocations, [belowExclusion(c.below.id)]);
     assert.equal(c.policy().repositories!.length, 1);
-    assert.equal(askedBelow(f), 0, "as with its survey, a Location the owner didn't add is never inspected");
+    assert.equal(askedBelow(f), askedBefore, "as with its survey, a Location the owner didn't add is never inspected");
     f.db.raw().prepare("UPDATE project_locations SET added_by_user_id=? WHERE id=?").run(f.human.userId, c.below.id);
 
     // The owner's first message limited the campaign, so that repository is available, not listed.
@@ -7634,7 +7668,7 @@ test("a transient failure after the update doesn't end a Custom Location's way b
   } finally { f.hub.isRunnerOnline = online; f.db.close(); }
 });
 
-test("a campaign that becomes Custom during a reconnect's inspection applies Custom's own retry rule: an exclusion that doesn't qualify neither joins nor gains a retry (#4319)", async () => {
+test("a campaign that becomes Custom during a reconnect's inspection applies Custom's own retry rule: an exclusion that doesn't qualify neither joins nor gains a retry, and is only named (#4319)", async () => {
   const f = fixture();
   const c = await launchedMultiRepositoryCampaign(f);
   answerBelow(f);
@@ -7656,7 +7690,9 @@ test("a campaign that becomes Custom during a reconnect's inspection applies Cus
     target.release("below/repo", "below");
     await reconnected;
     assert.deepEqual(c.policy().repositories, [{ repository: "owner/repo", locationIds: [c.p.launchLocation.id] }]);
-    assert.deepEqual(c.policy().excludedLocations, [{ locationId: below.id, name: "below z", ...offline }], "unchanged, and with no retry flag");
+    // Since the third read, Custom reads an offline Location only to name its repository (nameOnly).
+    assert.deepEqual(c.policy().excludedLocations, [{ locationId: below.id, name: "below z", ...offline, repository: "below/repo", nameOnly: true }],
+      "named, never joined, and with no retry flag");
   } finally { await c.server.close(); f.db.close(); }
 });
 
@@ -7673,7 +7709,7 @@ test("a stored exclusion always reads as today's fixed sentence, so raising the 
       f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify({ ...policy, excludedLocations }), id);
     };
     store([{ locationId: "l", name: "n", failure: "runner_below_gates", reason: "Update and restart it to protocol version 1 or newer. /home/someone/path" }]);
-    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.excludedLocations, [belowExclusion("l", "n")]);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.excludedLocations, [belowExclusion("l", "n", null)]);
     store([{ locationId: "l", name: "n", failure: "not_a_failure", reason: "anything" }]);
     assert.equal(f.db.getSession(id)!.orchestratorPolicy!.excludedLocations, undefined, "an unknown failure is still dropped");
   } finally { f.db.close(); }
@@ -7885,4 +7921,1416 @@ test("a scope card's Maximum Issues increase is only ever derived: a stored or f
     f.db.raw().prepare("UPDATE sessions SET pending_approval=? WHERE id=?").run(JSON.stringify({ ...stored(), scopeMaxIssuesIncrease: { from: 1, increase: 99 } }), c.id);
     assert.deepEqual(cardIncrease(f, c.id, occurrenceId), derived, "a forged value is replaced by the derived one");
   } finally { await server.close(); f.db.close(); }
+});
+
+/* The gaps an independent read of #4372 found (#4319). */
+
+/** A running child of the campaign in one Location, which gates are asked for and consumed as. */
+function childAt(f: ReturnType<typeof fixture>, rootId: string, runnerId: string, workspaceId: string, id = "gate-child"): string {
+  f.db.raw().prepare(`INSERT INTO sessions (id, runner_id, workspace_id, agent_id, driver, title, status, created_at, updated_at, parent_session_id)
+    SELECT ?, ?, ?, agent_id, driver, ?, 'running', created_at, updated_at, ? FROM sessions WHERE id=?`).run(id, runnerId, workspaceId, id, rootId, rootId);
+  return id;
+}
+const publicationIn = (repository: string): WorkflowDecisionResourceSnapshot => ({ category: "follow_up_issue_publication", repository,
+  sanitizedTitle: "Repair the Excluded Repository", sanitizedBody: "## Problem\n\nA repair that belongs in that repository.", labels: [] });
+const deletionIn = (repository: string): WorkflowDecisionResourceSnapshot => ({ category: "merged_branch_deletion", repository, branch: "agent/done",
+  merged: true, mergeCommitSha: "a".repeat(40), pullRequest: 8, headSha: "b".repeat(40), dependentPullRequests: { checkedAt: Date.now(), open: [] } });
+const ask = (f: ReturnType<typeof fixture>, sessionId: string, snapshot: WorkflowDecisionResourceSnapshot, requestId = `ask-${snapshot.category}`) =>
+  f.sessions.createWorkflowDecisionWithVideo(sessionId, { requestId, resourceKey: requestId, resourceSnapshot: snapshot }, () => true);
+const personApproves = (f: ReturnType<typeof fixture>, rootId: string, sessionId: string, occurrenceId: string) =>
+  f.sessions.resolveWorkflowDecision(rootId, sessionId, occurrenceId, { outcome: "approve" }, "human", { kind: "human", id: f.human.userId }, () => true);
+const NAMES_THE_FLOOR = new RegExp(`below/repo.*below z.*protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer.*no other login stands in`, "su");
+
+test("a follow-up in a repository excluded for its runner's version is refused by name, with no fallback to the requester's login (#4319)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  answerBelow(f);
+  registerBelow(f);
+  try {
+    const child = childAt(f, c.rootId, "r", "w");
+    // Approved while the campaign knew nothing of that repository, so it reaches consumption.
+    const asked = await ask(f, child, publicationIn("below/repo"));
+    assert.equal(asked.ok, true, asked.error ?? "");
+    const occurrenceId = asked.data!.occurrenceId;
+    assert.equal(personApproves(f, c.rootId, child, occurrenceId).ok, true);
+
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(below.id, f.human);
+
+    const consumed = await f.sessions.consumeWorkflowDecision(child, occurrenceId, { resourceSnapshot: asked.data!.resourceSnapshot });
+    assert.equal(consumed.ok, false, "consuming is what hands creation to the requester's own login");
+    assert.match(consumed.error!, NAMES_THE_FLOOR);
+    assert.equal(c.policy().excludedLocations!.find((item) => item.locationId === below.id)?.repository, "below/repo", "the exclusion knows its repository");
+    assert.equal(f.db.workflowDecisionByOccurrence(occurrenceId)!.status, "approved", "the approval still stands");
+    const executed = await f.sessions.executeWorkflowDecision(child, occurrenceId, { resourceDigest: asked.data!.resourceDigest }, () => true);
+    assert.equal(executed.ok, false);
+    assert.match(executed.error!, NAMES_THE_FLOOR);
+
+    // A new request is refused before anyone is asked to approve what can't be carried out.
+    const again = await ask(f, child, publicationIn("below/repo"), "ask-again");
+    assert.equal(again.ok, false);
+    assert.match(again.error!, NAMES_THE_FLOOR);
+
+    // Once it joins, the ordinary route applies again. The join is a boundary change, which revokes
+    // what was approved under the old one, so that takes a new approval.
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    await c.locations.runnerReconnected("below");
+    assert.equal(f.db.workflowDecisionByOccurrence(occurrenceId)!.status, "revoked");
+    const fresh = await ask(f, child, publicationIn("below/repo"), "ask-after-joining");
+    assert.equal(fresh.ok, true, fresh.error ?? "");
+    assert.equal(personApproves(f, c.rootId, child, fresh.data!.occurrenceId).ok, true);
+    const routed = await f.sessions.consumeWorkflowDecision(child, fresh.data!.occurrenceId, { resourceSnapshot: fresh.data!.resourceSnapshot });
+    assert.equal(routed.ok, false);
+    assert.match(routed.error!, /a Location of that repository creates it/u);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a repository that was never in the campaign keeps its rule: a person's approval lets the requester create the issue (#4319)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  answerBelow(f);
+  registerBelow(f);
+  try {
+    const child = childAt(f, c.rootId, "r", "w");
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(below.id, f.human);
+    const asked = await ask(f, child, publicationIn("elsewhere/repo"));
+    assert.equal(asked.ok, true, asked.error ?? "");
+    assert.equal(asked.data!.authority, "human");
+    assert.equal(personApproves(f, c.rootId, child, asked.data!.occurrenceId).ok, true);
+    const consumed = await f.sessions.consumeWorkflowDecision(child, asked.data!.occurrenceId, { resourceSnapshot: asked.data!.resourceSnapshot });
+    assert.equal(consumed.ok, true, consumed.error ?? "");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("merge, branch deletion and closure in an excluded repository refuse by name too, and a forge read never falls back to the root's login (#4319)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  answerBelow(f);
+  registerBelow(f);
+  try {
+    const child = childAt(f, c.rootId, "r", "w");
+    const asked = await ask(f, child, deletionIn("below/repo"));
+    assert.equal(asked.ok, true, asked.error ?? "");
+    assert.equal(asked.data!.authority, "human", "another repository's pull request gate is the person's");
+    assert.equal(personApproves(f, c.rootId, child, asked.data!.occurrenceId).ok, true);
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(below.id, f.human);
+
+    const consumed = await f.sessions.consumeWorkflowDecision(child, asked.data!.occurrenceId, { resourceSnapshot: asked.data!.resourceSnapshot });
+    assert.equal(consumed.ok, false);
+    assert.match(consumed.error!, NAMES_THE_FLOOR);
+    const executed = await f.sessions.executeWorkflowDecision(child, asked.data!.occurrenceId, { resourceDigest: asked.data!.resourceDigest }, () => true);
+    assert.equal(executed.ok, false);
+    assert.match(executed.error!, NAMES_THE_FLOOR);
+
+    const mergeRead = await Promise.race([ask(f, child, { category: "pr_merge", repository: "below/repo", pullRequest: 8, headSha: "b".repeat(40), reviewResult: "merge",
+      requiredChecks: { headSha: "b".repeat(40), status: "passed", checkedAt: Date.now(), checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" }] } }, "ask-merge"),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 2_000))]);
+    assert.ok(mergeRead, "a merge is refused before the forge is read");
+    assert.equal(mergeRead.ok, false);
+    assert.match(mergeRead.error!, NAMES_THE_FLOOR);
+
+    const closure = await f.sessions.requestGithubIssueClosure(c.rootId, closureRequest("close-below", 41, "below/repo"));
+    assert.equal(closure.ok, false);
+    assert.match(closure.error!, NAMES_THE_FLOOR);
+
+    // Not the root's login, and not that Location's runner either: it isn't in the boundary, so nobody
+    // approved reading through it. Nothing reads until a Location of the repository joins.
+    assert.equal(f.db.campaignForgeObservingRunner(c.rootId, "below/repo", () => true), null);
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    await c.locations.runnerReconnected("below");
+    assert.equal(f.db.campaignForgeObservingRunner(c.rootId, "below/repo", () => true)?.location?.workspaceId, "z", "once it joins, through it");
+    // A repository the campaign never held reads as it always has.
+    assert.equal(f.db.campaignForgeObservingRunner(c.rootId, "elsewhere/repo", () => true)?.runnerId, "r");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a child that runs in the excluded Location itself still acts in its own repository with its own login (#4319)", async () => {
+  const f = fixture();
+  try {
+    const c = await customBesideOldRunner(f);
+    const child = childAt(f, c.id, "below", "z");
+    f.db.raw().prepare("UPDATE sessions SET parent_control_policy=? WHERE id=?").run(JSON.stringify({ ...HUMAN_ONLY_PARENT_CONTROL_POLICY }), c.id);
+    const asked = await ask(f, child, publicationIn("below/repo"));
+    assert.equal(asked.ok, true, asked.error ?? "");
+    assert.equal(personApproves(f, c.id, child, asked.data!.occurrenceId).ok, true);
+    const consumed = await f.sessions.consumeWorkflowDecision(child, asked.data!.occurrenceId, { resourceSnapshot: asked.data!.resourceSnapshot });
+    assert.equal(consumed.ok, true, consumed.error ?? "");
+  } finally { f.db.close(); }
+});
+
+test("a child in an unlisted folder can't act on an excluded repository: an unknown placement proves nothing about its own (#4319)", async () => {
+  const f = fixture();
+  try {
+    const c = await customBesideOldRunner(f);
+    f.db.raw().prepare("UPDATE sessions SET parent_control_policy=? WHERE id=?").run(JSON.stringify({ ...HUMAN_ONLY_PARENT_CONTROL_POLICY }), c.id);
+    const unlisted = f.db.createWorkspace("r", { name: "r unlisted", path: "/fixture/unlisted" }, f.scope);
+    const child = childAt(f, c.id, "r", unlisted.id);
+    assert.equal(f.db.campaignParticipantRepository(f.db.getSession(c.id)!, f.db.getSession(child)!), null, "its repository isn't known");
+    const asked = await ask(f, child, deletionIn("below/repo"));
+    assert.equal(asked.ok, false);
+    assert.match(asked.error!, NAMES_THE_FLOOR);
+  } finally { f.db.close(); }
+});
+
+test("an exclusion recorded just as a person-approved follow-up is consumed refuses it by name, however soon the read in between returns (#4319)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  answerBelow(f);
+  registerBelow(f);
+  try {
+    const child = childAt(f, c.rootId, "r", "w");
+    const asked = await ask(f, child, publicationIn("below/repo"));
+    assert.equal(asked.ok, true, asked.error ?? "");
+    assert.equal(personApproves(f, c.rootId, child, asked.data!.occurrenceId).ok, true);
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    // Written as `await` next yields: after the first check, before the consumption.
+    queueMicrotask(() => {
+      const recorded = f.db.recordCampaignLocations(c.rootId, f.human.userId, { joins: [], excluded: [belowExclusion(below.id)], pending: [] }, Date.now());
+      assert.equal(recorded.ok, true);
+    });
+    const consumed = await f.sessions.consumeWorkflowDecision(child, asked.data!.occurrenceId, { resourceSnapshot: asked.data!.resourceSnapshot });
+    assert.equal(consumed.ok, false);
+    assert.match(consumed.error!, NAMES_THE_FLOOR);
+    assert.equal(f.db.workflowDecisionByOccurrence(asked.data!.occurrenceId)!.status, "approved");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+/** A campaign with a child whose approved merge in below/repo reaches its GitHub read, which the test
+ * holds open: an exclusion recorded meanwhile changes no revision, so only a recheck can see it. */
+async function mergeHeldAtPreflight(f: ReturnType<typeof fixture>) {
+  const c = await launchedMultiRepositoryCampaign(f);
+  answerBelow(f);
+  registerBelow(f);
+  const child = childAt(f, c.rootId, "r", "w");
+  let hold = false;
+  let held: (() => void) | null = null;
+  const actions: unknown[] = [];
+  const send = f.hub.sendToRunner.bind(f.hub);
+  f.hub.sendToRunner = (runnerId, message) => {
+    if (message.type === "forge_decision_action") { actions.push(message.action); return true; }
+    if (message.type === "reconcile_workflow_action") {
+      queueMicrotask(() => f.hub.resolveRunnerRequest({ type: "workflow_action_reconciliation_result", requestId: message.requestId, sessionId: message.sessionId,
+        occurrenceId: message.occurrenceId, accepted: true, commandDigest: createHash("sha256").update(message.command, "utf8").digest("hex"), forgeHeadSha: message.expectedHeadSha }, runnerId));
+      return true;
+    }
+    if (message.type !== "github_merge_preflight") return send(runnerId, message);
+    const answer = () => f.hub.resolveRunnerRequest({ type: "github_merge_preflight_result", requestId: message.requestId, sessionId: message.sessionId, ok: true,
+      check: { checkedAt: Date.now(), closures: [] } }, runnerId);
+    if (hold) held = answer; else queueMicrotask(answer);
+    return true;
+  };
+  const snapshot: WorkflowDecisionResourceSnapshot = { category: "pr_merge", repository: "below/repo", pullRequest: 8, headSha: "b".repeat(40), reviewResult: "merge",
+    requiredChecks: { headSha: "b".repeat(40), status: "passed", checkedAt: Date.now(), checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" }] } };
+  const asked = await ask(f, child, snapshot, "ask-held-merge");
+  assert.equal(asked.ok, true, asked.error ?? "");
+  assert.equal(personApproves(f, c.rootId, child, asked.data!.occurrenceId).ok, true);
+  const excludeDuringTheRead = async (action: Promise<{ ok: boolean; error?: string }>) => {
+    for (let tick = 0; tick < 200 && !held; tick += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.ok(held, "the GitHub read is being held");
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(below.id, f.human);
+    held!();
+    return action;
+  };
+  return { ...c, child, snapshot: asked.data!.resourceSnapshot, occurrenceId: asked.data!.occurrenceId, resourceDigest: asked.data!.resourceDigest, actions,
+    holdReads: (value: boolean) => { hold = value; held = null; }, excludeDuringTheRead };
+}
+const armMerge = (f: ReturnType<typeof fixture>, m: Awaited<ReturnType<typeof mergeHeldAtPreflight>>) => f.sessions.consumeWorkflowDecision(m.child, m.occurrenceId,
+  { resourceSnapshot: m.snapshot, action: { kind: "pr_merge_enqueue", command: "gh pr merge https://github.com/below/repo/pull/8 --squash --match-head-commit " + "b".repeat(40) } });
+
+test("an exclusion recorded while a merge is being armed stops the arming by name, and the approval stands (#4319)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    m.holdReads(true);
+    const armed = await m.excludeDuringTheRead(armMerge(f, m));
+    assert.equal(armed.ok, false);
+    assert.match(armed.error!, NAMES_THE_FLOOR);
+    const decision = f.db.workflowDecisionByOccurrence(m.occurrenceId)!;
+    assert.equal(decision.actionAdmission, undefined, "nothing is armed");
+    assert.equal(decision.status, "approved");
+  } finally { await m.server.close(); f.db.close(); }
+});
+
+test("an exclusion recorded during an armed merge's last GitHub read stops the enqueue by name, with nothing dispatched (#4319)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    const armed = await armMerge(f, m);
+    assert.equal(armed.ok, true, armed.error ?? "");
+    m.holdReads(true);
+    const executed = await m.excludeDuringTheRead(f.sessions.executeWorkflowDecision(m.child, m.occurrenceId, { resourceDigest: m.resourceDigest }, () => true));
+    assert.deepEqual(m.actions, [], "nothing reached a login");
+    const decision = f.db.workflowDecisionByOccurrence(m.occurrenceId)!;
+    assert.equal(decision.forgeAction?.outcome, "refused");
+    assert.match(decision.forgeAction?.refusal?.summary ?? "", NAMES_THE_FLOOR);
+    assert.equal(decision.status, "approved", "the approval still stands");
+    assert.equal(executed.ok, true, "the refusal is reported on the decision, as every forge refusal is");
+  } finally { await m.server.close(); f.db.close(); }
+});
+
+/** The merge above armed, then its repository left out: the command is in the child's hands. */
+async function armedThenExcluded(f: ReturnType<typeof fixture>, m: Awaited<ReturnType<typeof mergeHeldAtPreflight>>) {
+  const below = f.db.addProjectLocation(m.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+  await m.locations.locationAdded(below.id, f.human);
+}
+const armedCommand = "gh pr merge https://github.com/below/repo/pull/8 --squash --match-head-commit " + "b".repeat(40);
+const askPermission = (f: ReturnType<typeof fixture>, child: string, requestId: string, command = armedCommand) => f.sessions.onSessionEvent(child, {
+  kind: "permission_request", requestId, occurrenceId: requestId, requestSource: "provider_tool", title: "Run a Command", context: { toolName: "Bash", input: command },
+  options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }] });
+const resolutionsOf = (f: ReturnType<typeof fixture>) => f.sent.filter((message) => message.type === "resolve_permission")
+  .map((message) => [(message as { requestId: string }).requestId, (message as { optionId: string | null }).optionId]);
+
+test("an armed merge whose repository is left out afterward is rejected when its command asks, and only that command (#4319)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    assert.equal((await armMerge(f, m)).ok, true);
+    await armedThenExcluded(f, m);
+    f.sent.length = 0;
+    askPermission(f, m.child, "other-command", "git status");
+    const refusedHere = () => f.db.listGovernanceAudit(m.child).filter((entry) => JSON.stringify(entry).includes("campaign-excluded-repository")).map((entry) => entry.requestId);
+    assert.deepEqual(refusedHere(), [], "another command isn't this refusal's business");
+    askPermission(f, m.child, "armed-command");
+    assert.deepEqual(refusedHere(), ["armed-command"]);
+    assert.deepEqual(resolutionsOf(f).filter(([id]) => id === "armed-command"), [["armed-command", "reject"]]);
+    const decision = f.db.workflowDecisionByOccurrence(m.occurrenceId)!;
+    assert.deepEqual([decision.status, decision.actionAdmission?.kind], ["approved", "pr_merge_enqueue"], "still armed: its command may already have run");
+  } finally { await m.server.close(); f.db.close(); }
+});
+
+test("a person can't allow a card for that armed merge asked before its repository was left out (#4319)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    assert.equal((await armMerge(f, m)).ok, true);
+    f.db.upsertGovernancePolicy({ policyId: "protected", name: "Protected", effect: "ask", priority: 1, enabled: true, scope: { toolName: "Bash" }, conditions: { humanRequired: true } }, Date.now());
+    f.sent.length = 0;
+    askPermission(f, m.child, "asked-early");
+    assert.deepEqual(resolutionsOf(f), [], "a person is asked");
+    await armedThenExcluded(f, m);
+    const allowed = f.sessions.approve(m.child, "asked-early", "once", { kind: "human", id: f.human.userId });
+    assert.equal(allowed.ok, false);
+    assert.match(allowed.error!, NAMES_THE_FLOOR);
+    assert.deepEqual(resolutionsOf(f), [], "no allow reached the runner");
+  } finally { await m.server.close(); f.db.close(); }
+});
+
+test("a person can't allow a parked policy hook's shell command while that armed merge could be it, since the hook can't say which it is (#4319)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    assert.equal((await armMerge(f, m)).ok, true);
+    f.db.upsertGovernancePolicy({ policyId: "protected", name: "Protected", effect: "ask", priority: 100, enabled: true, scope: { toolName: "Bash" }, conditions: { humanRequired: true } }, Date.now());
+    const parked = f.sessions.evaluatePolicyHook(m.child, { hookEventName: "PreToolUse", providerSessionId: "provider-child", permissionMode: "plan",
+      toolUseId: "parked", context: { toolName: "Bash" } }, true);
+    assert.ok(parked.data?.approvalRequestId, parked.error ?? "the hook parks on a person");
+    await armedThenExcluded(f, m);
+    const allowed = f.sessions.approve(m.child, parked.data!.approvalRequestId!, "allow", { kind: "human", id: f.human.userId });
+    assert.equal(allowed.ok, false);
+    assert.match(allowed.error!, NAMES_THE_FLOOR);
+    assert.equal(f.db.workflowDecisionByOccurrence(m.occurrenceId)!.status, "approved");
+  } finally { await m.server.close(); f.db.close(); }
+});
+
+const childHook = (f: ReturnType<typeof fixture>, child: string, toolUseId: string, toolName = "Bash") => f.sessions.evaluatePolicyHook(child, { hookEventName: "PreToolUse",
+  providerSessionId: "provider-child", permissionMode: "bypassPermissions", toolUseId, context: { toolName } });
+
+test("Claude's policy hook, which can't see the command, keeps denying shell commands while that armed merge stands, so a first refusal opens no way to run it (#4319)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    assert.equal((await armMerge(f, m)).ok, true);
+    assert.equal(childHook(f, m.child, "before").data?.decision, "defer");
+    await armedThenExcluded(f, m);
+    assert.equal(childHook(f, m.child, "read", "Read").data?.decision, "defer", "only tools that can run a command");
+    for (const call of ["unrelated", "the-saved-merge"]) {
+      const denied = childHook(f, m.child, call);
+      assert.equal(denied.data?.decision, "deny", call);
+      assert.match(denied.data?.reason ?? "", NAMES_THE_FLOOR);
+      assert.match(denied.data?.reason ?? "", /If it already ran, reconcile it\./u);
+    }
+    const decision = f.db.workflowDecisionByOccurrence(m.occurrenceId)!;
+    assert.deepEqual([decision.status, decision.actionAdmission?.kind], ["approved", "pr_merge_enqueue"]);
+  } finally { await m.server.close(); f.db.close(); }
+});
+
+test("a merge that already ran before its repository was left out still reconciles, which lifts the block (#4319)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    assert.equal((await armMerge(f, m)).ok, true);
+    await armedThenExcluded(f, m);
+    assert.equal(childHook(f, m.child, "unrelated").data?.decision, "deny");
+    const reconciled = await f.sessions.reconcileWorkflowDecision(m.child, m.occurrenceId, { resourceSnapshot: m.snapshot }, () => true);
+    assert.equal(reconciled.ok, true, reconciled.error ?? "");
+    assert.equal(f.db.workflowDecisionByOccurrence(m.occurrenceId)!.status, "consumed");
+    assert.equal(childHook(f, m.child, "after").data?.decision, "defer");
+  } finally { await m.server.close(); f.db.close(); }
+});
+
+test("the runner updating lifts the block: its join revokes the armed merge, which needs a new approval (#4319)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    assert.equal((await armMerge(f, m)).ok, true);
+    await armedThenExcluded(f, m);
+    assert.equal(childHook(f, m.child, "while-old").data?.decision, "deny");
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    await m.locations.runnerReconnected("below");
+    assert.ok(m.boundary().repositories!.some((entry) => entry.repository === "below/repo"));
+    assert.equal(f.db.workflowDecisionByOccurrence(m.occurrenceId)!.status, "revoked");
+    assert.equal(childHook(f, m.child, "after-update").data?.decision, "defer");
+  } finally { await m.server.close(); f.db.close(); }
+});
+
+test("a new request for the same pull request replaces that armed merge and lifts the block, and consuming it is still refused by name (#4319)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    assert.equal((await armMerge(f, m)).ok, true);
+    await armedThenExcluded(f, m);
+    assert.equal(childHook(f, m.child, "stuck").data?.decision, "deny");
+    // Another pull request of that repository is no replacement, so it's refused as ever.
+    const other = await f.sessions.createWorkflowDecisionWithVideo(m.child, { requestId: "other-pull-request", resourceKey: "other-pull-request",
+      resourceSnapshot: { ...m.snapshot, pullRequest: 9 } as WorkflowDecisionResourceSnapshot }, () => true);
+    assert.equal(other.ok, false);
+    assert.match(other.error!, NAMES_THE_FLOOR);
+    // Under a key of its own: the refusal names the pull request, not the key it was armed under.
+    const replacement = await f.sessions.createWorkflowDecisionWithVideo(m.child, { requestId: "replace-held-merge", resourceKey: "a-key-of-its-own", resourceSnapshot: m.snapshot }, () => true);
+    assert.equal(replacement.ok, true, replacement.error ?? "");
+    assert.equal(f.db.workflowDecisionByOccurrence(m.occurrenceId)!.status, "superseded");
+    const lifted = childHook(f, m.child, "free").data;
+    assert.notEqual(lifted?.decision, "deny", "no longer blocked: ordinary governance decides again");
+    assert.doesNotMatch(lifted?.reason ?? "", /can't perform its gates/u);
+    assert.equal(personApproves(f, m.rootId, m.child, replacement.data!.occurrenceId).ok, true);
+    const consumed = await f.sessions.consumeWorkflowDecision(m.child, replacement.data!.occurrenceId,
+      { resourceSnapshot: replacement.data!.resourceSnapshot, action: { kind: "pr_merge_enqueue", command: armedCommand } });
+    assert.equal(consumed.ok, false);
+    assert.match(consumed.error!, NAMES_THE_FLOOR);
+  } finally { await m.server.close(); f.db.close(); }
+});
+
+test("an old runner of any version is asked for its repository only if it can inspect; one too old to read gets the version reason with no repository (#4319)", async () => {
+  const f = fixture();
+  const p = multiRepositoryProject(f);
+  const { server } = await app(f);
+  try {
+    const { preflight: checked } = await preflight(server, p.body);
+    const excluded = checked!.summary.excludedLocations!.find((item) => item.locationId === p.old.id)!;
+    assert.equal(excluded.failure, "runner_below_gates");
+    assert.equal(excluded.repository, undefined, "below v288 it can't read a Location");
+    const inspected = f.sent.filter((message) => message.type === "campaign_launch_inspect") as Array<Extract<ControlPlaneToRunner, { type: "campaign_launch_inspect" }>>;
+    assert.equal(inspected.some((message) => message.workspacePath === "/fixture/old"), false);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a launch Location on a root below the publication floor is reported by name and version, and only when a follow-up could reach it (#4319)", async () => {
+  const f = fixture({ protocolVersion: CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1 });
+  const p = multiRepositoryProject(f);
+  const { server } = await app(f);
+  try {
+    // A current Location of the launch repository can create its issues, so nothing is limited.
+    const { preflight: withTwin } = await preflight(server, p.body);
+    assert.deepEqual(withTwin!.summary.repositories!.map((entry) => entry.repository), ["owner/repo", "other/repo"]);
+    assert.equal(withTwin!.summary.limitedLocations, undefined);
+
+    f.db.removeProjectLocation(p.twin.id);
+    const { preflight: limited } = await preflight(server, p.body);
+    assert.deepEqual(limited!.summary.limitedLocations, [{ locationId: p.launchLocation.id, name: "Fixture Repo",
+      reason: `Follow-ups from this campaign's other repositories can't be created in this Location's repository until its runner is on protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer.` }]);
+    assert.ok(limited!.summary.repositories!.some((entry) => entry.locations.some((location) => location.locationId === p.launchLocation.id)), "it is never excluded");
+    assert.equal(limited!.summary.excludedLocations!.some((item) => item.locationId === p.launchLocation.id), false);
+
+    // One repository has nothing to route from, so there is nothing to say.
+    f.db.removeProjectLocation(p.other.id);
+    const { preflight: alone } = await preflight(server, p.body);
+    assert.equal(alone!.summary.limitedLocations, undefined);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("Campaign Status reports a limited launch Location live, and a routed follow-up to it is refused, until the root updates (#4319)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  try {
+    f.db.removeProjectLocation(c.p.twin.id);
+    const view = () => f.db.campaignRepositoryBoundaryView(c.rootId, c.policy())!;
+    assert.equal(view().limitedLocations, undefined, "a current root isn't limited");
+    const root = f.db.getRunner("r")!;
+    const registerRoot = (protocolVersion: number) => f.db.registerRunner({ runnerId: "r", hostname: "r", os: "linux", version: "test", agents: root.agents, runtime: root.runtime,
+      workspaces: root.workspaces }, Date.now(), protocolVersion);
+    registerRoot(CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1);
+    assert.deepEqual(view().limitedLocations!.map((item) => [item.locationId, item.name]), [[c.p.launchLocation.id, "Fixture Repo"]]);
+    assert.match(view().limitedLocations![0]!.reason, new RegExp(`protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer`, "u"));
+
+    const child = childAt(f, c.rootId, "r2", "a");
+    const asked = await ask(f, child, publicationIn("owner/repo"));
+    assert.equal(asked.ok, true, asked.error ?? "");
+    assert.equal(personApproves(f, c.rootId, child, asked.data!.occurrenceId).ok, true);
+    const executed = await f.sessions.executeWorkflowDecision(child, asked.data!.occurrenceId, { resourceDigest: asked.data!.resourceDigest }, () => true);
+    assert.equal(executed.ok, false);
+    assert.match(executed.error!, /no other login stands in/u);
+
+    registerRoot(PROTOCOL_VERSION);
+    assert.equal(view().limitedLocations, undefined, "it clears as soon as the root updates");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("children stay live across a revoke, and an enable with one on an old runner's Location says so in the preflight and the refusal (#4319)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  const { server } = await app(f);
+  try {
+    const child = childAt(f, c.rootId, "r2", "a", "live-child");
+    const launched = c.boundary();
+    const revoked = f.sessions.setCampaignControl(c.rootId, { mode: "custom" }, f.db.getSession(c.rootId)!.parentControlPolicy!.revision, f.human);
+    assert.equal(revoked.ok, true, revoked.error ?? "");
+    assert.equal(f.db.getSession(child)!.status, "running", "a revoke stops no child");
+    assert.equal(c.policy().repositories, undefined, "and drops the list, so nothing is held");
+
+    const r2 = f.db.getRunner("r2")!;
+    f.db.registerRunner({ runnerId: "r2", hostname: "r2", os: "linux", version: "test", agents: r2.agents, runtime: { ...runtime, campaignLaunchInspection: { version: 3 } },
+      workspaces: r2.workspaces }, Date.now(), CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1);
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${c.rootId}/orchestrator-campaign/full-control/preflight`, headers: { authorization: "Bearer human" }, payload: {} });
+    assert.equal(checked.statusCode, 200, checked.body);
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    assert.equal(reviewed.ready, false, "the preflight says so rather than showing ready");
+    const sentence = new RegExp(`live-child runs in r2 a.*protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer`, "u");
+    assert.match(reviewed.summary.blockers.map((item) => item.reason).join(" "), sentence);
+
+    // The enable is refused in the same words.
+    const enabled = await server.inject({ method: "POST", url: `/api/sessions/${c.rootId}/orchestrator-campaign/full-control`, headers: { authorization: "Bearer human" },
+      payload: { expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(enabled.statusCode, 409);
+    assert.match(enabled.body, sentence);
+
+    // And so is a change that passed the preflight and then lost the race.
+    const raced = f.sessions.setCampaignControl(c.rootId, reauthorization(launched), f.db.getSession(c.rootId)!.parentControlPolicy!.revision, f.human, undefined, undefined, undefined, {
+      repositories: [{ repository: "owner/repo", locationIds: [c.p.launchLocation.id] }], excludedLocations: reviewed.summary.excludedLocations ?? [], availableLocations: [], pendingLocations: [] });
+    assert.equal(raced.ok, false);
+    assert.match(raced.error!, sentence);
+  } finally { await server.close(); await c.server.close(); f.db.close(); }
+});
+
+test("a revoke drops the campaign's exclusions, so a later approved addition's list never takes one in without approval (#4319)", async () => {
+  const f = fixture();
+  const c = await repositoryAdditionCampaign(f);
+  answerBelow(f);
+  registerBelow(f);
+  try {
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(below.id, f.human);
+    assert.ok(c.policy().excludedLocations!.some((item) => item.locationId === below.id));
+    assert.equal(f.sessions.setCampaignControl(c.rootId, { mode: "custom" }, f.db.getSession(c.rootId)!.parentControlPolicy!.revision, f.human).ok, true);
+
+    const decision = (await c.request("custom-after-revoke")).data!;
+    assert.equal(c.resolve(decision.occurrenceId, "approve", { kind: "human", id: f.human.userId }).ok, true);
+    assert.equal((await c.additions.execute(c.rootId, decision.occurrenceId, decision.resourceDigest, c.orchestrator)).ok, true);
+    assert.ok(c.policy().repositories, "the approved addition recreates the list");
+
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    await c.locations.runnerReconnected("below");
+    assert.deepEqual(c.policy().repositories!.map((entry) => entry.repository), ["owner/repo", "third/repo"], "no approval named it");
+    assert.equal(c.policy().excludedLocations, undefined, "they described the boundary the revoke ended");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a reconnect that finds someone else's Location still too old keeps its version reason, and only an update moves it to waiting (#4319)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  answerBelow(f);
+  registerBelow(f);
+  try {
+    const other: HumanPrincipal = { ...f.human, userId: "usr_other", actorId: "usr_other" };
+    const theirs = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: other.userId });
+    await c.locations.locationAdded(theirs.id, other);
+    await c.locations.include(c.rootId, theirs.id, f.human);
+    const excluded = () => c.policy().excludedLocations?.find((item) => item.locationId === theirs.id);
+    const waiting = () => c.policy().pendingLocations?.some((item) => item.locationId === theirs.id) ?? false;
+    assert.equal(excluded()?.failure, "runner_below_gates");
+
+    await c.locations.runnerReconnected("below");
+    assert.equal(excluded()?.failure, "runner_below_gates", "the reason isn't lost for a promise Include can't keep");
+    assert.equal(waiting(), false);
+
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    await c.locations.runnerReconnected("below");
+    assert.equal(excluded(), undefined);
+    assert.equal(waiting(), true);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("one old runner's exclusion doesn't stop a one-entry Custom list adding a second Location of its repository through an approved addition (#4319)", async () => {
+  const f = fixture();
+  try {
+    const c = await customBesideOldRunner(f);
+    f.db.registerRunner({ runnerId: "r2", hostname: "r2", os: "linux", version: "test", agents: SECOND_MACHINE_AGENTS, runtime: { ...runtime, campaignLaunchInspection: { version: 3 } },
+      workspaces: [{ id: "copy", name: "r2 copy", path: "/fixture/two/repository-copy" }] }, Date.now(), PROTOCOL_VERSION);
+    const answers = f.state.inspect;
+    f.state.inspect = (message) => message.workspacePath === "/fixture/two/repository-copy"
+      ? { type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId, ok: true, repository: "owner/repo", issueNumbers: [], digest: "d".repeat(64) }
+      : answers(message);
+    const copy = f.db.addProjectLocation(c.project.id, { runnerId: "r2", workspaceId: "copy", addedByUserId: f.human.userId });
+    f.db.raw().prepare(`INSERT INTO orchestrator_campaign_follow_ups (id, campaign_session_id, origin_session_id, repository, title, recommendation_key, normalized_key, duplicate_of, created_at)
+      VALUES ('fu_copy', ?, NULL, 'owner/repo', 'Needs a Second Checkout', NULL, 'owner/repo:fu_copy', NULL, ?)`).run(c.id, Date.now());
+    const additions = new CampaignRepositoryAdditions({ db: f.db, hub: f.hub, sessions: f.sessions,
+      inspect: (locationId, options) => inspectProjectLocation({ db: f.db, hub: f.hub }, locationId, { ...options, requireProtocol: "campaignRepositoryBoundary" }),
+      synchronize: (id) => f.sessions.synchronizeCampaignIssueScope(id) });
+    const orchestrator: AgentPrincipal = { kind: "agent", actorId: "root-agent", credentialSessionId: c.id, orchestrator: true,
+      organizationId: f.human.organizationId, delegatedScope: f.scope };
+    const requested = await additions.request(c.id, { requestId: "add-copy", locationId: copy.id, reason: "The follow-up needs a second checkout.", work: { kind: "follow_up", id: "fu_copy" } }, orchestrator);
+    assert.equal(requested.ok, true, requested.error ?? "");
+    assert.equal(requested.data!.authority, "human");
+  } finally { f.db.close(); }
+});
+
+/* A refused repository rests on a record that only an entry ends (#4319). An independent read of
+   6499b514f found that a failed re-read, a move to waiting, a re-authorization, a revoke and a removal
+   each turned it back into an unknown repository, whose gates fall back to the requester's login. */
+
+/** Every later read of the below Location fails, as a timeout, a disconnect or an answer that doesn't map all do. */
+function failBelowReads(f: ReturnType<typeof fixture>): void {
+  const inspect = f.state.inspect;
+  f.state.inspect = (message) => message.workspacePath === "/fixture/below"
+    ? { type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId, ok: true, repository: "below/repo",
+      issueNumbers: message.issueNumbers, digest: "not-a-digest" }
+    : inspect(message);
+}
+let refusalAsks = 0;
+/** The refusal of a repository a read named, as only the durable record gives it: an unnamed
+ * Location's refusal reads otherwise. */
+const NAMED_REFUSAL = /below\/repo isn't in this campaign because the runner of below z can't perform its gates/u;
+/** below/repo's gates still refuse by name, and nothing reads its forge. */
+async function stillRefused(f: ReturnType<typeof fixture>, rootId: string, child: string, what: string): Promise<void> {
+  refusalAsks += 1;
+  const asked = await ask(f, child, publicationIn("below/repo"), `still-refused-${refusalAsks}`);
+  assert.equal(asked.ok, false, `${what}: a new request is refused`);
+  assert.match(asked.error!, NAMES_THE_FLOOR, what);
+  assert.match(asked.error!, NAMED_REFUSAL, `${what}: by the repository's own name`);
+  assert.equal(f.db.campaignForgeObservingRunner(rootId, "below/repo", () => true), null, `${what}: nothing reads its forge`);
+}
+/** A refusal while an old runner's Location holds a repository no read has named. */
+const UNNAMED_REFUSAL = (repository: string) => new RegExp(`${repository.replace("/", "\\/")} can't be acted on while the runner of below z can't perform this campaign's gates ` +
+  `and no read has named the repository it holds.*protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer so it can be read, or remove that Location from the Project.*no other login stands in`, "su");
+/** Answers every below read with a different repository each time. */
+function answerBelowWithEach(f: ReturnType<typeof fixture>, repositories: string[]): void {
+  const inspect = f.state.inspect;
+  let index = 0;
+  f.state.inspect = (message) => message.workspacePath === "/fixture/below"
+    ? { type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId, ok: true,
+      repository: repositories[Math.min(index++, repositories.length - 1)]!, issueNumbers: message.issueNumbers, digest: "d".repeat(64) }
+    : inspect(message);
+}
+const armedState = (f: ReturnType<typeof fixture>, occurrenceId: string) => {
+  const decision = f.db.workflowDecisionByOccurrence(occurrenceId)!;
+  return [decision.status, decision.actionAdmission?.kind];
+};
+const mergeIn = (repository: string): WorkflowDecisionResourceSnapshot => ({ category: "pr_merge", repository, pullRequest: 8, headSha: "b".repeat(40), reviewResult: "merge",
+  requiredChecks: { headSha: "b".repeat(40), status: "passed", checkedAt: Date.now(), checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" }] } });
+/** Every merge's GitHub read answers at once. */
+function answerMergeReads(f: ReturnType<typeof fixture>): void {
+  const send = f.hub.sendToRunner.bind(f.hub);
+  f.hub.sendToRunner = (runnerId, message) => {
+    if (message.type !== "github_merge_preflight") return send(runnerId, message);
+    queueMicrotask(() => f.hub.resolveRunnerRequest({ type: "github_merge_preflight_result", requestId: message.requestId, sessionId: message.sessionId, ok: true,
+      check: { checkedAt: Date.now(), closures: [] } }, runnerId));
+    return true;
+  };
+}
+
+test("a failed re-read of a Location left out for its runner's version keeps its repository refused and unread, and its armed merge blocked (#4319)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    // Approved under the ordinary rule before anything was known of below/repo.
+    const approved = async (snapshot: WorkflowDecisionResourceSnapshot, requestId: string) => {
+      const asked = await ask(f, m.child, snapshot, requestId);
+      assert.equal(asked.ok, true, asked.error ?? "");
+      assert.equal(personApproves(f, m.rootId, m.child, asked.data!.occurrenceId).ok, true);
+      return asked.data!;
+    };
+    const followUp = await approved(publicationIn("below/repo"), "approved-before");
+    const deletion = await approved(deletionIn("below/repo"), "deletion-before");
+    const unarmed = await approved({ ...mergeIn("below/repo"), pullRequest: 9 } as WorkflowDecisionResourceSnapshot, "unarmed-before");
+    assert.equal((await armMerge(f, m)).ok, true);
+    await armedThenExcluded(f, m);
+
+    failBelowReads(f);
+    await m.locations.runnerReconnected("below");
+    const excluded = m.policy().excludedLocations!.find((item) => item.failure === "runner_below_gates")!;
+    assert.equal(excluded.repository, undefined, "the latest read named no repository");
+    await stillRefused(f, m.rootId, m.child, "after a failed re-read");
+    const consumed = await f.sessions.consumeWorkflowDecision(m.child, followUp.occurrenceId, { resourceSnapshot: followUp.resourceSnapshot });
+    assert.equal(consumed.ok, false, "the requester's login doesn't create it");
+    assert.match(consumed.error!, NAMED_REFUSAL);
+    // Every action after that erasing event, not only a new request.
+    const deleted = await f.sessions.executeWorkflowDecision(m.child, deletion.occurrenceId, { resourceDigest: deletion.resourceDigest }, () => true);
+    assert.equal(deleted.ok, false, "no branch is deleted");
+    assert.match(deleted.error!, NAMED_REFUSAL);
+    const arming = await f.sessions.consumeWorkflowDecision(m.child, unarmed.occurrenceId, { resourceSnapshot: unarmed.resourceSnapshot,
+      action: { kind: "pr_merge_enqueue", command: "gh pr merge https://github.com/below/repo/pull/9 --squash --match-head-commit " + "b".repeat(40) } });
+    assert.equal(arming.ok, false, "nothing arms");
+    assert.match(arming.error!, NAMED_REFUSAL);
+    const enqueued = await f.sessions.executeWorkflowDecision(m.child, m.occurrenceId, { resourceDigest: m.resourceDigest }, () => true);
+    assert.equal(enqueued.ok, false, "refused before anything is sent");
+    assert.match(enqueued.error!, NAMED_REFUSAL);
+    assert.deepEqual(m.actions, [], "nothing is enqueued");
+    assert.equal(childHook(f, m.child, "after-failed-read").data?.decision, "deny");
+    assert.deepEqual(armedState(f, m.occurrenceId), ["approved", "pr_merge_enqueue"]);
+  } finally { await m.server.close(); f.db.close(); }
+});
+
+test("someone else's Location keeps its repository refused when its runner's update moves it to waiting, and only Include in Campaign's join lifts the block, revoking the armed merge (#4319)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    assert.equal((await armMerge(f, m)).ok, true);
+    const other: HumanPrincipal = { ...f.human, userId: "usr_other", actorId: "usr_other" };
+    const theirs = f.db.addProjectLocation(m.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: other.userId });
+    await m.locations.locationAdded(theirs.id, other);
+    await m.locations.include(m.rootId, theirs.id, f.human);
+    assert.equal(childHook(f, m.child, "while-old").data?.decision, "deny");
+
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    await m.locations.runnerReconnected("below");
+    assert.ok(m.policy().pendingLocations?.some((item) => item.locationId === theirs.id), "it waits for Include in Campaign");
+    assert.equal(m.policy().excludedLocations?.some((item) => item.locationId === theirs.id) ?? false, false);
+    await stillRefused(f, m.rootId, m.child, "while it waits");
+    const wayIn = await ask(f, m.child, publicationIn("below/repo"), "theirs-way-in");
+    assert.match(wayIn.error ?? "", /then the campaign's owner can bring it in with Include in Campaign\./u, "not a join that won't happen");
+    assert.equal(childHook(f, m.child, "while-waiting").data?.decision, "deny");
+    assert.deepEqual(armedState(f, m.occurrenceId), ["approved", "pr_merge_enqueue"], "nothing joined, so nothing was revoked and nothing lifted");
+
+    const included = await m.locations.include(m.rootId, theirs.id, f.human);
+    assert.equal(included.ok, true, included.ok ? "" : included.error);
+    assert.equal(f.db.workflowDecisionByOccurrence(m.occurrenceId)!.status, "revoked", "the join that ends the refusal revokes the armed merge");
+    assert.equal(childHook(f, m.child, "after-joining").data?.decision, "defer");
+  } finally { await m.server.close(); f.db.close(); }
+});
+
+test("a re-authorization that lists no exclusions, or someone else adding a refused repository's Location again, keeps that repository refused (#4319)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  answerBelow(f);
+  registerBelow(f);
+  try {
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(below.id, f.human);
+    // Before any child exists, whose placement a re-authorization would also check.
+    const launched = c.boundary();
+    const reauthorized = f.sessions.setCampaignControl(c.rootId, reauthorization(launched), f.db.getSession(c.rootId)!.parentControlPolicy!.revision, f.human,
+      undefined, undefined, undefined, { repositories: launched.repositories!, excludedLocations: [], availableLocations: [], pendingLocations: [] });
+    assert.equal(reauthorized.ok, true, reauthorized.error ?? "");
+    assert.equal(c.policy().excludedLocations, undefined);
+    const child = childAt(f, c.rootId, "r", "w");
+    await stillRefused(f, c.rootId, child, "after a re-authorization that lists no exclusions");
+
+    const other: HumanPrincipal = { ...f.human, userId: "usr_other", actorId: "usr_other" };
+    await c.locations.locationAdded(below.id, other);
+    assert.ok(c.policy().pendingLocations?.some((item) => item.locationId === below.id), "added again by someone else, it waits");
+    await stillRefused(f, c.rootId, child, "after someone else adds it again");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a revoke keeps a refused repository refused in Custom, and revokes the armed merge whose block it would otherwise lift (#4319)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    assert.equal((await armMerge(f, m)).ok, true);
+    await armedThenExcluded(f, m);
+    assert.equal(childHook(f, m.child, "before-revoke").data?.decision, "deny");
+    assert.equal(f.sessions.setCampaignControl(m.rootId, { mode: "custom" }, f.db.getSession(m.rootId)!.parentControlPolicy!.revision, f.human).ok, true);
+    assert.equal(m.policy().excludedLocations, undefined, "the exclusions described the boundary the revoke ended");
+    assert.equal(f.db.workflowDecisionByOccurrence(m.occurrenceId)!.status, "revoked", "the block lifts only with its approval revoked");
+    await stillRefused(f, m.rootId, m.child, "in Custom after the revoke");
+  } finally { await m.server.close(); f.db.close(); }
+});
+
+test("a refused repository's Location detached and added again, which drops its exclusion, keeps that repository refused (#4319)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  answerBelow(f);
+  registerBelow(f);
+  try {
+    const child = childAt(f, c.rootId, "r", "w");
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(below.id, f.human);
+    // Until a change could drop it, the exclusion itself is what names the repository.
+    assert.equal(c.policy().refusedRepositories, undefined);
+    // Removing the runner detaches the Location; adding it again revives the same id, added anew.
+    f.db.deleteRunner("below");
+    registerBelow(f);
+    assert.equal(f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z" }).id, below.id);
+    assert.equal(c.policy().excludedLocations?.some((item) => item.locationId === below.id) ?? false, false, "its exclusion went with its earlier life");
+    assert.deepEqual(c.policy().refusedRepositories, [{ repository: "below/repo", locationId: below.id, name: "below z" }]);
+    await stillRefused(f, c.rootId, child, "after its Location left the Project");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a campaign that has refused 100 repositories before still keeps the next one refused through a failed re-read, with its armed merge blocked (#4319 review)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    assert.equal((await armMerge(f, m)).ok, true);
+    // A long-running campaign whose Project's history refused 100 other repositories.
+    const history = Array.from({ length: 100 }, (_, index) => ({ repository: `old/repo-${index}`, locationId: `loc_old_${index}`, name: `Old ${index}` }));
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify({ ...m.policy(), refusedRepositories: history }), m.rootId);
+    await armedThenExcluded(f, m);
+    failBelowReads(f);
+    await m.locations.runnerReconnected("below");
+    assert.equal(m.policy().refusedRepositories!.length, 101, "no refusal is dropped to make room");
+    await stillRefused(f, m.rootId, m.child, "as the 101st refusal");
+    assert.equal(childHook(f, m.child, "the-101st").data?.decision, "deny");
+    assert.deepEqual(armedState(f, m.occurrenceId), ["approved", "pr_merge_enqueue"]);
+  } finally { await m.server.close(); f.db.close(); }
+});
+
+test("a malformed refused-repository record is dropped alone, and the others still refuse (#4319)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  try {
+    const child = childAt(f, c.rootId, "r", "w");
+    const kept = [{ repository: "below/repo", locationId: "loc_below", name: "below z" }];
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?")
+      .run(JSON.stringify({ ...c.policy(), refusedRepositories: [{ repository: "not a repository", locationId: "x", name: "x" }, ...kept] }), c.rootId);
+    assert.deepEqual(c.policy().refusedRepositories, kept);
+    await stillRefused(f, c.rootId, child, "beside a malformed record");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a Location the launch left out for its runner's version keeps its repository refused through a failed re-read (#4319)", async () => {
+  const f = fixture();
+  let belowId = "";
+  const c = await launchedMultiRepositoryCampaign(f, (p) => {
+    answerBelow(f);
+    registerBelow(f);
+    belowId = f.db.addProjectLocation(p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId }).id;
+  });
+  try {
+    assert.equal(c.policy().excludedLocations!.find((item) => item.locationId === belowId)?.repository, "below/repo");
+    const child = childAt(f, c.rootId, "r", "w");
+    failBelowReads(f);
+    await c.locations.runnerReconnected("below");
+    assert.equal(c.policy().excludedLocations!.find((item) => item.locationId === belowId)?.repository, undefined);
+    await stillRefused(f, c.rootId, child, "after a failed re-read of a launch exclusion");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a Custom campaign keeps a repository its creation refused through a failed re-read (#4319)", async () => {
+  const f = fixture();
+  try {
+    const c = await customBesideOldRunner(f);
+    f.db.raw().prepare("UPDATE sessions SET parent_control_policy=? WHERE id=?").run(JSON.stringify({ ...HUMAN_ONLY_PARENT_CONTROL_POLICY }), c.id);
+    const child = childAt(f, c.id, "r", "w");
+    failBelowReads(f);
+    await c.locations.runnerReconnected("below");
+    assert.equal(c.policy().excludedLocations![0]!.repository, undefined, "the latest read named no repository");
+    await stillRefused(f, c.id, child, "in Custom after a failed re-read");
+  } finally { f.db.close(); }
+});
+
+/** A Custom campaign of two current repositories, so it keeps a list, with no Location of below/repo
+ * at creation: a merge there arms under the ordinary rule. Then an old runner's Location of below/repo
+ * is excluded by name, as a reconnect records it, with that merge armed. */
+async function customArmedThenRefused(f: ReturnType<typeof fixture>) {
+  answerBelow(f);
+  registerBelow(f);
+  f.db.registerRunner({ runnerId: "r2", hostname: "r2", os: "linux", version: "test", agents: SECOND_MACHINE_AGENTS, runtime: { ...runtime, campaignLaunchInspection: { version: 3 } },
+    workspaces: [{ id: "a", name: "r2 a", path: "/fixture/two/other" }, { id: "copy", name: "r2 copy", path: "/fixture/two/below-copy" }] }, Date.now(), PROTOCOL_VERSION);
+  const answers = f.state.inspect;
+  f.state.inspect = (message) => message.workspacePath === "/fixture/two/other" || message.workspacePath === "/fixture/two/below-copy"
+    ? { type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId, ok: true,
+      repository: message.workspacePath === "/fixture/two/other" ? "other/repo" : "below/repo", issueNumbers: [], digest: "d".repeat(64) }
+    : answers(message);
+  const project = f.db.createProject({ name: "Custom Two", scope: f.scope });
+  const launchLocation = f.db.addProjectLocation(project.id, { runnerId: "r", workspaceId: "w", addedByUserId: f.human.userId });
+  f.db.addProjectLocation(project.id, { runnerId: "r2", workspaceId: "a", addedByUserId: f.human.userId });
+  const created = f.sessions.createSession({ ...request, projectId: project.id, projectLocationId: launchLocation.id }, undefined, f.scope);
+  assert.ok(created.ok && created.data, created.error ?? "created");
+  const id = created.data.id;
+  for (let attempt = 0; attempt < 200 && !f.db.getSession(id)!.orchestratorPolicy!.repositories; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  const policy = () => f.db.getSession(id)!.orchestratorPolicy!;
+  assert.deepEqual(policy().repositories!.map((entry) => entry.repository), ["owner/repo", "other/repo"]);
+  assert.equal(policy().excludedLocations, undefined, "nothing is refused at creation");
+  const locations = new CampaignLocations({ db: f.db, hub: f.hub, synchronize: () => { throw new Error("a Custom list has no boundary to synchronize"); },
+    settle: (before, revoked, owner, now) => f.sessions.settleCampaignBoundaryChange(before, revoked, owner, now), log: { warn(message) { throw new Error(message); } } });
+
+  f.db.raw().prepare("UPDATE sessions SET parent_control_policy=? WHERE id=?").run(JSON.stringify({ ...HUMAN_ONLY_PARENT_CONTROL_POLICY }), id);
+  const child = childAt(f, id, "r", "w");
+  answerMergeReads(f);
+  const asked = await ask(f, child, mergeIn("below/repo"), "custom-merge");
+  assert.equal(asked.ok, true, asked.error ?? "");
+  assert.equal(personApproves(f, id, child, asked.data!.occurrenceId).ok, true);
+  const armed = await f.sessions.consumeWorkflowDecision(child, asked.data!.occurrenceId,
+    { resourceSnapshot: asked.data!.resourceSnapshot, action: { kind: "pr_merge_enqueue", command: armedCommand } });
+  assert.equal(armed.ok, true, armed.error ?? "");
+  const below = f.db.addProjectLocation(project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+  assert.equal(f.db.recordCampaignLocations(id, f.human.userId, { joins: [], excluded: [belowExclusion(below.id)], pending: [] }, Date.now()).ok, true);
+  assert.equal(childHook(f, child, "refused").data?.decision, "deny");
+  return { id, project, below, policy, locations, child, occurrenceId: asked.data!.occurrenceId };
+}
+
+test("in Custom, the join that ends a refusal revokes what was approved in that repository, an armed merge included (#4319)", async () => {
+  const f = fixture();
+  try {
+    const c = await customArmedThenRefused(f);
+    const kept = await ask(f, c.child, publicationIn("other/repo"), "unaffected-by-custom-join");
+    assert.equal(kept.ok, true, kept.error ?? "");
+    const keptStatus = f.db.workflowDecisionByOccurrence(kept.data!.occurrenceId)!.status;
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    await c.locations.runnerReconnected("below");
+    assert.equal(f.db.workflowDecisionByOccurrence(kept.data!.occurrenceId)!.status, keptStatus, "a repository it never refused is untouched");
+    assert.ok(c.policy().repositories!.some((entry) => entry.repository === "below/repo"), "the owner's Location joined the list");
+    assert.equal(f.db.workflowDecisionByOccurrence(c.occurrenceId)!.status, "revoked", "the block lifts only with its approval revoked");
+    assert.match(JSON.stringify(f.db.listGovernanceAudit(c.child)), /campaign_control_changed/u, "and the revocation is settled like any other");
+    // Unblocked: ordinary governance decides again (it asks, for the pending request above).
+    assert.notEqual(childHook(f, c.child, "joined").data?.decision, "deny");
+  } finally { f.db.close(); }
+});
+
+test("in Custom, an approved addition that gives a refused repository an entry revokes the armed merge there too (#4319)", async () => {
+  const f = fixture();
+  try {
+    const c = await customArmedThenRefused(f);
+    const copy = f.db.addProjectLocation(c.project.id, { runnerId: "r2", workspaceId: "copy", addedByUserId: f.human.userId });
+    f.db.raw().prepare(`INSERT INTO orchestrator_campaign_follow_ups (id, campaign_session_id, origin_session_id, repository, title, recommendation_key, normalized_key, duplicate_of, created_at)
+      VALUES ('fu_below', ?, NULL, 'below/repo', 'Needs the Below Checkout', NULL, 'below/repo:fu_below', NULL, ?)`).run(c.id, Date.now());
+    const additions = new CampaignRepositoryAdditions({ db: f.db, hub: f.hub, sessions: f.sessions,
+      inspect: (locationId, options) => inspectProjectLocation({ db: f.db, hub: f.hub }, locationId, { ...options, requireProtocol: "campaignRepositoryBoundary" }),
+      synchronize: (id) => f.sessions.synchronizeCampaignIssueScope(id) });
+    const orchestrator: AgentPrincipal = { kind: "agent", actorId: "root-agent", credentialSessionId: c.id, orchestrator: true,
+      organizationId: f.human.organizationId, delegatedScope: f.scope };
+    const requested = await additions.request(c.id, { requestId: "add-below", locationId: copy.id, reason: "The follow-up needs that repository.", work: { kind: "follow_up", id: "fu_below" } }, orchestrator);
+    assert.equal(requested.ok, true, requested.error ?? "");
+    assert.equal(personApproves(f, c.id, c.id, requested.data!.occurrenceId).ok, true);
+    const executed = await additions.execute(c.id, requested.data!.occurrenceId, requested.data!.resourceDigest, orchestrator);
+    assert.equal(executed.ok, true, executed.error ?? "");
+    assert.ok(c.policy().repositories!.some((entry) => entry.repository === "below/repo"));
+    assert.equal(f.db.workflowDecisionByOccurrence(c.occurrenceId)!.status, "revoked");
+    assert.match(JSON.stringify(f.db.listGovernanceAudit(c.child)), /campaign_control_changed/u);
+  } finally { f.db.close(); }
+});
+
+/* A repository no read has named (#4319, the owner's decision on the third read): while an old runner's
+   Location holds one, every repository without an entry is refused, and none has a forge reader. */
+
+test("while an old runner's Location holds a repository no read has named, a person-approved follow-up, merge and deletion in any repository without an entry are refused, until a read names it (#4319)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    // Approved under the ordinary rule, in a repository the campaign never had.
+    const approved = async (snapshot: WorkflowDecisionResourceSnapshot, requestId: string) => {
+      const asked = await ask(f, m.child, snapshot, requestId);
+      assert.equal(asked.ok, true, asked.error ?? "");
+      assert.equal(personApproves(f, m.rootId, m.child, asked.data!.occurrenceId).ok, true);
+      return asked.data!;
+    };
+    const followUp = await approved(publicationIn("elsewhere/repo"), "elsewhere-follow-up");
+    const deletion = await approved(deletionIn("elsewhere/repo"), "elsewhere-deletion");
+    const merge = await approved(mergeIn("elsewhere/repo"), "elsewhere-merge");
+    assert.equal((await armMerge(f, m)).ok, true, "below/repo's merge arms while nothing is known of it");
+
+    // A Location whose first read fails, as a timeout does: its repository is never named.
+    failBelowReads(f);
+    const below = f.db.addProjectLocation(m.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await m.locations.locationAdded(below.id, f.human);
+    const excluded = m.policy().excludedLocations!.find((item) => item.locationId === below.id)!;
+    assert.deepEqual([excluded.failure, excluded.repository], ["runner_below_gates", undefined]);
+
+    const consumed = await f.sessions.consumeWorkflowDecision(m.child, followUp.occurrenceId, { resourceSnapshot: followUp.resourceSnapshot });
+    assert.equal(consumed.ok, false, "the requester's login doesn't create it");
+    assert.match(consumed.error!, UNNAMED_REFUSAL("elsewhere/repo"));
+    const deleted = await f.sessions.executeWorkflowDecision(m.child, deletion.occurrenceId, { resourceDigest: deletion.resourceDigest }, () => true);
+    assert.equal(deleted.ok, false);
+    assert.match(deleted.error!, UNNAMED_REFUSAL("elsewhere/repo"));
+    const arming = await f.sessions.consumeWorkflowDecision(m.child, merge.occurrenceId, { resourceSnapshot: merge.resourceSnapshot,
+      action: { kind: "pr_merge_enqueue", command: "gh pr merge https://github.com/elsewhere/repo/pull/8 --squash --match-head-commit " + "b".repeat(40) } });
+    assert.equal(arming.ok, false);
+    assert.match(arming.error!, UNNAMED_REFUSAL("elsewhere/repo"));
+    const enqueued = await f.sessions.executeWorkflowDecision(m.child, m.occurrenceId, { resourceDigest: m.resourceDigest }, () => true);
+    assert.equal(enqueued.ok, false, "the armed merge is refused before anything is sent");
+    assert.match(enqueued.error!, UNNAMED_REFUSAL("below/repo"));
+    assert.deepEqual(m.actions, [], "the armed merge isn't enqueued");
+    assert.equal(childHook(f, m.child, "unnamed").data?.decision, "deny");
+    const asked = await ask(f, m.child, publicationIn("never/had"), "never-had");
+    assert.equal(asked.ok, false, "a repository the campaign never had is refused too while this lasts");
+    assert.match(asked.error!, UNNAMED_REFUSAL("never/had"));
+    for (const repository of ["elsewhere/repo", "never/had", "below/repo"]) {
+      assert.equal(f.db.campaignForgeObservingRunner(m.rootId, repository, () => true), null, `no reader for ${repository}`);
+    }
+    assert.equal(f.db.campaignForgeObservingRunner(m.rootId, "other/repo", () => true)?.runnerId, "r2", "a repository with an entry reads as ever");
+
+    // A read names it: only that repository stays refused, by name.
+    answerBelow(f);
+    await m.locations.runnerReconnected("below");
+    assert.equal(m.policy().excludedLocations!.find((item) => item.locationId === below.id)?.repository, "below/repo");
+    const named = await f.sessions.consumeWorkflowDecision(m.child, followUp.occurrenceId, { resourceSnapshot: followUp.resourceSnapshot });
+    assert.equal(named.ok, true, named.error ?? "");
+    assert.equal(f.db.campaignForgeObservingRunner(m.rootId, "elsewhere/repo", () => true)?.runnerId, "r");
+    await stillRefused(f, m.rootId, m.child, "once named");
+  } finally { await m.server.close(); f.db.close(); }
+});
+
+test("a launch whose survey couldn't read an old runner's Location refuses every repository without an entry until that Location leaves the Project (#4319)", async () => {
+  const f = fixture();
+  let belowId = "";
+  const c = await launchedMultiRepositoryCampaign(f, (p) => {
+    failBelowReads(f);
+    registerBelow(f);
+    belowId = f.db.addProjectLocation(p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId }).id;
+  });
+  try {
+    const excluded = c.policy().excludedLocations!.find((item) => item.locationId === belowId)!;
+    assert.deepEqual([excluded.failure, excluded.repository], ["runner_below_gates", undefined], "the survey's read failed, as a timeout does");
+    const child = childAt(f, c.rootId, "r", "w");
+    const refused = await ask(f, child, publicationIn("elsewhere/repo"), "before-removal");
+    assert.equal(refused.ok, false);
+    assert.match(refused.error!, UNNAMED_REFUSAL("elsewhere/repo"));
+    assert.equal(f.db.campaignForgeObservingRunner(c.rootId, "elsewhere/repo", () => true), null);
+
+    f.db.removeProjectLocation(belowId);
+    const asked = await ask(f, child, publicationIn("elsewhere/repo"), "after-removal");
+    assert.equal(asked.ok, true, asked.error ?? "");
+    assert.equal(asked.data!.authority, "human", "the ordinary rule for a repository the campaign never had");
+    assert.equal(f.db.campaignForgeObservingRunner(c.rootId, "elsewhere/repo", () => true)?.runnerId, "r");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a Custom campaign whose old runner was offline at creation refuses every repository without an entry, names its repository on reconnect, and never joins (#4319)", async () => {
+  const f = fixture();
+  const online = f.hub.isRunnerOnline.bind(f.hub);
+  f.hub.isRunnerOnline = (runnerId) => runnerId !== "below" && online(runnerId);
+  try {
+    const c = await customBesideOldRunner(f);
+    assert.deepEqual(c.policy().repositories, [{ repository: "owner/repo", locationIds: [c.launchLocation.id] }], "recorded, so a reconnect can name it");
+    const excluded = () => c.policy().excludedLocations!.find((item) => item.locationId === c.below.id)!;
+    assert.deepEqual([excluded().failure, excluded().repository], ["runner_offline", undefined]);
+    f.db.raw().prepare("UPDATE sessions SET parent_control_policy=? WHERE id=?").run(JSON.stringify({ ...HUMAN_ONLY_PARENT_CONTROL_POLICY }), c.id);
+    const child = childAt(f, c.id, "r", "w");
+    const before = await ask(f, child, publicationIn("elsewhere/repo"), "while-offline");
+    assert.equal(before.ok, false);
+    assert.match(before.error!, UNNAMED_REFUSAL("elsewhere/repo"));
+
+    f.hub.isRunnerOnline = online;
+    await c.locations.runnerReconnected("below");
+    assert.deepEqual([excluded().failure, excluded().repository, excluded().nameOnly], ["runner_below_gates", "below/repo", true]);
+    const after = await ask(f, child, publicationIn("elsewhere/repo"), "once-named");
+    assert.equal(after.ok, true, after.error ?? "");
+    await stillRefused(f, c.id, child, "named on reconnect");
+    const wayIn = await ask(f, child, publicationIn("below/repo"), "name-only-way-in");
+    assert.match(wayIn.error ?? "", /Even on protocol version \d+ or newer, only an approved repository addition brings below\/repo into this campaign\./u);
+
+    // Current now, it still doesn't join: it was offline at creation, so only an approved addition adds it.
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    await c.locations.runnerReconnected("below");
+    assert.deepEqual(c.policy().repositories, [{ repository: "owner/repo", locationIds: [c.launchLocation.id] }]);
+    await stillRefused(f, c.id, child, "current but not added");
+  } finally { f.db.close(); }
+});
+
+/** The below runner answers that its folder is missing until `present(true)`. */
+function belowFolder(f: ReturnType<typeof fixture>): (present: boolean) => void {
+  let present = false;
+  const inspect = f.state.inspect;
+  f.state.inspect = (message) => message.workspacePath === "/fixture/below" && !present
+    ? { type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId, ok: false, failure: "missing_path" }
+    : inspect(message);
+  return (value) => { present = value; };
+}
+
+test("a Full Control Location whose folder was missing is read again when its runner registers, which names its repository (#4319)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  answerBelow(f);
+  registerBelow(f);
+  try {
+    const child = childAt(f, c.rootId, "r", "w");
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    const present = belowFolder(f);
+    await c.locations.locationAdded(below.id, f.human);
+    const excluded = () => c.policy().excludedLocations!.find((item) => item.locationId === below.id)!;
+    assert.deepEqual([excluded().failure, excluded().repository], ["path_missing", undefined]);
+    const refused = await ask(f, child, publicationIn("elsewhere/repo"), "folder-missing");
+    assert.match(refused.error ?? "", UNNAMED_REFUSAL("elsewhere/repo"));
+    present(true);
+    await c.locations.runnerReconnected("below");
+    assert.deepEqual([excluded().failure, excluded().repository], ["runner_below_gates", "below/repo"]);
+    await stillRefused(f, c.rootId, child, "once its folder is back");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a Custom Location whose folder was missing at creation is read again when its runner registers, only to name its repository (#4319)", async () => {
+  const f = fixture();
+  try {
+    answerBelow(f);
+    registerBelow(f);
+    const project = f.db.createProject({ name: "Custom Missing", scope: f.scope });
+    const launchLocation = f.db.addProjectLocation(project.id, { runnerId: "r", workspaceId: "w", addedByUserId: f.human.userId });
+    const below = f.db.addProjectLocation(project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    const present = belowFolder(f);
+    const created = f.sessions.createSession({ ...request, projectId: project.id, projectLocationId: launchLocation.id }, undefined, f.scope);
+    assert.ok(created.ok && created.data, created.error ?? "created");
+    const id = created.data.id;
+    for (let attempt = 0; attempt < 200 && !f.db.getSession(id)!.orchestratorPolicy!.repositories; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    const excluded = () => f.db.getSession(id)!.orchestratorPolicy!.excludedLocations!.find((item) => item.locationId === below.id)!;
+    assert.deepEqual([excluded().failure, excluded().repository], ["path_missing", undefined]);
+    const locations = new CampaignLocations({ db: f.db, hub: f.hub, synchronize: () => { throw new Error("a Custom list has no boundary to synchronize"); },
+      settle: (before, revoked, owner, now) => f.sessions.settleCampaignBoundaryChange(before, revoked, owner, now), log: { warn(message) { throw new Error(message); } } });
+    present(true);
+    await locations.runnerReconnected("below");
+    assert.deepEqual([excluded().failure, excluded().repository, excluded().nameOnly], ["runner_below_gates", "below/repo", true]);
+  } finally { f.db.close(); }
+});
+
+/** elsewhere/repo is refused while an unread Location stands, and nothing reads its forge. */
+async function stillUnread(f: ReturnType<typeof fixture>, rootId: string, child: string, what: string): Promise<void> {
+  refusalAsks += 1;
+  const asked = await ask(f, child, publicationIn("elsewhere/repo"), `still-unread-${refusalAsks}`);
+  assert.equal(asked.ok, false, `${what}: refused`);
+  assert.match(asked.error!, UNNAMED_REFUSAL("elsewhere/repo"), what);
+  assert.equal(f.db.campaignForgeObservingRunner(rootId, "elsewhere/repo", () => true), null, `${what}: no forge reader`);
+}
+
+test("an unread Location stays unread through its runner's update, a failed read and a missing folder, until a read resolves it (#4319 review round 9)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  answerBelow(f);
+  registerBelow(f);
+  const online = f.hub.isRunnerOnline.bind(f.hub);
+  f.hub.isRunnerOnline = (runnerId) => runnerId !== "below" && online(runnerId);
+  try {
+    const child = childAt(f, c.rootId, "r", "w");
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(below.id, f.human);
+    const excluded = () => c.policy().excludedLocations!.find((item) => item.locationId === below.id)!;
+    assert.deepEqual([excluded().failure, excluded().repository], ["runner_offline", undefined]);
+    await stillUnread(f, c.rootId, child, "while its old runner is offline");
+
+    // It registers at the floor, and its read hasn't happened yet.
+    f.hub.isRunnerOnline = online;
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    await stillUnread(f, c.rootId, child, "updated but not yet read");
+    // Its read fails, as a timeout does.
+    failBelowReads(f);
+    await c.locations.runnerReconnected("below");
+    assert.deepEqual([excluded().failure, excluded().repository], ["read_failed", undefined]);
+    await stillUnread(f, c.rootId, child, "after a failed read on a current runner");
+    // Its folder is reported missing.
+    const present = belowFolder(f);
+    await c.locations.runnerReconnected("below");
+    assert.equal(excluded().failure, "path_missing");
+    await stillUnread(f, c.rootId, child, "with its folder missing");
+
+    // A read resolves it: the owner's Location joins, and every other repository returns to its rule.
+    present(true);
+    answerBelow(f);
+    await c.locations.runnerReconnected("below");
+    assert.ok(c.boundary().repositories!.some((entry) => entry.repository === "below/repo"));
+    assert.equal(c.policy().unreadLocations?.some((item) => item.locationId === below.id) ?? false, false, "resolved");
+    const asked = await ask(f, child, publicationIn("elsewhere/repo"), "resolved");
+    assert.equal(asked.ok, true, asked.error ?? "");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("an unread Location stays unread when a revival drops its exclusion or a revoke drops them all (#4319 review round 9)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  registerBelow(f);
+  failBelowReads(f);
+  try {
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(below.id, f.human);
+    // Removing the runner detaches the Location; adding it again revives it and drops its exclusion.
+    f.db.deleteRunner("below");
+    registerBelow(f);
+    assert.equal(f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z" }).id, below.id);
+    assert.equal(c.policy().excludedLocations?.some((item) => item.locationId === below.id) ?? false, false);
+    const child = childAt(f, c.rootId, "r", "w");
+    await stillUnread(f, c.rootId, child, "after a revival");
+
+    assert.equal(f.sessions.setCampaignControl(c.rootId, { mode: "custom" }, f.db.getSession(c.rootId)!.parentControlPolicy!.revision, f.human).ok, true);
+    assert.equal(c.policy().excludedLocations, undefined);
+    await stillUnread(f, c.rootId, child, "after a revoke");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a requester in a named refused Location is still refused while another Location's repository is unread (#4319 review round 9)", async () => {
+  const f = fixture();
+  try {
+    const c = await customBesideOldRunner(f);
+    f.db.raw().prepare("UPDATE sessions SET parent_control_policy=? WHERE id=?").run(JSON.stringify({ ...HUMAN_ONLY_PARENT_CONTROL_POLICY }), c.id);
+    const child = childAt(f, c.id, "below", "z");
+    f.db.registerRunner({ runnerId: "old2", hostname: "old2", os: "linux", version: "test", agents: [], runtime: { ...runtime, campaignLaunchInspection: { version: 4 } },
+      workspaces: [{ id: "q", name: "old2 q", path: "/fixture/old2" }] }, Date.now(), CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1);
+    const other = f.db.addProjectLocation(c.project.id, { runnerId: "old2", workspaceId: "q", addedByUserId: f.human.userId });
+    assert.equal(f.db.recordCampaignLocations(c.id, f.human.userId, { joins: [], excluded: [belowExclusion(other.id, "old2 q", null)], pending: [] }, Date.now()).ok, true);
+    const refused = await ask(f, child, publicationIn("below/repo"), "own-repository");
+    assert.equal(refused.ok, false, "old2 q may hold below/repo too");
+    assert.match(refused.error!, /below\/repo can't be acted on while the runner of old2 q/u);
+
+    f.db.removeProjectLocation(other.id);
+    const allowed = await ask(f, child, publicationIn("below/repo"), "own-repository-again");
+    assert.equal(allowed.ok, true, "with it gone, the Location's own exemption applies again");
+  } finally { f.db.close(); }
+});
+
+/* The fourth read's decisions (#4319): the unread refusal is durable, counts only Locations the owner
+   consented to, ends without a read only by leaving the Project, which revokes what it covered, and
+   says what actually ends it. */
+
+test("a Custom Location offline at creation whose first read is on a current runner is named, not joined, and its repository stays refused (#4319 fourth read)", async () => {
+  const f = fixture();
+  const online = f.hub.isRunnerOnline.bind(f.hub);
+  f.hub.isRunnerOnline = (runnerId) => runnerId !== "below" && online(runnerId);
+  try {
+    const c = await customBesideOldRunner(f);
+    f.db.raw().prepare("UPDATE sessions SET parent_control_policy=? WHERE id=?").run(JSON.stringify({ ...HUMAN_ONLY_PARENT_CONTROL_POLICY }), c.id);
+    const child = childAt(f, c.id, "r", "w");
+    f.hub.isRunnerOnline = online;
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    await c.locations.runnerReconnected("below");
+    const excluded = c.policy().excludedLocations!.find((item) => item.locationId === c.below.id)!;
+    assert.deepEqual([excluded.repository, excluded.nameOnly], ["below/repo", true], "the read named it");
+    assert.deepEqual(c.policy().repositories, [{ repository: "owner/repo", locationIds: [c.launchLocation.id] }], "and it didn't join");
+    const elsewhere = await ask(f, child, publicationIn("elsewhere/repo"), "elsewhere-once-named");
+    assert.equal(elsewhere.ok, true, elsewhere.error ?? "");
+    await stillRefused(f, c.id, child, "named on a current runner");
+  } finally { f.db.close(); }
+});
+
+test("at startup, an earlier exclusion of the owner's Location left unread for another reason on an old runner is recorded, so its runner's update doesn't lift it (#4319 security review)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  registerBelow(f);
+  try {
+    const mine = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    // As a control plane before this one stored it: offline, no repository, no unread record.
+    const { unreadLocations: _none, ...policy } = c.policy();
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify({ ...policy, excludedLocations: [...policy.excludedLocations ?? [],
+      { locationId: mine.id, name: "below z", failure: "runner_offline", reason: PROJECT_LOCATION_INSPECTION_FAILURES.runner_offline }] }), c.rootId);
+    const child = childAt(f, c.rootId, "r", "w");
+    const before = await ask(f, child, publicationIn("elsewhere/repo"), "before-startup");
+    assert.equal(before.ok, true, "nothing records it yet");
+    f.db.recordEarlierUnreadLocations(Date.now());
+    assert.ok(c.policy().unreadLocations?.some((item) => item.locationId === mine.id), "recorded unread");
+    await stillUnread(f, c.rootId, child, "once startup recorded it");
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    await stillUnread(f, c.rootId, child, "after its runner updates, before any read");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a re-authorization that lists no exclusions keeps an unread Location unread (#4319 fourth read)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  registerBelow(f);
+  failBelowReads(f);
+  try {
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(below.id, f.human);
+    // Before any child exists, whose placement a re-authorization would also check.
+    const launched = c.boundary();
+    const reauthorized = f.sessions.setCampaignControl(c.rootId, reauthorization(launched), f.db.getSession(c.rootId)!.parentControlPolicy!.revision, f.human,
+      undefined, undefined, undefined, { repositories: launched.repositories!, excludedLocations: [], availableLocations: [], pendingLocations: [] });
+    assert.equal(reauthorized.ok, true, reauthorized.error ?? "");
+    assert.equal(c.policy().excludedLocations, undefined);
+    await stillUnread(f, c.rootId, childAt(f, c.rootId, "r", "w"), "after a re-authorization that lists no exclusions");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("someone else's Location doesn't refuse other repositories until the owner includes it, waiting or excluded alike (#4319 fourth read)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  registerBelow(f);
+  failBelowReads(f);
+  try {
+    const child = childAt(f, c.rootId, "r", "w");
+    const other: HumanPrincipal = { ...f.human, userId: "usr_other", actorId: "usr_other" };
+    const theirs = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: other.userId });
+    await c.locations.locationAdded(theirs.id, other);
+    assert.ok(c.policy().pendingLocations?.some((item) => item.locationId === theirs.id), "it waits, never inspected");
+    const waiting = await ask(f, child, publicationIn("elsewhere/repo"), "while-theirs-waits");
+    assert.equal(waiting.ok, true, waiting.error ?? "a repository the campaign never had keeps its rule");
+    // Excluded with no repository, as an older control plane might have recorded it, still without consent.
+    assert.equal(f.db.recordCampaignLocations(c.rootId, f.human.userId, { joins: [], excluded: [belowExclusion(theirs.id, "below z", null)], pending: [] }, Date.now()).ok, true);
+    const excluded = await ask(f, child, publicationIn("elsewhere/repo"), "while-theirs-is-excluded");
+    assert.equal(excluded.ok, true, excluded.error ?? "");
+    // The owner's Include in Campaign reads it; left unread, it now counts.
+    await c.locations.include(c.rootId, theirs.id, f.human);
+    await stillUnread(f, c.rootId, child, "once the owner included it");
+    // Its runner updates and a read succeeds: it waits for Include in Campaign again, read and current.
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    answerBelow(f);
+    await c.locations.runnerReconnected("below");
+    assert.ok(c.policy().pendingLocations?.some((item) => item.locationId === theirs.id));
+    const read = await ask(f, child, publicationIn("elsewhere/repo"), "once-theirs-is-read");
+    assert.equal(read.ok, true, read.error ?? "a successful read resolves it");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("an exclusion #4372 recorded with no repository refuses from the first request after this deploys, when the Location is the owner's (#4319 fourth read)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  registerBelow(f, RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryBoundary - 1);
+  try {
+    const mine = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    // As #4372 stored it: the version's exclusion alone, no repository, and no unread record.
+    const { unreadLocations: _none, ...policy } = c.policy();
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?")
+      .run(JSON.stringify({ ...policy, excludedLocations: [...policy.excludedLocations ?? [], belowExclusion(mine.id, "below z", null)] }), c.rootId);
+    assert.equal(c.policy().unreadLocations, undefined);
+    await stillUnread(f, c.rootId, childAt(f, c.rootId, "r", "w"), "the first request after the deploy");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("removing an unread Location ends its refusal and revokes what it covered, leaving decisions in repositories with an entry (#4319 fourth read)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    const followUp = await ask(f, m.child, publicationIn("elsewhere/repo"), "covered-follow-up");
+    assert.equal(followUp.ok, true, followUp.error ?? "");
+    assert.equal(personApproves(f, m.rootId, m.child, followUp.data!.occurrenceId).ok, true);
+    const kept = await ask(f, m.child, publicationIn("other/repo"), "unaffected-follow-up");
+    assert.equal(kept.ok, true, kept.error ?? "");
+    const keptStatus = f.db.workflowDecisionByOccurrence(kept.data!.occurrenceId)!.status;
+    assert.equal((await armMerge(f, m)).ok, true);
+    failBelowReads(f);
+    const below = f.db.addProjectLocation(m.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await m.locations.locationAdded(below.id, f.human);
+    const denied = childHook(f, m.child, "unread").data;
+    assert.equal(denied?.decision, "deny");
+    assert.match(denied?.reason ?? "", /update the runner of below z so a read can name its repository.*remove below z from the Project, which lifts this and revokes the armed merge/su,
+      "the way out names the unread Location, not a join");
+
+    const settled: string[] = [];
+    f.db.removeProjectLocation(below.id, Date.now(), (_root, revoked) => settled.push(...revoked.map((decision) => decision.occurrenceId)));
+    assert.equal(f.db.workflowDecisionByOccurrence(followUp.data!.occurrenceId)!.status, "revoked", "nothing read that repository");
+    assert.equal(f.db.workflowDecisionByOccurrence(m.occurrenceId)!.status, "revoked", "nor the armed merge's");
+    assert.deepEqual(settled.sort(), [followUp.data!.occurrenceId, m.occurrenceId].sort(), "the caller settles what was revoked");
+    assert.equal(f.db.workflowDecisionByOccurrence(kept.data!.occurrenceId)!.status, keptStatus, "a repository with an entry is untouched");
+    // Unblocked: ordinary governance decides again (here it asks, for the pending request left above).
+    const after = childHook(f, m.child, "removed").data;
+    assert.notEqual(after?.decision, "deny");
+    assert.doesNotMatch(after?.reason ?? "", /can't perform this campaign's gates/u);
+  } finally { await m.server.close(); f.db.close(); }
+});
+
+test("moving an unread Location to another Project ends its refusal the same way, revoking what it covered (#4319 fourth read)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  registerBelow(f);
+  failBelowReads(f);
+  try {
+    const child = childAt(f, c.rootId, "r", "w");
+    const followUp = await ask(f, child, publicationIn("elsewhere/repo"), "covered-before-move");
+    assert.equal(followUp.ok, true, followUp.error ?? "");
+    assert.equal(personApproves(f, c.rootId, child, followUp.data!.occurrenceId).ok, true);
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(below.id, f.human);
+    await stillUnread(f, c.rootId, child, "before the move");
+    const target = f.db.createProject({ name: "Somewhere Else", scope: f.scope });
+    f.db.moveProjectLocation(below.id, target.id, Date.now(), f.human.userId);
+    assert.equal(f.db.workflowDecisionByOccurrence(followUp.data!.occurrenceId)!.status, "revoked");
+    const asked = await ask(f, child, publicationIn("elsewhere/repo"), "after-move");
+    assert.equal(asked.ok, true, asked.error ?? "");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a named refusal says what actually brings its repository in, by whose Location it is and whether it is still in the Project (#4319 fourth read)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  answerBelow(f);
+  registerBelow(f);
+  try {
+    const child = childAt(f, c.rootId, "r", "w");
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(below.id, f.human);
+    const owners = await ask(f, child, publicationIn("below/repo"), "owners-location");
+    assert.match(owners.error ?? "", /Update and restart it to protocol version \d+ or newer, and it can join\./u);
+    f.db.removeProjectLocation(below.id);
+    const gone = await ask(f, child, publicationIn("below/repo"), "gone-location");
+    assert.equal(gone.ok, false, "a read named it, so it stays refused");
+    assert.match(gone.error ?? "", /That Location has left the Project, so only another Location of below\/repo on protocol version \d+ or newer joining, or an approved repository addition, brings it in\./u);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a Custom campaign whose own Location can't be read at creation on an old runner records it unread, and reads it again when that runner reconnects (#4319 fourth read)", async () => {
+  const f = fixture();
+  try {
+    const root = f.db.getRunner("r")!;
+    f.db.registerRunner({ runnerId: "r", hostname: "r", os: "linux", version: "test", agents: root.agents, runtime: root.runtime, workspaces: root.workspaces },
+      Date.now(), CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1);
+    const answers = f.state.inspect;
+    let ownReadable = false;
+    f.state.inspect = (message) => message.workspacePath === "/fixture/repository" && !ownReadable
+      ? { type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId, ok: true, repository: "owner/repo",
+        issueNumbers: message.issueNumbers, digest: "not-a-digest" }
+      : answers(message);
+    const project = f.db.createProject({ name: "Custom Own Unread", scope: f.scope });
+    const launchLocation = f.db.addProjectLocation(project.id, { runnerId: "r", workspaceId: "w", addedByUserId: f.human.userId });
+    const created = f.sessions.createSession({ ...request, projectId: project.id, projectLocationId: launchLocation.id }, undefined, f.scope);
+    assert.ok(created.ok && created.data, created.error ?? "created");
+    const id = created.data.id;
+    const policy = () => f.db.getSession(id)!.orchestratorPolicy!;
+    for (let attempt = 0; attempt < 200 && !policy().unreadLocations; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.deepEqual(policy().unreadLocations?.map((item) => item.locationId), [launchLocation.id]);
+    assert.equal(policy().repositories, undefined);
+    f.db.raw().prepare("UPDATE sessions SET parent_control_policy=? WHERE id=?").run(JSON.stringify({ ...HUMAN_ONLY_PARENT_CONTROL_POLICY }), id);
+    const child = childAt(f, id, "r", "w");
+    const refused = await ask(f, child, publicationIn("elsewhere/repo"), "own-unread");
+    assert.equal(refused.ok, false);
+    assert.match(refused.error!, /elsewhere\/repo can't be acted on while the runner of .* no read has named the repository it holds/su);
+
+    ownReadable = true;
+    const locations = new CampaignLocations({ db: f.db, hub: f.hub, synchronize: () => { throw new Error("a Custom list has no boundary to synchronize"); },
+      settle: (before, revoked, owner, now) => f.sessions.settleCampaignBoundaryChange(before, revoked, owner, now),
+      reestablish: (rootId) => f.sessions.establishCustomCampaignRepositories(rootId), log: { warn(message) { throw new Error(message); } } });
+    await locations.runnerReconnected("r");
+    assert.deepEqual(policy().repositories, [{ repository: "owner/repo", locationIds: [launchLocation.id] }], "the list it couldn't record before");
+    assert.equal(policy().unreadLocations, undefined);
+    const allowed = await ask(f, child, publicationIn("elsewhere/repo"), "own-read");
+    assert.equal(allowed.ok, true, allowed.error ?? "");
+  } finally { f.db.close(); }
+});
+
+test("a Location's later read naming another repository revokes the armed merge in the one it stops refusing, so that block never lifts with it armed (#4319 security review)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    assert.equal((await armMerge(f, m)).ok, true);
+    const kept = await ask(f, m.child, publicationIn("other/repo"), "unaffected-by-later-read");
+    assert.equal(kept.ok, true, kept.error ?? "");
+    const keptStatus = f.db.workflowDecisionByOccurrence(kept.data!.occurrenceId)!.status;
+    answerBelowWithEach(f, ["below/repo", "below/two"]);
+    const below = f.db.addProjectLocation(m.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await m.locations.locationAdded(below.id, f.human);
+    assert.equal(childHook(f, m.child, "while-refused").data?.decision, "deny");
+    await m.locations.runnerReconnected("below");
+    assert.equal(m.policy().excludedLocations!.find((item) => item.locationId === below.id)?.repository, "below/two");
+    assert.equal(f.db.workflowDecisionByOccurrence(m.occurrenceId)!.status, "revoked", "below/repo stopped being refused with no join, so its armed merge is revoked");
+    assert.equal(f.db.workflowDecisionByOccurrence(kept.data!.occurrenceId)!.status, keptStatus, "a repository it never refused is untouched");
+    assert.match(JSON.stringify(f.db.listGovernanceAudit(m.child)), /campaign_control_changed/u, "and settled");
+    // Unblocked: ordinary governance decides again (it asks, for the pending request above).
+    assert.notEqual(childHook(f, m.child, "after").data?.decision, "deny");
+  } finally { await m.server.close(); f.db.close(); }
+});
+
+test("one Location naming a different repository on each read keeps one refusal, its latest, so a runner can't grow the record (#4319)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  registerBelow(f);
+  answerBelowWithEach(f, ["below/one", "below/two", "below/three", "below/repo"]);
+  try {
+    const child = childAt(f, c.rootId, "r", "w");
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(below.id, f.human);
+    for (let read = 0; read < 3; read += 1) await c.locations.runnerReconnected("below");
+    assert.equal(c.policy().excludedLocations!.find((item) => item.locationId === below.id)?.repository, "below/repo");
+    assert.deepEqual(c.policy().refusedRepositories, [{ repository: "below/three", locationId: below.id, name: "below z" }],
+      "the record holds one per Location: what the last write copied before this read replaced it");
+    await stillRefused(f, c.rootId, child, "its latest repository");
+    const earlier = await ask(f, child, publicationIn("below/one"), "an-earlier-name");
+    assert.equal(earlier.ok, true, "an earlier name is no longer this Location's repository");
+  } finally { await c.server.close(); f.db.close(); }
 });

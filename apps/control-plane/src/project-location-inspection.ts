@@ -68,8 +68,9 @@ export async function inspectProjectLocation(
     /** A runner below this protocol capability is too old for what the caller will use it for. */
     requireProtocol?: RunnerProtocolCapability;
     /** The Location would join a campaign (#4319), so a runner that can't perform the campaign's
-     * gates there fails as `runner_below_gates`, naming the version. A Location the campaign already
-     * holds, and its own launch Location, are never asked this. */
+     * gates there fails as `runner_below_gates`, naming the version. One that can still read a Location
+     * (v288+) is asked which repository it is, because that repository's gates must then refuse by
+     * name. A Location the campaign already holds, and its own launch Location, are never asked this. */
     joinsCampaign?: boolean;
     /** Issues the runner must also read in the Location's repository (#4118); any it cannot read
      * as an issue there fails the inspection. */
@@ -95,7 +96,10 @@ export async function inspectProjectLocation(
   const runner = db.getRunner(location.runnerId);
   // An offline runner's recorded version may be out of date, so offline is what it is told first.
   if (!runner || !hub.isRunnerOnline(location.runnerId)) return fail("runner_offline");
-  if (options.joinsCampaign && !runnerSupportsProtocol(runner.protocolVersion, "campaignLocationGates")) return fail("runner_below_gates");
+  const belowGates = Boolean(options.joinsCampaign && !runnerSupportsProtocol(runner.protocolVersion, "campaignLocationGates"));
+  const canRead = (runner.runtime?.campaignLaunchInspection?.version ?? 0) >= PROJECT_LOCATION_INSPECTION_MIN_VERSION &&
+    runnerSupportsProtocol(runner.protocolVersion, "campaignRepositoryBoundary");
+  if (belowGates && !canRead) return fail("runner_below_gates");
   if ((runner.runtime?.campaignLaunchInspection?.version ?? 0) < PROJECT_LOCATION_INSPECTION_MIN_VERSION ||
       (options.requireProtocol && !runnerSupportsProtocol(runner.protocolVersion, options.requireProtocol)) ||
       (options.facts && !runnerSupportsProtocol(runner.protocolVersion, "repositoryQualifiedProposals")) ||
@@ -111,7 +115,8 @@ export async function inspectProjectLocation(
       campaignRepositoryLocation(result.repository) === null || typeof result.digest !== "string" || !/^[a-f0-9]{64}$/.test(result.digest)) {
     const failure = result?.ok === false && typeof result.failure === "string" && Object.hasOwn(RUNNER_FAILURES, result.failure)
       ? RUNNER_FAILURES[result.failure] : undefined;
-    return fail(failure ?? "read_failed");
+    // A folder that isn't a repository stays that; an unreadable answer leaves the version as the reason.
+    return fail(failure ?? (belowGates ? "runner_below_gates" : "read_failed"));
   }
   // Facts out of their bounds, or missing a requested number, verify nothing.
   const issueFacts = options.facts ? issueNumbers.map((n) => result.issueFacts?.find((fact) => validCampaignIssueFacts(fact) && fact.number === n)) : [];
@@ -127,6 +132,7 @@ export async function inspectProjectLocation(
   if (!current) return fail("unknown_location");
   if (current.projectId !== location.projectId || current.runnerId !== location.runnerId || current.workspaceId !== location.workspaceId ||
       db.getWorkspacePath(location.runnerId, location.workspaceId) !== workspacePath) return fail("read_failed");
+  if (belowGates) return { ...fail("runner_below_gates") as Extract<ProjectLocationInspection, { ok: false }>, repository };
   return { ok: true, location: {
     locationId, projectId: current.projectId, runnerId: current.runnerId, workspaceId: current.workspaceId,
     repository, digest: result.digest, verifiedAt: (options.now ?? Date.now)(),
@@ -248,7 +254,8 @@ export function projectLocationSurvey(db: ControlPlaneDb, hub: Hub, principal: A
       }));
       return reads.every(Boolean);
     },
-    settled(): { launchLocationId: string | null; locations: CampaignProjectLocation[]; inspections: Map<string, ProjectLocationInspection>; waiting: CampaignProjectLocation[] } | null {
+    settled(): { launchLocationId: string | null; locations: CampaignProjectLocation[]; inspections: Map<string, ProjectLocationInspection>; waiting: CampaignProjectLocation[];
+      publishes: (locationId: string) => boolean } | null {
       if (!locations) return null;
       const current = reachable() ?? [];
       // Read again: one re-added by someone else while it was inspected waits too.
@@ -262,7 +269,8 @@ export function projectLocationSurvey(db: ControlPlaneDb, hub: Hub, principal: A
         }
       }
       return { launchLocationId, locations: now.map((location) => ({ id: location.id, name: location.name })), inspections,
-        waiting: waiting.map((location) => ({ id: location.id, name: location.name })) };
+        waiting: waiting.map((location) => ({ id: location.id, name: location.name })),
+        publishes: (id) => runnerSupportsProtocol(db.getRunner(db.getProjectLocation(id)?.runnerId ?? "")?.protocolVersion, "locationIssuePublication") };
     },
   };
 }

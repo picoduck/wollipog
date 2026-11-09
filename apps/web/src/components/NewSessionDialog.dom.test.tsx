@@ -27,9 +27,6 @@ import { describeBoundaries } from "./SessionOptions.js";
 import { ariaReferencedText, assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { fireDomEvent } from "./test-dom-events.js";
-import { FeedbackContext } from "./FeedbackProvider.js";
-
-const toasts: Array<{ message: string; tone?: string; detail?: string }> = [];
 
 const SKILLS_UNAVAILABLE = /Managed skills from this Machine are unavailable on container and cloud targets/u;
 /** System nouns docs/design-system.md §17.2 retires from user copy. */
@@ -203,10 +200,7 @@ async function mountFixture(
     root.render(
       <ApiProvider client={client}>
         <StoreProvider connection={connection} navigation={navigation}>
-          <FeedbackContext.Provider value={{ confirm: async () => false, showToast: (message, options) => { toasts.push({ message, tone: options?.tone, detail: options?.detail }); return 1; },
-            showUndo: () => -1, dismissToast: () => undefined }}>
-            <DialogWhenReady preset={preset} onOpenTerminal={() => { terminalOpens.count += 1; }} />
-          </FeedbackContext.Provider>
+          <DialogWhenReady preset={preset} onOpenTerminal={() => { terminalOpens.count += 1; }} />
         </StoreProvider>
       </ApiProvider>,
     );
@@ -1772,24 +1766,64 @@ function assertNoFullControlForm(container: HTMLDivElement): void {
   }
 }
 
-test("Start warns about a Location Full Control left out for its runner's version, in the same one action (#4319)", async () => {
-  const reason = "The Location's runner can't perform this campaign's gates. Update and restart it to protocol version 327 or newer.";
-  toasts.length = 0;
-  const fixture = await mountFixture({ runners: [fullControlRunner()] }, undefined, undefined, undefined, undefined, undefined, {
-    fullControlLaunchPreflight: async (input) => {
-      const preflight = launchPreflight(true, input);
-      return { preflight: { ...preflight, summary: { ...preflight.summary, excludedLocations: [{ locationId: "loc_old", name: "Old Mac", failure: "runner_below_gates", reason }] } } };
-    },
-    createFullControlCampaign: async () => ({ id: "campaign-1" } as SessionView),
+const OLD_RUNNER_REASON = "The Location's runner can't perform this campaign's gates. Update and restart it to protocol version 327 or newer.";
+const excludingOldMac = (input: import("@wollipog/protocol").FullControlLaunchRequest) => {
+  const preflight = launchPreflight(true, input);
+  return { preflight: { ...preflight, summary: { ...preflight.summary,
+    excludedLocations: [{ locationId: "loc_old", name: "Old Mac", failure: "runner_below_gates" as const, reason: OLD_RUNNER_REASON, repository: "owner/old" }] } } };
+};
+
+test("a Project with several Locations shows the ones Full Control would leave out before Start, and Start then admits at once (#4319)", async () => {
+  const preflights: Array<[import("@wollipog/protocol").FullControlLaunchRequest, AbortSignal | undefined]> = [];
+  const admissions: unknown[] = [];
+  const twoLocations = { ...project, locations: [...project.locations, { ...project.locations[0]!, id: "loc_old", name: "Old Mac", isDefault: false }] };
+  const fixture = await mountFixture({ runners: [fullControlRunner()], projects: [twoLocations] }, undefined, undefined, undefined, undefined, undefined, {
+    fullControlLaunchPreflight: async (input, signal) => { preflights.push([input, signal]); return excludingOldMac(input); },
+    createFullControlCampaign: async (input) => { admissions.push(input); return { id: "campaign-1" } as SessionView; },
   });
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
     await chooseControlMode(fixture.container, "Full Control");
-    assert.deepEqual(toasts, [], "nothing is shown before Start");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 350)); });
+    assert.ok(preflights[0]?.[1] instanceof domWindow.AbortSignal || preflights[0]?.[1] instanceof AbortSignal, "the read is cancelled with the dialog");
+    assert.equal(fixture.container.querySelector('ul[aria-label="Excluded Locations"]')?.textContent, `Old Macowner/old${OLD_RUNNER_REASON}`, "the reason, before anything is approved");
+    assert.match(fixture.container.textContent ?? "", /Full Control starts without this Location\. It can join once its runner updates\./);
+    assert.deepEqual(admissions, []);
+
     await act(async () => createButton(fixture.container).click());
     await act(async () => { await Promise.resolve(); });
-    assert.deepEqual(toasts, [{ message: "Old Mac isn't in this campaign yet.", tone: "warning", detail: `${reason} Campaign Status lists it until it can join.` }]);
+    assert.equal(admissions.length, 1, "the person has seen it, so Start is one action");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a Start that finds a Location the person wasn't shown stops and shows it, and the next one admits (#4319)", async () => {
+  const preflights: unknown[] = [];
+  const admissions: unknown[] = [];
+  const closesBefore = dialogCloses.count;
+  const fixture = await mountFixture({ runners: [fullControlRunner()] }, undefined, undefined, undefined, undefined, undefined, {
+    fullControlLaunchPreflight: async (input) => { preflights.push(input); return excludingOldMac(input); },
+    createFullControlCampaign: async (input) => { admissions.push(input); return { id: "campaign-1" } as SessionView; },
+  });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    await chooseControlMode(fixture.container, "Full Control");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 350)); });
+    assert.equal(preflights.length, 0, "one Location has nothing to leave out, so nothing is asked before Start");
+
+    await act(async () => createButton(fixture.container).click());
+    await act(async () => { await Promise.resolve(); });
+    assert.deepEqual(admissions, [], "not admitted");
+    assert.equal(dialogCloses.count, closesBefore, "and the dialog stays");
+    assert.equal(fixture.container.querySelector('ul[aria-label="Excluded Locations"]')?.textContent, `Old Macowner/old${OLD_RUNNER_REASON}`);
+    assert.doesNotMatch(fixture.container.textContent ?? "", /Couldn't Start the Session/, "it isn't a failure");
+
+    await act(async () => createButton(fixture.container).click());
+    await act(async () => { await Promise.resolve(); });
+    assert.equal(admissions.length, 1);
   } finally {
     await unmountFixture(fixture);
   }

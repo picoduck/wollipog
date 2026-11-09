@@ -180,7 +180,49 @@ for (const viewport of viewports) {
       expect(admissions[0]!.requestId).toMatch(/^[a-f0-9]{32}$/);
     });
 
-    test(`launch harness ${viewport.name} ${theme}: a Native TUI choice refuses Full Control in words and never starts Direct (#2940)`, async ({ page }) => {
+    test(`launch ${viewport.name} ${theme}: the person sees which Locations Full Control leaves out before Start, and Start then admits at once (#4319)`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await routeSettings(page, []);
+      const reason = "The Location's runner can't perform this campaign's gates. Update and restart it to protocol version 327 or newer.";
+      const limit = "Follow-ups from this campaign's other repositories can't be created in this Location's repository until its runner is on protocol version 327 or newer.";
+      const admissions: Array<Record<string, unknown>> = [];
+      await page.route("**/api/full-control-campaigns/preflight", async (route) => {
+        const preflight = serverPreflight(route.request().postDataJSON() as FullControlLaunchRequest, true);
+        await route.fulfill({ json: { preflight: { ...preflight, summary: { ...preflight.summary,
+          excludedLocations: [{ locationId: "location-old", name: "Wollipog on Old Mac", failure: "runner_below_gates", reason, repository: "picoduck/old-tools" }],
+          limitedLocations: [{ locationId: "location-1", name: "Wollipog", reason: limit }] } } } });
+      });
+      await page.route("**/api/full-control-campaigns", async (route) => {
+        admissions.push(route.request().postDataJSON());
+        await route.fulfill({ status: 201, json: { id: "session-full-control" } });
+      });
+      await page.goto(`/new-session-choices-e2e.html?defaults=orchestrator&openedView=1&projectLocations=2&theme=${theme}`);
+      await openSessionOptions(page);
+      await editSessionPolicy(page, "Decisions", async (policy) => {
+        await policy.getByRole("radiogroup", { name: "Orchestrator Control" }).getByRole("radio", { name: "Full Control", exact: true }).click();
+      });
+      const excluded = page.getByRole("list", { name: "Excluded Locations" }).getByRole("listitem");
+      await expect(excluded).toContainText("Wollipog on Old Mac");
+      await expect(excluded).toContainText("picoduck/old-tools");
+      await expect(excluded).toContainText(reason);
+      await expect(page.getByText("Full Control starts without this Location. It can join once its runner updates.")).toBeVisible();
+      const limited = page.getByRole("list", { name: "Limited Locations" }).getByRole("listitem");
+      await expect(limited).toContainText("Wollipog");
+      await expect(limited).toContainText(limit);
+      expect(admissions, "nothing is approved by seeing it").toHaveLength(0);
+      const start = page.getByRole("button", { name: "Create Session", exact: true });
+      await expect(start).toBeEnabled();
+      await excluded.scrollIntoViewIfNeeded();
+      await page.mouse.move(0, 0);
+      await settle(page);
+      if (process.env.CAMPAIGN_LOCATION_EVIDENCE_DIR) await page.screenshot({ path: `${process.env.CAMPAIGN_LOCATION_EVIDENCE_DIR}/before-start-${viewport.name}-${theme}.png` });
+
+      await start.click();
+      await expect(page.getByRole("status").filter({ hasText: "session-full-control" })).toBeVisible();
+      expect(admissions).toHaveLength(1);
+    });
+
+    test(`launch harness ${viewport.name} ${theme}: a Native TUI choice refuses Full Control in words and never starts Direct (#2940)`, async ({ page}) => {
       await page.setViewportSize(viewport);
       await routeSettings(page, []);
       const preflights: FullControlLaunchRequest[] = [];
@@ -303,6 +345,33 @@ for (const viewport of viewports) {
       await expect(footer.getByRole("button")).toHaveText(["Done"]);
       await shoot(page, heading, `${prefix}-enabled.png`);
       expect(bodies).toEqual([{}]);
+    });
+
+    test(`campaign ${viewport.name} ${theme}: enabling stops once to show a Location left out for its runner's version, and the next click enables (#4319)`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await routeSettings(page, []);
+      const reason = "The Location's runner can't perform this campaign's gates. Update and restart it to protocol version 327 or newer.";
+      await page.route("**/orchestrator-campaign/full-control/preflight", async (route) => {
+        const preflight = serverPreflight({ runnerId: "runner-1", workspaceId: "w", task: "Review the source fixture" }, true, true);
+        await route.fulfill({ json: { preflight: { ...preflight, summary: { ...preflight.summary,
+          excludedLocations: [{ locationId: "location-old", name: "Wollipog on Old Mac", failure: "runner_below_gates", reason, repository: "picoduck/old-tools" }] } }, expectedRevision: 3 } });
+      });
+      await page.goto(`/session-usage-e2e.html?width=${viewport.width}&height=${viewport.height}&composer=orchestrator&fullControlFixture=enable`);
+      await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+      await page.getByRole("button", { name: "Attach and Settings" }).click();
+      await page.getByRole("menuitem", { name: "Orchestrator Controls…" }).click();
+      await page.getByRole("radio", { name: "Full Control", exact: true }).click();
+      const enable = page.getByRole("button", { name: "Enable Full Control", exact: true });
+      await enable.click();
+      const excluded = page.getByRole("list", { name: "Excluded Locations" }).getByRole("listitem");
+      await expect(excluded).toContainText("Wollipog on Old Mac");
+      await expect(excluded).toContainText(reason);
+      await expect(page.getByText(/Effective Mode: Custom/), "nothing changed yet").toBeVisible();
+      await page.mouse.move(0, 0);
+      await settle(page);
+      if (process.env.CAMPAIGN_LOCATION_EVIDENCE_DIR) await page.screenshot({ path: `${process.env.CAMPAIGN_LOCATION_EVIDENCE_DIR}/before-enable-${viewport.name}-${theme}.png` });
+      await enable.click();
+      await expect(page.getByText(/Effective Mode: Full Control/)).toBeVisible();
     });
 
     test(`paused campaign ${viewport.name} ${theme}: a campaign that admits no children says why it can't enable`, async ({ page }) => {

@@ -376,11 +376,13 @@ test("public runner capability floors retain their recorded version boundaries",
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.mergeClosureWatch, 330);
   assert.equal(runnerSupportsProtocol(329, "mergeClosureWatch"), false);
   assert.equal(runnerSupportsProtocol(330, "mergeClosureWatch"), true);
-  // A Location joins a campaign only on a runner that can perform all of these gates (#4319): this
-  // fails when a new gate raises the highest floor without raising the campaign's.
+  // A Location joins a campaign only on a runner that can perform all of its gates (#4319). Each gate
+  // done through a Location is a capability named `location*`, so a new one that raises the highest
+  // floor without raising the campaign's fails here. One named otherwise would not; name it so.
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.campaignLocationGates, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
-  assert.equal(CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL, Math.max(RUNNER_CAPABILITY_MIN_PROTOCOL.locationIssueClosure,
-    RUNNER_CAPABILITY_MIN_PROTOCOL.locationForgeObservation, RUNNER_CAPABILITY_MIN_PROTOCOL.locationIssuePublication));
+  const locationGates = Object.entries(RUNNER_CAPABILITY_MIN_PROTOCOL).filter(([name]) => name.startsWith("location")).map(([name, floor]) => [name, floor] as const);
+  assert.deepEqual(locationGates.map(([name]) => name).sort(), ["locationForgeObservation", "locationIssueClosure", "locationIssuePublication"]);
+  assert.equal(CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL, Math.max(...locationGates.map(([, floor]) => floor)));
   assert.equal(runnerSupportsProtocol(CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1, "campaignLocationGates"), false);
   assert.equal(runnerSupportsProtocol(CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL, "campaignLocationGates"), true);
   assert.match(PROJECT_LOCATION_INSPECTION_FAILURES.runner_below_gates, new RegExp(`protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer`, "u"));

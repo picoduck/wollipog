@@ -79,8 +79,7 @@ import { BusyButton } from "./ui/BusyButton.js";
 import { FieldError } from "./FieldError.js";
 import { FieldWarning } from "./FieldWarning.js";
 import { Notice } from "./Notice.js";
-import { FullControlBlockedError, launchFullControlCampaign } from "./FullControlPreparation.js";
-import { useFeedback } from "./FeedbackProvider.js";
+import { checkFullControlLocations, FullControlBlockedError, FullControlLocationNotices, FullControlLocationsToReview, launchFullControlCampaign, type FullControlLocationReport } from "./FullControlPreparation.js";
 import {
   evaluateOrchestratorPolicy,
   policyDraftFromDefaults,
@@ -175,7 +174,6 @@ export function NewSessionDialog({
   preset?: NewSessionPreset;
 }) {
   const api = useApi();
-  const { showToast } = useFeedback();
   const instanceScope = useInstanceScope();
   const {
     runners,
@@ -399,6 +397,8 @@ export function NewSessionDialog({
     field: ProblemField; message: string; control?: ProblemControl;
   } | null>(null);
   const [requestFailure, setRequestFailure] = useState<{ sentence: string; detail: string } | null>(null);
+  const [locationReport, setLocationReport] = useState<FullControlLocationReport | null>(null);
+  const locationNoticesRef = useRef<HTMLDivElement | null>(null);
   const [retainedSessionId, setRetainedSessionId] = useState<string | null>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const projectChoiceRef = useRef<HTMLDivElement>(null);
@@ -1081,6 +1081,23 @@ export function NewSessionDialog({
     return "create";
   };
 
+  // The person sees which Locations Full Control would leave out before Start (#4319), from the same
+  // server check Start runs. A Project with one Location has nothing to leave out, so nothing is asked.
+  const locationCheckPlace = fullControlLaunch && selectedProject && selectedProject.locations.length > 1 && projectLocationId
+    ? `${selectedProject.id}/${projectLocationId}/${agentId}` : null;
+  const locationCheckRequest = useRef<() => CreateSessionRequest>(() => { throw new Error("no request yet"); });
+  useEffect(() => {
+    setLocationReport(null);
+    if (!locationCheckPlace) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      void checkFullControlLocations(api, locationCheckRequest.current(), controller.signal)
+        .then((report) => { if (!controller.signal.aborted) setLocationReport(report); })
+        .catch(() => undefined);
+    }, 300);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [api, locationCheckPlace]);
+
   const buildSessionRequest = (): CreateSessionRequest => {
     const placement = projectSessionPlacement(
       projectsSupported,
@@ -1148,6 +1165,7 @@ export function NewSessionDialog({
       ...(launchSurface === "native_tui" ? { launchSurface: "native_tui" as const } : {}),
     };
   };
+  locationCheckRequest.current = buildSessionRequest;
 
   const submit = async () => {
     // Re-entrancy guard: the Enter path bypasses the footer button's disabled attribute, and a
@@ -1234,12 +1252,18 @@ export function NewSessionDialog({
     setBusy(true);
     try {
       const session = fullControlLaunch
-        ? await launchFullControlCampaign(api, buildSessionRequest(), ({ message, detail }) => showToast(message, { tone: "warning", detail }))
+        ? await launchFullControlCampaign(api, buildSessionRequest(), locationReport)
         : await api.createSession(buildSessionRequest());
       navigate({ name: "session", id: session.id });
       if (launchSurface === "native_tui") onOpenTerminal?.();
       onClose();
     } catch (e) {
+      if (e instanceof FullControlLocationsToReview) {
+        // Not a failure: the person sees what this start leaves out, and Create Session again proceeds.
+        flushSync(() => setLocationReport(e.report));
+        locationNoticesRef.current?.firstElementChild?.scrollIntoView?.({ block: "nearest" });
+        return;
+      }
       const keptSessionId = e instanceof ApiError &&
           (e.code === "NATIVE_TUI_LAUNCH_AMBIGUOUS" ||
             e.code === "NATIVE_TUI_COMPENSATION_FAILED") &&
@@ -1888,6 +1912,8 @@ export function NewSessionDialog({
           </SessionOptions>
 
           {problemFor("form")}
+          {/* `contents`: each notice takes the form's own spacing; the wrapper only holds the scroll target. */}
+          {fullControlLaunch && <div ref={locationNoticesRef} style={{ display: "contents" }}><FullControlLocationNotices report={locationReport} /></div>}
           {/* A request failure sits at the body's end, directly above the footer (§7.3, §13.2). */}
           {requestFailure && (
             <Notice

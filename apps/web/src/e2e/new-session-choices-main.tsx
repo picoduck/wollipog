@@ -342,7 +342,9 @@ function fixtureProject(id: string, name: string, locations: ProjectLocationView
   };
 }
 
-const project = fixtureProject("project-1", "Wollipog", [fixtureLocation("project-1", "location-1")]);
+/** `projectLocations=2` gives the Project a second Location, as Full Control's Location check needs (#4319). */
+const project = fixtureProject("project-1", "Wollipog", [fixtureLocation("project-1", "location-1"),
+  ...(fixtureParams.get("projectLocations") === "2" ? [fixtureLocation("project-1", "location-old", { isDefault: false, name: "Wollipog on Old Mac", path: "/repos/old" })] : [])]);
 
 const runProjects: ProjectView[] = runDialog ? [
   fixtureProject("project-empty", "No Locations Yet", []),

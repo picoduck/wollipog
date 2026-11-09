@@ -7,14 +7,26 @@ import type { Hub } from "./hub.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { inspectProjectLocation } from "./project-location-inspection.js";
 
-/** Exclusions that a reconnecting runner may have cleared. The others describe the folder itself. A
- * runner's protocol version changes only by registering again, so an update is a reconnect (#4319). */
-const RETRIED_ON_RECONNECT: ReadonlySet<string> = new Set(["runner_offline", "read_failed", "runner_too_old", "runner_below_gates"]);
+/** Exclusions that a reconnecting runner may have cleared. The others describe what the folder holds. A
+ * runner's protocol version changes only by registering again, so an update is a reconnect (#4319). A
+ * missing folder is retried too: until a read names its repository, every repository without an entry
+ * is refused, and updating the runner is what that refusal asks for. */
+const RETRIED_ON_RECONNECT: ReadonlySet<string> = new Set(["runner_offline", "read_failed", "runner_too_old", "runner_below_gates", "path_missing"]);
 
-/** Custom retries only what #4319 excludes there, and that exclusion's later transient failures: one
- * that was offline when the campaign was created stays out, as it always has. */
+/** What a Custom campaign reads again on a reconnect only to name the repository (#4319). */
+const NAMED_ON_RECONNECT: ReadonlySet<string> = new Set(["runner_offline", "path_missing"]);
+
+/** Whether a Custom exclusion can join on a reconnect: one #4319 excluded there for its runner's version,
+ * and that exclusion's later transient failures. One left out for another reason at creation, such as
+ * its machine being offline, stays out, as it always has. */
+function customRejoins(item: CampaignExcludedLocation): boolean {
+  return item.nameOnly !== true && (item.failure === "runner_below_gates" || item.rejoinsOnReconnect === true);
+}
+
+/** Custom reads again what can join, and also what is only read to name its repository, so that a
+ * repository behind an old runner is refused by name rather than leaving every repository refused. */
 function retriedOnReconnect(item: CampaignExcludedLocation, custom: boolean): boolean {
-  return custom ? item.failure === "runner_below_gates" || item.rejoinsOnReconnect === true : RETRIED_ON_RECONNECT.has(item.failure);
+  return custom ? customRejoins(item) || item.nameOnly === true || NAMED_ON_RECONNECT.has(item.failure) : RETRIED_ON_RECONNECT.has(item.failure);
 }
 
 type Outcome = { ok: true; data: { joined: boolean; revision: number } } | { ok: false; status: number; error: string };
@@ -45,6 +57,8 @@ export class CampaignLocations {
     synchronize: (rootId: string) => Promise<unknown>;
     /** Settles the decisions a boundary change revoked and publishes every member (Sessions). */
     settle: (before: SessionView, revoked: WorkflowDecisionView[], ownerUserId: string, now: number) => void;
+    /** Reads a Custom campaign's own Location again and records its list (#4319). */
+    reestablish?: (rootId: string) => Promise<unknown>;
     log: { warn(message: string): void };
     inspectionTimeoutMs?: number;
   }) {}
@@ -71,7 +85,9 @@ export class CampaignLocations {
   /** A runner reconnected: retry its Locations that were excluded only because it was away. */
   runnerReconnected(runnerId: string): Promise<void> {
     const { db } = this.deps;
-    return this.forRoots([...db.campaignRepositoryRoots({ runnerId }), ...db.customCampaignRepositoryRoots(runnerId)], (root) => {
+    // A Custom campaign whose own Location was unread at creation reads it again (#4319).
+    const awaiting = this.deps.reestablish ? this.forRoots(db.customRootsAwaitingLaunchRead(runnerId), (root) => this.deps.reestablish!(root.id)) : Promise.resolve([]);
+    const retried = this.forRoots([...db.campaignRepositoryRoots({ runnerId }), ...db.customCampaignRepositoryRoots(runnerId)], (root) => {
       const custom = root.orchestratorPolicy?.control?.mode !== "full_control";
       const retry = (root.orchestratorPolicy?.excludedLocations ?? [])
         .filter((item) => retriedOnReconnect(item, custom))
@@ -80,7 +96,8 @@ export class CampaignLocations {
           location.projectId === root.projectId && location.availability !== "runner_removed" &&
           (!custom || this.customSurveyLists(root, location))));
       return retry.length ? this.inspectAndRecord(root, retry, "runner_reconnected") : Promise.resolve();
-    }).then(() => undefined);
+    });
+    return Promise.all([awaiting, retried]).then(() => undefined);
   }
 
   /** Nobody reviews a Custom campaign's list, so only what its survey would list joins it: a Location
@@ -152,6 +169,8 @@ export class CampaignLocations {
     const joins: Array<{ locationId: string; name: string; repository: string; source: CampaignLocationJoin["source"] }> = [];
     const excluded: CampaignExcludedLocation[] = [];
     const pending: CampaignPendingLocation[] = [];
+    // Locations read on a current runner, whatever is recorded for them: no longer unread (#4319).
+    const read: string[] = [];
     let changed = false;
     results.forEach((result: ProjectLocationInspection, index) => {
       const location = locations[index]!;
@@ -168,26 +187,44 @@ export class CampaignLocations {
         (source !== "owner_included" || Boolean(includer && includer.userId === owner &&
           db.canAccessWorkspace(includer, now.runnerId, now.workspaceId))));
       if (!eligible) { changed = true; return; }
+      // A Custom Location read only to name its repository never joins (#4319). A read that names it
+      // records the repository, which stays refused until an approved addition brings it in, even on a
+      // current runner; one that fails records what it found.
+      const previous = fresh.orchestratorPolicy?.excludedLocations?.find((item) => item.locationId === location.id);
+      if (custom && source === "runner_reconnected" && previous && !customRejoins(previous)) {
+        if (result.ok) {
+          excluded.push({ locationId: location.id, name: location.name, failure: previous.failure, reason: previous.reason,
+            repository: result.location.repository.toLowerCase(), nameOnly: true });
+        } else {
+          excluded.push({ locationId: location.id, name: location.name, failure: result.failure, reason: result.reason,
+            ...(result.repository ? { repository: result.repository } : {}), nameOnly: true });
+        }
+        return;
+      }
       // Only the owner's own Location joins on a reconnect. Anyone else's, or one with no recorded
       // adder, waits for Include in Campaign however it read: nobody has seen its repository.
-      if (source === "runner_reconnected" && was.addedBy !== owner) {
+      // While its runner is still too old, Include in Campaign can't help, so it keeps the reason that says why.
+      if (source === "runner_reconnected" && was.addedBy !== owner && (result.ok || result.failure !== "runner_below_gates")) {
         pending.push({ locationId: location.id, name: location.name, reason: "added_by_other" });
+        if (result.ok) read.push(location.id);
         return;
       }
       if (result.ok) joins.push({ locationId: location.id, name: location.name, repository: result.location.repository, source });
       else excluded.push({ locationId: location.id, name: location.name, failure: result.failure, reason: result.reason,
+        ...(result.repository ? { repository: result.repository } : {}),
         // A transient read after the update must not end this Location's way back into a Custom list.
         ...(custom && result.failure !== "runner_below_gates" && RETRIED_ON_RECONNECT.has(result.failure) ? { rejoinsOnReconnect: true as const } : {}) });
     });
     if (changed && source === "owner_included") return { ok: false, status: 409, error: "That Location changed while it was inspected; try again." };
-    return this.record(fresh, { joins, excluded, pending });
+    // Include in Campaign is the owner's consent to someone else's Location: left unread, it counts (#4319).
+    return this.record(fresh, { joins, excluded, pending, read, ...(source === "owner_included" ? { consented: locations.map((location) => location.id) } : {}) });
   }
 
   private async record(root: SessionView, update: { joins: Array<{ locationId: string; name: string; repository: string;
-    source: CampaignLocationJoin["source"] }>; excluded: CampaignExcludedLocation[]; pending: CampaignPendingLocation[] }): Promise<Outcome> {
+    source: CampaignLocationJoin["source"] }>; excluded: CampaignExcludedLocation[]; pending: CampaignPendingLocation[]; read?: string[]; consented?: string[] }): Promise<Outcome> {
     const owner = this.owner(root);
     if (!owner) return { ok: false, status: 409, error: "This campaign has no Full Control owner." };
-    if (!update.joins.length && !update.excluded.length && !update.pending.length) {
+    if (!update.joins.length && !update.excluded.length && !update.pending.length && !update.read?.length) {
       return { ok: true, data: { joined: false, revision: this.revision(root) } };
     }
     const now = Date.now();
@@ -196,12 +233,15 @@ export class CampaignLocations {
       this.deps.log.warn(JSON.stringify({ event: "campaign_locations_not_recorded", sessionId: root.id, status: result.status }));
       return result;
     }
-    // A Custom campaign's list has no boundary to re-mint and revokes nothing.
     if (result.joined && root.orchestratorPolicy?.control?.mode === "full_control") {
       // A join is an owner-authorized boundary change: what it revoked leaves its pauses, and every
       // member's runner gets the new boundary.
       this.deps.settle(root, result.revoked, owner, now);
       await this.deps.synchronize(root.id);
+    } else if (result.revoked.length) {
+      // A Custom list has no boundary to re-mint. Its join revokes only what was approved in a
+      // repository it stops refusing (#4319), and that leaves its pauses the same way.
+      this.deps.settle(root, result.revoked, owner, now);
     } else {
       this.deps.hub.sessionChangedById(root.id);
     }

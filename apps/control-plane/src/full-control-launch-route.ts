@@ -283,6 +283,7 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
         : { repository: derived?.repository ?? "", issueNumbers: derived?.issueNumbers ?? [], authorizedByCaller: true },
       projectLocations: surveyed && { ...surveyed, carried: carriedCampaignRepositories(settled!, issueScope?.repository ?? derived?.repository ?? ""),
         limits: campaignRepositoryLimits(settled!.orchestratorPolicy) },
+      participantRefusal: (boundary) => sessions.campaignParticipantRefusal(id, issueScope?.repository ?? derived?.repository ?? "", boundary.repositories, boundary.excluded),
       participantCeiling: db.campaignDescendantIds(id).some((childId) => {
         const child = db.getSession(childId);
         return Boolean(child && !["completed", "failed", "stopped"].includes(child.status) && ceiling(limits(childId)));

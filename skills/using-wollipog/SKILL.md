@@ -934,8 +934,15 @@ the work needs one; once the owner adds it, it joins the campaign on its own.
 
 A Location on a runner too old to perform the campaign's gates doesn't join: `repositoryBoundary` lists
 it under `excludedLocations` with a reason naming the version it needs, and asking to add its repository
-is refused with that reason. Report that its runner needs updating. It can join once that runner updates,
-without a new launch.
+is refused with that reason. A merge, branch deletion, closure or follow-up naming that repository is
+refused the same way, with no other login standing in, so don't look for one: report that its runner
+needs updating. The refusal holds until a Location of that repository joins, without a new launch: the
+owner's own Location joins once its runner updates, and someone else's then waits for the owner's Include
+in Campaign. A join revokes what was approved in that repository meanwhile, so request again afterward.
+While such a Location's repository hasn't been read yet, every repository the campaign holds no entry
+for is refused the same way, naming that Location: report that its runner needs updating so it can be
+read, or that the owner can remove the Location from the Project. Removing it revokes what was approved
+in those repositories, so request again afterward. The refusal's own text says which way in applies.
 
 ## Inspecting and Changing Campaign Issue Scope
 

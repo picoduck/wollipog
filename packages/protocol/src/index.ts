@@ -2238,6 +2238,15 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   /** Project Locations the launch inspection left out of the repository boundary (#4117), each with
    * its fixed reason. Server-owned and informational: it grants nothing. */
   excludedLocations?: import("./project-location-inspection.js").CampaignExcludedLocation[];
+  /** Repositories refused for a Location's runner version (#4319), kept whatever later happens to
+   * that Location's exclusion. Server-owned: it only ever refuses. */
+  refusedRepositories?: import("./project-location-inspection.js").CampaignRefusedRepository[];
+  /** Locations excluded on a runner below the gates' floor, or of no known version, whose repository
+   * no read has named (#4319). While one is still in the Project, every repository without an entry is
+   * refused. Server-owned: only a read that resolves it (names its repository, joins it, or reads it on
+   * a current runner) ends it, so a failed read, an update before the read, a revoke or a
+   * re-authorization never does. */
+  unreadLocations?: Array<{ locationId: string; name: string }>;
   /** What the Full Control launch or enable that set `control` disclosed about capabilities and
    * evidence (#2940). Server-owned and informational: it grants nothing, a revoke to Custom drops
    * it, and a campaign authorized before it existed has none. */

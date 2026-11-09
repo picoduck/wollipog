@@ -28,14 +28,14 @@
  * section (#2940); see `fullControlProjection`.
  * With `budget=1`, `slots=held` lists two ended workers whose slots only the person can release, and
  * `slots=released` one of them released, with its record (#4331).
- * `locationWarning=1` adds the warning Start shows when Full Control starts without a Location because
- * its runner can't perform the campaign's gates (#4319).
+ * With `repositories=1`, `limited=1` reports the launch Location as limited by its runner (#4319).
  */
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   CAMPAIGN_AUTOMATION_HOLD_REASONS,
   CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE,
+  CAMPAIGN_LIMITED_LOCATION_REASON,
   CAMPAIGN_WORK_ITEM_PRIMARY_STATES,
   campaignIssueLimitsRequirement,
   campaignIssueScopeChangesRequirement,
@@ -53,8 +53,6 @@ import {
 } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import { FeedbackProvider, useFeedback } from "../components/FeedbackProvider.js";
-import { locationGatesWarning } from "../components/FullControlPreparation.js";
 import { RightPanel, type RightPanelState } from "../components/RightPanel.js";
 import { RequestDock, dockRequests } from "../components/requests/RequestDock.js";
 import { useCampaignStatusAvailability } from "../components/useCampaignStatus.js";
@@ -581,10 +579,11 @@ const projectionFor = (rev: number) => campaignProjection(
         { locationId: "loc_scratch", name: "Scratch Folder", failure: "not_repository" as const,
           reason: "The Location's folder is not a git repository with a valid HEAD." },
         { locationId: "loc_old", name: "Wollipog on Old Mac", failure: "runner_below_gates" as const,
-          reason: PROJECT_LOCATION_INSPECTION_FAILURES.runner_below_gates },
+          reason: PROJECT_LOCATION_INSPECTION_FAILURES.runner_below_gates, repository: "picoduck/old-tools" },
         { locationId: "loc_away", name: "Wollipog on Travel Laptop", failure: "runner_offline" as const,
           reason: "The Location's machine is offline." },
       ],
+      ...(params.get("limited") === "1" ? { limitedLocations: [{ locationId: "loc_laptop", name: "Wollipog on Laptop", reason: CAMPAIGN_LIMITED_LOCATION_REASON }] } : {}),
       pendingLocations: included ? [] : [{ locationId: "loc_shared", name: "Shared Docs", reason: "added_by_other" as const }],
       joins: [
         { locationId: "loc_setup", name: "Dev Box Setup", repository: "picoduck/dev-box-setup", revision: 6, at: NOW - 60_000, source: "owner_added" as const },
@@ -1380,20 +1379,10 @@ window.__WOLLIPOG_CAMPAIGN_STATUS_E2E__ = {
   forgeRefreshes: () => [...forgeRefreshes],
 };
 
-function LocationGatesWarning() {
-  const { showToast } = useFeedback();
-  useEffect(() => {
-    const warning = locationGatesWarning([{ locationId: "loc_old", name: "Wollipog on Old Mac", failure: "runner_below_gates",
-      reason: PROJECT_LOCATION_INSPECTION_FAILURES.runner_below_gates }]);
-    if (warning) showToast(warning.message, { tone: "warning", detail: warning.detail });
-  }, [showToast]);
-  return null;
-}
-
 createRoot(document.getElementById("root")!).render(
   <ApiProvider client={client}>
     <StoreProvider connection={connection} navigation={navigation}>
-      {params.get("locationWarning") === "1" ? <FeedbackProvider><Fixture /><LocationGatesWarning /></FeedbackProvider> : <Fixture />}
+      <Fixture />
     </StoreProvider>
   </ApiProvider>,
 );

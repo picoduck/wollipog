@@ -24,6 +24,7 @@ export function CampaignRepositories({ campaignId, boundary, canInclude }: {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const joinedAt = new Map(boundary.joins.map((join) => [join.locationId, join.revision]));
+  const limitedBecause = new Map((boundary.limitedLocations ?? []).map((location) => [location.locationId, location.reason]));
   const include = async (locationId: string) => {
     if (busy) return;
     setBusy(locationId); setError(null);
@@ -51,6 +52,7 @@ export function CampaignRepositories({ campaignId, boundary, canInclude }: {
                 <StatusBadge meta={location.availability === "removed" ? REMOVED : projectAvailabilityMeta(location.availability)} />
                 {joinedAt.has(location.locationId) && <span className="campaign-status-meta">{joinedAt.get(location.locationId)
                   ? `Joined at boundary revision ${joinedAt.get(location.locationId)}.` : "Joined after launch."}</span>}
+                {limitedBecause.has(location.locationId) && <span className="campaign-status-meta">{limitedBecause.get(location.locationId)}</span>}
               </li>)}
             </ul>}
             {!usable && <span className="campaign-status-meta">No Location of this repository is available, so it can't take new work until one is.</span>}
@@ -68,6 +70,7 @@ export function CampaignRepositories({ campaignId, boundary, canInclude }: {
       <ul className="campaign-detail-list" aria-label="Excluded Locations">
         {boundary.excludedLocations.map((location) => <li key={location.locationId}>
           {location.name}
+          {location.repository && <span className="campaign-status-meta">{location.repository}</span>}
           <span className="campaign-status-meta">{location.reason}</span>
         </li>)}
       </ul>

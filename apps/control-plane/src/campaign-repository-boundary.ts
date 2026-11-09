@@ -1,6 +1,6 @@
 import {
-  CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_BOUNDARY_REPOSITORIES_MAX, PROJECT_LOCATION_INSPECTION_FAILURES, campaignBoundaryRepositories,
-  type CampaignAvailableLocation, type CampaignBoundaryRepository, type CampaignPendingLocation, type CampaignExcludedLocation, type ProjectLocationInspection, type ProjectLocationView, type SessionView,
+  CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_BOUNDARY_REPOSITORIES_MAX, CAMPAIGN_LIMITED_LOCATION_REASON, PROJECT_LOCATION_INSPECTION_FAILURES, campaignBoundaryRepositories,
+  runnerSupportsProtocol, type CampaignLimitedLocation, type CampaignAvailableLocation, type CampaignBoundaryRepository, type CampaignPendingLocation, type CampaignExcludedLocation, type ProjectLocationInspection, type ProjectLocationView, type SessionView,
 } from "@wollipog/protocol";
 
 /** One place a gate of a campaign repository can run (#4119). */
@@ -61,6 +61,28 @@ export function campaignBoundaryRepositoryAt(
   return campaignLocationRepository(db, root, campaignBoundaryRepositories(control.boundary), place);
 }
 
+/** The launch Location when a follow-up routed to its repository can't be created anywhere (#4319):
+ * the campaign has another repository to route from, the root's runner is too old to create it, and no
+ * other Location of the launch repository is on a runner that can. Excluding it would be wrong, because
+ * the root runs there and that repository's other gates run in the root's own checkout. */
+export function limitedLaunchLocations(input: {
+  launchRepository: string;
+  launchLocationId: string | null | undefined;
+  repositories: readonly CampaignBoundaryRepository[];
+  rootProtocolVersion: number | null | undefined;
+  /** Whether this Location's runner can create an issue through a Location, online or not. */
+  publishes: (locationId: string) => boolean;
+  name: (locationId: string) => string | undefined;
+}): CampaignLimitedLocation[] {
+  const launch = input.launchRepository.toLowerCase();
+  const name = input.launchLocationId ? input.name(input.launchLocationId) : undefined;
+  if (!input.launchLocationId || !name || input.repositories.length < 2 ||
+      runnerSupportsProtocol(input.rootProtocolVersion, "locationIssuePublication")) return [];
+  const entry = input.repositories.find((candidate) => candidate.repository.toLowerCase() === launch);
+  if (entry?.locationIds.some((id) => id !== input.launchLocationId && input.publishes(id))) return [];
+  return [{ locationId: input.launchLocationId, name, reason: CAMPAIGN_LIMITED_LOCATION_REASON }];
+}
+
 /** One Location of the campaign's Project, in Project order (its default Location first). */
 export interface CampaignProjectLocation { id: string; name: string }
 
@@ -109,10 +131,11 @@ export function launchBoundaryRepositories(input: {
         const result = input.inspections.get(location.id);
         return result?.ok ? { ok: true as const, repository: result.location.repository.toLowerCase() }
           // A Location nobody inspected is shown as unread, never silently left out.
-          : result ?? { ok: false as const, failure: "read_failed" as const, reason: PROJECT_LOCATION_INSPECTION_FAILURES.read_failed };
+          : result ?? { ok: false as const, failure: "read_failed" as const, reason: PROJECT_LOCATION_INSPECTION_FAILURES.read_failed, repository: undefined };
       })();
     if (!inspection.ok) {
-      excluded.push({ locationId: location.id, name: location.name, failure: inspection.failure, reason: inspection.reason });
+      excluded.push({ locationId: location.id, name: location.name, failure: inspection.failure, reason: inspection.reason,
+        ...(inspection.repository ? { repository: inspection.repository.toLowerCase() } : {}) });
       continue;
     }
     if (input.limits?.length && inspection.repository !== launch && !heldRepositories.has(inspection.repository) &&

@@ -41,7 +41,37 @@ export interface CampaignExcludedLocation {
   /** A Custom campaign only (#4319): this exclusion began as `runner_below_gates`, so a reconnect still
    * retries it whatever the last read found. Full Control retries by `failure` alone. */
   rejoinsOnReconnect?: true;
+  /** A Custom campaign only (#4319): this Location was left out for another reason at creation, such
+   * as its machine being offline. A reconnect reads it only to name its repository, so that repository
+   * can be refused. It never joins on a reconnect, as a Location offline at creation never has. */
+  nameOnly?: true;
+  /** What a `runner_below_gates` Location verified as, when its runner can still read one (v288+):
+   * while it is left out, that repository's gates refuse by this Location's name (#4319). */
+  repository?: string;
 }
+
+/** A repository a read found behind a Location whose runner can't perform the campaign's gates
+ * (#4319). Server-owned. Its gates refuse by that Location's name until the repository holds an
+ * entry, which only a join or an approved addition gives it, each revoking what was approved
+ * meanwhile. Nothing else clears it: not a later read that fails, a move to waiting, a revoke, a
+ * re-authorization, nor the Location leaving the Project. */
+export interface CampaignRefusedRepository {
+  repository: string;
+  locationId: string;
+  /** The Location's name when it was read. */
+  name: string;
+}
+
+/** A launch Location kept in the boundary although its root runner can't create issues through a
+ * Location, so a follow-up routed to its repository from another of the campaign's can't be created
+ * (#4319). Its repository's other gates run in the root's own checkout and aren't affected. */
+export interface CampaignLimitedLocation {
+  locationId: string;
+  name: string;
+  reason: string;
+}
+
+export const CAMPAIGN_LIMITED_LOCATION_REASON = `Follow-ups from this campaign's other repositories can't be created in this Location's repository until its runner is on protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer.`;
 
 /** A Project Location someone other than the campaign's owner added mid-campaign (#4117). It joins
  * only when the owner uses Include in Campaign. */
@@ -82,6 +112,8 @@ export interface CampaignRepositoryBoundaryView {
   repositories: Array<{ repository: string; locations: Array<{ locationId: string; name: string;
     availability: import("./index.js").ProjectLocationAvailability | "removed"; isDefault: boolean }> }>;
   excludedLocations: CampaignExcludedLocation[];
+  /** Read live from the root's runner, so it clears when that runner updates. Absent with none. */
+  limitedLocations?: CampaignLimitedLocation[];
   pendingLocations: CampaignPendingLocation[];
   /** Absent from a control plane before v320. */
   availableLocations?: CampaignAvailableLocation[];
@@ -94,4 +126,4 @@ export type ProjectLocationInspection =
   | { ok: true; location: VerifiedProjectLocation; issueFacts?: import("./index.js").CampaignIssueFacts[];
     /** The asked-for epic and its members, all in `location.repository`. */
     candidates?: NonNullable<import("./index.js").CampaignIssueScopeView["candidates"]> }
-  | { ok: false; locationId: string; failure: ProjectLocationInspectionFailure; reason: string };
+  | { ok: false; locationId: string; failure: ProjectLocationInspectionFailure; reason: string; repository?: string };

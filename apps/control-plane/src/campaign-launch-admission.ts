@@ -12,7 +12,8 @@ import {
   type PreparedCampaignLaunch, type ProjectLocationInspection, type RunnerView, type ExecutionTargetDefinition,
 } from "@wollipog/protocol";
 import type { UiEvidenceReviewEvaluation } from "./ui-evidence-review.js";
-import { launchBoundaryRepositories, type CampaignProjectLocation } from "./campaign-repository-boundary.js";
+import type { CampaignExcludedLocation } from "@wollipog/protocol";
+import { launchBoundaryRepositories, limitedLaunchLocations, type CampaignProjectLocation } from "./campaign-repository-boundary.js";
 import { issueReferenceSpans, MAX_MESSAGE_ISSUES } from "./first-message-issue-intent.js";
 
 const keys = ["repository", "repositories", "issueNumbers", "otherIssues", "objective", "operations", "delegatablePolicyIds", "issueAuthority", "budgetAuthority"];
@@ -271,10 +272,14 @@ export interface CampaignLaunchFacts {
   otherIssuesRead?: boolean;
   /** Enabling on an existing campaign: a live participant already holds its own cost or tool limit. */
   participantCeiling?: boolean;
+  /** An enable: why a live participant couldn't stay under the boundary this preflight built (#4319). */
+  participantRefusal?: (boundary: { repositories: CampaignBoundaryRepository[]; excluded: CampaignExcludedLocation[] }) => string | null;
   /** A launch in a Project (#4117): its active Locations in Project order and each one's own
    * inspection. The launch Location is verified by `inspection`, never by this map. */
   projectLocations?: { launchLocationId: string | null; locations: CampaignProjectLocation[];
     inspections: ReadonlyMap<string, ProjectLocationInspection>;
+    /** Whether a Location's runner can create an issue through a Location (#4319). */
+    publishes?: (locationId: string) => boolean;
     /** Enabling on an existing campaign: the repositories it already holds, which it keeps. */
     carried?: CampaignBoundaryRepository[] | undefined;
     /** Enabling on an existing campaign: what the owner's first message limited it to. */
@@ -403,7 +408,8 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   const add = (id: CampaignLaunchCapability["id"], capability: string, state: CampaignLaunchCapability["state"], reason: string, mandatory = true) =>
     capabilities.push({ id, capability, state, reason, mandatory });
 
-  add("repository_scope", "Repository and Issue Scope", verified && otherIssuesVerified ? "verified" : "unsupported", verified && !otherIssuesVerified
+  const participantRefusal = boundary ? facts.participantRefusal?.(boundary) ?? null : null;
+  add("repository_scope", "Repository and Issue Scope", verified && otherIssuesVerified && !participantRefusal ? "verified" : "unsupported", participantRefusal ?? (verified && !otherIssuesVerified
     ? "An issue this launch names in another repository could not be read through a Location of that repository in this Project. Check that a Location of each repository is online on an up-to-date runner, or leave the issue out."
     : campaignScope ? verified
     ? `This campaign's Human-established scope is ${repository}${issueNumbers.length ? ` with issues ${issueNumbers.map((n) => `#${n}`).join(", ")}` : " with no issues yet"}.`
@@ -417,7 +423,7 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
     : inspection?.failure && Object.hasOwn(CAMPAIGN_LAUNCH_INSPECTION_ERRORS, inspection.failure)
       ? CAMPAIGN_LAUNCH_INSPECTION_ERRORS[inspection.failure]
     : inspection ? "The project location inspection failed; refresh the preflight."
-    : "The runner did not answer the workspace inspection in time; refresh the preflight.");
+    : "The runner did not answer the workspace inspection in time; refresh the preflight."));
 
   const authority = campaignAuthorityPreflight(proposal ? schemaControl(proposal) : schemaControl({
     repository: "schema/validation", issueNumbers: [], objective: "schema validation", operations, delegatablePolicyIds: [],
@@ -492,6 +498,9 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   const ready = blockers.length === 0 && proposal !== null;
   const envelope = Boolean(ready && facts.pacedVideoPeer && facts.disclosuresAvailable && imageDelegated && plan.config.model);
   const humanRequiredRequests = authority.supported ? fullControlStandingHumanRequired(facts.humanRequiredRules ?? true) : [];
+  const limitedLocations = boundary && repository && facts.projectLocations ? limitedLaunchLocations({ launchRepository: repository,
+    launchLocationId: facts.projectLocations.launchLocationId, repositories: boundary.repositories, rootProtocolVersion: runner.protocolVersion,
+    publishes: (id) => facts.projectLocations?.publishes?.(id) ?? false, name: (id) => locationName.get(id) }) : [];
   const summary: CampaignLaunchPreflight["summary"] = {
     repository,
     ...(boundary ? {
@@ -499,6 +508,7 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
         // A carried Location the person can no longer see in the Project is never named by a live read.
         locations: entry.locationIds.map((locationId) => ({ locationId, name: locationName.get(locationId) ?? "Removed Location" })) })),
       excludedLocations: boundary.excluded,
+      ...(limitedLocations.length ? { limitedLocations } : {}),
       ...(boundary.available.length ? { availableLocations: boundary.available } : {}),
       ...(boundary.pending.length ? { pendingLocations: boundary.pending } : {}),
     } : {}),
