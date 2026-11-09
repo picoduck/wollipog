@@ -3187,7 +3187,7 @@ export async function worktreeHoldsUnsharedWork(
   }
 }
 
-export type WorktreeRollbackWork ={ state: "unchanged" } | { state: "changed"; reason: string } | { state: "unavailable" };
+export type WorktreeRollbackWork = { state: "unchanged" } | { state: "changed"; reason: string } | { state: "unavailable" };
 
 /** Whether a proved worktree is still exactly what the runner left. The proof says which worktree
  * this is, not what has happened in it since. No answer is not a change, so a passing Git failure

@@ -3539,7 +3539,6 @@ export class SessionManager {
     const rollback = this.cleanupJournal.list().find((record) => this.isAuxiliaryRollback(record) &&
       record.sessionId === meta.sessionId && sameWorktreePath(meta.context, record.worktreePath, worktree.path));
     if (rollback) throw new Error(this.pendingRemovalRefusal(rollback, worktree.branch));
-    this.endLaunchRollbacksAt(meta.sessionId, meta.context, worktree.path);
     // A request can arrive during the current provider turn. Anchor that turn's remaining diff at
     // the newly selected tree so capture/checkpoint logic never compares two different worktrees.
     const baseTree = await withGitExecutionContext(meta.context, () => captureWorktreeTree(worktree.path));
@@ -3593,6 +3592,9 @@ export class SessionManager {
       ...(resumeAfterRecovery ? { status: "idle" as const } : {}),
     });
     if (!updated) throw new Error("session disappeared while its requested worktree was activating");
+    // The session has taken this worktree, so an earlier launch's rollback of it is over (#4209). Not
+    // before: an activation that fails above still leaves the worktree to that record.
+    this.endLaunchRollbacksAt(meta.sessionId, meta.context, worktree.path);
     const active = this.active.get(meta.sessionId);
     if (active) {
       active.worktree = { path: worktree.path, branch: worktree.branch, created: false };
@@ -4558,12 +4560,19 @@ export class SessionManager {
     this.store.patchMeta(meta.sessionId, { keptWorktreesTracked: true });
   }
 
+  /** A requested or switch worktree's rollback still on record for this exact row. */
+  private pendingRollbackFor(meta: SessionMeta, worktree: SessionWorktreeView): WorktreeCleanupRecord | undefined {
+    return this.cleanupJournal.list().find((record) => this.isAuxiliaryRollback(record) && record.sessionId === meta.sessionId &&
+      (record.worktreeId ?? "legacy") === worktree.id && sameWorktreePath(meta.context, record.worktreePath, worktree.path));
+  }
+
   /** Whether any other session on this runner, live or archived, works in or lists the worktree at
    * `path`. Deleting one session never removes a worktree another one has: a fork copied rows it
    * never owned, say, or another session attached it. */
   private listedByAnotherSession(sessionId: string, context: AgentContext, path: string): boolean {
     const same = (candidate: string | null | undefined) => !!candidate && sameWorktreePath(context, candidate, path);
-    return this.store.listSessions().some((other) => other.sessionId !== sessionId && (same(other.worktreePath) ||
+    // Its rows include its selected worktree, which attributedWorktrees adds when no row names it.
+    return this.store.listSessions().some((other) => other.sessionId !== sessionId && (
       this.attributedWorktrees(other).some((item) => same(item.path)) ||
       (other.locationHistory ?? []).some((left) => same(left.worktreePath) || left.worktrees.some((item) => same(item.path)))));
   }
@@ -4824,6 +4833,9 @@ export class SessionManager {
       );
       record.processesTerminatedAt = Date.now();
       this.cleanupJournal.add(record);
+      // A keep that landed while the processes were ending (#4209) runs no teardown, which is repository
+      // code, over what was kept. The callers read the keep again and remove nothing.
+      if (record.keepWorktree) return;
       // Ending processes can take a long time, and a teardown is repository code that should not run
       // over someone's work, so this is proved again before it as well as before the forced removal.
       await this.assertRollbackUntouched(record);
@@ -8092,11 +8104,12 @@ export class SessionManager {
           // Legacy/test materializers omit the marker and historically represented a newly
           // created tree. Only an explicit false proves that this call reused durable state.
           worktreeOwnedByLaunch = worktree.created !== false;
-          // A worktree that was already there is taken back by this launch, so an earlier launch's
-          // rollback of it is over. One made just now is new where nothing was, so nothing kept there
-          // is any more.
-          if (!worktreeOwnedByLaunch) this.endLaunchRollbacksAt(spec.sessionId, context, worktree.path);
-          else this.forgetWorktreeKept(spec.sessionId, worktree.path);
+          // An earlier launch's rollback of this path is over either way. A worktree that was already
+          // there is taken back by this launch. One made just now is new where nothing was, so the
+          // earlier one is gone, and so is anything kept there. This launch's own rollback, if it
+          // needs one, is recorded afresh.
+          this.endLaunchRollbacksAt(spec.sessionId, context, worktree.path);
+          if (worktreeOwnedByLaunch) this.forgetWorktreeKept(spec.sessionId, worktree.path);
           if (worktreeOwnedByLaunch && worktreeIdentity && !worktreeIdentity.baseCommit) {
             worktreeIdentity = {
               ...worktreeIdentity,
@@ -8218,7 +8231,11 @@ export class SessionManager {
                 worktreeBranch: prior!.worktreeBranch,
                 worktreePending: false,
               });
-              if (retained) this.recordWorktreeRecovery(retained, selected, failure, "during restart preparation");
+              if (retained) {
+                // The session holds this worktree again, so no earlier launch's rollback may take it.
+                this.endLaunchRollbacksAt(spec.sessionId, context, selected);
+                this.recordWorktreeRecovery(retained, selected, failure, "during restart preparation");
+              }
               if (priorResumeId) this.releaseResumeLock(spec.sessionId, launchGeneration);
               this.releaseAdmissionIfInactive(spec.sessionId);
               durable?.failed(`${failure}; this message was not sent`, "WORKTREE_RECOVERY_REQUIRED");
@@ -18470,6 +18487,14 @@ export class SessionManager {
         // Attached worktrees remain operator-owned: session deletion only forgets their
         // attribution. Runner-created/legacy worktrees carry destructive ownership proof.
         for (const worktree of this.attributedWorktrees(cleanupMeta).filter((item) => item.source !== "attached")) {
+          // The journal holds one record per worktree, so a deletion record would replace a rollback
+          // still pending for this one, and with it the proof and snapshot that say whether anyone
+          // changed it (#4209). The rollback stays and decides, as it does for any deleted session.
+          const rollback = this.pendingRollbackFor(cleanupMeta, worktree);
+          if (rollback) {
+            worktreeCleanups.push(rollback);
+            continue;
+          }
           const cleanup = this.keepIfKept(cleanupMeta, worktree, this.cleanupRecordForWorktree(cleanupMeta, worktree, "session_delete", "force"));
           const teardownIdentityError = teardownIdentityErrors.get(worktree.id);
           if (teardownIdentityError) {
@@ -18502,6 +18527,11 @@ export class SessionManager {
           const leftMeta: SessionMeta = { ...cleanupMeta, repoPath: left.repoPath, workspaceId: left.workspaceId,
             worktrees: left.worktrees, worktreePath: left.worktreePath, worktreeBranch: left.worktreeBranch };
           for (const worktree of left.worktrees.filter((item) => item.source !== "attached")) {
+            const rollback = this.pendingRollbackFor(leftMeta, worktree);
+            if (rollback) {
+              worktreeCleanups.push(rollback);
+              continue;
+            }
             const cleanup = this.keepIfKept(cleanupMeta, worktree, this.cleanupRecordForWorktree(leftMeta, worktree, "session_delete", "force"));
             if (checkpointOwnerHash) cleanup.checkpointOwnerHash = checkpointOwnerHash;
             this.cleanupJournal.add(cleanup);

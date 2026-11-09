@@ -122,6 +122,7 @@ test("a fork does not take on the worktrees its source left in other Locations, 
     const result = await f.manager.forkConversation(f.source.sessionId, "s_fork_target", 1, "Fork");
     assert.equal(result.ok, true, result.error ?? "the fork failed");
     assert.equal(f.store.readMeta("s_fork_target")?.locationHistory, undefined, "the fork has no Locations of its own to have left");
+    assert.equal(f.store.readMeta("s_fork_target")?.keptWorktreesTracked, true, "and it records every keep from the start");
     await f.manager.delete("s_fork_target");
     assert.deepEqual(files(f.left), before, "the source's work there is all there");
     assert.equal(git(f.leftRepo, ["rev-parse", "--verify", "refs/heads/fix/left"]).length, 40, "on its branch");
@@ -129,15 +130,25 @@ test("a fork does not take on the worktrees its source left in other Locations, 
   });
 });
 
-test("deleting a session leaves a worktree another session lists, as a fork made by an older runner does", async () => {
-  if (process.platform === "win32") return;
-  await withSource("listed", async (f) => {
-    const before = files(f.left);
-    // An older runner's fork copied the source's history whole.
-    f.store.create({ ...f.source, sessionId: "s_listed_copy", worktreePath: null, worktreeBranch: undefined, worktrees: [],
-      forkPoints: {}, agentSessionId: null });
-    await f.manager.delete("s_listed_copy");
-    assert.deepEqual(files(f.left), before);
-    assert.equal(git(f.leftRepo, ["rev-parse", "--verify", "refs/heads/fix/left"]).length, 40);
+for (const how of ["in its history", "as its selected worktree", "as one of its worktrees"] as const) {
+  test(`deleting a session leaves a worktree another session lists ${how}`, async () => {
+    if (process.platform === "win32") return;
+    await withSource(`listed-${how.split(" ").at(-2)}`, async (f) => {
+      const before = files(f.left);
+      // The session being deleted lists the worktree in its history, as an older runner's fork copied it.
+      f.store.create({ ...f.source, sessionId: "s_listed_copy", worktreePath: null, worktreeBranch: undefined, worktrees: [],
+        forkPoints: {}, agentSessionId: null });
+      // The source, the one that really works there, holds it in one way only.
+      const row = f.source.locationHistory![0]!.worktrees[0]!;
+      f.store.patchMeta(f.source.sessionId, how === "in its history" ? {} : {
+        locationHistory: undefined,
+        ...(how === "as its selected worktree"
+          ? { worktreePath: f.left, worktreeBranch: "fix/left", worktrees: [] }
+          : { worktrees: [...(f.store.readMeta(f.source.sessionId)!.worktrees ?? []), row] }),
+      });
+      await f.manager.delete("s_listed_copy");
+      assert.deepEqual(files(f.left), before);
+      assert.equal(git(f.leftRepo, ["rev-parse", "--verify", "refs/heads/fix/left"]).length, 40);
+    });
   });
-});
+}
