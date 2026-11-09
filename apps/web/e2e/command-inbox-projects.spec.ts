@@ -790,7 +790,7 @@ for (const reducedMotion of ["reduce", "no-preference"] as const) {
 }
 
 for (const fault of ["row transition", "observer jump"] as const) {
-  test(`the painted-frame row recorder sees a row that moves for one frame (${fault})`, async ({ page }) => {
+  test(`the painted-frame row recorder sees injected row movement (${fault})`, async ({ page }) => {
     // Negative controls for the paging tests above. "row transition" puts back the transition #2426
     // removed, which paints a scroll correction a frame before the rows it compensates for.
     // "observer jump" moves the reader in a ResizeObserver callback, before paint, in the first frame
@@ -798,7 +798,10 @@ for (const fault of ["row transition", "observer jump"] as const) {
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow");
     if (fault === "row transition") {
-      await page.addStyleTag({ content: "[data-virtual-row] { transition-property: transform !important; }" });
+      // Give this synthetic fault an observable duration instead of inheriting reduced motion's
+      // 1ms, whose visibility depends on row geometry and frame timing. The observer-jump control
+      // below still checks a movement that lasts exactly one painted frame.
+      await page.addStyleTag({ content: "[data-virtual-row] { transition-property: transform !important; transition-duration: 200ms !important; }" });
     }
     const reader = page.getByRole("region", { name: "Session Preview Activity" });
     await expect(reader.locator("[data-virtual-row]").first()).toBeVisible();
