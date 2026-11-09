@@ -21095,6 +21095,17 @@ export class SessionsService {
     return memoryRefusal ?? account;
   }
 
+  /** The saved policy this runner's launch must honor. A fixed default needs a runner with accounts.
+   * A non-fixed policy counts on every runner, however old, so a runner that can't enforce it refuses
+   * rather than quietly falling back. */
+  private applicableProviderAccountPolicy(
+    runner: Pick<RunnerView, "runnerId" | "protocolVersion">,
+    provider: ProviderAccountDefinition["provider"],
+  ): RunnerProviderAccountDefault | null {
+    const policy = this.db.machineProviderAccountDefault(runner.runnerId, provider);
+    return runnerSupportsProtocol(runner.protocolVersion, "providerAccounts") || (policy?.mode ?? "fixed") !== "fixed" ? policy : null;
+  }
+
   /** The Machine's policy for one launch's provider, resolved from what the control plane knows now. */
   private providerAccountPolicyResult(
     runner: RunnerView,
@@ -21150,8 +21161,7 @@ export class SessionsService {
     const accounts = provider ? (runner.providerAccounts ?? []).filter((account) => account.provider === provider) : [];
     const native = (launch.context?.kind ?? "native") === "native";
     const agent = runner.agents.find((candidate) => candidate.id === input.agentId);
-    const policy = provider && runnerSupportsProtocol(runner.protocolVersion, "providerAccounts")
-      ? this.db.machineProviderAccountDefault(runner.runnerId, provider) : null;
+    const policy = provider ? this.applicableProviderAccountPolicy(runner, provider) : null;
     let providerAccountId: string | undefined;
     let selection: ProviderAccountSelectionRecord | undefined;
     let savedDefault = false;
@@ -21252,8 +21262,7 @@ export class SessionsService {
       (agent.context?.kind ?? "native") === "native");
     const agent = requested ?? providerAgents.find((candidate) => candidate.available === true) ?? providerAgents[0];
     const native = (agent?.context?.kind ?? "native") === "native";
-    const policy = runnerSupportsProtocol(runner.protocolVersion, "providerAccounts")
-      ? this.db.machineProviderAccountDefault(runnerId, provider) : null;
+    const policy = this.applicableProviderAccountPolicy(runner, provider);
     const accountSpecificMemory = Boolean(target.projectId) && provider === "claude" && agent?.driver === "claude-code" &&
       !supportsClaudeProjectMemory(agent.version);
     const result = this.providerAccountPolicyResult(runner, provider, agent, native, policy, accountSpecificMemory);

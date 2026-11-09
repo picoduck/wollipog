@@ -194,6 +194,12 @@ test("the runner's recheck refuses only on positive evidence", () => {
   assert.equal(providerAccountLaunchIneligibility(account("a", { billing: "unknown" }), { now: NOW }), null);
   assert.equal(providerAccountLaunchIneligibility(account("a"), { now: NOW, usage: usage("a", {
     buckets: [{ id: "w", label: "Week", status: "exhausted", resetsAt: NOW + 1 }] }) }), "usage_exhausted");
+  // An unknown state hides nothing that is known.
+  const spent = usage("a", { state: "unavailable", spendControls: [{ id: "s", label: "Spend", reached: true }] });
+  assert.equal(providerAccountLaunchIneligibility(account("a", { authStatus: "unknown", selectionCooldownUntil: NOW + 1 }), { now: NOW }), "cooldown");
+  assert.equal(providerAccountLaunchIneligibility(account("a", { authStatus: "unknown" }), { now: NOW, usage: spent }), "spend_limit_reached");
+  assert.equal(providerAccountLaunchIneligibility(account("a", { billing: "unknown", selectionCooldownUntil: NOW + 1 }), { now: NOW }), "cooldown");
+  assert.equal(providerAccountLaunchIneligibility(account("a", { billing: "unknown" }), { now: NOW, usage: spent }), "spend_limit_reached");
 });
 
 test("a policy write is checked for shape and keeps what it doesn't name", () => {

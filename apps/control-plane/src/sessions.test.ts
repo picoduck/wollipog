@@ -10872,6 +10872,23 @@ test("an older runner can't appear to enforce Priority Order, yet keeps explicit
   assert.equal(preview.data?.status, "choice_required");
 });
 
+test("a runner too old for accounts at all still can't bypass a saved Priority Order (#4353)", () => {
+  for (const version of [RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts - 1, undefined]) {
+    const { db, hub, svc, request, meta } = priorityHarness();
+    db.registerRunner(meta, Date.now(), version);
+    const before = hub.sentOfType("start_session").length;
+    const refused = svc.createSession(request);
+    assert.equal(refused.status, 409, String(version));
+    assert.equal(refused.errorDetails?.code, PROVIDER_ACCOUNT_CHOICE_REQUIRED);
+    assert.equal(refused.providerAccountSelection?.refusal, "runner_update_required");
+    assert.equal(hub.sentOfType("start_session").length, before, "nothing starts");
+    const preview = svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID });
+    assert.equal(preview.data?.mode, "priority");
+    assert.equal(preview.data?.enforcement, "runner_update_required");
+    assert.equal(preview.data?.status, "choice_required");
+  }
+});
+
 test("a policy saved under a newer schema also fails closed (#4353)", () => {
   const { db, svc, request } = priorityHarness();
   (db as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }).db

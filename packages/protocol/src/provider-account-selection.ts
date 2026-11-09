@@ -196,6 +196,9 @@ export interface ProviderAccountEligibilityInput {
   usage?: SubscriptionUsageSnapshot;
   /** The control plane's own grant ledger refuses this account (#3239). */
   accessRefused?: boolean;
+  /** Only what is known counts: an unconfirmed sign-in or billing state doesn't disqualify, and later
+   * rules still run. */
+  positiveEvidenceOnly?: boolean;
   now: number;
 }
 
@@ -220,8 +223,10 @@ export function providerAccountIneligibility(
   if (agentUsesNonSubscriptionBilling(agent) || account.billing === "api" || usage?.state === "not_applicable") {
     return { reason: "api_billing" };
   }
-  if (account.authStatus !== "authenticated") return { reason: "sign_in_unknown" };
-  if (account.billing !== "subscription" && usage?.state !== "available") return { reason: "billing_unknown" };
+  if (!input.positiveEvidenceOnly) {
+    if (account.authStatus !== "authenticated") return { reason: "sign_in_unknown" };
+    if (account.billing !== "subscription" && usage?.state !== "available") return { reason: "billing_unknown" };
+  }
   if (account.selectionCooldownUntil !== undefined && account.selectionCooldownUntil > now) {
     return { reason: "cooldown", retryAt: account.selectionCooldownUntil };
   }
@@ -244,12 +249,10 @@ export function providerAccountIneligibility(
  * passed the control plane's fuller check seconds ago and the runner holds no better answer. */
 export function providerAccountLaunchIneligibility(
   account: ProviderAccountDefinition | undefined,
-  input: Omit<ProviderAccountEligibilityInput, "agent" | "accessRefused">,
+  input: Omit<ProviderAccountEligibilityInput, "agent" | "accessRefused" | "positiveEvidenceOnly">,
 ): ProviderAccountSkipReason | null {
   if (!account) return "missing";
-  const refused = providerAccountIneligibility(account, input);
-  if (!refused || refused.reason === "sign_in_unknown" || refused.reason === "billing_unknown") return null;
-  return refused.reason;
+  return providerAccountIneligibility(account, { ...input, positiveEvidenceOnly: true })?.reason ?? null;
 }
 
 export interface ProviderAccountSelectionInput {
