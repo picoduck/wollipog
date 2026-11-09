@@ -1,7 +1,9 @@
 # Provider Account Selection
 
-Provider Accounts on each machine groups compact account rows by provider inside one surface.
-Choose **Set as Default** in an account’s menu; its **Default** badge updates immediately. There is
+Provider Accounts on each machine groups compact account rows by provider inside one surface. With
+more than one account, each provider's heading chooses **Default Account** or **Priority Order**.
+
+Under Default Account, choose **Set as Default** in an account’s menu; its **Default** badge updates immediately. There is
 no separate picker or full-screen default editor. **Clear Default** in the default account’s menu
 restores the agent’s configured account or the existing fallback. One **Add Account…** action opens
 the existing dialog with its provider choice. The default applies to new
@@ -34,6 +36,16 @@ content-height dialog offers **Limit Access to This Server…** for an unrestric
 and **Remove This Server’s Access…** where granted or pending. These actions retain their consent
 and active-session checks. They do not set the default account. Recovery actions remain directly
 available in the account menu when needed.
+
+Under Priority Order, each ranked row shows its place, **Move Up** and **Move Down** buttons that work
+by keyboard and touch, and why it would be skipped. The group says which account new sessions are
+expected to use and why, and marks it **Next Session**. **Add to Priority Order** and **Remove From
+Priority Order** are in the account's menu. An account that isn't ranked reads **Not Ranked**, and one
+that left the machine keeps its place until removed. Turning Priority Order on starts from the saved
+default, then the listed accounts this server may use; returning to Default Account restores the
+default. New Session and New Multi-Agent Run show the expected account and its reason. Choosing a
+different account in New Session overrides the policy for that session. When no account is eligible,
+New Session asks for one before it can start.
 
 ## Selection Policy
 

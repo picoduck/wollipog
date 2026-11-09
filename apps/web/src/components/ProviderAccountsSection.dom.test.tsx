@@ -17,7 +17,7 @@ import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import type { MachineAccountsIntent } from "../navigation.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
-import { ProviderAccountsSection, providerAccountRemovalRefusal, providerProfileErrorMessage, PROFILES_UNSUPPORTED_ON_WINDOWS } from "./ProviderAccountsSection.js";
+import { initialPriorityOrder, movedPriorityOrder, ProviderAccountsSection, providerAccountRemovalRefusal, providerProfileErrorMessage, PROFILES_UNSUPPORTED_ON_WINDOWS } from "./ProviderAccountsSection.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -2026,5 +2026,137 @@ test("an expanded usage row keeps its disclosure during a failed reconnect refre
     assert.equal(toggle.getAttribute("aria-expanded"), "false");
     assert.equal(toggle.isConnected, true, "collapsing does not remove the operated control");
     assertNoDomNode(ui.row("Work").querySelector(".provider-usage-details"));
+  } finally { await ui.unmount(); }
+});
+
+const RANKED: ProviderAccountDefinition[] = [
+  { id: "first", label: "first@example.com", provider: "claude", authStatus: "unauthenticated", billing: "subscription" },
+  { id: "second", label: "second@example.com", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+  { id: "third", label: "third@example.com", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+  { id: "unranked", label: "unranked@example.com", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+];
+const POLICY = RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccountSelectionPolicy;
+const priorityPolicy = (order: string[], revision = 4) => ({ provider: "claude" as const, accountId: null, revision, mode: "priority" as const, schemaVersion: 1, fixedAccountId: "third", priorityAccountIds: order });
+
+function priorityClient(handlers: { write?: (input: { priorityAccountIds?: string[]; mode: string; expectedRevision: number }) => Promise<unknown> } = {}) {
+  const writes: Array<{ priorityAccountIds?: string[]; mode: string; expectedRevision: number }> = [];
+  const api = { ...client().client,
+    inspectProviderHomeLease: async () => ({ state: "none" }),
+    updateMachineProviderAccountPolicy: async (_runner: string, _provider: string, input: { priorityAccountIds?: string[]; mode: string; expectedRevision: number }) => {
+      writes.push(input);
+      if (handlers.write) await handlers.write(input);
+      return { providerAccountPolicy: priorityPolicy(input.priorityAccountIds ?? [], input.expectedRevision + 1) };
+    },
+    providerAccountSelection: async () => ({
+      provider: "claude", mode: "priority", policyRevision: 4, status: "selected", source: "priority", accountId: "second",
+      enforcement: "enforced", generatedAt: 1,
+      candidates: [
+        { accountId: "first", position: 1, eligible: false, reason: "signed_out" },
+        { accountId: "second", position: 2, eligible: true, selected: true },
+        { accountId: "third", position: 3, eligible: true },
+        { accountId: "unranked", position: null, eligible: false, reason: "not_ranked" },
+      ],
+    }),
+  } as unknown as ApiClient;
+  return { api, writes };
+}
+
+test("Priority Order lists its ranking, expected account and skip reasons, and moves by button (#4353)", async () => {
+  const { api, writes } = priorityClient();
+  const ui = await render({ runner: runnerView({ protocolVersion: POLICY, providerAccounts: RANKED,
+    providerAccountDefaults: [priorityPolicy(["first", "second", "third"])] }), api });
+  try {
+    await ui.settle();
+    const text = ui.container.textContent ?? "";
+    assert.match(text, /New sessions use/);
+    assert.match(text, /first account in the machine's Priority Order|first eligible account/);
+    assert.match(text, /Skipped: needs sign-in\./);
+    assert.match(text, /Next Session/);
+    assert.match(text, /Not Ranked/);
+    assert.equal(ui.container.querySelectorAll(".provider-account-rank").length, 3);
+    const up = ui.container.querySelector<HTMLButtonElement>('[data-move="first:up"]')!;
+    assert.equal(up.getAttribute("aria-disabled"), "true", "the first account can't move up");
+    await act(async () => up.click());
+    assert.deepEqual(writes, [], "and pressing it writes nothing");
+    const down = ui.container.querySelector<HTMLButtonElement>('[data-move="second:down"]')!;
+    assert.match(down.getAttribute("aria-label") ?? "", /^Move .* Down$/);
+    await act(async () => down.click()); await ui.settle();
+    assert.deepEqual(writes, [{ mode: "priority", priorityAccountIds: ["first", "third", "second"], expectedRevision: 4 }]);
+    assert.match(ui.container.querySelector('[role="status"].sr-only')?.textContent ?? "", /Moved .* to position 3 of 3\./);
+    assert.equal(domWindow.document.activeElement?.getAttribute("data-move"), "second:up", "a row that reached the edge hands focus to its other direction");
+  } finally { await ui.unmount(); }
+});
+
+test("a move that lost a race shows the saved order and asks for another action (#4353)", async () => {
+  const current = priorityPolicy(["third", "first", "second"], 5);
+  const { api, writes } = priorityClient({ write: async () => { throw new ApiError("changed", 409, undefined, { current }); } });
+  const ui = await render({ runner: runnerView({ protocolVersion: POLICY, providerAccounts: RANKED,
+    providerAccountDefaults: [priorityPolicy(["first", "second", "third"])] }), api });
+  try {
+    await ui.settle();
+    await act(async () => ui.container.querySelector<HTMLButtonElement>('[data-move="second:up"]')!.click()); await ui.settle();
+    assert.equal(writes.length, 1, "nothing retries on its own");
+    assert.match(ui.container.textContent ?? "", /changed in another client\. Review it, then choose again/);
+    assert.equal(ui.container.querySelector('[data-move="third:up"]')?.getAttribute("aria-disabled"), "true", "the saved order shows");
+  } finally { await ui.unmount(); }
+});
+
+test("switching to Priority Order starts from the saved default, without accounts this server can't use (#4353)", () => {
+  const accounts: ProviderAccountDefinition[] = [
+    { id: "a", label: "A", provider: "claude", authStatus: "authenticated" },
+    { id: "b", label: "B", provider: "claude", authStatus: "authenticated" },
+    { id: "theirs", label: "Theirs", provider: "claude", authStatus: "authenticated", profile: { id: "p", access: "not_granted" } },
+  ];
+  assert.deepEqual(initialPriorityOrder(accounts, "b"), ["b", "a"]);
+  assert.deepEqual(initialPriorityOrder(accounts, null), ["a", "b"]);
+  assert.deepEqual(initialPriorityOrder(accounts, "theirs"), ["a", "b"]);
+  assert.deepEqual(movedPriorityOrder(["a", "b", "c"], "b", "up"), ["b", "a", "c"]);
+  assert.deepEqual(movedPriorityOrder(["a", "b", "c"], "a", "up"), ["a", "b", "c"]);
+  assert.deepEqual(movedPriorityOrder(["a", "b", "c"], "c", "down"), ["a", "b", "c"]);
+});
+
+test("an older runner offers no Priority Order, and one policy already saved says it isn't applied (#4353)", async () => {
+  const older = POLICY - 1;
+  const { api } = priorityClient();
+  const fixed = await render({ runner: runnerView({ protocolVersion: older, providerAccounts: RANKED, providerAccountDefaults: [] }), api });
+  try {
+    await fixed.settle();
+    assert.equal(fixed.container.querySelectorAll('[role="radio"]').length, 0);
+    assert.match(fixed.container.textContent ?? "", /Update this machine's runner to use Priority Order/);
+  } finally { await fixed.unmount(); }
+  const saved = await render({ runner: runnerView({ protocolVersion: older, providerAccounts: RANKED,
+    providerAccountDefaults: [priorityPolicy(["second"])] }), api: { ...api,
+      providerAccountSelection: async () => ({ provider: "claude", mode: "priority", policyRevision: 4, status: "choice_required", source: "none",
+        refusal: "runner_update_required", candidates: [], enforcement: "runner_update_required", generatedAt: 1 }) } as unknown as ApiClient });
+  try {
+    await saved.settle();
+    assert.match(saved.container.textContent ?? "", /Priority Order Isn't Being Applied/);
+  } finally { await saved.unmount(); }
+});
+
+test("no eligible account says so instead of naming one (#4353)", async () => {
+  const { api } = priorityClient();
+  const ui = await render({ runner: runnerView({ protocolVersion: POLICY, providerAccounts: RANKED, providerAccountDefaults: [priorityPolicy(["first"])] }),
+    api: { ...api, providerAccountSelection: async () => ({ provider: "claude", mode: "priority", policyRevision: 4, status: "choice_required", source: "none",
+      refusal: "no_eligible_account", enforcement: "enforced", generatedAt: 1, candidates: [{ accountId: "first", position: 1, eligible: false, reason: "signed_out" }] }) } as unknown as ApiClient });
+  try {
+    await ui.settle();
+    const text = ui.container.textContent ?? "";
+    assert.match(text, /No Eligible Account/);
+    assert.match(text, /Choose an account for this session/);
+    assert.doesNotMatch(text, /New sessions use/);
+    assert.doesNotMatch(text, /Next Session/);
+  } finally { await ui.unmount(); }
+});
+
+test("a viewer sees the mode but gets no controls for it (#4353)", async () => {
+  const { api } = priorityClient();
+  const ui = await render({ runner: runnerView({ protocolVersion: POLICY, providerAccounts: RANKED, providerAccountDefaults: [priorityPolicy(["first", "second"])] }),
+    canManageProfiles: false, api });
+  try {
+    await ui.settle();
+    assert.equal(ui.container.querySelectorAll('[role="radio"]').length, 0);
+    assert.equal(ui.container.querySelectorAll("[data-move]").length, 0);
+    assert.match(ui.container.textContent ?? "", /Priority Order/);
   } finally { await ui.unmount(); }
 });

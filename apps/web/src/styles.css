@@ -10792,6 +10792,16 @@ textarea {
 .provider-accounts-list > .row + .row { box-shadow: inset 0 1px 0 var(--border); }
 .provider-accounts-surface > .provider-account-group:first-child > .provider-settings-heading { border-top-left-radius: var(--radius-md); border-top-right-radius: var(--radius-md); }
 .provider-default-marker { color: var(--accent); font: var(--type-small); }
+/* Priority Order (#4353): the rank leads the account's name at every width, and each account's Move
+   Up and Move Down sit before its menu, where the actions' gap keeps their touch areas apart. */
+.provider-account-rank { flex: none; color: var(--text-dim); font: var(--type-small); font-variant-numeric: tabular-nums; }
+.provider-selection-summary { padding: var(--space-2) var(--space-3); border-top: 1px solid var(--border); }
+.provider-selection-summary p { margin: 0; }
+.provider-selection-note { margin: 0; padding: var(--space-2) var(--space-3); }
+.provider-account-move[aria-disabled="true"] { opacity: 0.45; cursor: default; }
+/* A skip reason is why the account wasn't chosen, so it wraps rather than truncates. */
+.provider-account-sub:has(.provider-account-skip) { white-space: normal; overflow: visible; flex-wrap: wrap; }
+.provider-account-skip { white-space: normal; overflow-wrap: anywhere; }
 .provider-accounts-list > .row {
   border-radius: unset;
   height: auto;
@@ -10836,6 +10846,14 @@ textarea {
   .provider-accounts-list .provider-usage-details { grid-column: 1 / -1; grid-row: 3; }
   .provider-accounts-list .provider-account-actions,
   .provider-accounts-list .provider-account-usage + .provider-account-actions { grid-column: 2; grid-row: 1 / span 2; }
+  /* A ranked row's controls need the width its name and skip reason would lose beside them, so the
+     name takes the first line whole and the controls share the second with its usage. */
+  .provider-accounts-list > .row:has(.provider-account-move) > .row-body { grid-column: 1 / -1; }
+  .provider-accounts-list > .row:has(.provider-account-move) .provider-usage-toggle,
+  .provider-accounts-list > .row:has(.provider-account-move) .provider-usage-empty { grid-column: 1; grid-row: 2; align-self: center; }
+  .provider-accounts-list > .row:has(.provider-account-move) .provider-account-actions { grid-column: 2; grid-row: 2; padding-block: var(--space-1); }
+  .provider-accounts-list > .row:has(.provider-account-move) .provider-usage-details { grid-row: 3; }
+  .provider-default-marker { white-space: nowrap; }
 }
 /* A provider sign-in's two numbered steps and its endings (#2996, §8.7, §13.2): a local block of the
    shared ProviderSignIn part. Each step's first line is a 28px control (36px or 44px on touch), and

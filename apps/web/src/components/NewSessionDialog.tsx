@@ -8,7 +8,10 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
+import { providerAccountExpectationSentence, providerAccountSelectionRefreshKey, providerAccountSkipLabel, useProviderAccountSelection } from "./ProviderAccountSelection.js";
 import {
+  PROVIDER_ACCOUNT_CHOICE_REQUIRED,
+  providerAccountPolicyMode,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   WORKFLOW_DECISION_CATEGORIES,
   advertisesOrchestratorAdditiveRole,
@@ -320,6 +323,7 @@ export function NewSessionDialog({
   const initialAgentSelection = savedAgentSelection(initialAgentOptions, agentDefaults[runnerId], runner?.agents);
   const [agentId, setAgentId] = useState(initialAgentSelection.agentId);
   const [providerAccountId, setProviderAccountId] = useState("");
+  const [accountSelectionRefresh, setAccountSelectionRefresh] = useState(0);
   // `undefined` until the user chooses: a saved Orchestrator harness default then selects the role
   // on the user's behalf, exactly as the saved preset did before the role became independent.
   const [roleOverride, setRoleOverride] = useState<"normal" | "orchestrator" | undefined>(undefined);
@@ -549,6 +553,13 @@ export function NewSessionDialog({
     : undefined;
   const savedProviderAccountMissing = !!savedProviderAccount?.accountId &&
     !providerAccounts.some((account) => account.id === savedProviderAccount.accountId);
+  // What this launch would use if nobody chooses, from the launch's own resolver (#4353). Project
+  // sessions can differ, because a policy won't move a project's account-held memory.
+  const accountSelection = useProviderAccountSelection(runnerId || undefined,
+    provider && agentId ? { agentId, ...(selectedProjectId ? { projectId: selectedProjectId } : {}) } : null,
+    `${providerAccountSelectionRefreshKey(runner, true)}\0${accountSelectionRefresh}`);
+  const policyMode = providerAccountPolicyMode(savedProviderAccount);
+  const policyChoiceRequired = policyMode !== "fixed" && accountSelection?.status === "choice_required";
   const providerAccountTitles = maskedAccountTitles(providerAccounts.map((account) => account.label));
   // Bound to this exact account list: another Machine or Agent offers other accounts, hidden again.
   const [accountIdentifiersRevealed, toggleAccountIdentifiers] = useAccountIdentifierReveal(
@@ -563,13 +574,20 @@ export function NewSessionDialog({
     if (selectionChanged) accountChosenByUser.current = false;
     if (accountChosenByUser.current && providerAccounts.some((account) => account.id === providerAccountId)) return;
     accountChosenByUser.current = false;
+    // Under a policy that chooses among accounts, show its expected account, and nothing until a
+    // choice exists: the control plane decides at launch, and the first-listed account would mislead.
+    if (policyMode !== "fixed") {
+      setProviderAccountId(accountSelection?.status === "selected" ? accountSelection.accountId ?? "" : "");
+      return;
+    }
     const preferred = savedProviderAccount?.accountId ?? agent?.defaultProviderAccountId;
     // Like the control plane's implicit choice, never a profile only other control planes may use (#3240).
     setProviderAccountId(savedProviderAccountMissing ? "" :
       providerAccounts.find((account) => account.id === preferred)?.id ??
       providerAccounts.find((account) => account.profile?.access !== "not_granted")?.id ?? "");
   }, [accountSelectionKey, agent?.defaultProviderAccountId, savedProviderAccount?.accountId,
-    savedProviderAccountMissing, providerAccountId, providerAccounts.map((account) => account.id).join("\0")]);
+    savedProviderAccountMissing, providerAccountId, providerAccounts.map((account) => account.id).join("\0"),
+    policyMode, accountSelection?.status, accountSelection?.accountId]);
   const savedPermissionMode = savedSessionPermissionMode(defaultsReady ? harnessDefaults?.view ?? null : null, agent);
   const savedPiModeUnavailableForTarget = agent?.driver === "pi" && executionTarget !== undefined &&
     executionTarget.adapter !== "host" && savedPermissionMode !== undefined &&
@@ -583,7 +601,7 @@ export function NewSessionDialog({
     runnerSupportsProtocol(runner?.protocolVersion, "wslSafeLauncher") &&
     runner?.runtime?.executionIsolation?.mode === "bwrap";
   const hostExecutionTarget = !executionTarget || executionTarget.adapter === "host";
-  const missingRequiredAccountChoice = hostExecutionTarget && savedProviderAccountMissing && !providerAccountId;
+  const missingRequiredAccountChoice = hostExecutionTarget && (savedProviderAccountMissing || policyChoiceRequired) && !providerAccountId;
   // Availability is DERIVED from the sentence that explains it, so the two cannot disagree. The
   // preset card is rendered either way now — §11.3 — and a disabled card whose reason contradicted
   // why it was disabled would be worse than the omission it replaced.
@@ -1235,6 +1253,8 @@ export function NewSessionDialog({
         ? e.details.sessionId
         : null;
       if (keptSessionId) setRetainedSessionId(keptSessionId);
+      // The launch's own answer may be newer than the preview: read again, so the choice it asks for appears.
+      if (e instanceof ApiError && e.code === PROVIDER_ACCOUNT_CHOICE_REQUIRED) setAccountSelectionRefresh((value) => value + 1);
       setRequestFailure({
         // Only a genuine impossibility stops Full Control, and its reason is the sentence (#2940).
         sentence: e instanceof FullControlBlockedError ? e.message : createFailureSentence(e, keptSessionId !== null),
@@ -1643,7 +1663,7 @@ export function NewSessionDialog({
               ))}
           </div>
 
-          {hostExecutionTarget && (providerAccounts.length > 1 || savedProviderAccountMissing) && (
+          {hostExecutionTarget && (providerAccounts.length > 1 || savedProviderAccountMissing || policyChoiceRequired) && (
             <div className="field">
               <div className="pid-field-head">
                 <label className="new-session-field-label">Account</label>
@@ -1664,7 +1684,9 @@ export function NewSessionDialog({
                 options={providerAccounts.map((account, index) => ({
                   value: account.id,
                   label: accountIdentifiersRevealed ? account.label : providerAccountTitles[index]!,
-                  description: providerAccountDescription(account.authStatus),
+                  description: accountSelection?.candidates.find((candidate) => candidate.accountId === account.id)?.reason && policyMode === "priority"
+                    ? providerAccountSkipLabel(accountSelection.candidates.find((candidate) => candidate.accountId === account.id)!) ?? providerAccountDescription(account.authStatus)
+                    : providerAccountDescription(account.authStatus),
                 }))}
                 placeholder="Choose an Account…"
                 invalid={missingRequiredAccountChoice}
@@ -1672,8 +1694,13 @@ export function NewSessionDialog({
               />
               {missingRequiredAccountChoice && (
                 <FieldError id={accountReasonId}>
-                  The saved default account isn't on this machine anymore. Choose an account, or change the default in this machine's Provider Accounts.
+                  {policyChoiceRequired && accountSelection
+                    ? providerAccountExpectationSentence(accountSelection)
+                    : "The saved default account isn't on this machine anymore. Choose an account, or change the default in this machine's Provider Accounts."}
                 </FieldError>
+              )}
+              {!missingRequiredAccountChoice && !accountChosenByUser.current && accountSelection?.status === "selected" && (
+                <p className="field-helper">{providerAccountExpectationSentence(accountSelection)}</p>
               )}
             </div>
           )}

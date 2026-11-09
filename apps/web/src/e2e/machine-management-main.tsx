@@ -11,6 +11,7 @@ import {
   type RunnerView,
   type UiSnapshotMessage,
 } from "@wollipog/protocol";
+import { providerAccountPolicyFixedId, resolveProviderAccountSelection, type SubscriptionUsageSnapshot } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
@@ -202,6 +203,27 @@ if (Object.keys(leases).length && runner) {
 const fixtureParams = new URLSearchParams(window.location.search);
 // `machines=0` opens on the empty Machines tab (#2984).
 if (fixtureParams.get("machines") === "0") runner = null;
+// Priority Order (#4353): three ranked Claude accounts, the first signed out and the second at a limit.
+if (fixtureParams.has("priority") && runner) {
+  runner.providerAccounts = [
+    { id: "claude-work", label: "work@example.com", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+    { id: "claude-personal", label: "personal@example.com", provider: "claude", authStatus: "unauthenticated", billing: "subscription" },
+    { id: "claude-team", label: "team@example.com", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+    { id: "claude-credits", label: "credits@example.com", provider: "claude", authStatus: "authenticated", billing: "api" },
+    { id: "codex-team", label: "Codex Team", provider: "codex", authStatus: "authenticated", billing: "subscription" },
+    { id: "codex-solo", label: "Codex Solo", provider: "codex", authStatus: "authenticated", billing: "subscription" },
+  ];
+  if (fixtureParams.get("priority") !== "off") {
+    runner.providerAccountDefaults = [{ provider: "claude", accountId: null, revision: 3, mode: "priority", schemaVersion: 1,
+      fixedAccountId: "claude-team", priorityAccountIds: fixtureParams.get("priority") === "none"
+        ? ["claude-personal", "claude-credits"] : ["claude-personal", "claude-work", "claude-team", "claude-gone"] }];
+  }
+}
+const fixturePolicyUsage = (): SubscriptionUsageSnapshot[] => fixtureParams.has("priorityLimit") ? [{
+  sourceId: "fixture-work", runnerId: runner?.runnerId ?? "", agentId: "claude", provider: "claude", state: "available",
+  fetchedAt: Date.now(), providerAccountId: "claude-work",
+  buckets: [{ id: "five-hour", label: "5 Hours", status: "exhausted", resetsAt: Date.now() + 2 * 3_600_000 }],
+}] : [];
 // `identity=fail` fails every permission load until `restoreIdentity()`, so Retry can recover (#2984).
 let identityFails = fixtureParams.get("identity") === "fail";
 // `local=setup` stands in for the desktop app's bundled runner, available and not yet set up, so
@@ -589,6 +611,48 @@ const client = {
     };
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { automaticAccountSwitching: structuredClone(runner.automaticAccountSwitching) };
+  },
+  updateMachineProviderAccountPolicy: async (
+    _runnerId: string,
+    provider: "claude" | "codex",
+    body: { mode: "fixed" | "priority"; priorityAccountIds?: string[]; fixedAccountId?: string | null; expectedRevision: number },
+  ) => {
+    if (fixtureParams.has("policySaveDelay")) await new Promise(resolve => setTimeout(resolve, 250));
+    if (!runner) throw new Error("runner not found");
+    const current = runner.providerAccountDefaults?.find((choice) => choice.provider === provider);
+    if (fixtureParams.has("policyConflict") && body.priorityAccountIds?.[0] !== current?.priorityAccountIds?.[0]) {
+      const moved = { ...current!, revision: current!.revision + 1, priorityAccountIds: [...current!.priorityAccountIds!].reverse() };
+      runner.providerAccountDefaults = [moved];
+      throw new ApiError("This provider's account selection changed in another client", 409, undefined, { current: moved });
+    }
+    if (body.expectedRevision !== (current?.revision ?? 0)) throw new Error("Account selection changed in another client");
+    const fixedAccountId = body.fixedAccountId !== undefined ? body.fixedAccountId : providerAccountPolicyFixedId(current);
+    const providerAccountPolicy = {
+      provider, accountId: body.mode === "fixed" ? fixedAccountId : null, revision: body.expectedRevision + 1, mode: body.mode, schemaVersion: 1,
+      fixedAccountId, priorityAccountIds: body.priorityAccountIds ?? current?.priorityAccountIds ?? [],
+    };
+    runner.providerAccountDefaults = [
+      ...(runner.providerAccountDefaults ?? []).filter((choice) => choice.provider !== provider),
+      providerAccountPolicy,
+    ];
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { providerAccountPolicy };
+  },
+  providerAccountSelection: async (_runnerId: string, target: { agentId?: string; provider?: "claude" | "codex" }) => {
+    if (!runner) throw new Error("runner not found");
+    const provider = target.provider ?? "claude";
+    const result = resolveProviderAccountSelection({
+      provider,
+      policy: runner.providerAccountDefaults?.find((choice) => choice.provider === provider),
+      accounts: (runner.providerAccounts ?? []).filter((account) => account.provider === provider),
+      agent: undefined,
+      native: true,
+      usage: fixturePolicyUsage(),
+      policySupported: !fixtureParams.has("outdated"),
+      now: Date.now(),
+    });
+    return { ...result, enforcement: fixtureParams.has("offline") ? "machine_offline" as const
+      : fixtureParams.has("outdated") && result.mode !== "fixed" ? "runner_update_required" as const : "enforced" as const, generatedAt: Date.now() };
   },
   updateMachineProviderAccountDefault: async (
     _runnerId: string,

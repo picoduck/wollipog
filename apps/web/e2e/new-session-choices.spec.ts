@@ -72,6 +72,32 @@ test("selects a provider account and submits its opaque id", async ({ page }) =>
     .toContain('"providerAccountId":"claude-personal"');
 });
 
+test("Priority Order shows its expected account and reason, and an explicit choice overrides it (#4353)", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openDialog(page, "?accountPriority=selected");
+  const account = page.getByRole("button", { name: /Account:/ });
+  await expect(account).toHaveAccessibleName(/Account: Personal/);
+  await expect(page.getByText(/first eligible account in the machine's Priority Order\. Skipped ahead of it: one needs sign-in\./u)).toBeVisible();
+  await page.screenshot({ path: "playwright-report/provider-accounts/new-session-expected-desktop.png", fullPage: true });
+  await page.getByRole("button", { name: "Create Session" }).click();
+  await expect.poll(() => page.evaluate(() => document.documentElement.dataset.createSessionRequest)).toBeTruthy();
+  expect(await page.evaluate(() => document.documentElement.dataset.createSessionRequest), "the expected account is not an override").not.toContain("providerAccountId");
+});
+
+test("no eligible account requires an explicit choice before a session starts (#4353)", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openDialog(page, "?accountPriority=none");
+  await expect(page.getByText(/No Claude account in this machine's Priority Order can start this session/u)).toBeVisible();
+  await page.screenshot({ path: "playwright-report/provider-accounts/new-session-choice-required-mobile.png", fullPage: true });
+  await page.getByRole("button", { name: "Create Session" }).click();
+  await expect.poll(() => page.evaluate(() => document.documentElement.dataset.createSessionCount ?? "0")).toBe("0");
+  await page.getByRole("button", { name: /Account:/ }).click();
+  await page.getByRole("option", { name: /Personal/ }).click();
+  await page.getByRole("button", { name: "Create Session" }).click();
+  await expect.poll(() => page.evaluate(() => document.documentElement.dataset.createSessionRequest))
+    .toContain('"providerAccountId":"claude-personal"');
+});
+
 for (const viewport of [
   { name: "desktop", width: 1280, height: 900 },
   { name: "phone", width: 390, height: 780 },

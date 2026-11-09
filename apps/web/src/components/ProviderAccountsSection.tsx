@@ -1,6 +1,7 @@
 import React, { Fragment, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import {
-  PROVIDER_CREDENTIAL_IMPORT_DEFAULT_SOURCE_LABEL, runnerSupportsProtocol, runnerSupportsProviderCredentialImport,
+  PROVIDER_ACCOUNT_POLICY_NOT_FIXED, PROVIDER_CREDENTIAL_IMPORT_DEFAULT_SOURCE_LABEL, providerAccountPolicyMode, providerAccountPolicyFixedId,
+  runnerSupportsProtocol, runnerSupportsProviderCredentialImport,
   type ProviderAccountDefinition, type ProviderHomeLeaseInspection, type ProviderLoginView, type RunnerView,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
@@ -18,7 +19,9 @@ import { AccountIdentifier } from "./AccountIdentifier.js";
 import { conflictCurrent, RunningSessionAccountSettings } from "./ProviderAccountSettings.js";
 import { Modal } from "./common.js";
 import { AddProviderAccountDialog, providerLoginRunning, providerName, type ProviderCredentialImportOffer } from "./AddProviderAccountDialog.js";
-import { MoreHorizontalIcon, SignInIcon } from "./Icons.js";
+import { ArrowDownIcon, ArrowUpIcon, MoreHorizontalIcon, SignInIcon } from "./Icons.js";
+import { SegmentedControl } from "./ui/ChoiceControls.js";
+import { ExpectedProviderAccount, providerAccountExpectationSentence, providerAccountSelectionRefreshKey, providerAccountSkipLabel, useProviderAccountSelection } from "./ProviderAccountSelection.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuLabel, MenuSeparator, MenuSurface } from "./Menu.js";
 import { Notice } from "./Notice.js";
@@ -179,6 +182,46 @@ const PROFILE_ACCESS: Readonly<Record<NonNullable<ProviderAccountDefinition["pro
 
 type BusyAction = "sign_in" | "cancel" | "remove" | "adopt" | "revoke" | "recover" | "default";
 
+type AccountProvider = ProviderAccountDefinition["provider"];
+type AccountPolicy = NonNullable<RunnerView["providerAccountDefaults"]>[number];
+
+/** The order Priority Order starts from: the saved default first, then the list as shown, without an
+ * account this server may not use. */
+export function initialPriorityOrder(accounts: readonly ProviderAccountDefinition[], fixedAccountId: string | null): string[] {
+  const usable = accounts.filter((account) => account.profile?.access !== "not_granted").map((account) => account.id);
+  return fixedAccountId && usable.includes(fixedAccountId) ? [fixedAccountId, ...usable.filter((id) => id !== fixedAccountId)] : usable;
+}
+
+/** Swap one entry with its neighbor. An edge entry stays put. */
+export function movedPriorityOrder(order: readonly string[], accountId: string, direction: "up" | "down"): string[] {
+  const from = order.indexOf(accountId);
+  const to = from + (direction === "up" ? -1 : 1);
+  if (from < 0 || to < 0 || to >= order.length) return [...order];
+  const next = [...order];
+  [next[from], next[to]] = [next[to]!, next[from]!];
+  return next;
+}
+
+/** Keeps a moved row's control focused, and a reader told where it landed. A button that just reached
+ * an edge hands focus to its other direction, so another press still does something. */
+function MoveButton({ accountId, direction, name, edge, busy, onMove }: {
+  accountId: string;
+  direction: "up" | "down";
+  name: string;
+  edge: boolean;
+  busy: boolean;
+  onMove: () => void;
+}) {
+  const word = direction === "up" ? "Up" : "Down";
+  return (
+    <button type="button" className="icon-btn sm provider-account-move" data-move={`${accountId}:${direction}`}
+      title={`Move ${word}`} aria-label={`Move ${name} ${word}`} aria-disabled={edge || busy || undefined} aria-busy={busy || undefined}
+      onClick={() => { if (!edge && !busy) onMove(); }}>
+      {direction === "up" ? <ArrowUpIcon /> : <ArrowDownIcon />}
+    </button>
+  );
+}
+
 interface RowMenuItem {
   label: string;
   danger?: boolean;
@@ -269,8 +312,13 @@ function AccountMenu({ name, heading, busy, items }: {
  * expansion under it: its sign-in's steps or ending (#2996). While a sign-in runs for a label that is
  * a hidden email, `hiddenTitle` ("Signing In to Codex") replaces the mask, with "Email hidden" as line 2.
  */
-function ProviderAccountRow({ identity, label, hiddenTitle, profile, lease, status, actions, children, isDefault = false, usage }: {
-  isDefault?: boolean;
+function ProviderAccountRow({ identity, label, hiddenTitle, profile, lease, status, actions, children, marker, rank, skip, usage }: {
+  /** "Default", or "Next Session" for the account Priority Order expects to use. */
+  marker?: string;
+  /** The account's place in the Priority Order, leading its name. */
+  rank?: number;
+  /** Why Priority Order passes over this account, as a sentence. */
+  skip?: string;
   usage?: ReactNode;
   identity: string;
   label: string;
@@ -289,18 +337,20 @@ function ProviderAccountRow({ identity, label, hiddenTitle, profile, lease, stat
         <span className="row-icon" aria-hidden="true"><SignInIcon /></span>
         <span className="row-body">
           <span className="row-line">
+            {rank !== undefined && <span className="provider-account-rank"><span className="sr-only">Priority </span>{rank}</span>}
             {hiddenTitle ? <span className="row-title provider-account-signing-title">{hiddenTitle}</span>
               : <AccountIdentifier identity={identity} className="row-title" value={label} label="Account Email" />}
-            {isDefault && <span className="provider-default-marker">Default</span>}
+            {marker && <span className="provider-default-marker">{marker}</span>}
             {meta && <StatusBadge meta={meta} />}
           </span>
-          {(hiddenTitle || profile || lease) && <span className="row-sub provider-account-sub">
+          {(hiddenTitle || profile || lease || skip) && <span className="row-sub provider-account-sub">
             {hiddenTitle ? <span>Email hidden</span> : (
               <>
                 {profile && <span>{profile}</span>}
               </>
             )}
             {lease && <span className="provider-account-lease" title={lease.title}>{lease.label}</span>}
+            {skip && <span className="provider-account-skip">{skip}</span>}
           </span>}
         </span>
         {usage}
@@ -312,6 +362,78 @@ function ProviderAccountRow({ identity, label, hiddenTitle, profile, lease, stat
 }
 
 type SectionNotice = { title: ReactNode; body: string; details?: string };
+
+/** What Priority Order expects to do now, and whether this Machine can do it. */
+function PrioritySummary({ runner, preview }: {
+  runner: RunnerView;
+  preview: NonNullable<ReturnType<typeof useProviderAccountSelection>>;
+}) {
+  if (preview.enforcement === "runner_update_required") {
+    return <Notice compact tone="warning" title="Priority Order Isn't Being Applied">
+      This machine's runner can't enforce Priority Order. New sessions here need an account chosen until the runner is updated.
+    </Notice>;
+  }
+  if (preview.status === "choice_required") {
+    return <Notice compact tone="warning" title="No Eligible Account">{providerAccountExpectationSentence(preview)}</Notice>;
+  }
+  return <div className="provider-selection-summary">
+    {preview.enforcement === "machine_offline" && <p className="section-note">This machine is offline. The order applies when it reconnects.</p>}
+    <ExpectedProviderAccount runner={runner} preview={preview} />
+  </div>;
+}
+
+/**
+ * One provider's heading and policy: the mode, what the policy expects now, then its rows.
+ * A component of its own so each provider reads its own preview.
+ */
+function ProviderAccountGroup({ runner, online, provider, policy, canEdit, saving, chooseMode, providerNotices, rows }: {
+  runner: RunnerView;
+  online: boolean;
+  provider: AccountProvider;
+  policy: AccountPolicy | undefined;
+  canEdit: boolean;
+  saving: boolean;
+  chooseMode: (provider: AccountProvider, mode: "fixed" | "priority") => void;
+  /** The fixed default's own notices, shown only under that mode. */
+  providerNotices: ReactNode;
+  rows: (preview: ReturnType<typeof useProviderAccountSelection>) => ReactNode;
+}) {
+  const mode = providerAccountPolicyMode(policy);
+  const accounts = (runner.providerAccounts ?? []).filter((account) => account.provider === provider);
+  const preview = useProviderAccountSelection(runner.runnerId, mode === "priority" ? { provider } : null,
+    providerAccountSelectionRefreshKey(runner, online));
+  const prioritySupported = runnerSupportsProtocol(runner.protocolVersion, "providerAccountSelectionPolicy");
+  const anyUsable = accounts.some((account) => account.profile?.access !== "not_granted");
+  // One account has nothing to rank, and an older runner can't enforce an order, so the choice appears
+  // once there is one to make. A saved policy keeps its control, so it can always be replaced.
+  const offerModes = canEdit && (mode !== "fixed" || (accounts.length > 1 && prioritySupported));
+  const fixedId = providerAccountPolicyFixedId(policy);
+  return <div className="provider-account-group">
+    <div className="provider-settings-heading">
+      <h4>{providerName(provider)}</h4>
+      {offerModes ? (
+        <SegmentedControl<"fixed" | "priority">
+          className="sm"
+          label={`${providerName(provider)} Account Selection`}
+          value={mode === "unsupported" ? null : mode}
+          onChange={(next) => { if (!saving && next !== mode) chooseMode(provider, next); }}
+          options={[
+            { value: "fixed", label: "Default Account" },
+            { value: "priority", label: "Priority Order",
+              ...(!anyUsable && mode !== "priority" ? { disabled: true, disabledReason: "This server needs access to an account first." } : {}) },
+          ]}
+        />
+      ) : <span className="section-note">{mode === "priority" ? "Priority Order" : mode === "unsupported" ? "Newer Policy" : fixedId ? "Default Account" : "No Default"}</span>}
+    </div>
+    {canEdit && !prioritySupported && mode === "fixed" && accounts.length > 1 && <p className="section-note provider-selection-note">Update this machine's runner to use Priority Order.</p>}
+    {mode === "unsupported" && <Notice compact tone="warning" title="Account Policy From a Newer Server">
+      This server can't apply the saved policy, so new sessions need an account chosen. {canEdit ? "Choose a mode to replace it." : "Ask this machine's owner to replace it."}
+    </Notice>}
+    {mode === "priority" && preview && <PrioritySummary runner={runner} preview={preview} />}
+    {mode === "fixed" && providerNotices}
+    <div className="provider-accounts-list">{rows(preview)}</div>
+  </div>;
+}
 
 /**
  * Provider Accounts, a section of the machine detail (#2995, docs/design-system.md §4.5): its count
@@ -349,6 +471,8 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   const [notice, setNotice] = useState<SectionNotice | null>(null);
   const defaultWrites = useRef(new Set<ProviderAccountDefinition["provider"]>());
   const [savedDefaults, setSavedDefaults] = useState<NonNullable<RunnerView["providerAccountDefaults"]>>([]);
+  // A control whose row just moved takes focus back once the list has redrawn, and a reader hears where.
+  const [moved, setMoved] = useState<{ selector: string; fallback: string; message: string } | null>(null);
   const usage = useMachineAccountUsage(runner, online);
   const defaults = (["claude", "codex"] as const).flatMap(provider => {
     const live = runner.providerAccountDefaults?.find(value => value.provider === provider);
@@ -639,7 +763,8 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   const savedDefault = startedAccount
     ? defaults.find((entry) => entry.provider === startedAccount.provider)
     : undefined;
-  const defaultOffer = startedAccount && canManageProfiles && canManage &&
+  // Priority Order ranks a new account from its menu; a default wouldn't apply.
+  const defaultOffer = startedAccount && canManageProfiles && canManage && providerAccountPolicyMode(savedDefault) === "fixed" &&
     runnerSupportsProtocol(runner.protocolVersion, "providerAccounts") && savedDefault?.accountId !== startedAccount.id
     ? startedAccount : undefined;
   const saveDefault = async (provider: ProviderAccountDefinition["provider"], account: ProviderAccountDefinition | null) => {
@@ -663,19 +788,94 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
         if (valid) setSavedDefaults(values => [...values.filter(value => value.provider !== provider), {
           provider, accountId: current.accountId as string | null, revision: current.revision as number,
         }]);
+        const notFixed = cause instanceof ApiError && cause.code === PROVIDER_ACCOUNT_POLICY_NOT_FIXED;
         setNotice({ title: "Couldn't Update the Default", body: valid
           ? "The default changed in another client. Review the Default badge, then choose again."
+          : notFixed ? "This provider's account selection changed in another client. Review it, then choose again."
           : machineSettingsMutationError(cause) });
       } finally { defaultWrites.current.delete(provider); }
     });
   };
 
+  /** Write the whole policy against the revision on screen. A conflict shows what is saved now and
+   * waits for another explicit action. Nothing is retried or overwritten. */
+  const savePolicy = async (provider: AccountProvider, change: { mode: "fixed" | "priority"; priorityAccountIds?: string[] }, onSaved: () => void) => {
+    if (!canEditDefaults || defaultWrites.current.has(provider)) return;
+    defaultWrites.current.add(provider);
+    setNotice(null);
+    await track(`policy:${provider}`, "default", async () => {
+      try {
+        const { providerAccountPolicy } = await api.updateMachineProviderAccountPolicy(runner.runnerId, provider, {
+          ...change, expectedRevision: defaults.find((value) => value.provider === provider)?.revision ?? 0,
+        });
+        setSavedDefaults((current) => [...current.filter((value) => value.provider !== provider), providerAccountPolicy]);
+        onSaved();
+      } catch (cause) {
+        const current = conflictCurrent(cause);
+        if (current?.provider === provider) setSavedDefaults((values) => [...values.filter((value) => value.provider !== provider), current as unknown as AccountPolicy]);
+        setNotice({ title: "Couldn't Update Account Selection", body: current?.provider === provider
+          ? "This provider's account selection changed in another client. Review it, then choose again."
+          : machineSettingsMutationError(cause) });
+      } finally { defaultWrites.current.delete(provider); }
+    });
+  };
+
+  const chooseMode = (provider: AccountProvider, mode: "fixed" | "priority") => {
+    const policy = defaults.find((value) => value.provider === provider);
+    const saved = policy?.priorityAccountIds ?? [];
+    const order = saved.length ? saved : initialPriorityOrder(accounts.filter((account) => account.provider === provider), providerAccountPolicyFixedId(policy));
+    void savePolicy(provider, mode === "priority" ? { mode, priorityAccountIds: order } : { mode }, () => {
+      showToast(`${mode === "priority" ? "Priority Order" : "Default Account"} now applies to new ${providerName(provider)} sessions. Running sessions aren't affected.`, { tone: "success" });
+    });
+  };
+
+  const moveAccount = (provider: AccountProvider, accountId: string, direction: "up" | "down", name: string) => {
+    const order = defaults.find((value) => value.provider === provider)?.priorityAccountIds ?? [];
+    const next = movedPriorityOrder(order, accountId, direction);
+    void savePolicy(provider, { mode: "priority", priorityAccountIds: next }, () => {
+      const position = next.indexOf(accountId) + 1;
+      const atEdge = direction === "up" ? position === 1 : position === next.length;
+      const opposite = direction === "up" ? "down" : "up";
+      setMoved({
+        selector: `${accountId}:${atEdge ? opposite : direction}`,
+        fallback: `${accountId}:${direction}`,
+        message: `Moved ${name} to position ${position} of ${next.length}.`,
+      });
+    });
+  };
+
+  const rankAccount = (provider: AccountProvider, accountId: string, ranked: boolean) => {
+    const order = defaults.find((value) => value.provider === provider)?.priorityAccountIds ?? [];
+    void savePolicy(provider, { mode: "priority", priorityAccountIds: ranked ? [...order, accountId] : order.filter((id) => id !== accountId) }, () => {
+      showToast(ranked ? "Account added to the Priority Order." : "Account removed from the Priority Order.", { tone: "success" });
+    });
+  };
+
+  useEffect(() => {
+    if (!moved) return;
+    // Account ids hold only letters, digits and `._-`, so they are safe inside the quotes.
+    const button = sectionRef.current?.querySelector<HTMLElement>(`[data-move="${moved.selector}"]`) ??
+      sectionRef.current?.querySelector<HTMLElement>(`[data-move="${moved.fallback}"]`);
+    button?.focus();
+  }, [moved]);
+
   const menuItems = (account: ProviderAccountDefinition, signingIn: boolean): RowMenuItem[] => {
     if (!canManage) return [];
     const offline = online ? {} : { disabled: true, description: OFFLINE };
     const items: RowMenuItem[] = [];
-    if (canEditDefaults) {
-      const isDefault = defaults.find(value => value.provider === account.provider)?.accountId === account.id;
+    const policy = defaults.find(value => value.provider === account.provider);
+    if (canEditDefaults && providerAccountPolicyMode(policy) === "priority") {
+      const order = policy?.priorityAccountIds ?? [];
+      const ranked = order.includes(account.id);
+      const saving = defaultWrites.current.has(account.provider);
+      items.push({ label: ranked ? "Remove From Priority Order" : "Add to Priority Order",
+        ...(saving ? { disabled: true, description: "Saving the account selection…" }
+          : ranked && order.length === 1 ? { disabled: true, description: "Priority Order needs at least one account." }
+          : !ranked && account.profile?.access === "not_granted" ? { disabled: true, description: "This control plane needs access to the account first." } : {}),
+        onClick: () => rankAccount(account.provider, account.id, !ranked),
+      });
+    } else if (canEditDefaults && providerAccountPolicyMode(policy) === "fixed") {
+      const isDefault = policy?.accountId === account.id;
       const blocked = !isDefault && account.profile?.access === "not_granted";
       const saving = defaultWrites.current.has(account.provider);
       items.push({ label: isDefault ? "Clear Default" : "Set as Default",
@@ -795,25 +995,46 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
           New {providerName(defaultOffer.provider)} sessions on this machine that don't choose an account will use it.
         </Notice>
       )}
-      {count > 0 || defaults.some(value => value.accountId) ? <div className="surface provider-accounts-surface">
+      {moved && <span className="sr-only" role="status">{moved.message}</span>}
+      {count > 0 || defaults.some(value => value.accountId || value.priorityAccountIds?.length) ? <div className="surface provider-accounts-surface">
       {(["claude", "codex"] as const).filter(provider => accounts.some(account => account.provider === provider) ||
-        newLogins.some(login => login.provider === provider) || defaults.some(value => value.provider === provider && value.accountId)).map(provider => {
+        newLogins.some(login => login.provider === provider) ||
+        defaults.some(value => value.provider === provider && (value.accountId || value.priorityAccountIds?.length))).map(provider => {
         const choice = defaults.find(value => value.provider === provider);
         const selected = accounts.find(account => account.id === choice?.accountId && account.provider === provider);
         const unavailable = !!choice?.accountId && (!selected || selected.profile?.access === "not_granted");
-        return <div className="provider-account-group" key={provider}>
-          <div className="provider-settings-heading">
-            <h4>{providerName(provider)}</h4>
-            {!choice?.accountId && <span className="section-note">No Default</span>}
-          </div>
-          {unavailable && <Notice compact tone="warning" title="Default Account Unavailable"
+        const priority = providerAccountPolicyMode(choice) === "priority";
+        const order = priority ? choice?.priorityAccountIds ?? [] : [];
+        const providerAccounts = accounts.filter(account => account.provider === provider);
+        // Ranked accounts in their order, then the rest. A ranked account that left stays in its place,
+        // as its id alone.
+        const listed: Array<ProviderAccountDefinition | string> = priority
+          ? [...order.map(id => providerAccounts.find(account => account.id === id) ?? id),
+             ...providerAccounts.filter(account => !order.includes(account.id))]
+          : providerAccounts;
+        const savingPolicy = busy[`policy:${provider}`] !== undefined;
+        return <ProviderAccountGroup key={provider} runner={runner} online={online} provider={provider} policy={choice}
+          canEdit={canEditDefaults} saving={savingPolicy} chooseMode={chooseMode}
+          providerNotices={unavailable && <Notice compact tone="warning" title="Default Account Unavailable"
             actions={canEditDefaults && <button type="button" className="btn sm" disabled={defaultWrites.current.has(provider)}
               onClick={() => void saveDefault(provider, null)}>Clear {providerName(provider)} Default</button>}>
             {selected ? "The saved default needs access to this control plane. Grant access or choose another account from its menu."
               : "The saved default account is missing. Choose another account from its menu or clear the default."}
           </Notice>}
-          <div className="provider-accounts-list">
-          {accounts.filter(account => account.provider === provider).map((account) => {
+          rows={(preview) => <>
+          {listed.map((account) => {
+            if (typeof account === "string") {
+              const position = order.indexOf(account);
+              return <ProviderAccountRow key={account} identity={`${runner.runnerId}:${account}`} label="Missing Account" status={null}
+                rank={position + 1} skip={providerAccountSkipLabel({ reason: "missing" })}
+                actions={canEditDefaults && (
+                  <button type="button" className="btn sm" disabled={savingPolicy || order.length === 1}
+                    aria-label={`Remove Missing Account ${position + 1} From Priority Order`}
+                    onClick={() => rankAccount(provider, account, false)}>Remove</button>
+                )} />;
+            }
+            const position = order.indexOf(account.id);
+            const candidate = preview?.candidates.find(value => value.accountId === account.id);
             const login = loginFor(account.id);
             const signingIn = login !== undefined && providerLoginRunning(login);
             const status = accountStatus(account, signingIn);
@@ -832,10 +1053,20 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
                   title: providerHomeLeaseDescription(leases[account.id]!) ?? "An earlier Wollipog runner left this account locked. Choose Recover Account in its menu to try unlocking it.",
                 } : undefined}
                 status={status}
-                isDefault={account.id === choice?.accountId}
+                {...(priority ? {
+                  ...(position >= 0 ? { rank: position + 1 } : {}),
+                  marker: candidate?.selected ? "Next Session" : position < 0 ? "Not Ranked" : undefined,
+                  skip: candidate ? providerAccountSkipLabel(candidate) : undefined,
+                } : { marker: account.id === choice?.accountId ? "Default" : undefined })}
                 usage={!signingIn && <ProviderAccountUsage account={account} runnerId={runner.runnerId} online={online} data={usage} />}
                 actions={canManage && (
                   <>
+                    {canEditDefaults && priority && position >= 0 && order.length > 1 && <>
+                      <MoveButton accountId={account.id} direction="up" name={masked(account.label)} edge={position === 0} busy={savingPolicy}
+                        onMove={() => moveAccount(provider, account.id, "up", masked(account.label))} />
+                      <MoveButton accountId={account.id} direction="down" name={masked(account.label)} edge={position === order.length - 1} busy={savingPolicy}
+                        onMove={() => moveAccount(provider, account.id, "down", masked(account.label))} />
+                    </>}
                     {signingIn && cancelButton(login)}
                     {showSignIn && (
                       <BusyButton className="btn sm" busy={action === "sign_in"} progress="Starting the sign-in…"
@@ -872,8 +1103,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
               </ProviderAccountRow>
             );
           })}
-          </div>
-        </div>;
+          </>} />;
       })}
       </div> : null}
       <RunningSessionAccountSettings key={runner.runnerId} runner={runner} online={online} canEdit={canManageProfiles && canManage} />

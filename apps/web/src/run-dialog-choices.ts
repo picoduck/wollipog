@@ -1,5 +1,5 @@
 import type { AgentDefinition, ProjectLocationView, ProjectView, RunnerView, WorkflowDefinition } from "@wollipog/protocol";
-import { agentAvailableForRunnerDefault } from "@wollipog/protocol";
+import { agentAvailableForRunnerDefault, providerForDriver } from "@wollipog/protocol";
 import { agentOptions, agentSetupReason, type AgentOption } from "./components/agent-options.js";
 import { titleCaseLabel } from "./format.js";
 import { liveLocationAvailability } from "./project-session-selection.js";
@@ -49,7 +49,10 @@ export function runAgentChoices(
       return { option, description: disabledReason, disabledReason };
     }
     if (!agentAvailableForRunnerDefault(agent, defaults)) {
-      const disabledReason = `The default provider account is not ready on ${machine}.`;
+      const provider = providerForDriver(agent.driver ?? "acp");
+      const disabledReason = defaults?.find((choice) => choice.provider === provider)?.mode === "priority"
+        ? `No account in the Priority Order is ready on ${machine}.`
+        : `The default provider account is not ready on ${machine}.`;
       return { option, description: disabledReason, disabledReason };
     }
     if (agentSignedOut(agent)) {

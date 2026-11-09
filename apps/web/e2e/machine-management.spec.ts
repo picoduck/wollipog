@@ -1029,6 +1029,108 @@ test("account menus save independent defaults and explicitly recover a missing d
   await expect(accountRow(page, "Codex Solo").locator(".provider-default-marker")).toHaveText("Default");
 });
 
+test.describe("Priority Order (#4353)", () => {
+  const openPriority = async (page: import("@playwright/test").Page, query: string, viewport?: { width: number; height: number }) => {
+    if (viewport) await page.setViewportSize(viewport);
+    await page.goto(`/machine-management-e2e.html?priority=on&priorityLimit=1&${query}`);
+    await expect(providerAccounts(page)).toBeVisible();
+  };
+  const moveButton = (page: import("@playwright/test").Page, id: string, direction: "up" | "down") =>
+    providerAccounts(page).locator(`[data-move="${id}:${direction}"]`);
+
+  test("shows its ranking, expected account and skip reasons, and reorders by keyboard alone", async ({ page }) => {
+    await openPriority(page, DESIGN_WORKSTATION);
+    const accounts = providerAccounts(page);
+    await expect(accounts.getByRole("radiogroup", { name: "Claude Account Selection" }).getByRole("radio", { name: "Priority Order" })).toHaveAttribute("aria-checked", "true");
+    await expect(accounts.getByRole("radio", { name: /balance/i })).toHaveCount(0);
+    await expect(accounts.getByText("New sessions use")).toBeVisible();
+    await expect(accounts.getByText("Skipped: needs sign-in.")).toBeVisible();
+    await expect(accounts.getByText(/Skipped: at a usage limit\. Resets in 2 hours\./u)).toBeVisible();
+    await expect(accounts.getByText("Skipped: no longer on this machine.")).toBeVisible();
+    await expect(accounts.getByText("Next Session")).toBeVisible();
+    await expect(accounts.getByText("Not Ranked")).toBeVisible();
+    await accounts.screenshot({ path: "playwright-report/provider-accounts/priority-desktop.png" });
+
+    const down = moveButton(page, "claude-work", "down");
+    await down.focus();
+    await page.keyboard.press("Enter");
+    await expect(accounts.getByRole("status").filter({ hasText: /Moved .* to position 3 of 4\./u })).toBeAttached();
+    await expect(down, "focus stays with the moved row").toBeFocused();
+    await accounts.screenshot({ path: "playwright-report/provider-accounts/priority-keyboard-focus-desktop.png" });
+    await page.keyboard.press("Space");
+    await expect(accounts.getByRole("status").filter({ hasText: /position 4 of 4\./u })).toBeAttached();
+    await expect(moveButton(page, "claude-work", "up"), "at the edge, focus moves to the direction that still works").toBeFocused();
+    await expect(down).toHaveAttribute("aria-disabled", "true");
+    await page.keyboard.press("Enter");
+    await expect(accounts.getByRole("status").filter({ hasText: /position 3 of 4\./u })).toBeAttached();
+  });
+
+  test("reads in the light theme at both widths", async ({ page }) => {
+    await openPriority(page, `theme=light&${DESIGN_WORKSTATION}`);
+    await expect(providerAccounts(page).getByText("Skipped: needs sign-in.")).toBeVisible();
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/priority-light-desktop.png" });
+    await openPriority(page, `theme=light&${DESIGN_WORKSTATION}`, { width: 390, height: 844 });
+    await expect(providerAccounts(page).getByText("Skipped: needs sign-in.")).toBeVisible();
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/priority-light-mobile.png" });
+  });
+
+  test("moves by tap on a phone, with targets large enough to touch", async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+    const page = await context.newPage();
+    try {
+      await openPriority(page, DESIGN_WORKSTATION);
+      const accounts = providerAccounts(page);
+      await expect(accounts.getByText("Skipped: needs sign-in.")).toBeVisible();
+      const up = moveButton(page, "claude-team", "up");
+      const box = await up.boundingBox();
+      expect(box!.width).toBeGreaterThanOrEqual(28);
+      const scroll = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      expect(scroll, "the rows fit without sideways scrolling").toBeLessThanOrEqual(0);
+      const clipped = await accounts.locator(".provider-account-skip").evaluateAll((reasons) => reasons
+        .filter((reason) => reason.scrollWidth > reason.clientWidth).map((reason) => reason.textContent));
+      expect(clipped, "every skip reason reads whole").toEqual([]);
+      await accounts.screenshot({ path: "playwright-report/provider-accounts/priority-mobile.png" });
+      await up.tap();
+      await expect(accounts.getByRole("status").filter({ hasText: /position 2 of 4\./u })).toBeAttached();
+      await accounts.screenshot({ path: "playwright-report/provider-accounts/priority-mobile-moved.png" });
+    } finally { await context.close(); }
+  });
+
+  test("no eligible account says so, and a lost race shows the saved order", async ({ page }) => {
+    await page.goto(`/machine-management-e2e.html?priority=none&${DESIGN_WORKSTATION}`);
+    const accounts = providerAccounts(page);
+    await expect(accounts.getByText("No Eligible Account")).toBeVisible();
+    await expect(accounts.getByText(/one would spend API credits/u)).toBeVisible();
+    await expect(accounts.getByText("Next Session")).toHaveCount(0);
+    await accounts.screenshot({ path: "playwright-report/provider-accounts/priority-no-eligible-desktop.png" });
+
+    await page.goto(`/machine-management-e2e.html?priority=on&policyConflict=1&${DESIGN_WORKSTATION}`);
+    await moveButton(page, "claude-work", "up").click();
+    await expect(providerAccounts(page).getByRole("alert")).toContainText("changed in another client");
+    await expect(moveButton(page, "claude-gone", "up")).toHaveCount(0);
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/priority-conflict-desktop.png" });
+  });
+
+  test("turning it on starts from the saved order, and an older runner can't", async ({ page }) => {
+    await page.goto(`/machine-management-e2e.html?priority=off&${DESIGN_WORKSTATION}`);
+    const accounts = providerAccounts(page);
+    await (await openAccountMenu(page, "work@example.com")).getByRole("menuitem", { name: "Set as Default", exact: true }).click();
+    const claude = accounts.getByRole("radiogroup", { name: "Claude Account Selection" });
+    await expect(claude.getByRole("radio", { name: "Default Account" })).toHaveAttribute("aria-checked", "true");
+    await claude.getByRole("radio", { name: "Priority Order" }).click();
+    await expect(claude.getByRole("radio", { name: "Priority Order" })).toHaveAttribute("aria-checked", "true");
+    await expect(moveButton(page, "claude-work", "up"), "the saved default ranks first").toHaveAttribute("aria-disabled", "true");
+    await claude.getByRole("radio", { name: "Default Account" }).click();
+    await expect(accountRow(page, "work@example.com").locator(".provider-default-marker"), "and returning restores it").toHaveText("Default");
+
+    await page.goto(`/machine-management-e2e.html?priority=off&outdated=1&${DESIGN_WORKSTATION}`);
+    await expect(providerAccounts(page).getByText("Update this machine's runner to use Priority Order.").first()).toBeVisible();
+    await page.goto(`/machine-management-e2e.html?priority=on&outdated=1&${DESIGN_WORKSTATION}`);
+    await expect(providerAccounts(page).getByText("Priority Order Isn't Being Applied")).toBeVisible();
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/priority-older-runner-desktop.png" });
+  });
+});
+
 for (const width of [390, 320]) {
   test("at " + width + "px Account Access is content-height and its consent returns safely", async ({ page }) => {
     await page.setViewportSize({ width, height: 844 });

@@ -242,6 +242,8 @@ const runner: RunnerView = {
       acp: { logout: false, loadSession: false, sessionList: false, sessionDelete: false, sessionResume: false, sessionClose: false },
     }] : []),
   ],
+  ...(fixtureParams.has("accountPriority") ? { providerAccountDefaults: [{ provider: "claude" as const, accountId: null, revision: 2, mode: "priority" as const,
+    schemaVersion: 1, fixedAccountId: null, priorityAccountIds: ["claude-work", "claude-personal"] }] } : {}),
   providerAccounts: [
     {
       id: "claude-work",
@@ -436,6 +438,19 @@ const client = {
     ],
     reported: null,
   }) as Awaited<ReturnType<ApiClient["runnerSkills"]>>,
+  // #4353: `?accountPriority=selected|none` is a Priority Order, with the first account signed out.
+  providerAccountSelection: async () => ({
+    provider: "claude", mode: "priority", policyRevision: 2, enforcement: "enforced", generatedAt: Date.now(),
+    ...(fixtureParams.get("accountPriority") === "none"
+      ? { status: "choice_required", source: "none", refusal: "no_eligible_account", candidates: [
+          { accountId: "claude-work", position: 1, eligible: false, reason: "signed_out" },
+          { accountId: "claude-personal", position: 2, eligible: false, reason: "usage_exhausted", retryAt: Date.now() + 2 * 3_600_000 },
+        ] }
+      : { status: "selected", source: "priority", accountId: "claude-personal", candidates: [
+          { accountId: "claude-work", position: 1, eligible: false, reason: "signed_out" },
+          { accountId: "claude-personal", position: 2, eligible: true, selected: true },
+        ] }),
+  }),
   createSession: async (request: CreateSessionRequest) => {
     const documentRoot = document.documentElement;
     const count = Number(documentRoot.dataset.createSessionCount ?? "0") + 1;
