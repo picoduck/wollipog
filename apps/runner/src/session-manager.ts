@@ -7806,6 +7806,10 @@ export class SessionManager {
         meta.worktrees = latestMatchesWorkspace ? latest.worktrees : undefined;
         meta.worktreeHooks = latestMatchesWorkspace ? latest.worktreeHooks : undefined;
         meta.worktreeProcessMarkers = latestMatchesWorkspace ? latest.worktreeProcessMarkers : undefined;
+        // An operation that ran meanwhile may have kept a worktree, or forgotten the rows of one it kept
+        // (#4209). Both belong to every Location, so they come from here whatever the workspace.
+        meta.keptWorktreePaths = latest.keptWorktreePaths;
+        meta.locationHistory = latest.locationHistory;
         meta.lastTurnBaseTree = latest.lastTurnBaseTree;
         meta.turnCount = latest.turnCount ?? 0;
         meta.forkPoints = latest.forkPoints ?? {};

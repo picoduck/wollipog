@@ -2928,6 +2928,51 @@ for (const replay of ["at once", "after a restart", "after a relaunch"] as const
   });
 }
 
+test("a keep that lands while a relaunch waits for the worktree lane survives the relaunch's write, and deletion leaves it", async () => {
+  await withSession("keep-during-relaunch", async (h) => {
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    const { worktree } = await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/plain" });
+    writeFileSync(join(worktree.path, "notes.txt"), "a person's notes\n");
+    const before = files(worktree.path);
+    h.restart();
+    const lease = h.store.readWorktreeLease(h.sessionId);
+    if (lease) h.store.releaseWorktreeLease(h.sessionId, lease.owner);
+    const lane = h.manager as unknown as {
+      runWorktreeOperation: (sessionId: string, operation: () => Promise<void>) => Promise<void>;
+      markWorktreeKept: (sessionId: string, path: string) => void;
+    };
+    // An operation queued right behind the relaunch's first use of the lane, its remap check, starts
+    // before the relaunch reads the session, and keeps that worktree before the relaunch writes.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const run = lane.runWorktreeOperation.bind(h.manager);
+    let keeping: Promise<void> | undefined;
+    lane.runWorktreeOperation = (sessionId, operation) => {
+      const result = run(sessionId, operation);
+      keeping ??= run(sessionId, async () => {
+        await held;
+        lane.markWorktreeKept(h.sessionId, worktree.path);
+        // A keep also forgets history rows at its path; stand in for that with a visible edit.
+        assert.equal(h.store.readMeta(h.sessionId)!.locationHistory!.length, 1);
+        h.store.patchMeta(h.sessionId, { locationHistory: [] });
+      });
+      return result;
+    };
+    const starting = h.manager.start({ sessionId: h.sessionId, workspaceId: "docs", workspacePath: h.docs, agentId: "claude-code",
+      command: "claude-code", args: [], env: {}, useWorktree: false, driver: "claude-code", context: { kind: "native" } });
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    release();
+    await keeping;
+    await starting;
+    assert.ok(h.store.readMeta(h.sessionId)?.keptWorktreePaths?.includes(worktree.path), "the relaunch kept the keep");
+    assert.equal(h.store.readMeta(h.sessionId)!.locationHistory?.length ?? 0, 0, "and the history as the operation left it");
+    await h.manager.delete(h.sessionId);
+    assert.deepEqual(files(worktree.path), before);
+    assert.ok(docsWorktrees(h).includes(worktree.path));
+  });
+});
+
 test("a worktree the runner makes again where a kept one was is removed with the session, as any other is", async () => {
   await withSession("delete-remade-kept", async (h) => {
     const { slot } = await keptRequest(h, LOG_STEP(h));
@@ -2983,8 +3028,8 @@ test("a request's setup leaves no process running once its step ends, so a kept 
   await withSession("kept-processes", async (h) => {
     const pidFile = join(h.root, "server-pid");
     const server = { name: "Start Server", timeoutSeconds: 30, command: [process.execPath, "-e",
-      "const c=require('child_process').spawn(process.execPath,['-e','setTimeout(()=>{},120000)'],{detached:true,stdio:'ignore'});" +
-      `require('fs').writeFileSync(${JSON.stringify(pidFile)},String(c.pid));c.unref()`] };
+      `require('fs').writeFileSync(${JSON.stringify(pidFile)},String(require('node:child_process').spawn(process.execPath,` +
+      "['-e','setTimeout(()=>{},120000)'],{detached:true,stdio:'ignore'}).pid));process.exit(0)"] };
     let pid: number | undefined;
     try {
       const { slot, before } = await keptRequest(h, server, () => {
