@@ -17,6 +17,13 @@ for (const [label, viewport] of [["1440", { width: 1440, height: 900 }], ["390",
     }
     await expect(items.nth(0)).toContainText("Only Discusses");
     await expect(items.nth(0)).toContainText("The Orchestrator decides it.");
+    // #4367: a check names its target and the exact model that answered.
+    const fact = (index: number, term: string) => items.nth(index).locator("dl.facts > div")
+      .filter({ has: page.getByRole("term").getByText(term, { exact: true }) }).locator("dd");
+    await expect(fact(0, "Target Model")).toContainText("Haiku, Low effort");
+    await expect(fact(0, "Answered By")).toHaveText("claude-haiku-5-5");
+    await expect(fact(2, "Target Model")).toContainText("Haiku, Low effort");
+    await expect(fact(2, "Answered By")).toHaveCount(0);
     await expect(items.nth(1)).toContainText("Asks for Access");
     await expect(items.nth(1)).toContainText("Declined and recorded as blocked work.");
     await expect(items.nth(2)).toContainText("Timed Out");

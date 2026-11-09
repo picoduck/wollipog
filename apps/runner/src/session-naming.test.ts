@@ -32,7 +32,7 @@ function claudeAgent(): AgentDefinition {
     claudeCode: {
       status: "ready",
       effortLevels: [],
-      permissionModes: ["plan"],
+      permissionModes: ["dontAsk"],
       streamJsonInput: true,
       streamJsonImages: true,
       controlProtocol: true,
@@ -114,7 +114,9 @@ test("Claude naming argv disables tools, persistence, repository customizations,
     "--no-chrome",
   ]) assert.ok(args.includes(flag), flag);
   assert.equal(args[args.indexOf("--tools") + 1], "");
-  assert.equal(args[args.indexOf("--permission-mode") + 1], "plan");
+  assert.equal(args[args.indexOf("--permission-mode") + 1], "dontAsk");
+  assert.equal(args[args.indexOf("--setting-sources") + 1], "");
+  assert.equal(args.includes("plan"), false, "plan mode changes what a model alias means and what it answers (#4367)");
   assert.equal(args.some((arg) => arg.includes("Fix the session naming flow")), false, "user text never enters argv");
 });
 

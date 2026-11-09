@@ -2441,7 +2441,7 @@ test.describe("Decision Model group", () => {
     await expect(group.getByRole("button", { name: /^Run Test/ })).toBeEnabled();
     await expect(group.getByText("to the selected agent's provider")).toBeVisible();
     await group.getByRole("button", { name: /^Run Test/ }).click();
-    await expect(group.getByText(/^Verdict: Confirm\. 3\.2 s, 1 attempt on Claude Code \(Haiku, Low effort\)\.$/)).toBeVisible();
+    await expect(group.getByText(/^Verdict: Confirm\. 3\.2 s, 1 attempt on Claude Code \(Haiku, Low effort\), answered by claude-haiku-5-5\.$/)).toBeVisible();
   });
 
   test("a member without admin permission sees Edit… and Run Test disabled in the disabled ink", async ({ page }) => {

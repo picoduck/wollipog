@@ -6889,6 +6889,13 @@ export const DECISION_MODEL_AUTOMATIC_PREFERENCE: readonly string[] = ["haiku", 
 /** Fixed effort order for Automatic, first advertised wins. */
 export const DECISION_MODEL_AUTOMATIC_EFFORTS: readonly string[] = ["low", "minimal", "medium"];
 
+/** A Claude Code picker alias whose model depends on plan mode, such as `opusplan`. One-shot naming
+ * and Decision calls never run in plan mode (#4367), so it would answer on a model other than the
+ * one it names; neither kind of target offers it. */
+export function claudeModelDependsOnPlanMode(driver: string | undefined, modelId: string): boolean {
+  return driver === "claude-code" && /plan$/iu.test(modelId);
+}
+
 /** Persisted explicit target, recomputed against the runner's current advertisement on every read. */
 export type DecisionModelTarget = SessionNamingHarnessTarget;
 export type DecisionModelMachine = SessionNamingHarnessMachine;
@@ -6932,6 +6939,9 @@ export interface DecisionAttemptView {
   attempt: number;
   /** Absent for the attempt that produced the recorded verdict. */
   errorClass?: DecisionErrorClass;
+  /** The model the provider reported answering, which can differ from the target's (#4367). Absent
+   * when the attempt reported none. */
+  model?: string;
   latencyMs: number;
 }
 

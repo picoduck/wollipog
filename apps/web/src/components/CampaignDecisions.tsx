@@ -1,16 +1,16 @@
 import React, { useEffect, useId, useState } from "react";
 import type { CampaignDecisionsResponse } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import { effortLabel } from "../format.js";
 import { DecisionAnswerChecklist } from "./DecisionAnswerChecklist.js";
-import { decisionCostText, decisionModelName, decisionOutcomeText, isDecisionModelCheck, verdictLabel } from "./decision-model.js";
+import { DecisionModelFacts } from "./DecisionModelFacts.js";
+import { decisionCostText, decisionOutcomeText, isDecisionModelCheck, verdictLabel } from "./decision-model.js";
 
 const SHOWN = 10;
 const REFRESH_MS = 60_000;
 
 /**
  * Campaign Status › Decision Model (#4101): the campaign's Decision calls, each as its own group
- * with its outcome and reason, the model it ran on and its usage, which is kept apart from the
+ * with its outcome and reason, the model it targeted and the one that answered, and its usage, kept apart from the
  * campaign's worker cost. Decisions Decision Model Checks lists beside their request
  * (`isDecisionModelCheck`) are not listed here a second time (#4265). Hidden until the campaign has
  * another decision; a read that fails leaves the rest of Campaign Status as it is.
@@ -64,18 +64,7 @@ export function CampaignDecisions({ campaignId }: { campaignId: string }) {
                   <dd><DecisionAnswerChecklist typed={decision.typedAnswers} /></dd>
                 </div>
               )}
-              {decision.target && (
-                <div>
-                  <dt>Model</dt>
-                  <dd>
-                    {decisionModelName(decision.target)}, {effortLabel(decision.target.effort)} effort
-                    <span className="campaign-status-meta">
-                      {decision.target.harnessName} on {decision.target.machineName}
-                      {decision.target.source === "automatic" ? " (Automatic)" : ""}
-                    </span>
-                  </dd>
-                </div>
-              )}
+              <DecisionModelFacts decision={decision} />
               <div>
                 <dt>Usage</dt>
                 <dd>

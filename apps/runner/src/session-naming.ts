@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
+import { agentAvailableForImplicitLaunch, claudeModelDependsOnPlanMode } from "@wollipog/protocol";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +20,7 @@ import {
   SESSION_NAMING_RUNNER_BUDGET_MS,
 } from "@wollipog/protocol";
 import { JsonRpcPeer } from "./jsonrpc.js";
+import { CLAUDE_TOOLLESS_CALL_PERMISSION_MODE } from "./discovery/claude-code.js";
 import { run } from "./discovery/resolve.js";
 import { killTree, spawnAgent, type AgentProcess, type SpawnAgentOptions, type SpawnIsolation } from "./spawn.js";
 
@@ -116,7 +117,7 @@ export function claudeSessionNamingArgs(
     ...(target ? ["--model", target.model, "--effort", target.effort] : []),
     "-p",
     "--output-format", "text",
-    "--permission-mode", "plan",
+    "--permission-mode", CLAUDE_TOOLLESS_CALL_PERMISSION_MODE,
     "--tools", "",
     "--safe-mode",
     "--strict-mcp-config",
@@ -275,7 +276,8 @@ function explicitTargetFailureCode(
   if (target.agentId !== agent.id || target.driver !== (agent.driver ?? "acp")) return "harness_unavailable";
   const capabilities = agent.capabilities;
   const model = capabilities?.models.find((candidate) =>
-    candidate.id === target.model && candidate.id !== "default" && !candidate.hidden,
+    candidate.id === target.model && candidate.id !== "default" && !candidate.hidden &&
+    !claudeModelDependsOnPlanMode(target.driver, candidate.id),
   );
   const efforts = model?.efforts?.length ? model.efforts : capabilities?.effortLevels ?? [];
   return model && efforts.includes(target.effort) ? null : "model_unavailable";

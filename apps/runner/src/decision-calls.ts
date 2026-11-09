@@ -12,8 +12,10 @@ import {
   DECISION_OUTPUT_MAX_BYTES,
   DECISION_PREPARATION_BUDGET_MS,
   DECISION_SCHEMA_MAX_CHARS,
+  claudeModelDependsOnPlanMode,
   decisionAgentFailureClass,
 } from "@wollipog/protocol";
+import { CLAUDE_TOOLLESS_CALL_PERMISSION_MODE } from "./discovery/claude-code.js";
 import { JsonRpcPeer } from "./jsonrpc.js";
 import {
   codexSessionNamingArgs,
@@ -54,8 +56,8 @@ export class DecisionCallFailure extends Error {
 }
 
 /** Claude Code with the naming lockdown plus an enforced schema: no tools, no MCP servers, no
- * settings, no persistence, plan permission mode, and the kind's fixed instructions as the system
- * prompt. The untrusted input arrives only on stdin. */
+ * settings, no persistence, a permission mode that refuses everything, and the kind's fixed
+ * instructions as the system prompt. The untrusted input arrives only on stdin. */
 export function claudeDecisionArgs(
   baseArgs: readonly string[],
   target: RunDecisionMessage["target"],
@@ -68,7 +70,7 @@ export function claudeDecisionArgs(
     "--effort", target.effort,
     "-p",
     "--output-format", "json",
-    "--permission-mode", "plan",
+    "--permission-mode", CLAUDE_TOOLLESS_CALL_PERMISSION_MODE,
     "--tools", "",
     "--safe-mode",
     "--strict-mcp-config",
@@ -297,6 +299,7 @@ async function generateCodexDecision(
   let output = "";
   let sawDelta = false;
   let usage: RunDecisionResultMessage["usage"] | undefined;
+  let answeredBy = message.target.model;
   let lastError: DecisionErrorClass | null = null;
   let settleTurn!: (value: void | PromiseLike<void>) => void;
   let rejectTurn!: (reason?: unknown) => void;
@@ -336,6 +339,11 @@ async function generateCodexDecision(
       cacheReadInputTokens: cached,
       cacheCreationInputTokens: 0,
     };
+  });
+  // Codex answers on the model the turn names unless it says it rerouted the turn.
+  peer.onNotification("model/rerouted", (params: unknown) => {
+    const toModel = (params as { toModel?: unknown } | null)?.toModel;
+    if (typeof toModel === "string" && toModel && toModel.length <= 200) answeredBy = toModel;
   });
   peer.onNotification("error", (params: unknown) => {
     const value = params as { error?: { codexErrorInfo?: unknown }; willRetry?: unknown } | null;
@@ -378,7 +386,7 @@ async function generateCodexDecision(
     phase = "generation";
     await turn;
     if (!output.trim()) throw new DecisionCallFailure("invalid_output", "output_validation", usage);
-    return { outputText: output, model: message.target.model, ...(usage ? { usage } : {}) };
+    return { outputText: output, model: answeredBy, ...(usage ? { usage } : {}) };
   } catch (error) {
     if (error instanceof DecisionCallFailure) throw error;
     const rpc = error as { requestTimeout?: boolean } | null;
@@ -406,7 +414,8 @@ function targetFailureClass(target: RunDecisionMessage["target"], agent: AgentDe
   if (target.agentId !== agent.id || target.driver !== (agent.driver ?? "acp")) return "harness_unavailable";
   const capabilities = agent.capabilities;
   const model = capabilities?.models.find((candidate) =>
-    candidate.id === target.model && candidate.id !== "default" && !candidate.hidden,
+    candidate.id === target.model && candidate.id !== "default" && !candidate.hidden &&
+    !claudeModelDependsOnPlanMode(target.driver, candidate.id),
   );
   const efforts = model?.efforts?.length ? model.efforts : capabilities?.effortLevels ?? [];
   return model && efforts.includes(target.effort) ? null : "model_unavailable";
@@ -574,7 +583,8 @@ export class DecisionExecutor {
         ok: true,
         outputText: generated.outputText,
         ...accountFields,
-        model: generated.model ?? message.target.model,
+        // Only what the provider reported: a record must never show the target as the answering model.
+        ...(generated.model ? { model: generated.model } : {}),
         ...(generated.usage ? { usage: generated.usage } : {}),
       };
     } catch (error) {
