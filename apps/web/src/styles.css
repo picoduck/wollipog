@@ -8705,6 +8705,8 @@ textarea {
   font-variant-numeric: tabular-nums;
   margin-bottom: var(--space-1);
 }
+.tl-message-stack.user > .tl-message-timestamp { justify-self: end; margin-bottom: 0; }
+.tl-message-stack.user > .tl-bubble { justify-self: end; }
 .tl-timestamp-meta {
   display: inline-flex;
   flex-wrap: wrap;

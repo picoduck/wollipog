@@ -24,8 +24,11 @@ for (const width of [1440, 390]) {
 
       const stopped = page.locator(".tl-turn-stopped");
       await expect(stopped).toHaveCount(1);
-      await expect(stopped.locator("time")).toHaveText(/^\d{1,2}:\d{2} [AP]M$/u);
-      await expect(stopped).toContainText(/^Stopped at \d{1,2}:\d{2} [AP]M/u);
+      const recorded = await stopped.locator("time").evaluate((element) => new Intl.DateTimeFormat(undefined, {
+        dateStyle: "medium", timeStyle: "medium",
+      }).format(new Date(element.getAttribute("datetime")!)));
+      await expect(stopped.locator("time")).toHaveText(recorded);
+      await expect(stopped).toContainText(`Stopped at ${recorded}`);
       await expect(stopped.locator("svg")).toHaveAttribute("width", "14");
       const footerLefts = await page.locator(".tl-turn-footer").evaluateAll((footers) =>
         footers.map((footer) => Math.round(footer.getBoundingClientRect().left)));

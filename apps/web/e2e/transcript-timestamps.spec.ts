@@ -16,6 +16,6 @@ for (const width of [1440, 390]) {
     }
     const reader = page.getByTestId("reader");
     expect(await reader.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
-    await page.screenshot({ path: `/tmp/transcript-timestamps-${width}.png` });
+    await page.screenshot({ path: test.info().outputPath(`transcript-timestamps-${width}.png`) });
   });
 }
