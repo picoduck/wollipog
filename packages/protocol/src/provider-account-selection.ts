@@ -94,7 +94,7 @@ export interface ProviderAccountSelectionRecord {
    * accounts: a named account or default was chosen by a person and keeps its recovery path. */
   revalidateAtLaunch?: boolean;
   /** Set when this launch names a model and a policy chose the account. No reliable per-account model
-   * source exists, so nothing checked that the account's plan offers that model. Never score on it. */
+   * source exists, so nothing checked that the account's plan offers that model. */
   modelCompatibility?: "unknown";
 }
 
@@ -345,8 +345,8 @@ export function providerAccountPolicyFixedId(policy: Pick<RunnerProviderAccountD
   return policy?.fixedAccountId !== undefined ? policy.fixedAccountId : policy?.accountId ?? null;
 }
 
-/** Picks one of the eligible candidates, which arrive in rank order. A mode is defined by this step:
- * eligibility above is common to every mode and always runs first. */
+/** Picks one of the eligible candidates, which arrive in rank order. Eligibility above is common to
+ * every mode and always runs first. */
 function chooseEligibleCandidate(
   mode: ProviderAccountPolicyMode,
   eligible: readonly ProviderAccountSelectionCandidate[],

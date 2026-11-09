@@ -10915,7 +10915,7 @@ test("a policy saved under a newer schema also fails closed (#4353)", () => {
 test("a mode written by a newer server fails closed until it is replaced (#4353)", () => {
   const { db, svc, request } = priorityHarness();
   (db as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }).db
-    .prepare("UPDATE machine_provider_account_defaults SET mode='automatic_balance' WHERE runner_id=?").run(RUNNER_ID);
+    .prepare("UPDATE machine_provider_account_defaults SET mode='unrecognized_mode' WHERE runner_id=?").run(RUNNER_ID);
   assert.equal(db.machineProviderAccountDefault(RUNNER_ID, "claude")?.mode, "unsupported");
   const refused = svc.createSession(request);
   assert.equal(refused.providerAccountSelection?.refusal, "unsupported_mode");

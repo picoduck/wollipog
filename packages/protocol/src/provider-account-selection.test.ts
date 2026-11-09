@@ -241,8 +241,7 @@ test("a policy write is checked for shape and keeps what it doesn't name", () =>
   const keep = parseProviderAccountPolicyWrite({ mode: "fixed", expectedRevision: 3 }, current);
   assert.deepEqual(keep, { ok: true, mode: "fixed", fixedAccountId: "a", priorityAccountIds: ["a", "b"], expectedRevision: 3 });
   const bad = (body: unknown) => assert.equal(parseProviderAccountPolicyWrite(body, null).ok, false, JSON.stringify(body));
-  bad({ mode: "automatic_balance", expectedRevision: 0 });
-  bad({ mode: "balance", expectedRevision: 0 });
+  bad({ mode: "unrecognized_mode", expectedRevision: 0 });
   bad({ mode: "priority", priorityAccountIds: ["a"] });
   bad({ mode: "priority", expectedRevision: -1, priorityAccountIds: ["a"] });
   bad({ mode: "priority", expectedRevision: 0, priorityAccountIds: [] });
