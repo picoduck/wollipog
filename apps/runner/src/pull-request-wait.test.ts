@@ -1433,7 +1433,7 @@ for (const absent of [false, true]) {
     assert.ok(result.ok);
     assert.equal(result.summary.outcome, "timeout");
     assert.equal(result.summary.polls, 3);
-    assert.equal(fake.calls.filter((args) => args.some((arg) => arg.includes("/actions/runs?"))).length, 1);
+    assert.equal(fake.calls.filter((args) => args.some((arg) => arg.includes("/actions/runs?"))).length, absent ? 3 : 1);
   });
 }
 
@@ -1461,4 +1461,52 @@ test("suite identity cache evicts beyond 2000 entries", async () => {
   assert.equal(result.summary.outcome, "checks_passed");
   assert.equal(result.summary.polls, 22);
   assert.equal(reads, 22, "the original 100 suites must be looked up again after eviction");
+});
+
+
+for (const required of [false, true]) {
+  for (const recovers of [false, true]) {
+    test(`any-failure identity retry cannot fall through to success (${required}, ${recovers})`, async () => {
+      const lint = (conclusion: string, id: number, suite: number) => ({ ...suiteJob(conclusion, id, suite), name: "Lint" });
+      const fake = fakeGh([ok(pr({}, [
+        ...(required ? [run(AGGREGATOR, "SUCCESS")] : []), lint("FAILURE", 100, 1), lint("SUCCESS", 101, 2),
+      ]))], { rules: required ? ok(RULESET) : ok([]) });
+      let reads = 0;
+      const gh: GhRunner = async (args) => args.some((arg) => arg.includes("/actions/runs?"))
+        ? ++reads > 1 && recovers ? ok(suiteRuns()) : failed("gh: Bad Gateway (HTTP 502)") : fake.gh(args);
+      const result = await waitForPullRequest({ repository: "o/r", number: 7, returnOnAnyFailure: true }, { gh, ...clock() });
+      assert.ok(result.ok);
+      assert.equal(result.summary.outcome, recovers ? required ? "checks_passed" : "no_required_checks" : "checks_failed");
+      assert.equal(result.summary.polls, recovers ? 2 : 4);
+      assert.equal(reads, recovers ? 2 : 4);
+    });
+  }
+}
+
+for (const optionalFailure of [false, true]) {
+  test(`unrelated definitive failure is immediate despite transient identity read (${optionalFailure})`, async () => {
+    const nodes = [run(AGGREGATOR, optionalFailure ? "SUCCESS" : "FAILURE"),
+      ...(optionalFailure ? [run("Unique", "FAILURE")] : []),
+      { ...suiteJob("SUCCESS", 100, 1), name: "Lint" }, { ...suiteJob("SUCCESS", 101, 2), name: "Lint" }];
+    const fake = fakeGh([ok(pr({}, nodes))], { runs: failed("gh: Bad Gateway (HTTP 502)") });
+    const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1, returnOnAnyFailure: optionalFailure }, { gh: fake.gh, ...clock() });
+    assert.ok(result.ok);
+    assert.equal(result.summary.outcome, "checks_failed");
+    assert.equal(result.summary.polls, 1);
+  });
+}
+
+test("a suite absent from one complete lookup can acquire provenance on the next poll", async () => {
+  const fake = fakeGh([
+    ok(pr({}, [suiteJob(null, 100, 1), suiteJob(null, 101, 2)])),
+    ok(pr({}, [suiteJob("CANCELLED", 100, 1), suiteJob("SUCCESS", 101, 2)])),
+  ]);
+  let reads = 0;
+  const gh: GhRunner = async (args) => args.some((arg) => arg.includes("/actions/runs?"))
+    ? ++reads === 1 ? ok({ total_count: 1, workflow_runs: [suiteRuns().workflow_runs[0]] }) : ok(suiteRuns()) : fake.gh(args);
+  const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "checks_passed");
+  assert.equal(result.summary.polls, 2);
+  assert.equal(reads, 2);
 });

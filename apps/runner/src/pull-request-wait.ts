@@ -538,7 +538,7 @@ interface Observation {
   /** Latest ready event, or creation for a PR with a known empty ready-event timeline. */
   admittedAfter: number | null;
   admittedSkippedRuns?: ReadonlySet<number>;
-  workflowRetry?: boolean;
+  workflowRetry?: ReadonlySet<string>;
   /** The pull request's head branch, which check suites name. */
   headRef: string | null;
   /** The latest merge-queue event, when it is a removal no force push has followed. */
@@ -716,7 +716,7 @@ async function admittedSkippedRuns(
 type WorkflowIdentity = { workflowId: number; workflowEvent: string; workflowContext: string };
 async function workflowChecks(
   gh: GhRunner, repository: string, sha: string | null, rollup: unknown, cache: Map<number, WorkflowIdentity | null>,
-): Promise<{ rollup: unknown; retry: boolean }> {
+): Promise<{ rollup: unknown; retry: ReadonlySet<string> }> {
   let retry = false;
   const contexts = record(record(rollup)?.contexts);
   const nodes = Array.isArray(contexts?.nodes) ? contexts.nodes : [];
@@ -729,7 +729,7 @@ async function workflowChecks(
     ids.add(node.suiteId);
     suites.set(key, ids);
   }
-  if (!sha || ![...suites.values()].some((ids) => ids.size > 1)) return { rollup, retry };
+  if (!sha || ![...suites.values()].some((ids) => ids.size > 1)) return { rollup, retry: new Set() };
   const missing = [...suites.values()].some((ids) => ids.size > 1 && [...ids].some((id) => !cache.has(id)));
   if (missing) {
     let body: Record<string, unknown> | null = null;
@@ -764,13 +764,19 @@ async function workflowChecks(
         found.set(run.check_suite_id, identity);
       }
       if (valid) for (const ids of suites.values()) for (const id of ids) {
-        const identity = found.get(id) ?? cache.get(id) ?? null;
+        // Absence from a list is not immutable evidence: only cache suites actually returned.
+        if (!found.has(id)) continue;
+        const identity = found.get(id)!;
         cache.set(id, identity);
         if (cache.size > 2_000) cache.delete(cache.keys().next().value!);
       }
     }
   }
-  return { retry, rollup: { ...record(rollup), contexts: { ...contexts, nodes: nodes.map((raw) => {
+  const retryChecks = new Set<string>();
+  if (retry) for (const [key, ids] of suites) {
+    if (ids.size > 1 && [...ids].some((id) => !cache.has(id))) retryChecks.add(key);
+  }
+  return { retry: retryChecks, rollup: { ...record(rollup), contexts: { ...contexts, nodes: nodes.map((raw) => {
     const node = record(raw);
     const suite = record(node?.checkSuite);
     const identity = cache.get(suite?.databaseId as number);
@@ -1030,9 +1036,29 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
       const checks = evaluateCommitChecks(seen.headSha, seen.rollup, required.names, required.apps, seen.mergeStateStatus, seen.admittedSkippedRuns);
       // Retry only classified transient optional reads, within a fixed budget. A denied read still
       // retains observed failures; an unresolved transient at the deadline reports timeout.
-      const retryIdentity = seen.workflowRetry === true && ++workflowTransientFailures <= MAX_TRANSIENT_FAILURES;
-      if (!seen.workflowRetry) workflowTransientFailures = 0;
-      if (!retryIdentity && (checks.requiredState === "failed" || (input.returnOnAnyFailure && checks.summary.failedJobs.length > 0))) {
+      const unresolved = seen.workflowRetry ?? new Set<string>();
+      const contexts = record(record(seen.rollup)?.contexts);
+      const independent = unresolved.size > 0 ? evaluateCommitChecks(seen.headSha, {
+        contexts: { ...contexts, nodes: (Array.isArray(contexts?.nodes) ? contexts.nodes : [])
+          .filter((raw) => {
+            const node = checkNode(raw);
+            return !unresolved.has(JSON.stringify([node?.appId, node?.name]));
+          }) },
+      }, required.names, required.apps, seen.mergeStateStatus, seen.admittedSkippedRuns) : checks;
+      const independentFailure = independent.requiredState === "failed" ||
+        (input.returnOnAnyFailure && independent.summary.failedJobs.length > 0);
+      const observedFailure = checks.requiredState === "failed" ||
+        (input.returnOnAnyFailure && checks.summary.failedJobs.length > 0);
+      const retryIdentity = observedFailure && unresolved.size > 0 && !independentFailure &&
+        ++workflowTransientFailures <= MAX_TRANSIENT_FAILURES;
+      if (unresolved.size === 0) workflowTransientFailures = 0;
+      if (retryIdentity) {
+        // A retry must bypass every terminal success outcome, including optional-only waits.
+        if (now() >= deadline) return { ok: true, summary: summarize("timeout", seen) };
+        if (!await pause(intervalMs)) return { ok: false, error: "request cancelled" };
+        continue;
+      }
+      if (checks.requiredState === "failed" || (input.returnOnAnyFailure && checks.summary.failedJobs.length > 0)) {
         return { ok: true, summary: summarize("checks_failed", seen) };
       }
       if (checks.requiredState === "none") return { ok: true, summary: summarize("no_required_checks", seen) };
