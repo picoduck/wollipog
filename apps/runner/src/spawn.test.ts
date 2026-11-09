@@ -737,14 +737,20 @@ test("bwrapPathWritable follows bwrap's last-mount-wins order over the generated
 });
 
 test("bwrapPathMayBeWritable counts what the provider could create and treats the unknown as writable", () => {
-  const args = ["--ro-bind", "/", "/", "--tmpfs", "/tmp", "--bind", "/work", "/work", "--ro-bind", "/work/.git", "/work/.git",
-    "--tmpfs", "/hooks", "--remount-ro", "/hooks"];
+  const args = ["--ro-bind", "/", "/", "--dev", "/dev", "--dir", "/dev/shm", "--proc", "/proc", "--tmpfs", "/tmp",
+    "--bind", "/work", "/work", "--ro-bind", "/work/.git", "/work/.git",
+    "--tmpfs", "/hooks", "--remount-ro", "/hooks",
+    "--tmpfs", "/state", "--bind", "/src", "/state/sub", "--remount-ro", "/state"];
   for (const [path, mayWrite] of [
     ["/usr/lib", false],
     ["/tmp/retired/.git", true], // below a fresh tmpfs: absent, but the provider can create it
+    ["/dev/shm/retired/.git", true], // bwrap's --dev is a writable private filesystem
+    ["/proc/sys", true],
     ["/work/file", true],
     ["/work/.git", false],
     ["/hooks/state", false],
+    ["/state/file", false],
+    ["/state/sub/file", true], // --remount-ro leaves a mount below its target writable
     ["relative", true],
   ] as const) {
     assert.equal(bwrapPathMayBeWritable(args, path), mayWrite, path);

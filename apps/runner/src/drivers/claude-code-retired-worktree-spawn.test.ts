@@ -375,19 +375,22 @@ test("a retired sibling that a retained writable mount still covers never loses 
   }
 });
 
-test("a removed sibling under the sandbox's private /tmp never loses its read-only overlays", () => {
-  // bwrap always mounts a writable tmpfs at /tmp, so a missing overlay there could be recreated
-  // writable inside the sandbox. Paths are illustrative; nothing exists, as `exists` reports.
-  const owned = { path: "/tmp/retired", gitAdmin: "/srv/repo.git/worktrees/retired" };
-  const isolation: BwrapSpawnIsolation = {
-    backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "inherit",
-    writableBinds: [{ source: owned.path, target: owned.path }],
-    protectedWorktree: { parent: "/srv/worktrees", path: "/srv/worktrees/selected",
-      gitWritableRoots: ["/srv/repo.git/worktrees/selected", owned.gitAdmin], ownedWorktrees: [owned] },
-    readOnlyBinds: [`${owned.path}/.git`, `${owned.gitAdmin}/gitdir`],
-  };
-  const narrowed = isolationWithoutRetiredWorktrees({ ...isolation, readOnlyBinds: [`${owned.gitAdmin}/gitdir`] },
-    [owned], () => false) as BwrapSpawnIsolation;
-  assert.equal(narrowed.writableBinds, undefined, "an overlay outside /tmp may still go");
-  assert.equal(isolationWithoutRetiredWorktrees(isolation, [owned], () => false), isolation);
-});
+for (const path of ["/tmp/retired", "/dev/shm/retired"]) {
+  test(`a removed sibling under the sandbox's private ${path.split("/").slice(0, -1).join("/")} never loses its read-only overlays`, () => {
+    // bwrap always mounts a writable tmpfs at /tmp and a writable private /dev, so a missing overlay
+    // there could be recreated writable inside the sandbox. Paths are illustrative; nothing exists,
+    // as `exists` reports.
+    const owned = { path, gitAdmin: "/srv/repo.git/worktrees/retired" };
+    const isolation: BwrapSpawnIsolation = {
+      backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "inherit",
+      writableBinds: [{ source: owned.path, target: owned.path }],
+      protectedWorktree: { parent: "/srv/worktrees", path: "/srv/worktrees/selected",
+        gitWritableRoots: ["/srv/repo.git/worktrees/selected", owned.gitAdmin], ownedWorktrees: [owned] },
+      readOnlyBinds: [`${owned.path}/.git`, `${owned.gitAdmin}/gitdir`],
+    };
+    const narrowed = isolationWithoutRetiredWorktrees({ ...isolation, readOnlyBinds: [`${owned.gitAdmin}/gitdir`] },
+      [owned], () => false) as BwrapSpawnIsolation;
+    assert.equal(narrowed.writableBinds, undefined, "an overlay outside the private mount may still go");
+    assert.equal(isolationWithoutRetiredWorktrees(isolation, [owned], () => false), isolation);
+  });
+}
