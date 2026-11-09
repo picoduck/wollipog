@@ -139,9 +139,13 @@ export type ProviderAccountPolicyEnforcement = "enforced" | "machine_offline" | 
 
 /** How an agent names an account. Account ids are derived from account labels, which are personal
  * data, so agent tools carry this instead: an opaque reference the control plane computes from the
- * Machine and account, valid in `providerAccountId`. A generated id has no `_`, and a configured id
- * that happens to start this way still resolves as itself when no reference matches it. */
-export const PROVIDER_ACCOUNT_REF_PREFIX = "acct_";
+ * Machine and account, valid in `providerAccountId`. `:` is not valid in an account id, so a reference
+ * and an id can never be mistaken for each other, whatever a runner's configuration names an account. */
+export const PROVIDER_ACCOUNT_REF_PREFIX = "acct:";
+
+export function isProviderAccountRef(value: string): boolean {
+  return /^acct:[0-9a-f]{16}$/u.test(value);
+}
 
 /** One account an agent could name for a launch of this agent. Reason codes and references only. */
 export interface ProviderAccountChoice {

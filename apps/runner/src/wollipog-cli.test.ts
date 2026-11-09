@@ -848,7 +848,7 @@ test("CLI rejects explicit effort against pre-v138 control planes without creati
 test("CLI names a provider account and lists choices only on a control plane that reads them (#4353)", async () => {
   const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" };
   const create = ["node", "cli.js", "--wollipog-cli", "session", "create", "--runner", "r1", "--agent", "claude",
-    "--workspace", "ws", "--provider-account", "acct_aaaaaaaaaaaaaaaa", "--json"];
+    "--workspace", "ws", "--provider-account", "acct:aaaaaaaaaaaaaaaa", "--json"];
   const accounts = ["node", "cli.js", "--wollipog-cli", "session", "accounts", "--runner", "r1", "--agent", "claude", "--workspace", "ws", "--json"];
   for (const protocolVersion of [RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccountAgentChoice - 1, PROTOCOL_VERSION]) {
     for (const argv of [create, accounts]) {
@@ -858,7 +858,7 @@ test("CLI names a provider account and lists choices only on a control plane tha
         return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
           ? { protocolVersion }
           : url.includes("provider-account-selection")
-            ? { provider: "claude", accountId: "person-example-com-1234", choices: [{ accountRef: "acct_aaaaaaaaaaaaaaaa", position: 1, canName: true }] }
+            ? { provider: "claude", accountId: "person-example-com-1234", choices: [{ accountRef: "acct:aaaaaaaaaaaaaaaa", position: 1, canName: true }] }
             : { id: "s_new", status: "starting", runnerId: "r1", title: "New" }) };
       };
       let output = "";
@@ -869,12 +869,12 @@ test("CLI names a provider account and lists choices only on a control plane tha
         assert.deepEqual(requests.map((request) => request.url), ["http://cp/api/compatibility"]);
       } else if (argv === create) {
         assert.equal(code, 0);
-        assert.equal(JSON.parse(requests[1]!.body!).providerAccountId, "acct_aaaaaaaaaaaaaaaa");
+        assert.equal(JSON.parse(requests[1]!.body!).providerAccountId, "acct:aaaaaaaaaaaaaaaa");
       } else {
         assert.equal(code, 0);
         assert.equal(requests[1]!.url, "http://cp/api/runners/r1/provider-account-selection?agentId=claude&workspaceId=ws");
         assert.ok(!output.includes("person-example-com"), output);
-        assert.equal(JSON.parse(output).accounts[0].accountRef, "acct_aaaaaaaaaaaaaaaa");
+        assert.equal(JSON.parse(output).accounts[0].accountRef, "acct:aaaaaaaaaaaaaaaa");
       }
     }
   }

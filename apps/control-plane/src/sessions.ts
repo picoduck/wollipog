@@ -2,7 +2,7 @@ import { normalizeWorkflowDecisionOwnerRule, sameWorkflowDecisionOwnerRule } fro
 import { normalizeDeliveryVerificationFailure } from "@wollipog/protocol";
 import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
 import {
-  PROVIDER_ACCOUNT_CHOICE_REQUIRED, PROVIDER_ACCOUNT_REF_PREFIX, providerAccountChoiceRequired, providerAccountChoiceRequiredSentence,
+  isProviderAccountRef, PROVIDER_ACCOUNT_CHOICE_REQUIRED, PROVIDER_ACCOUNT_REF_PREFIX, providerAccountChoiceRequired, providerAccountChoiceRequiredSentence,
   providerAccountExplicitRecord, providerAccountIneligibility, providerAccountNamedRefusal, providerAccountNamedRefusalSentence,
   providerAccountSelectionRecord, providerForDriver, resolveProviderAccountSelection,
   supportsClaudeProjectMemory, type AgentDefinition, type ProviderAccountChoice, type ProviderAccountChoiceRequired, type ProviderAccountDefinition, type ProviderAccountSelectionPreview,
@@ -4960,7 +4960,7 @@ export class SessionsService {
     const useWorktree = resolvedTarget.useWorktree;
     if (req.providerAccountId !== undefined &&
         (typeof req.providerAccountId !== "string" ||
-          !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(req.providerAccountId))) {
+          !(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(req.providerAccountId) || isProviderAccountRef(req.providerAccountId)))) {
       return fail("providerAccountId is invalid", 400);
     }
     const usesRunnerProviderAccount = executionTarget.adapter === "host";
@@ -20030,7 +20030,7 @@ export class SessionsService {
       if (!launch) return fail(`unknown orchestrator agent '${req.orchestratorAgentId}'`, 404);
       const configError = workflowMemberCapabilityError(req.orchestratorAgentId, req.config, launch);
       if (configError) return fail(configError, 409);
-      const account = this.workflowMemberAccount(req, req.orchestratorAgentId, launch, snapshot, this.memberLaunchProjectId(requestedProject.data, req, parentSessionId),
+      const account = this.workflowMemberAccount(req, req.orchestratorAgentId, launch, snapshot, this.workflowOrchestratorLaunchProjectId(requestedProject.data, req),
         delivery?.memberSessionId?.(members.length) ?? delivery?.memberSessionIds?.[members.length]);
       if (!account.ok || !account.data) return failAs(account);
       members.push({ roleId: "__orchestrator__", agentId: req.orchestratorAgentId, launch, orchestrator: true, account: account.data });
@@ -20041,12 +20041,7 @@ export class SessionsService {
     // session an explicit organization scope so a user/team-owned project cannot accidentally
     // disable the workflow routes it was created to drive.
     const runnerScope = this.db.runnerScope(req.runnerId);
-    const orchestratorScope: ResourceScope | null = members.some((member) => member.orchestrator) && runnerScope
-      ? {
-          organizationId: runnerScope.organizationId,
-          owner: { kind: "organization", organizationId: runnerScope.organizationId },
-        }
-      : null;
+    const orchestratorScope = members.some((member) => member.orchestrator) ? this.workflowOrchestratorScope(req.runnerId) : null;
     if (members.some((member) => member.orchestrator) && !orchestratorScope) {
       return fail(`runner '${req.runnerId}' has no organization ownership`, 409);
     }
@@ -21194,9 +21189,9 @@ export class SessionsService {
     const { runner, launch, pinned } = input;
     const provider = providerForDriver(launch.driver);
     const accounts = provider ? (runner.providerAccounts ?? []).filter((account) => account.provider === provider) : [];
-    // An agent names an account by reference. One that matches nothing here, including another
-    // provider's account, stays unresolved and is refused below like any unknown id.
-    const requestedId = input.requestedId?.startsWith(PROVIDER_ACCOUNT_REF_PREFIX)
+    // An agent names an account by reference, which can't be an id. One that matches nothing here,
+    // including another provider's account, stays unresolved and is refused below like an unknown id.
+    const requestedId = input.requestedId && isProviderAccountRef(input.requestedId)
       ? accounts.find((account) => providerAccountRef(runner.runnerId, account.id) === input.requestedId)?.id ?? input.requestedId
       : input.requestedId;
     const native = (launch.context?.kind ?? "native") === "native";
@@ -21357,6 +21352,25 @@ export class SessionsService {
   ): string | null {
     return this.launchProjectId(assignment, req.runnerId, req.workspaceId, this.db.effectiveSessionScope(req.runnerId, req.workspaceId,
       (parentSessionId ? this.db.sessionScope(parentSessionId) : null) ?? undefined));
+  }
+
+  private workflowOrchestratorScope(runnerId: string): ResourceScope | null {
+    const runnerScope = this.db.runnerScope(runnerId);
+    return runnerScope
+      ? { organizationId: runnerScope.organizationId, owner: { kind: "organization", organizationId: runnerScope.organizationId } }
+      : null;
+  }
+
+  /** A workflow's orchestrator is organization-scoped, so a narrower project keeps it out, however the
+   * project was assigned. This answers for that session, whose memory may differ from its workers'. */
+  private workflowOrchestratorLaunchProjectId(
+    assignment: { projectId?: string | null },
+    req: { runnerId: string; workspaceId: string },
+  ): string | null {
+    const scope = this.workflowOrchestratorScope(req.runnerId);
+    const projectScope = assignment.projectId ? this.db.projectScope(assignment.projectId) : null;
+    if (scope && projectScope && !this.db.scopeAudienceContainedWithMembership(scope, projectScope)) return null;
+    return this.launchProjectId(assignment, req.runnerId, req.workspaceId, scope);
   }
 
   /** Every account of this provider an agent could name instead. References and reason codes only. */

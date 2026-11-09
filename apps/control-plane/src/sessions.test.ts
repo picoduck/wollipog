@@ -10983,7 +10983,7 @@ test("an agent names an account by reference, and only one it could actually use
   assert.equal(named.data.providerAccountSelection?.source, "explicit");
   assert.equal(hub.sentOfType("start_session").at(-1)!.spec.providerAccountId, "second", "the runner receives the real account");
 
-  assert.match(asChild("acct_0000000000000000").error ?? "", /not available for the selected agent/u);
+  assert.match(asChild("acct:0000000000000000").error ?? "", /not available for the selected agent/u);
   // Another provider's account on the same Machine is no choice for this agent.
   const codexRef = svc.providerAccountSelectionPreview(RUNNER_ID, { provider: "codex" }).data!.choices![0]!.accountRef;
   assert.match(asChild(codexRef).error ?? "", /not available for the selected agent/u);
@@ -11058,6 +11058,46 @@ test("only a launch naming a model under a policy is told its plan wasn't checke
   const explicit = svc.createSession({ ...request, providerAccountId: "second", config: { model: "chosen-model" } });
   assert.ok(explicit.ok && explicit.data, explicit.error);
   assert.equal(explicit.data.providerAccountSelection?.modelCompatibility, undefined);
+});
+
+test("a workflow's orchestrator answers for the project it joins, not its workers' (#4353)", () => {
+  const { db, svc } = priorityHarness();
+  // Project memory is fine on the workers' Claude Code; `test-orchestrator` reports no such version.
+  const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, workflowId: "builtin:build-review", task: "Build and review",
+    agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID }, orchestratorAgentId: "test-orchestrator" };
+
+  // Everyone in the organization can reach the workspace's project, so the orchestrator joins it too.
+  const shared = svc.createWorkflowRun(request);
+  assert.equal(shared.providerAccountSelection?.refusal, "account_memory", shared.error);
+
+  // A narrower project keeps the organization-scoped orchestrator out, whether named or inferred, so
+  // it has no project memory to move. Its workers still join.
+  const { project, location, scope } = makeTeamOwnedProject(db);
+  assert.equal(db.setResourceScope({ resource: "workspace", runnerId: RUNNER_ID, resourceId: WORKSPACE_ID, scope, now: 3 }), true);
+  for (const placement of [{}, { projectId: project.id, projectLocationId: location.id }]) {
+    const run = svc.createWorkflowRun({ ...request, ...placement });
+    assert.ok(run.ok && run.data, run.error);
+    const orchestrator = run.data.sessions.find((session) => session.agentId === "test-orchestrator")!;
+    assert.equal(orchestrator.projectId, null);
+    assert.equal(orchestrator.providerAccountSelection?.source, "priority");
+    for (const worker of run.data.sessions.filter((session) => session.agentId !== "test-orchestrator")) {
+      assert.equal(worker.projectId, project.id);
+    }
+  }
+});
+
+test("an account reference and a configured id can never be each other (#4353)", () => {
+  const base: ProviderAccountDefinition = { id: "work", label: "Work", provider: "claude", authStatus: "authenticated", billing: "subscription" };
+  const probe = priorityHarness({ accounts: [base], order: ["work"] });
+  const ref = probe.svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID }).data!.choices![0]!.accountRef;
+  assert.match(ref, /^acct:[0-9a-f]{16}$/u);
+  // Everything a runner's configuration admits for an id excludes the separator, so this is the closest
+  // an id can get: the same characters, which name that account and no other.
+  const lookalike = ref.replace(":", "_");
+  const { svc, request } = priorityHarness({ order: ["work"], accounts: [base, { ...base, id: lookalike, label: "Other" }] });
+  assert.equal(svc.createSession({ ...request, providerAccountId: lookalike }).data?.providerAccountId, lookalike);
+  assert.equal(svc.createSession({ ...request, providerAccountId: ref }).data?.providerAccountId, "work");
+  assert.equal(svc.createSession({ ...request, providerAccountId: "acct:not-a-digest" }).status, 400, "a malformed reference is no id either");
 });
 
 test("a launch that infers a project joins the one the shared rule names (#4353)", () => {

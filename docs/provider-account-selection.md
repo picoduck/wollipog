@@ -92,7 +92,8 @@ account's HOME. Priority Order refuses these launches, because choosing a differ
 would silently change what the session remembers; they need an explicit account or a newer Claude
 Code. This covers the project a launch would join without naming one: a child follows its parent, and
 any other launch follows its workspace's Location when that workspace has exactly one and the
-session's audience fits inside the project. No Project is a choice, and nothing is inferred for it. A
+session's audience fits inside the project. A workflow's orchestrator is organization-scoped, so a
+narrower project keeps it out and it answers only for a project it joins. No Project is a choice, and nothing is inferred for it. A
 preview given the workspace reads this same rule. Without a workspace, as in Provider Accounts, it
 has no project to predict.
 

@@ -1779,9 +1779,9 @@ test("an agent reads the accounts it could name as references, never as identifi
     accountId: "person-example-com-1234", enforcement: "enforced", generatedAt: 1,
     candidates: [{ accountId: "person-example-com-1234", position: 1, eligible: true, selected: true }],
     choices: [
-      { accountRef: "acct_aaaaaaaaaaaaaaaa", position: 1, expected: true, canName: true },
-      { accountRef: "acct_bbbbbbbbbbbbbbbb", position: 2, canName: false, reason: "signed_out" },
-      { accountRef: "acct_cccccccccccccccc", position: null, canName: true, reason: "usage_exhausted", retryAt: 1_800_000_000_000, limitLabel: "Weekly" },
+      { accountRef: "acct:aaaaaaaaaaaaaaaa", position: 1, expected: true, canName: true },
+      { accountRef: "acct:bbbbbbbbbbbbbbbb", position: 2, canName: false, reason: "signed_out" },
+      { accountRef: "acct:cccccccccccccccc", position: null, canName: true, reason: "usage_exhausted", retryAt: 1_800_000_000_000, limitLabel: "Weekly" },
     ],
   } }));
   deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
@@ -1792,9 +1792,9 @@ test("an agent reads the accounts it could name as references, never as identifi
   assert.ok(!text.includes("person-example-com"), text);
   const body = JSON.parse(text);
   assert.deepEqual(body.accounts, [
-    { accountRef: "acct_aaaaaaaaaaaaaaaa", position: 1, expected: true, canName: true },
-    { accountRef: "acct_bbbbbbbbbbbbbbbb", position: 2, canName: false, reason: "signed_out", because: "needs sign-in" },
-    { accountRef: "acct_cccccccccccccccc", position: null, canName: true, reason: "usage_exhausted", because: "is at a usage limit",
+    { accountRef: "acct:aaaaaaaaaaaaaaaa", position: 1, expected: true, canName: true },
+    { accountRef: "acct:bbbbbbbbbbbbbbbb", position: 2, canName: false, reason: "signed_out", because: "needs sign-in" },
+    { accountRef: "acct:cccccccccccccccc", position: null, canName: true, reason: "usage_exhausted", because: "is at a usage limit",
       retryAt: new Date(1_800_000_000_000).toISOString(), limitLabel: "Weekly" },
   ]);
 });
@@ -1802,13 +1802,13 @@ test("an agent reads the accounts it could name as references, never as identifi
 test("create_session carries a named account, and refuses it before sending to an older control plane (#4353)", async () => {
   const current = makeDeps(() => ({ status: 200, body: { id: "s_child", status: "queued", runnerId: "r1" } }));
   current.deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
-  const created = await callTool(current.deps, "create_session", { runnerId: "r1", agentId: "claude", workspaceId: "ws", providerAccountId: "acct_aaaaaaaaaaaaaaaa" });
+  const created = await callTool(current.deps, "create_session", { runnerId: "r1", agentId: "claude", workspaceId: "ws", providerAccountId: "acct:aaaaaaaaaaaaaaaa" });
   assert.equal(created.isError, undefined, resultText(created));
-  assert.equal((current.calls[0]?.body as { providerAccountId?: string })?.providerAccountId, "acct_aaaaaaaaaaaaaaaa");
+  assert.equal((current.calls[0]?.body as { providerAccountId?: string })?.providerAccountId, "acct:aaaaaaaaaaaaaaaa");
 
   const older = makeDeps(() => ({ status: 200, body: {} }));
   older.deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccountAgentChoice - 1;
-  const refused = await callTool(older.deps, "create_session", { runnerId: "r1", agentId: "claude", workspaceId: "ws", providerAccountId: "acct_aaaaaaaaaaaaaaaa" });
+  const refused = await callTool(older.deps, "create_session", { runnerId: "r1", agentId: "claude", workspaceId: "ws", providerAccountId: "acct:aaaaaaaaaaaaaaaa" });
   assert.equal(refused.isError, true);
   assert.match(resultText(refused), /Choosing a provider account from an agent needs/u);
   assert.deepEqual(older.calls, [], "an older control plane can't silently ignore the choice, because it never receives it");
