@@ -71,8 +71,10 @@ export function fullControlLocationReport(preflight: Pick<CampaignLaunchPrefligh
   return excluded.length || limited.length ? { excluded, limited } : null;
 }
 
+/** Everything a row shows: a changed name or repository stops Start again too. */
 const reportKey = (report: FullControlLocationReport | null) => report
-  ? JSON.stringify([report.excluded.map((item) => [item.locationId, item.reason]).sort(), report.limited.map((item) => [item.locationId, item.reason]).sort()]) : null;
+  ? JSON.stringify([report.excluded.map((item) => [item.locationId, item.name, item.repository ?? null, item.reason]).sort(),
+    report.limited.map((item) => [item.locationId, item.name, item.reason]).sort()]) : null;
 
 /** The check found something the person hasn't been shown: show it, and let the next action proceed. */
 export class FullControlLocationsToReview extends Error {

@@ -198,12 +198,15 @@ export class CampaignLocations {
       this.deps.log.warn(JSON.stringify({ event: "campaign_locations_not_recorded", sessionId: root.id, status: result.status }));
       return result;
     }
-    // A Custom campaign's list has no boundary to re-mint and revokes nothing.
     if (result.joined && root.orchestratorPolicy?.control?.mode === "full_control") {
       // A join is an owner-authorized boundary change: what it revoked leaves its pauses, and every
       // member's runner gets the new boundary.
       this.deps.settle(root, result.revoked, owner, now);
       await this.deps.synchronize(root.id);
+    } else if (result.revoked.length) {
+      // A Custom list has no boundary to re-mint. Its join revokes only what was approved in a
+      // repository it stops refusing (#4319), and that leaves its pauses the same way.
+      this.deps.settle(root, result.revoked, owner, now);
     } else {
       this.deps.hub.sessionChangedById(root.id);
     }

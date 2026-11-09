@@ -65,6 +65,24 @@ test("a start stops again when the check finds something the person wasn't shown
   assert.deepEqual(fullControlLocationReport(withSummary({ excludedLocations: [], limitedLocations: [limited] })), { excluded: [], limited: [limited] });
 });
 
+test("a start stops again when a shown row's repository or name changed, even with the same Location and reason (#4319)", async () => {
+  const shown = { ...excluded("a", "Old Mac", "runner_below_gates", OLD), repository: "old/tools" };
+  const shownLimit = { locationId: "l", name: "Laptop", reason: "limited" };
+  for (const [what, now] of [
+    ["repository", { excluded: [{ ...shown, repository: "other/tools" }], limited: [shownLimit] }],
+    ["excluded name", { excluded: [{ ...shown, name: "Old Mac Renamed" }], limited: [shownLimit] }],
+    ["limited name", { excluded: [shown], limited: [{ ...shownLimit, name: "Laptop Renamed" }] }],
+  ] as const) {
+    const { client, sent } = api(async () => ({ preflight: withSummary({ excludedLocations: [...now.excluded], limitedLocations: [...now.limited] }) }));
+    await assert.rejects(launchFullControlCampaign(client, request, { excluded: [shown], limited: [shownLimit] }),
+      (error: unknown) => error instanceof FullControlLocationsToReview, what);
+    assert.equal(sent.admissions.length, 0, what);
+  }
+  const { client, sent } = api(async () => ({ preflight: withSummary({ excludedLocations: [shown], limitedLocations: [shownLimit] }) }));
+  await launchFullControlCampaign(client, request, { excluded: [shown], limited: [shownLimit] });
+  assert.equal(sent.admissions.length, 1, "what was shown, unchanged, starts");
+});
+
 test("a campaign whose runners are all current starts in one action, even with other exclusions (#4319)", async () => {
   const { client, sent } = api(async () => ({ preflight: withSummary({ excludedLocations: [excluded("b", "Notes", "not_repository", "not a repository"), excluded("c", "Away", "runner_offline", "offline")] }) }));
   await launchFullControlCampaign(client, request);

@@ -219,6 +219,9 @@ export class CampaignRepositoryAdditions {
         // Like any join, what the new revision revoked leaves its pauses before members re-sync.
         this.deps.sessions.settleCampaignBoundaryChange(current, recorded.revoked, owner.userId, now);
         await this.deps.synchronize(rootId);
+      } else if (recorded.revoked.length) {
+        // A Custom addition revokes only what was approved in a repository it stops refusing (#4319).
+        this.deps.sessions.settleCampaignBoundaryChange(current, recorded.revoked, owner.userId, now);
       }
       this.deps.hub.sessionChangedById(rootId);
       return ok(db.workflowDecisionByOccurrence(occurrenceId)!, 201);

@@ -45,7 +45,7 @@ import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignClosureIssueHeld, campaignRepositoryLimits, campaignControlForRunner, campaignControlRevisionForRunner, campaignLaunchRepository, campaignOtherRepository, campaignScopeRepositories, carriedCampaignRepositories } from "./campaign-authority.js";
-import { campaignRepositoryOutsideLimit } from "./campaign-authority.js";
+import { campaignRefusedRepositories, campaignRepositoryOutsideLimit } from "./campaign-authority.js";
 import { campaignBoundaryRepositoryAt, campaignRepositoryPlaces, launchBoundaryRepositories, type CampaignRepositoryPlace } from "./campaign-repository-boundary.js";
 import { CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL, type CampaignBoundaryRepository, type CampaignExcludedLocation } from "@wollipog/protocol";
 import { inspectBoundaryPublication, verifyBoundaryPublishedIssue } from "./project-location-inspection.js";
@@ -11691,8 +11691,9 @@ export class SessionsService {
    * after arming. Pass `approval` for a request whose command is known; without one (Claude's policy
    * hook never carries a command) any armed merge of the session counts, so as with a hold every shell
    * command is denied while it stands. The approval stays armed, because its command may already have
-   * run and reconciling needs it. That lifts this, as does the runner updating, whose join revokes it,
-   * or a new request for the same pull request, which replaces it. */
+   * run and reconciling needs it. That lifts this, as does a Location of that repository joining (Full
+   * Control or Custom), which revokes it, or a new request for the same pull request, which replaces it.
+   * Nothing else lifts it: the refusal rests on a record only an entry ends (#4319). */
   private excludedArmedMerge(session: SessionView, approval?: PendingApproval): string | null {
     if (approval && (approval.kind === "authentication" || approval.kind === "question")) return null;
     const command = session.driver === "codex-app-server" ? approval?.context?.commandIdentity?.input : approval?.context?.input;
@@ -11702,7 +11703,8 @@ export class SessionsService {
           (approval && decision.actionAdmission.command !== command)) continue;
       const refusal = this.excludedRepositoryRefusal(session, null, decision.resourceSnapshot);
       if (refusal) return `${refusal} Command tools are blocked while this session's armed merge can't run, since it must not. If it already ran, reconcile it. ` +
-        "Otherwise this lifts when that runner updates, or when you request a new pr_merge decision for the same pull request with the request_workflow_decision tool " +
+        "Otherwise this lifts when a Location of that repository joins the campaign, which revokes the armed merge, " +
+        "or when you request a new pr_merge decision for the same pull request with the request_workflow_decision tool " +
         "(the CLI needs the shell), which replaces the armed one.";
     }
     return null;
@@ -12572,8 +12574,9 @@ export class SessionsService {
 
   private excludedRepositorySentence(root: SessionView, repository: string, requester: Pick<SessionView, "runnerId" | "workspaceId">): string | null {
     const named = repository.toLowerCase();
-    if (campaignScopeRepositories(root).some((entry) => entry.repository === named)) return null;
-    const excluded = (root.orchestratorPolicy?.excludedLocations ?? []).filter((item) => item.failure === "runner_below_gates" && item.repository === named);
+    // The durable record, not the latest read: a later read that fails, a move to waiting or a revoke
+    // never turns a refused repository back into an unknown one. Only an entry ends it.
+    const excluded = campaignRefusedRepositories(root).filter((item) => item.repository === named);
     if (!excluded.length || excluded.some((item) => {
       const location = this.db.getProjectLocation(item.locationId);
       return location?.runnerId === requester.runnerId && location?.workspaceId === requester.workspaceId;

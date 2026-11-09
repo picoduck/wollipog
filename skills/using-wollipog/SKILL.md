@@ -912,7 +912,9 @@ A Location on a runner too old to perform the campaign's gates doesn't join: `re
 it under `excludedLocations` with a reason naming the version it needs, and asking to add its repository
 is refused with that reason. A merge, branch deletion, closure or follow-up naming that repository is
 refused the same way, with no other login standing in, so don't look for one: report that its runner
-needs updating. It can join once that runner updates, without a new launch.
+needs updating. The refusal holds until a Location of that repository joins, without a new launch: the
+owner's own Location joins once its runner updates, and someone else's then waits for the owner's Include
+in Campaign. A join revokes what was approved in that repository meanwhile, so request again afterward.
 
 ## Inspecting and Changing Campaign Issue Scope
 

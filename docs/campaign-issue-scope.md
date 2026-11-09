@@ -202,21 +202,26 @@ Include in Campaign once its runner is current. A Custom list retries this exclu
 owner's own Location. An offline runner reads as offline, whatever version it last reported.
 
 A repository whose only Location is excluded has no entry until that Location joins, and it is not treated
-like a repository the campaign never knew of. A follow-up, merge, branch deletion or closure naming it is
-refused by the Location's name and version, at request and again at consume and execute, and a forge read
-goes through that Location or not at all, so no other login stands in. An exclusion recorded mid-action
-stops it too. An armed merge is refused where its command can be seen, and as with a merge hold Claude's
-policy hook denies the session's shell commands while it stands, since it can't tell them apart. The
-approval stays armed, because its command may already have run. Reconciling it, the runner updating, or a
-new request for the same pull request lifts that. A requester running in that very Location still acts in
-its own repository. An unknown repository keeps its rule: a person's approval lets
-the requester act with its own login. A runner too old to read a Location names no repository, so its
-repository can't be told apart from an unknown one.
+like a repository the campaign never knew of. Once a read has named it, the campaign keeps it refused in a
+record of its own (`refusedRepositories`) until the repository holds an entry: a Location of it joining,
+or the owner's approved addition. Nothing else ends it: not a later read that fails, a move to waiting, a
+re-authorization, a revoke to Custom, nor the Location leaving the Project. A follow-up, merge, branch
+deletion or closure naming it is refused by the Location's name and version, at request and again at
+consume, arming and execute. Nothing reads its forge, since its Location isn't in the boundary, so no other
+login stands in. An exclusion recorded mid-action stops it too. An armed merge is refused where its command
+can be seen, and as with a merge hold Claude's policy hook denies the session's shell commands while it
+stands, since it can't tell them apart. The approval stays armed, because its command may already have
+run. Reconciling it, a new request for the same pull request, or the join that ends the refusal lifts that.
+That join revokes the armed approval, in Full Control and in Custom, so the block never lifts with it still
+armed; a revoke to Custom revokes it too. A requester running in that very Location still acts in its own
+repository. An unknown repository keeps its rule: a person's approval lets the requester act with its own
+login. A runner too old to read a Location (below v288) names no repository, and neither does a read that
+fails, so until a later read names it that repository can't be told apart from an unknown one.
 
 This narrows only what joins. A Location the campaign already holds keeps its place on any runner, so a
 re-authorization or enable never drops a repository, and each gate still refuses a runner below its own
 floor by name, with no other login standing in. A revoke to Custom ends the boundary and its exclusions,
-children stay live across it, and an enable after one surveys the Project again: a Location on an old
+though not the repositories they refused, children stay live across it, and an enable after one surveys the Project again: a Location on an old
 runner is then excluded rather than carried. If a live child runs in it, the preflight reports that by
 the child's and Location's names and the version, and the enable is refused in the same words.
 

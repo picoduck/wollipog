@@ -46,6 +46,18 @@ export interface CampaignExcludedLocation {
   repository?: string;
 }
 
+/** A repository a read found behind a Location whose runner can't perform the campaign's gates
+ * (#4319). Server-owned. Its gates refuse by that Location's name until the repository holds an
+ * entry, which only a join or an approved addition gives it, each revoking what was approved
+ * meanwhile. Nothing else clears it: not a later read that fails, a move to waiting, a revoke, a
+ * re-authorization, nor the Location leaving the Project. */
+export interface CampaignRefusedRepository {
+  repository: string;
+  locationId: string;
+  /** The Location's name when it was read. */
+  name: string;
+}
+
 /** A launch Location kept in the boundary although its root runner can't create issues through a
  * Location, so a follow-up routed to its repository from another of the campaign's can't be created
  * (#4319). Its repository's other gates run in the root's own checkout and aren't affected. */

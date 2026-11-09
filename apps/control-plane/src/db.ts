@@ -44,7 +44,7 @@ import {
   validProviderHomeLaunchRefusal, validProviderHomeWait, validWorktreeSwitch,
 } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
-import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignDispatchScopeRefusal, campaignBoundaryCurrent, campaignIssueInScope, campaignLaunchRepository, campaignOtherRepository, campaignRepositoryLimits, campaignScopeRepositories, remintCampaignBoundary } from "./campaign-authority.js";
+import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignDispatchScopeRefusal, campaignBoundaryCurrent, campaignIssueInScope, campaignLaunchRepository, campaignOtherRepository, campaignRefusedRepositories, campaignRepositoryLimits, campaignScopeRepositories, remintCampaignBoundary, rememberRefusedRepositories } from "./campaign-authority.js";
 import { campaignBoundaryRepositoryAt, campaignLocationRepository, campaignRepositoryPlaces, limitedLaunchLocations } from "./campaign-repository-boundary.js";
 import { genericRequestScreenData, storedCredentialScreenFact } from "./credential-screen.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
@@ -6589,18 +6589,13 @@ export class ControlPlaneDb {
       return { runnerId, protocolVersion: runner?.protocolVersion ?? null, online: runner?.status === "online" && isOnline(runnerId) };
     };
     const root = repository ? { projectId: row.project_id, orchestratorPolicy: orchestratorCampaignPolicyFromJson(row.orchestrator_policy) ?? undefined } : null;
+    // A repository refused for a runner's version (#4319) has no reader until a Location of it joins:
+    // the root's login no more stands in than it does for a repository that holds an entry, and a
+    // Location outside the boundary is a runner nobody approved. Asked before the launch repository is
+    // known, since a Custom campaign may have none.
+    if (root && campaignRefusedRepositories(root).some((item) => item.repository === repository!.toLowerCase())) return null;
     const other = root ? campaignOtherRepository(root, repository) : null;
     const entry = other ? campaignScopeRepositories(root!).find((candidate) => candidate.repository === other) : undefined;
-    // A repository left out for its runner's version (#4319) is read through that Location or not at
-    // all: the root's login no more stands in than it does for a repository that holds an entry.
-    if (root && other && !entry) {
-      const excluded = root.orchestratorPolicy?.excludedLocations?.find((item) => item.failure === "runner_below_gates" && item.repository === other);
-      const location = excluded ? this.getProjectLocation(excluded.locationId) : null;
-      if (excluded) {
-        const workspacePath = location ? this.getWorkspacePath(location.runnerId, location.workspaceId) : null;
-        return location && workspacePath ? { ...reader(location.runnerId), location: { workspaceId: location.workspaceId, workspacePath, repository: other } } : null;
-      }
-    }
     if (!root || !entry) return reader(row.runner_id);
     const places = campaignRepositoryPlaces(this, root, entry).map((place) => ({ ...reader(place.runnerId), location:
       { workspaceId: place.workspaceId, workspacePath: place.workspacePath, repository: place.repository } }));
@@ -17838,6 +17833,8 @@ export class ControlPlaneDb {
       const available = (policy.availableLocations ?? []).filter((item) => item.locationId !== locationId);
       if (excluded.length === (policy.excludedLocations ?? []).length && pending.length === (policy.pendingLocations ?? []).length &&
           available.length === (policy.availableLocations ?? []).length) continue;
+      // A repository this Location's read refused stays refused after the Location leaves (#4319).
+      rememberRefusedRepositories(policy);
       if (excluded.length) policy.excludedLocations = excluded; else delete policy.excludedLocations;
       if (pending.length) policy.pendingLocations = pending; else delete policy.pendingLocations;
       if (available.length) policy.availableLocations = available; else delete policy.availableLocations;
@@ -18159,6 +18156,24 @@ export class ControlPlaneDb {
    * consumed in the same transaction, only for its own approver, and never revoked by the revision
    * it creates. A Custom campaign has no authority boundary, so an approved addition extends its
    * repository list instead, starting from `customBase` (its own Location's repository). */
+  /** Revoke what is approved in each repository a Custom join or addition stops refusing (#4319). A
+   * Custom list has no revision, so nothing else would: an armed merge's block would lift with its
+   * approval still armed. A Full Control join revokes every authority-bound decision already. */
+  private revokeLiftedRefusals(rootId: string, before: ReadonlySet<string>, policy: OrchestratorCampaignPolicy, now: number): WorkflowDecisionView[] {
+    const still = new Set(campaignRefusedRepositories({ orchestratorPolicy: policy }).map((item) => item.repository));
+    const lifted = new Set([...before].filter((repository) => !still.has(repository)));
+    if (!lifted.size) return [];
+    const revoked = this.authorityBoundWorkflowDecisionsForController(rootId).filter(({ resourceSnapshot: snapshot }) =>
+      (snapshot.category === "follow_up_issue_publication" || snapshot.category === "pr_merge" || snapshot.category === "merged_branch_deletion") &&
+      lifted.has(snapshot.repository.toLowerCase()));
+    for (const stale of revoked) {
+      this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
+      this.retireWorkflowDecisionResume(stale.occurrenceId, now);
+      this.revokeUiEvidenceReviewReceipts(stale.occurrenceId, now);
+    }
+    return revoked;
+  }
+
   recordCampaignLocations(rootId: string, ownerUserId: string, update: {
     joins: Array<{ locationId: string; name: string; repository: string; source: CampaignLocationJoin["source"] }>;
     excluded: CampaignExcludedLocation[];
@@ -18170,6 +18185,9 @@ export class ControlPlaneDb {
     try {
       const policy = this.sessionOrchestratorPolicy(rootId);
       const control = policy?.control;
+      // What this campaign refuses before the update, kept whatever the update says about its Locations (#4319).
+      if (policy) rememberRefusedRepositories(policy);
+      const refusedBefore = new Set(policy ? campaignRefusedRepositories({ orchestratorPolicy: policy }).map((item) => item.repository) : []);
       const consumed = options.consume;
       const addition = consumed ? this.workflowDecisionByOccurrence(consumed.occurrenceId) : null;
       if (consumed && (addition?.category !== "campaign_repository_addition" || addition.sessionId !== rootId ||
@@ -18206,8 +18224,9 @@ export class ControlPlaneDb {
         widenCampaignRepositoryLimit(policy, join);
         this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(policy), now, rootId);
         finishAddition(0);
+        const revoked = this.revokeLiftedRefusals(rootId, refusedBefore, policy, now);
         this.db.exec("COMMIT");
-        return { ok: true, revision: 0, joined: true, revoked: [] };
+        return { ok: true, revision: 0, joined: true, revoked };
       }
       if (policy && control?.mode !== "full_control" && policy.repositories) {
         // Custom's owner Location whose runner has now updated (#4319). Its list has no revision, and
@@ -18238,8 +18257,9 @@ export class ControlPlaneDb {
           ...leftOut.map((join) => ({ locationId: join.locationId, name: join.name, repository: join.repository.toLowerCase() }))];
         if (available.length) policy.availableLocations = available.slice(-CAMPAIGN_BOUNDARY_LOCATIONS_MAX); else delete policy.availableLocations;
         this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(policy), now, rootId);
+        const revoked = this.revokeLiftedRefusals(rootId, refusedBefore, policy, now);
         this.db.exec("COMMIT");
-        return { ok: true, revision: 0, joined: joins.length > 0, revoked: [] };
+        return { ok: true, revision: 0, joined: joins.length > 0, revoked };
       }
       if (!policy || control?.mode !== "full_control" || !control.boundary.repositories) {
         return refuse(409, "Only a Full Control campaign with a repository boundary takes Project Locations.");
@@ -21682,6 +21702,9 @@ export class ControlPlaneDb {
       const { derivedLimits: _stale, ...rest } = waiting;
       campaign.firstMessageScope = { ...rest, ...(control.mode === "full_control" && derivedLimits ? { derivedLimits: { ...derivedLimits } } : {}) };
     }
+    // What the campaign refuses for a runner's version outlives every change here (#4319): a revoke or
+    // re-authorization drops or replaces exclusions, never the repositories they refused.
+    rememberRefusedRepositories(campaign);
     // A revoke ends the boundary these describe (#4319). A list an approved addition recreates later
     // must not take one of them in on a reconnect, with nobody having approved that.
     if (control.mode !== "full_control" && campaign.control?.mode === "full_control") delete campaign.excludedLocations;
@@ -35552,6 +35575,14 @@ function validExcludedLocations(value: unknown): boolean {
   });
 }
 
+/** A malformed record is dropped alone: its neighbours still refuse (#4319). */
+function validRefusedRepositories(value: unknown): import("@wollipog/protocol").CampaignRefusedRepository[] {
+  return (Array.isArray(value) ? value : []).filter((item) => {
+    const repository = locationRecord(item, ["locationId", "name", "repository"])?.repository;
+    return typeof repository === "string" && campaignRepositoryLocation(repository) !== null;
+  }).slice(0, CAMPAIGN_BOUNDARY_LOCATIONS_MAX);
+}
+
 function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCampaignPolicy | null {
   const value = parseJson<OrchestratorCampaignPolicy>(raw);
   if (!value || value.version !== 1 ||
@@ -35647,6 +35678,10 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
   // Each reason reads as today's fixed sentence, so stored text never reaches a person, and a raised
   // version floor (#4319) names the new version rather than dropping the list its reconnects retry.
   else if (value.excludedLocations) value.excludedLocations = value.excludedLocations.map((item) => ({ ...item, reason: PROJECT_LOCATION_INSPECTION_FAILURES[item.failure] }));
+  if (value.refusedRepositories !== undefined) {
+    const refused = validRefusedRepositories(value.refusedRepositories);
+    if (refused.length) value.refusedRepositories = refused; else delete value.refusedRepositories;
+  }
   // Informational only (#2940), and only beside the Full Control boundary it describes.
   if (value.launchDisclosure !== undefined && (value.control?.mode !== "full_control" || !validCampaignLaunchDisclosure(value.launchDisclosure))) {
     delete value.launchDisclosure;

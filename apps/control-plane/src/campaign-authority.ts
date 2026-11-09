@@ -1,6 +1,6 @@
 import {
-  campaignAuthorityPreflight, campaignBoundaryRepositories, campaignBoundaryRepository, campaignScopeHolds, initialScopeRepositoryLimits, resolveCampaignAuthority, runnerSupportsProtocol, validCampaignControl,
-  type CampaignAuthorityEvaluation, type CampaignBoundaryRepository, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope, type CredentialScreenFact,
+  CAMPAIGN_BOUNDARY_LOCATIONS_MAX, campaignAuthorityPreflight, campaignBoundaryRepositories, campaignBoundaryRepository, campaignScopeHolds, initialScopeRepositoryLimits, resolveCampaignAuthority, runnerSupportsProtocol, validCampaignControl,
+  type CampaignAuthorityEvaluation, type CampaignBoundaryRepository, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope, type CampaignRefusedRepository, type CredentialScreenFact,
   type OrchestratorCampaignPolicy, type ParentControlPolicy, type PendingApproval, type SessionView, type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
 import type { HumanPrincipal } from "./identity.js";
@@ -166,6 +166,36 @@ export function campaignScopeRepositories(root: Pick<SessionView, "orchestratorP
   const listed = (root.orchestratorPolicy?.repositories ?? []).map((entry) => ({ repository: entry.repository.toLowerCase(), locationIds: entry.locationIds }));
   const own = listed.find((entry) => entry.repository === launch);
   return [...(launch ? [own ?? { repository: launch, locationIds: [] }] : []), ...listed.filter((entry) => entry.repository !== launch)];
+}
+
+/** The repositories this campaign refuses because a Location's runner can't perform its gates (#4319):
+ * each one a read found, recorded durably or still on an exclusion written before that record existed,
+ * that holds no entry now. Holding an entry is the only thing that ends a refusal. */
+export function campaignRefusedRepositories(root: Pick<SessionView, "orchestratorPolicy">): CampaignRefusedRepository[] {
+  const policy = root.orchestratorPolicy;
+  const entries = new Set(campaignScopeRepositories(root).map((entry) => entry.repository));
+  const seen = new Set<string>();
+  return [...policy?.refusedRepositories ?? [],
+    ...(policy?.excludedLocations ?? []).flatMap((item) => item.failure === "runner_below_gates" && item.repository
+      ? [{ repository: item.repository, locationId: item.locationId, name: item.name }] : [])]
+    .map((item) => ({ repository: item.repository.toLowerCase(), locationId: item.locationId, name: item.name }))
+    .filter((item) => {
+      const key = `${item.repository}\n${item.locationId}`;
+      if (entries.has(item.repository) || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+/** Keep every repository `policy` refuses now in its durable record (#4319), so no later change to
+ * its exclusions forgets one, and drop those that now hold an entry. Call it at the start of every
+ * write that can replace or drop an exclusion. Until such a write, the exclusion itself names the
+ * repository, and every reader reads both. The record keeps its oldest; past its bound a repository
+ * is refused only while its exclusion stands. */
+export function rememberRefusedRepositories(policy: OrchestratorCampaignPolicy): void {
+  const refused = campaignRefusedRepositories({ orchestratorPolicy: policy });
+  if (refused.length) policy.refusedRepositories = refused.slice(0, CAMPAIGN_BOUNDARY_LOCATIONS_MAX);
+  else delete policy.refusedRepositories;
 }
 
 /** Under Full Control the issue scope bounds what the Orchestrator may deliver (#4062): a child is
