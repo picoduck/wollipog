@@ -33,6 +33,9 @@ Collection used five adjacent slices: activation to #4229, then to November 7
 All 15 event listings, job listings, attempt histories and timeline listings
 completed within their ten-page/ten-attempt bounds; no truncation was reported.
 The largest daily event listing was 117 runs, below the search cap of 1,000.
+Run collection is sliced, but queue timelines are recomputed from the union of
+tracked PR identities over the whole window before filtering by merge/removal
+time. This preserves episodes crossing collection boundaries.
 
 Required latency ends at the exact `Typecheck, Test & Sidecar Bundle` job.
 Passing latency excludes failed/cancelled/skipped/unfinished outcomes. Elapsed
@@ -76,6 +79,12 @@ The unknown admitted run in B was cancelled before planning established
 reduction. Do not classify it as reduced because one matrix job appears.
 A's full PR cohort has 41 five-shard and three ten-shard feature runs before
 #4229 landed; B's full PR topologies all have ten shards.
+Era A groups also mix inventories: 27 five-shard and five ten-shard groups,
+including 27 five-shard and three ten-shard passing groups. The ten-shard
+groups are #4229 and integrations stacked on it before landing. In those rows,
+the collector's `browserShardImbalance.expected=5` is the era-pinned analysis
+input, not the executed workflow inventory; `complete=false` there does not
+mean a missing shard when ten observed shards actually executed.
 
 | Passing Required Latency, Minutes | Era A Median / P90 (N) | Era B Median / P90 (N) |
 | --- | ---: | ---: |
@@ -120,18 +129,23 @@ run outcomes, but unmeasured timing remains as above.
 | Cancelled Merge-Group Runs | 1 (3.13%) | 7 (7.14%) |
 | Browser-Failing Runs | 1 (3.13%) | 2 (2.04%) |
 | Other Failing Runs | 0 | 16 |
-| Surviving Enqueue → Merge Median / P90, Minutes (N) | 152.92 / 260.67 (27) | 20.08 / 32.02 (70) |
+| Surviving Enqueue → Merge Median / P90, Minutes (N) | 152.92 / 260.67 (27) | 20.08 / 33.68 (74) |
 | Tracked `failed_checks` Removal Events | 1 | 18 |
 | Tracked `merge_conflict` Removal Events | 0 | 2 |
+| Tracked `manual` Removal Events | 2 | 0 |
 
-Queue latency describes only the surviving enqueue episode of 97 merged PRs
+Queue latency describes only the surviving enqueue episode of 101 merged PRs
 tracked by included group runs. Earlier failed episodes and still-open PRs are
 not successful latency observations. Queue/removal clocks use merge/removal time,
-not group creation. Removals cover tracked PRs only: 19 failed-check removals and
-two conflicts are **not** a population ejection rate or interchangeable with 130
+not group creation. Removals cover tracked PRs only: 19 failed-check removals,
+two conflicts and two manual removals are **not** a population ejection rate or interchangeable with 130
 created runs. Successful `merged` removals remain in JSON but are not ejections.
 PR cancellation was 16/72 (22.22%) / 62/205 (30.24%) admitted first attempts;
 the causes are unmeasured.
+Boundary checks retain #4229's merge exactly at 2026-11-06T00:42:15Z in B,
+plus #4264 at 00:43:40Z, #4315 at 2026-11-07T00:15:32Z and #4358 at
+2026-11-09T00:07:00Z. Their complete queue histories confirm the merge SHAs;
+all four crossed a collection-slice boundary and are included in B's 74.
 
 All **three browser-failing runs out of 130 (2.31%)** have a corresponding
 failed-check removal for their PR: three browser-associated ejections following
@@ -251,10 +265,15 @@ The other two browser failures are also retry-only failures after full coverage:
 Both untruncated timing projections contain one failing attempt and a passing
 retry with the same file/test IDs. The agent-question failure has the same hashed
 test ID in #4229 and #4349. This supports repeated flakiness, not a diagnosis.
-Historical prior PR heads were checked against read-only PR metadata. No browser
+Historical prior PR heads were checked against read-only PR metadata. No merge-group browser
 failure in this sample needs an “escaped reduced PR regression” or “proven main
 regression” attribution: all three are observed retry-only failures after full
 PR coverage. This does not establish that main cannot exhibit the same flakes.
+Separately, six first-attempt PR runs had Chromium failures: all used full
+coverage (one five-shard, five ten-shard), and four later passed on attempt-2
+reruns. No reduced PR browser failure was observed. The six run IDs are
+42095509704, 42174322391, 42163880391, 42335793843, 42326463283 and 42556931314;
+their presence does not change the merge-group failure/ejection denominator.
 
 ## Acceptance Criteria
 
