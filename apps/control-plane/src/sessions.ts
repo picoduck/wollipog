@@ -12524,14 +12524,14 @@ export class SessionsService {
   /** Why this gate can't proceed in a repository the campaign left out for its runner's version
    * (#4319), or null. A repository that holds an entry refuses by version at its own gate, so with no
    * entry the requester's login must not stand in by default. A repository the campaign never knew of
-   * keeps its rule, and a requester running in that very Location still acts in its own repository. A
-   * merge or deletion is left alone when the requester's own repository isn't known, since that gate
-   * normally is its own. The approval, if any, still stands. */
+   * keeps its rule, and only a requester running in that very Location still acts in its own
+   * repository: a runner acts on the snapshot's repository whatever folder the requester is in, so an
+   * unknown placement proves nothing. Exclusions change no revision, so anything that awaits after this
+   * check asks again with nothing awaited before the action. The approval, if any, still stands. */
   private excludedRepositoryRefusal(requester: SessionView, controller: SessionView | null, snapshot: WorkflowDecisionResourceSnapshot): string | null {
     if (snapshot.category !== "follow_up_issue_publication" && snapshot.category !== "pr_merge" && snapshot.category !== "merged_branch_deletion") return null;
     const rootId = this.db.campaignRootForMember(requester.id);
     const root = (rootId ? this.db.getSession(rootId) : null) ?? controller ?? requester;
-    if (snapshot.category !== "follow_up_issue_publication" && requester.id !== root.id && !this.db.campaignParticipantRepository(root, requester)) return null;
     return this.excludedRepositorySentence(root, snapshot.repository, requester);
   }
 
@@ -15718,6 +15718,8 @@ export class SessionsService {
       // #4120: the ledger may have gained a hold while the forge was read above.
       const heldNow = normalized.data.category === "pr_merge" ? this.campaignMergeHoldNow(child, normalized.data) : null;
       if (heldNow) return this.mergeHeld(child, occurrenceId, heldNow);
+      const excludedWhileArming = this.excludedRepositoryRefusal(child, armingParent, normalized.data);
+      if (excludedWhileArming) return fail(excludedWhileArming, 409);
       const armed = this.db.armWorkflowDecisionAction(occurrenceId, {
         ...action.data,
         commandDigest: auditDigest(action.data)!,
@@ -15945,6 +15947,13 @@ export class SessionsService {
           finish("refused", { reason: "runner_unavailable", summary: "The repository's Location changed while the publication was being prepared; nothing was published." });
           return this.forgeActionResult(sessionId, parent.id, occurrenceId);
         }
+      }
+      // An exclusion recorded during the reads above changes no revision, so `authorityCurrent` can't
+      // see it. Nothing is awaited between this check and the dispatch, and the approval stands (#4319).
+      const excludedWhilePreparing = this.excludedRepositoryRefusal(this.db.getSession(sessionId)!, this.db.getSession(parent.id), snapshot);
+      if (excludedWhilePreparing) {
+        finish("refused", { reason: "runner_unavailable", summary: boundedForgeSummary(excludedWhilePreparing) });
+        return this.forgeActionResult(sessionId, parent.id, occurrenceId);
       }
       const requestId = `forge_decision_action_${randomUUID()}`;
       let answer: Partial<ForgeDecisionActionResultMessage> | null = null;

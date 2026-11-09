@@ -8030,6 +8030,89 @@ test("a child that runs in the excluded Location itself still acts in its own re
   } finally { f.db.close(); }
 });
 
+test("a child in an unlisted folder can't act on an excluded repository: an unknown placement proves nothing about its own (#4319)", async () => {
+  const f = fixture();
+  try {
+    const c = await customBesideOldRunner(f);
+    f.db.raw().prepare("UPDATE sessions SET parent_control_policy=? WHERE id=?").run(JSON.stringify({ ...HUMAN_ONLY_PARENT_CONTROL_POLICY }), c.id);
+    const unlisted = f.db.createWorkspace("r", { name: "r unlisted", path: "/fixture/unlisted" }, f.scope);
+    const child = childAt(f, c.id, "r", unlisted.id);
+    assert.equal(f.db.campaignParticipantRepository(f.db.getSession(c.id)!, f.db.getSession(child)!), null, "its repository isn't known");
+    const asked = await ask(f, child, deletionIn("below/repo"));
+    assert.equal(asked.ok, false);
+    assert.match(asked.error!, NAMES_THE_FLOOR);
+  } finally { f.db.close(); }
+});
+
+/** A campaign with a child whose approved merge in below/repo reaches its GitHub read, which the test
+ * holds open: an exclusion recorded meanwhile changes no revision, so only a recheck can see it. */
+async function mergeHeldAtPreflight(f: ReturnType<typeof fixture>) {
+  const c = await launchedMultiRepositoryCampaign(f);
+  answerBelow(f);
+  registerBelow(f);
+  const child = childAt(f, c.rootId, "r", "w");
+  let hold = false;
+  let held: (() => void) | null = null;
+  const actions: unknown[] = [];
+  const send = f.hub.sendToRunner.bind(f.hub);
+  f.hub.sendToRunner = (runnerId, message) => {
+    if (message.type === "forge_decision_action") { actions.push(message.action); return true; }
+    if (message.type !== "github_merge_preflight") return send(runnerId, message);
+    const answer = () => f.hub.resolveRunnerRequest({ type: "github_merge_preflight_result", requestId: message.requestId, sessionId: message.sessionId, ok: true,
+      check: { checkedAt: Date.now(), closures: [] } }, runnerId);
+    if (hold) held = answer; else queueMicrotask(answer);
+    return true;
+  };
+  const snapshot: WorkflowDecisionResourceSnapshot = { category: "pr_merge", repository: "below/repo", pullRequest: 8, headSha: "b".repeat(40), reviewResult: "merge",
+    requiredChecks: { headSha: "b".repeat(40), status: "passed", checkedAt: Date.now(), checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" }] } };
+  const asked = await ask(f, child, snapshot, "ask-held-merge");
+  assert.equal(asked.ok, true, asked.error ?? "");
+  assert.equal(personApproves(f, c.rootId, child, asked.data!.occurrenceId).ok, true);
+  const excludeDuringTheRead = async (action: Promise<{ ok: boolean; error?: string }>) => {
+    for (let tick = 0; tick < 200 && !held; tick += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.ok(held, "the GitHub read is being held");
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(below.id, f.human);
+    held!();
+    return action;
+  };
+  return { ...c, child, snapshot: asked.data!.resourceSnapshot, occurrenceId: asked.data!.occurrenceId, resourceDigest: asked.data!.resourceDigest, actions,
+    holdReads: (value: boolean) => { hold = value; held = null; }, excludeDuringTheRead };
+}
+const armMerge = (f: ReturnType<typeof fixture>, m: Awaited<ReturnType<typeof mergeHeldAtPreflight>>) => f.sessions.consumeWorkflowDecision(m.child, m.occurrenceId,
+  { resourceSnapshot: m.snapshot, action: { kind: "pr_merge_enqueue", command: "gh pr merge https://github.com/below/repo/pull/8 --squash --match-head-commit " + "b".repeat(40) } });
+
+test("an exclusion recorded while a merge is being armed stops the arming by name, and the approval stands (#4319)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    m.holdReads(true);
+    const armed = await m.excludeDuringTheRead(armMerge(f, m));
+    assert.equal(armed.ok, false);
+    assert.match(armed.error!, NAMES_THE_FLOOR);
+    const decision = f.db.workflowDecisionByOccurrence(m.occurrenceId)!;
+    assert.equal(decision.actionAdmission, undefined, "nothing is armed");
+    assert.equal(decision.status, "approved");
+  } finally { await m.server.close(); f.db.close(); }
+});
+
+test("an exclusion recorded during an armed merge's last GitHub read stops the enqueue by name, with nothing dispatched (#4319)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    const armed = await armMerge(f, m);
+    assert.equal(armed.ok, true, armed.error ?? "");
+    m.holdReads(true);
+    const executed = await m.excludeDuringTheRead(f.sessions.executeWorkflowDecision(m.child, m.occurrenceId, { resourceDigest: m.resourceDigest }, () => true));
+    assert.deepEqual(m.actions, [], "nothing reached a login");
+    const decision = f.db.workflowDecisionByOccurrence(m.occurrenceId)!;
+    assert.equal(decision.forgeAction?.outcome, "refused");
+    assert.match(decision.forgeAction?.refusal?.summary ?? "", NAMES_THE_FLOOR);
+    assert.equal(decision.status, "approved", "the approval still stands");
+    assert.equal(executed.ok, true, "the refusal is reported on the decision, as every forge refusal is");
+  } finally { await m.server.close(); f.db.close(); }
+});
+
 test("an old runner of any version is asked for its repository only if it can inspect; one too old to read gets the version reason with no repository (#4319)", async () => {
   const f = fixture();
   const p = multiRepositoryProject(f);
