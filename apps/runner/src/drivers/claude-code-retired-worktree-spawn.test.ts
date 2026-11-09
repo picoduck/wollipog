@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
@@ -43,7 +42,9 @@ function bwrapRefusesMissingSources(options: any): void {
 }
 
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "claude-retired-sibling-"));
+  // Not under the host's /tmp: the sandbox mounts a private writable tmpfs there, so a sibling under
+  // it could never lose its overlays (see the last test).
+  const root = mkdtempSync(join(process.cwd(), ".claude-retired-sibling-"));
   const parent = join(root, "worktrees");
   const selected = join(parent, "selected");
   const sibling = join(parent, "sibling");
@@ -329,10 +330,11 @@ test("leaving a retired worktree out removes exactly its writable binds and its 
 /** The mount that decides whether `path` is writable in a rendered bwrap argv: the last one covering it. */
 function decidingMount(args: string[], path: string): string | undefined {
   let mount: string | undefined;
-  for (let index = 0; index < args.length; index += 1) {
-    if (args[index] !== "--bind" && args[index] !== "--ro-bind") continue;
-    const target = args[index + 2]!;
-    if (path === target || path.startsWith(`${target}/`)) mount = args[index];
+  for (let index = 0; index < args.length && args[index] !== "--"; index += 1) {
+    const operands = args[index] === "--bind" || args[index] === "--ro-bind" ? 2 : args[index] === "--tmpfs" ? 1 : 0;
+    if (!operands) continue;
+    const target = args[index + operands]!;
+    if (target === "/" || path === target || path.startsWith(`${target}/`)) mount = args[index];
   }
   return mount;
 }
@@ -371,4 +373,21 @@ test("a retired sibling that a retained writable mount still covers never loses 
   } finally {
     f.cleanup();
   }
+});
+
+test("a removed sibling under the sandbox's private /tmp never loses its read-only overlays", () => {
+  // bwrap always mounts a writable tmpfs at /tmp, so a missing overlay there could be recreated
+  // writable inside the sandbox. Paths are illustrative; nothing exists, as `exists` reports.
+  const owned = { path: "/tmp/retired", gitAdmin: "/srv/repo.git/worktrees/retired" };
+  const isolation: BwrapSpawnIsolation = {
+    backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "inherit",
+    writableBinds: [{ source: owned.path, target: owned.path }],
+    protectedWorktree: { parent: "/srv/worktrees", path: "/srv/worktrees/selected",
+      gitWritableRoots: ["/srv/repo.git/worktrees/selected", owned.gitAdmin], ownedWorktrees: [owned] },
+    readOnlyBinds: [`${owned.path}/.git`, `${owned.gitAdmin}/gitdir`],
+  };
+  const narrowed = isolationWithoutRetiredWorktrees({ ...isolation, readOnlyBinds: [`${owned.gitAdmin}/gitdir`] },
+    [owned], () => false) as BwrapSpawnIsolation;
+  assert.equal(narrowed.writableBinds, undefined, "an overlay outside /tmp may still go");
+  assert.equal(isolationWithoutRetiredWorktrees(isolation, [owned], () => false), isolation);
 });

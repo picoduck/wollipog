@@ -518,6 +518,30 @@ export function bwrapPathWritable(options: readonly string[], path: string): boo
   return writable;
 }
 
+/** Whether the provider might write or create `path` inside the sandbox the given bwrap options
+ * describe: the opposite stance of `bwrapPathWritable`, for a caller proving a path stays read-only.
+ * A path below a fresh tmpfs counts, since the provider can create it there, and an option or
+ * operand this model does not know answers `true`. */
+export function bwrapPathMayBeWritable(options: readonly string[], path: string): boolean {
+  if (!posix.isAbsolute(path)) return true;
+  const target = bwrapMountPath(path);
+  const contains = (mount: string) => mount === "/" || target === mount || target.startsWith(`${mount}/`);
+  let writable = true;
+  for (let index = 0; index < options.length && options[index] !== "--";) {
+    const option = options[index]!;
+    if (BWRAP_FLAGS.has(option)) { index += 1; continue; }
+    const skipped = BWRAP_NON_MOUNT_OPTIONS.get(option);
+    if (skipped) { index += 1 + skipped; continue; }
+    const mount = BWRAP_MOUNTS.get(option);
+    if (!mount) return true;
+    const destination = options[index + mount.operands];
+    if (destination === undefined || !posix.isAbsolute(destination)) return true;
+    if (contains(bwrapMountPath(destination))) writable = mount.writable;
+    index += 1 + mount.operands;
+  }
+  return writable;
+}
+
 /** Temporary-directory variables POSIX tools read, `TMPDIR` first. */
 const POSIX_TEMP_ENV = ["TMPDIR", "TMP", "TEMP"] as const;
 
