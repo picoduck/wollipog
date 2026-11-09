@@ -45,7 +45,7 @@ import {
   validProviderHomeLaunchRefusal, validProviderHomeWait, validWorktreeSwitch,
 } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
-import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignDispatchScopeRefusal, campaignBoundaryCurrent, campaignIssueInScope, campaignLaunchRepository, campaignOtherRepository, campaignRefusedRepositories, campaignRepositoryLimits, campaignScopeRepositories, campaignOwnerId, campaignUnreadLocations, remintCampaignBoundary, rememberRefusedRepositories } from "./campaign-authority.js";
+import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignDispatchScopeRefusal, campaignBoundaryCurrent, campaignIssueInScope, campaignLaunchRepository, campaignOtherRepository, campaignRefusedRepositories, campaignRepositoryLimits, campaignRepositoryOutsideLimit, campaignScopeRepositories, campaignOwnerId, campaignUnreadLocations, remintCampaignBoundary, rememberRefusedRepositories } from "./campaign-authority.js";
 import { campaignBoundaryRepositoryAt, campaignLocationRepository, campaignRepositoryPlaces, limitedLaunchLocations } from "./campaign-repository-boundary.js";
 import { genericRequestScreenData, storedCredentialScreenFact } from "./credential-screen.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
@@ -18390,7 +18390,7 @@ export class ControlPlaneDb {
     /** Locations the owner's Include in Campaign brought in, whoever added them (#4319). */
     consented?: string[];
   }, now: number, options: { consume?: { occurrenceId: string; resourceDigest: string }; customBase?: CampaignBoundaryRepository } = {}):
-    { ok: true; revision: number; joined: boolean; revoked: WorkflowDecisionView[] } | { ok: false; status: number; error: string } {
+    { ok: true; revision: number; joined: boolean; reminted: boolean; revoked: WorkflowDecisionView[] } | { ok: false; status: number; error: string } {
     this.db.exec("BEGIN IMMEDIATE");
     const refuse = (status: number, error: string) => { this.db.exec("ROLLBACK"); return { ok: false as const, status, error }; };
     try {
@@ -18441,13 +18441,18 @@ export class ControlPlaneDb {
         policy.pendingLocations = (policy.pendingLocations ?? []).filter((item) => item.locationId !== join.locationId);
         if (!policy.excludedLocations.length) delete policy.excludedLocations;
         if (!policy.pendingLocations.length) delete policy.pendingLocations;
+        // A repository the limit left out had every gate routed to the person; with no revision to
+        // take, those are revoked here instead.
+        const widens = campaignRepositoryOutsideLimit(policy, join.repository);
         widenCampaignRepositoryLimit(policy, join);
         this.trackUnreadLocations(policy, unreadBefore, read, ownerUserId, consented);
         this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(policy), now, rootId);
         finishAddition(0);
-        const revoked = this.revokeLiftedRefusals(rootId, refusedBefore, policy, now);
+        // Each runs after the other's revocations, so nothing is revoked twice.
+        const revoked = [...this.revokeLiftedRefusals(rootId, refusedBefore, policy, now),
+          ...widens ? this.revokeRestoredRepositoryGates(rootId, join.repository, now) : []];
         this.db.exec("COMMIT");
-        return { ok: true, revision: 0, joined: !listed, revoked };
+        return { ok: true, revision: 0, joined: !listed, reminted: false, revoked };
       }
       if (policy && control?.mode !== "full_control" && policy.repositories) {
         // Custom's owner Location whose runner has now updated (#4319). Its list has no revision, and
@@ -18481,7 +18486,7 @@ export class ControlPlaneDb {
         this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(policy), now, rootId);
         const revoked = this.revokeLiftedRefusals(rootId, refusedBefore, policy, now);
         this.db.exec("COMMIT");
-        return { ok: true, revision: 0, joined: joins.length > 0, revoked };
+        return { ok: true, revision: 0, joined: joins.length > 0, reminted: false, revoked };
       }
       if (!policy || control?.mode !== "full_control" || !control.boundary.repositories) {
         return refuse(409, "Only a Full Control campaign with a repository boundary takes Project Locations.");
@@ -18505,8 +18510,12 @@ export class ControlPlaneDb {
       let revision = control.boundary.revision;
       const joins = update.joins.filter((join) => !leftOut.includes(join) && !control.boundary.repositories!.some((entry) => entry.locationIds.includes(join.locationId)));
       let revoked: WorkflowDecisionView[] = [];
-      if (joins.length) {
-        const order = new Map((this.getProject(this.getSession(rootId)?.projectId ?? "")?.locations ?? []).map((location, index) => [location.id, index]));
+      // An approval that brings a listed repository (the launch entry) back into the limit joins
+      // nothing, yet changes who decides that repository's gates: it takes a new revision as a join
+      // does, so what was evaluated while the limit left it out is revoked and asked again.
+      const widens = Boolean(consumed) && campaignRepositoryOutsideLimit(policy, update.joins[0]!.repository);
+      if (joins.length || widens) {
+        const order =new Map((this.getProject(this.getSession(rootId)?.projectId ?? "")?.locations ?? []).map((location, index) => [location.id, index]));
         const repositories = structuredClone(control.boundary.repositories);
         for (const join of joins) {
           const name = join.repository.toLowerCase();
@@ -18548,7 +18557,7 @@ export class ControlPlaneDb {
         }
       }
       // An approved addition whose Location joined meanwhile (an owner addition, say) is still spent.
-      if (!joins.length) finishAddition(revision);
+      if (!joins.length && !widens) finishAddition(revision);
       if (excluded.length) policy.excludedLocations = excluded.slice(-CAMPAIGN_BOUNDARY_LOCATIONS_MAX); else delete policy.excludedLocations;
       if (pending.length) policy.pendingLocations = pending.slice(-CAMPAIGN_BOUNDARY_LOCATIONS_MAX); else delete policy.pendingLocations;
       if (available.length) policy.availableLocations = available.slice(-CAMPAIGN_BOUNDARY_LOCATIONS_MAX); else delete policy.availableLocations;
@@ -18559,8 +18568,24 @@ export class ControlPlaneDb {
       // (#4319): what was approved there is revoked here, so that block never lifts with it armed.
       revoked = [...revoked, ...this.revokeLiftedRefusals(rootId, refusedBefore, policy, now)];
       this.db.exec("COMMIT");
-      return { ok: true, revision, joined: joins.length > 0, revoked };
+      return { ok: true, revision, joined: joins.length > 0, reminted: joins.length > 0 || widens, revoked };
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  /** Revoke the unconsumed gates of a repository a Custom approval brings back into a first-message
+   * limit (#4117): each was routed to the person because the limit left it out, and its owner now
+   * reads otherwise, so it is asked again. Scope and repository additions have their own owners. */
+  private revokeRestoredRepositoryGates(rootId: string, repository: string, now: number): WorkflowDecisionView[] {
+    const restored = repository.toLowerCase();
+    const revoked = this.authorityBoundWorkflowDecisionsForController(rootId).filter(({ resourceSnapshot: snapshot }) =>
+      "repository" in snapshot && snapshot.category !== "campaign_issue_scope" && snapshot.category !== "campaign_repository_addition" &&
+      typeof snapshot.repository === "string" && snapshot.repository.toLowerCase() === restored);
+    for (const stale of revoked) {
+      this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
+      this.retireWorkflowDecisionResume(stale.occurrenceId, now);
+      this.revokeUiEvidenceReviewReceipts(stale.occurrenceId, now);
+    }
+    return revoked;
   }
 
   /** The owner's new count for the selection a Full Control first message's scope grant asked for

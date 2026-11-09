@@ -228,12 +228,14 @@ export class CampaignRepositoryAdditions {
         excluded: [], pending: [],
       }, now, { consume: { occurrenceId, resourceDigest: digest }, ...(customBase ? { customBase } : {}) });
       if (!recorded.ok) return fail(recorded.error, recorded.status);
-      if (recorded.joined && fullControl(current)) {
-        // Like any join, what the new revision revoked leaves its pauses before members re-sync.
+      if (recorded.reminted && fullControl(current)) {
+        // Like any join, what the new revision revoked leaves its pauses before members re-sync. A
+        // repository brought back into the limit takes a new revision too, with nothing joining.
         this.deps.sessions.settleCampaignBoundaryChange(current, recorded.revoked, owner.userId, now);
         await this.deps.synchronize(rootId);
       } else if (recorded.revoked.length) {
-        // A Custom addition revokes only what was approved in a repository it stops refusing (#4319).
+        // A Custom addition revokes what was approved in a repository it stops refusing (#4319), and
+        // the gates of one it brings back into the limit.
         this.deps.sessions.settleCampaignBoundaryChange(current, recorded.revoked, owner.userId, now);
       }
       this.deps.hub.sessionChangedById(rootId);

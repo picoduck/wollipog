@@ -5005,15 +5005,30 @@ test("only the owner's approved addition brings a launch repository its first me
       { kind: "agent", id }, () => true).ok, false, "nobody acting for the campaign approves it");
     assert.deepEqual(c.limits(), ["third/repo"]);
     assert.equal(c.delegate().ok, false);
+    // The root's own gate of the launch repository waits for the person while the limit leaves it out.
+    const head = "a".repeat(40);
+    const deletion: WorkflowDecisionResourceSnapshot = { category: "merged_branch_deletion", repository: "owner/repo", branch: "agent/x", merged: true,
+      mergeCommitSha: head, dependentPullRequests: { checkedAt: 1, open: [] } };
+    const gate = (requestId: string) => f.sessions.createWorkflowDecision(id, { requestId, resourceKey: "merged_branch_deletion:owner/repo:agent/x",
+      resourceSnapshot: deletion }, () => true);
+    const held = gate("delete-before");
+    assert.equal(held.ok, true, held.error ?? "");
+    assert.equal(held.data!.authority, "human");
 
     assert.equal(c.approve(requested.data!.occurrenceId).ok, true);
     const executed = await c.additions.execute(id, requested.data!.occurrenceId, requested.data!.resourceDigest, c.orchestrator);
     assert.equal(executed.ok, true, executed.error ?? "");
     assert.equal(executed.data!.status, "consumed");
     assert.deepEqual(c.limits(), ["third/repo", "owner/repo"], "the limit now holds the launch repository");
-    // Nothing joins and nothing is re-minted: the boundary already listed every one of its Locations.
-    assert.equal(c.boundary().revision, revision);
+    // Nothing joins, yet who decides its gates changed: a new revision, as a join takes, with the same Locations.
+    assert.equal(c.boundary().revision, revision + 1);
+    assert.equal(executed.data!.campaignRepositoryAdditionResult!.revision, revision + 1);
     assert.deepEqual(c.boundary().repositories, listed);
+    // The gate routed to the person under the old limit is revoked, not left to fail when answered, and asked again it is the Orchestrator's.
+    assert.equal(f.db.workflowDecisionByOccurrence(held.data!.occurrenceId)!.status, "revoked");
+    const asked = gate("delete-after");
+    assert.equal(asked.ok, true, asked.error ?? "");
+    assert.equal(asked.data!.authority, "orchestrator");
     assert.equal(c.policy().pendingLocations?.length ?? 0, 0, "no Location of it is left waiting");
     assert.equal(c.policy().locationJoins?.some((join) => join.source === "addition_approved") ?? false, false, "no join is recorded for a listed Location");
 
@@ -5021,7 +5036,6 @@ test("only the owner's approved addition brings a launch repository its first me
     const delegated = c.delegate();
     assert.equal(delegated.ok, true, delegated.error ?? "");
     const root = f.db.getSession(id)!;
-    const head = "a".repeat(40);
     const merge: WorkflowDecisionResourceSnapshot = { category: "pr_merge", repository: "owner/repo", pullRequest: 7, headSha: head, reviewResult: "merge",
       requiredChecks: { headSha: head, status: "passed", checkedAt: 1, checks: [{ name: "CI", state: "passed" }] } };
     const { owner } = evaluateCampaignAuthority(root, { ...root, boundaryRepository: campaignBoundaryRepositoryAt(f.db, root, root) }, PROTOCOL_VERSION, merge,
@@ -5097,12 +5111,26 @@ test("back in Custom, the owner's approved addition brings the launch repository
     const requested = await c.ask("custom-launch", c.p.launchLocation.id);
     assert.equal(requested.status, 201, requested.error ?? "");
     assert.equal(requested.data!.authority, "human");
+    // Gates a child asked for meanwhile: the launch repository's waits for the person because of the limit.
+    f.db.createSession({ id: "custom-worker", parentSessionId: id, runnerId: "r2", workspaceId: "c", agentId: "claude", title: "Worker", useWorktree: false,
+      driver: "claude-code", creationActor: "agent", scope: f.scope, config: { model: "claude-opus-5-5" }, now: Date.now() });
+    f.db.updateSessionStatus("custom-worker", "running", Date.now());
+    const gate = (repository: string) => f.sessions.createWorkflowDecision("custom-worker", { requestId: `delete-${repository}`,
+      resourceKey: `merged_branch_deletion:${repository}:agent/x`, resourceSnapshot: { category: "merged_branch_deletion", repository, branch: "agent/x",
+        merged: true, mergeCommitSha: "a".repeat(40), dependentPullRequests: { checkedAt: 1, open: [] } } }, () => true);
+    const launchGate = gate("owner/repo");
+    const otherGate = gate("third/repo");
+    assert.equal(launchGate.ok && otherGate.ok, true, launchGate.error ?? otherGate.error ?? "");
+    assert.equal(launchGate.data!.authority, "human");
     assert.equal(c.approve(requested.data!.occurrenceId).ok, true);
     const executed = await c.additions.execute(id, requested.data!.occurrenceId, requested.data!.resourceDigest, c.orchestrator);
     assert.equal(executed.ok, true, executed.error ?? "");
     assert.deepEqual(c.limits(), ["third/repo", "owner/repo"]);
     assert.deepEqual(c.policy().repositories, before, "the list is unchanged");
     assert.equal(c.policy().locationJoins?.length ?? 0, joinsBefore, "a listed Location records no join");
+    // With no revision to take, the restored repository's gates are revoked and asked again; the other repository's stand.
+    assert.equal(f.db.workflowDecisionByOccurrence(launchGate.data!.occurrenceId)!.status, "revoked");
+    assert.equal(f.db.workflowDecisionByOccurrence(otherGate.data!.occurrenceId)!.status, otherGate.data!.status);
     const delegated = c.delegate();
     assert.equal(delegated.ok, true, delegated.error ?? "");
   } finally { await c.server.close(); f.db.close(); }
