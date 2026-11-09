@@ -181,6 +181,8 @@ export interface ProviderHomeLeaseOptions {
   isProcessAlive?: (pid: number) => boolean;
   beforeMarkerWriteForTest?: () => void;
   beforeTransitionPublishForTest?: () => void;
+  /** Between a contender's last journal read and its successor link. */
+  beforeSuccessorLinkForTest?: () => void;
   afterTransitionPublishForTest?: () => void;
   afterInitializationPublishForTest?: () => void;
   beforeInitializationMirrorForTest?: (mirror: string) => void;
@@ -600,7 +602,8 @@ function canonicalRootEntries(root: string, lockDir: string): string[] {
 
 /**
  * Resolve the immutable lease journal. A fixed successor pathname is the compare-and-swap: only
- * one process can publish the transition from a particular tip, and no record is ever removed.
+ * one process can publish the transition from a particular tip. A checkpoint retires records, but
+ * never the name of the successor its holder won (see `compactHeld`).
  */
 function readChain(lockDir: string): LeaseChain {
   const root = join(lockDir, "..");
@@ -757,6 +760,11 @@ function sameAcquiredTip(tip: ReadLeaseRecord, acquiredHash: string): boolean {
   return tip.hash === acquiredHash || tip.record.version === 4 && tip.record.checkpoint.previousTipHash === acquiredHash;
 }
 
+/** The successor name an unanchored journal's `tip` was published under. */
+function activeSuccessor(tip: ReadLeaseRecord): string | undefined {
+  return isJournalTransition(tip.record) && tip.record.previousLeaseId ? `next-${tip.record.previousLeaseId}.json` : undefined;
+}
+
 /**
  * Publish a complete immutable record with an exclusive hard link. The temporary file is outside
  * the lock directory, so a crash can leave harmless litter but never a transient in-lock entry.
@@ -840,6 +848,7 @@ export class ProviderHomeLeaseRegistry {
   private readonly isProcessAlive: (pid: number) => boolean;
   private readonly beforeMarkerWriteForTest?: () => void;
   private readonly beforeTransitionPublishForTest?: () => void;
+  private readonly beforeSuccessorLinkForTest?: () => void;
   private readonly afterInitializationPublishForTest?: () => void;
   private readonly beforeInitializationMirrorForTest?: (mirror: string) => void;
   private readonly nativeCheckpointBarrierForTest?: ProviderHomeLeaseOptions["nativeCheckpointBarrierForTest"];
@@ -864,6 +873,7 @@ export class ProviderHomeLeaseRegistry {
     this.isProcessAlive = options.isProcessAlive ?? defaultProcessAlive;
     this.beforeMarkerWriteForTest = options.beforeMarkerWriteForTest;
     this.beforeTransitionPublishForTest = options.beforeTransitionPublishForTest;
+    this.beforeSuccessorLinkForTest = options.beforeSuccessorLinkForTest;
     this.afterInitializationPublishForTest = options.afterInitializationPublishForTest;
     this.beforeInitializationMirrorForTest = options.beforeInitializationMirrorForTest;
     this.nativeCheckpointBarrierForTest = options.nativeCheckpointBarrierForTest;
@@ -1403,6 +1413,7 @@ export class ProviderHomeLeaseRegistry {
     replacement.previousRecordHash = confirmed.hash;
     const name = `next-${confirmed.record.leaseId}.json`;
     const target = join(chain.external ? root : lockDir, name);
+    this.beforeSuccessorLinkForTest?.();
     try {
       publishRecord(root, target, replacement);
     } catch (error) {
@@ -1575,9 +1586,11 @@ export class ProviderHomeLeaseRegistry {
           const work = applyLeaseIoPlan(plan, 1, remainingBudget()); spendVerificationWork(work.records, work.bytes);
           snapshot = capture(root);
         };
+        let unanchoredSuccessor: string | undefined;
         const indexes = (retired: LeaseRetirementEntry[]): number[] => {
           const index = new Map(snapshot.entries.map((entry, i) => [`${entry.directory}/${entry.name}`, i]));
-          const result = retired.flatMap((entry) => { const i = index.get(`${entry.directory}/${entry.name}`); return i === undefined ? [] : [i]; });
+          const result = retired.filter((entry) => entry.directory !== "lock" || entry.name !== unanchoredSuccessor)
+            .flatMap((entry) => { const i = index.get(`${entry.directory}/${entry.name}`); return i === undefined ? [] : [i]; });
           // Windows retains the last moved inode at this fixed witness. Its
           // original name may already be absent; carry the selected tuple's
           // physical witness into the native cleanup manifest as well.
@@ -1590,6 +1603,13 @@ export class ProviderHomeLeaseRegistry {
           return result;
         };
         let chain = owned();
+        // Before a first anchor, a successor's in-lock name is the compare-and-swap for its predecessor,
+        // and a contender that read that predecessor links there unfenced. Freeing the name this holder
+        // won would let that link succeed and leave a record no chain accepts, so it stays taken: the
+        // manifest already lists it, and the next holder's compaction removes it. (A contender would
+        // have to sleep through the whole lease to reach it then.) An anchored chain publishes
+        // successors through the fence at the root, so its in-lock names are only mirrors.
+        unanchoredSuccessor = chain.anchor ? undefined : activeSuccessor(chain.tip);
         // A new journal has no historical successor to checkpoint yet. Its first
         // release remains bounded; the following acquisition migrates the chain.
         if (!chain.external && chain.transitions === 0) return true;
