@@ -237,8 +237,8 @@ refusal covered:** the root's follow-ups, merges and branch deletions in each re
 entry, except one a read's name still refuses, whose own stay blocked until a join revokes them. A Full
 Control join revokes every decision already. The outermost Orchestrator controls every member's gates, a
 nested Orchestrator's included, so this reaches the whole campaign, and it reaches a stopped, failed,
-completed or archived root's campaign too, since its children can outlive it. Each revocation is settled
-as the campaign owner's, whoever removed, moved or deleted something. The refusal names the Location and
+completed or archived root's campaign too, since its children can outlive it. Each revocation names the
+person whose action led to it, such as whoever removed, moved or deleted something. The refusal names the Location and
 its ways out. A requester in that Location isn't exempt, nor is one in a Location refused by name, since
 nothing shows which repository it acts in. Someone else's Location, waiting or excluded mid-campaign,
 counts only once the owner includes it, which reads it. A reconnect reads such a Location again, a

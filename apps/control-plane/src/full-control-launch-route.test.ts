@@ -33,7 +33,7 @@ import { inspectCampaignWorkspace, inspectProjectLocation } from "./project-loca
 import { CampaignRepositoryAdditions } from "./campaign-repository-additions.js";
 import { CampaignLocations, registerCampaignLocationRoutes } from "./campaign-locations.js";
 import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL, PROJECT_LOCATION_INSPECTION_FAILURES, campaignBoundaryEpics, campaignBoundaryRepositories, validCampaignControl, type CampaignControl,
-  type CampaignAuthorityBoundary, type CampaignRepositoryAdditionRequest, type SessionView, type WorkflowDecisionView } from "@wollipog/protocol";
+  type CampaignAuthorityBoundary, type CampaignRepositoryAdditionRequest } from "@wollipog/protocol";
 import type { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
 import { fakeScopeGrantRuntime, grantVerdict, issues, ownerMessageOf, reviewVerdict, scopeCheckAnswer, scopeCheckParametersOf, uncertainVerdict,
@@ -9412,7 +9412,7 @@ test("a Location someone else added, shown excluded before Start with no reposit
   } finally { await c.server.close(); f.db.close(); }
 });
 
-test("deleting the Project ends an unread Location's refusal and revokes what it covered, settled as the campaign's owner (#4319 fifth read, 2)", async () => {
+test("deleting the Project ends an unread Location's refusal and revokes what it covered (#4319 fifth read, 2)", async () => {
   const f = fixture();
   const c = await launchedMultiRepositoryCampaign(f);
   registerBelow(f);
@@ -9424,10 +9424,10 @@ test("deleting the Project ends an unread Location's refusal and revokes what it
     const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
     await c.locations.locationAdded(below.id, f.human);
     await stillUnread(f, c.rootId, child, "before the Project is deleted");
-    const settled: Array<[string, string | null]> = [];
-    assert.ok(f.db.deleteProject(c.p.project.id, Date.now(), (_root, revoked, owner) => settled.push(...revoked.map((d): [string, string | null] => [d.occurrenceId, owner]))));
+    const settled: string[] = [];
+    assert.ok(f.db.deleteProject(c.p.project.id, Date.now(), (_root, revoked) => settled.push(...revoked.map((d) => d.occurrenceId))));
     assert.equal(statusOf(f, covered), "revoked", "no read named that repository");
-    assert.deepEqual(settled, [[covered, f.human.userId]], "the caller settles it as the campaign's owner");
+    assert.deepEqual(settled, [covered], "the caller settles it");
     assert.equal(statusOf(f, kept), "approved", "a repository with an entry is untouched");
   } finally { await c.server.close(); f.db.close(); }
 });
@@ -9592,26 +9592,6 @@ test("an unread Location whose exclusion a revoke or a re-authorization dropped 
   }
 });
 
-test("the removal and move routes' revocations are settled as the campaign's owner, whoever removes the Location (#4319 fifth read, 7)", async () => {
-  for (const leave of ["remove", "move"] as const) {
-    const f = fixture();
-    const c = await launchedMultiRepositoryCampaign(f);
-    registerBelow(f);
-    failBelowReads(f);
-    try {
-      const child = childAt(f, c.rootId, "r", "w");
-      await approvedFollowUp(f, c.rootId, child, "elsewhere/repo", `covered-before-${leave}`);
-      const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
-      await c.locations.locationAdded(below.id, f.human);
-      const owners: Array<string | null> = [];
-      const settle = (_root: SessionView, _revoked: WorkflowDecisionView[], owner: string | null) => { owners.push(owner); };
-      if (leave === "remove") f.db.removeProjectLocation(below.id, Date.now(), settle);
-      else f.db.moveProjectLocation(below.id, f.db.createProject({ name: "Elsewhere", scope: f.scope }).id, Date.now(), OTHER_PERSON.userId, settle);
-      assert.deepEqual(owners, [f.human.userId], `${leave}: settled as the owner`);
-    } finally { await c.server.close(); f.db.close(); }
-  }
-});
-
 test("under a first-message repository limit, a named refusal says only an approved repository addition brings the repository in (#4319 fifth read, 9)", async () => {
   const f = fixture();
   const c = await launchedMultiRepositoryCampaign(f);
@@ -9736,6 +9716,43 @@ test("after a rollback, startup keeps a record an older control plane named or j
       assert.equal(c.policy().unreadLocations?.some((item) => item.locationId === below.id) ?? false, false, `${left}: the registration ends it`);
       assert.equal(statusOf(f, covered), "revoked", `${left}: and revokes what it covered`);
     } finally { await c.server.close(); f.db.close(); }
+  }
+});
+
+test("a stopped or archived Custom root whose child still runs has its own unread Location read again on registration (#4319 fifth read, review round 1)", async () => {
+  for (const ended of ["stopped", "archived"] as const) {
+    const f = fixture();
+    try {
+      const project = f.db.createProject({ name: `Custom Own ${ended}`, scope: f.scope });
+      const launchLocation = f.db.addProjectLocation(project.id, { runnerId: "r", workspaceId: "w", addedByUserId: f.human.userId });
+      const other = f.db.addProjectLocation(project.id, { runnerId: "r", workspaceId: f.db.createWorkspace("r", { name: "r other", path: "/fixture/other" }, f.scope).id,
+        addedByUserId: f.human.userId });
+      const inspect = f.state.inspect;
+      f.state.inspect = (message) => message.workspacePath === "/fixture/other"
+        ? { type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId, ok: true, repository: "other/repo",
+          issueNumbers: message.issueNumbers, digest: "d".repeat(64) }
+        : inspect(message);
+      const created = f.sessions.createSession({ ...request, projectId: project.id, projectLocationId: launchLocation.id }, undefined, f.scope);
+      assert.ok(created.ok && created.data, created.error ?? "created");
+      const id = created.data.id;
+      const policy = () => f.db.getSession(id)!.orchestratorPolicy!;
+      for (let attempt = 0; attempt < 200 && !policy().repositories; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+      f.db.raw().prepare("UPDATE sessions SET parent_control_policy=? WHERE id=?").run(JSON.stringify({ ...HUMAN_ONLY_PARENT_CONTROL_POLICY }), id);
+      const child = childAt(f, id, "r", "w");
+      const covered = await approvedFollowUp(f, id, child, "elsewhere/repo", `own-${ended}-covered`);
+      // As a creation whose own read failed on an old runner leaves it: no list, its own Location unread.
+      const { repositories: _list, ...rest } = policy();
+      f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify({ ...rest,
+        unreadLocations: [{ locationId: launchLocation.id, name: "Fixture Repo" }] }), id);
+      f.db.raw().prepare(ended === "stopped" ? "UPDATE sessions SET status='stopped' WHERE id=?" : "UPDATE sessions SET archived=1, status='stopped' WHERE id=?").run(id);
+      const locations = new CampaignLocations({ db: f.db, hub: f.hub, synchronize: () => { throw new Error("a Custom list has no boundary to synchronize"); },
+        settle: (before, revoked, owner, now) => f.sessions.settleCampaignBoundaryChange(before, revoked, owner, now),
+        reestablish: (rootId) => f.sessions.establishCustomCampaignRepositories(rootId), log: { warn(message) { throw new Error(message); } } });
+      await locations.runnerReconnected("r");
+      assert.equal(policy().unreadLocations, undefined, `${ended}: the list resolves it`);
+      assert.ok(policy().repositories!.some((entry) => entry.locationIds.includes(other.id)), `${ended}: recorded`);
+      assert.equal(statusOf(f, covered), "revoked", `${ended}: and revokes what it covered`);
+    } finally { f.db.close(); }
   }
 });
 

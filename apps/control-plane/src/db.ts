@@ -5987,8 +5987,8 @@ function sessionHistoryRetentionView(
 }
 
 /** Hears what a Location's removal or move, or a Project's deletion, revoked in one campaign by ending
- * an unread refusal (#4319), with the campaign's owner to settle it as, or null when it has none. */
-export type UnreadReleaseSettle = (root: SessionView, revoked: WorkflowDecisionView[], ownerUserId: string | null) => void;
+ * an unread refusal (#4319). The caller settles it as the person whose action led to it (#3916). */
+export type UnreadReleaseSettle = (root: SessionView, revoked: WorkflowDecisionView[]) => void;
 
 export class ControlPlaneDb {
   private readonly providerPublications: ProviderProfilePublicationStore;
@@ -10325,12 +10325,9 @@ export class ControlPlaneDb {
     });
   }
 
-  /** Hands each campaign's revocations to `settle`, as its owner's: the person the campaign's authority
-   * rests on, not whoever moved, removed or deleted something (#4319). */
+  /** Hands each campaign's revocations to `settle` (#4319). */
   private settleReleasedUnread(released: ReadonlyArray<{ root: SessionView; revoked: WorkflowDecisionView[] }>, settle: UnreadReleaseSettle | undefined): void {
-    for (const { root, revoked } of released) {
-      if (revoked.length) settle?.(root, revoked, this.campaignOwnerForRoot(root.id, this.sessionOrchestratorPolicy(root.id) ?? root.orchestratorPolicy));
-    }
+    for (const { root, revoked } of released) if (revoked.length) settle?.(root, revoked);
   }
 
   /** `settle` hears what an unread Location's removal revoked in each campaign (#4319). */
@@ -18391,10 +18388,11 @@ export class ControlPlaneDb {
   /** Live Custom campaigns with no list yet whose own Location, on this runner, is unread (#4319): its
    * reconnect reads it again. */
   customRootsAwaitingLaunchRead(runnerId: string): SessionView[] {
+    // Whatever the root's state while a member still runs, since its refusal binds those members.
     return this.projectIdsForRunner(runnerId).flatMap((projectId) => (this.stmt(`SELECT id FROM sessions WHERE project_id=? AND parent_session_id IS NULL
-      AND archived=0 AND status NOT IN ('completed','failed','stopped')
       AND CASE WHEN json_valid(orchestrator_policy) THEN json_type(orchestrator_policy, '$.unreadLocations') ELSE NULL END='array'`)
       .all(projectId) as Array<{ id: string }>).flatMap(({ id }) => {
+      if (!this.campaignRootBindsRunningMembers(id)) return [];
       const root = this.getSession(id);
       const policy = root?.orchestratorPolicy;
       const own = root?.projectLocationId ? this.getProjectLocation(root.projectLocationId) : null;
@@ -18407,13 +18405,21 @@ export class ControlPlaneDb {
    * state while a member still runs, since its refusal binds those members: that runner's registration
    * reads it again. */
   campaignRootsRereadingUnread(runnerId: string): SessionView[] {
-    const live = (id: string) => (this.stmt("SELECT archived, status FROM sessions WHERE id=?").get(id) as { archived: number; status: string } | undefined)
-      ?? null;
-    const running = (id: string) => { const row = live(id); return Boolean(row && !row.archived && !["completed", "failed", "stopped"].includes(row.status)); };
     return this.projectIdsForRunner(runnerId).flatMap((projectId) => this.campaignRootsWithUnreadRecords(projectId)
+      .filter((id) => this.campaignRootBindsRunningMembers(id))
       .map((id) => this.getSession(id))
-      .filter((root): root is SessionView => Boolean(root && (running(root.id) || this.campaignDescendantIds(root.id).some(running)) &&
+      .filter((root): root is SessionView => Boolean(root &&
         this.unnamedBelowGatesLocations(root).some((item) => this.getProjectLocation(item.locationId)?.runnerId === runnerId))));
+  }
+
+  /** Whether a root's refusals still bind a running session (#4319): the root itself is live, or, in
+   * any state, archived included, one of its members still runs. */
+  private campaignRootBindsRunningMembers(rootId: string): boolean {
+    const running = (id: string) => {
+      const row = this.stmt("SELECT archived, status FROM sessions WHERE id=?").get(id) as { archived: number; status: string } | undefined;
+      return Boolean(row && !row.archived && !["completed", "failed", "stopped"].includes(row.status));
+    };
+    return running(rootId) || this.campaignDescendantIds(rootId).some(running);
   }
 
   /** Record what reading an unread Location again found (#4319), in either mode. It never joins: it
@@ -18484,7 +18490,7 @@ export class ControlPlaneDb {
     try {
       const session = this.getSession(rootId);
       const policy = this.sessionOrchestratorPolicy(rootId);
-      if (!session || !policy || session.archived || session.parentSessionId || policy.control?.mode === "full_control" || policy.repositories ||
+      if (!session || !policy || (session.archived && !this.campaignRootBindsRunningMembers(rootId)) || session.parentSessionId || policy.control?.mode === "full_control" || policy.repositories ||
           session.projectId !== inspected.projectId || session.projectLocationId !== inspected.projectLocationId ||
           !validCampaignRepositoryList(repositories)) {
         this.db.exec("ROLLBACK");

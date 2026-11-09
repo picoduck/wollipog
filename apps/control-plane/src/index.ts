@@ -2626,9 +2626,9 @@ app.delete("/api/projects/:id", async (req, reply) => {
   if (!canManageAffectedSessions(principal, (session) => session.projectId === id)) {
     return reply.code(409).send({ error: "project contains sessions you cannot manage" });
   }
-  // What deleting it ends of an unread Location's refusal leaves its pauses like any revocation, as
-  // the campaign owner's (#4319).
-  const deleted = db.deleteProject(id, Date.now(), (root, revoked, owner) => svc.settleCampaignBoundaryChange(root, revoked, owner ?? principal.userId));
+  // What deleting it ends of an unread Location's refusal leaves its pauses like any revocation, and
+  // names who deleted it, whose action led to it (#4319, #3916).
+  const deleted = db.deleteProject(id, Date.now(), (root, revoked) => svc.settleCampaignBoundaryChange(root, revoked, principal.userId));
   if (!deleted) return reply.code(404).send({ error: "project not found" });
   hub.projectRemoved(id);
   for (const sessionId of deleted.sessionIds) hub.sessionChangedById(sessionId);
@@ -2726,10 +2726,10 @@ app.post("/api/projects/:id/locations/move", async (req, reply) => {
     .map((session) => session.id);
   let moved: ProjectLocationView | null;
   try {
-    // What a move ends of an unread Location's refusal leaves its pauses like any revocation, as the
-    // campaign owner's rather than the mover's (#4319).
+    // What a move ends of an unread Location's refusal leaves its pauses like any revocation, and
+    // names who moved it, whose action led to it (#4319, #3916).
     moved = db.moveProjectLocation(location.id, id, Date.now(), principal.userId,
-      (root, revoked, owner) => svc.settleCampaignBoundaryChange(root, revoked, owner ?? principal.userId));
+      (root, revoked) => svc.settleCampaignBoundaryChange(root, revoked, principal.userId));
   } catch (error) {
     return reply.code(400).send({ error: (error as Error).message });
   }
@@ -2752,9 +2752,9 @@ app.delete("/api/projects/:id/locations/:locationId", async (req, reply) => {
   if (!canManageAffectedSessions(principal, (session) => session.projectLocationId === locationId)) {
     return reply.code(409).send({ error: "project location contains sessions you cannot manage" });
   }
-  // What removing it ends of an unread Location's refusal leaves its pauses like any revocation, as
-  // the campaign owner's rather than the remover's (#4319).
-  db.removeProjectLocation(locationId, Date.now(), (root, revoked, owner) => svc.settleCampaignBoundaryChange(root, revoked, owner ?? principal.userId));
+  // What removing it ends of an unread Location's refusal leaves its pauses like any revocation, and
+  // names who removed it, whose action led to it (#4319, #3916).
+  db.removeProjectLocation(locationId, Date.now(), (root, revoked) => svc.settleCampaignBoundaryChange(root, revoked, principal.userId));
   const project = db.getProject(id)!;
   hub.projectChanged(project);
   for (const session of db.listSessions({ includeArchived: true })) {
