@@ -1807,8 +1807,10 @@ export class SessionManager {
     environment: Record<string, string>;
   }>();
   /** A Location switch's target worktree while its setup runs (#4209). Until the move's one metadata
-   * write the session belongs to its old Location, so what setup would record there is held here. */
+   * write the session belongs to its old Location, so what setup would record there is held here,
+   * and what a restart needs in order to reap it is in `record`, the attempt's journaled rollback. */
   private readonly detachedWorktreeSetups = new WeakMap<SessionWorktreeView, {
+    record: WorktreeCleanupRecord;
     hooks?: WorktreeHookSnapshot;
     processMarker?: string;
   }>();
@@ -2693,6 +2695,10 @@ export class SessionManager {
     const detached = this.detachedWorktreeSetups.get(worktree);
     if (detached) {
       detached.hooks = structuredClone(snapshot);
+      // Durable before any copy or step runs, so a crash from here on still runs its teardown.
+      detached.record.hooks = structuredClone(snapshot);
+      if (worktree.portBlock) detached.record.portBlock = { ...worktree.portBlock };
+      this.cleanupJournal.add(detached.record);
       return;
     }
     const latest = this.store.readMeta(sessionId);
@@ -14786,8 +14792,9 @@ export class SessionManager {
     target: SessionMeta,
     worktree: SessionWorktreeView,
     locationName: string,
+    record: WorktreeCleanupRecord,
   ): Promise<string | undefined> {
-    this.detachedWorktreeSetups.set(worktree, {});
+    this.detachedWorktreeSetups.set(worktree, { record, ...(record.processMarker ? { processMarker: record.processMarker } : {}) });
     const announced = new Set<SessionWorktreeProgressPhase>();
     const report = (phase: SessionWorktreeProgressPhase) => {
       if (announced.has(phase)) return;
@@ -14814,22 +14821,34 @@ export class SessionManager {
     return undefined;
   }
 
-  /** Give back a target worktree that setup ran in, through the journal a removal takes, so its
-   * processes end and its teardown runs even if the runner stops here (#4209). */
-  private async rollBackLocationSwitchWorktree(
-    target: SessionMeta,
-    worktree: SessionWorktreeView,
-    setup: { hooks?: WorktreeHookSnapshot; processMarker?: string },
-  ): Promise<void> {
-    const meta: SessionMeta = {
-      ...target,
-      worktreeHooks: { [worktree.id]: setup.hooks! },
-      ...(setup.processMarker ? { worktreeProcessMarkers: { [worktree.id]: setup.processMarker } } : {}),
-    };
-    const cleanup = this.cleanupRecordForWorktree(meta, worktree, "creation_rollback", "force");
-    cleanup.auxiliaryWorktreeRollback = true;
-    this.cleanupJournal.add(cleanup);
-    await this.reapCreationRollback(cleanup, meta);
+  /** A rollback an earlier attempt of this session left for this branch's worktree, retried once
+   * now, in case the runner has not got to it or what blocked it has passed. Returns what is still
+   * pending: no session moves into a worktree a recorded removal is about to take (#4209). */
+  private async pendingWorktreeRemoval(
+    sessionId: string,
+    context: AgentContext,
+    repoPath: string,
+    branch: string,
+  ): Promise<WorktreeCleanupRecord | undefined> {
+    const find = () => this.cleanupJournal.list().find((record) => record.sessionId === sessionId &&
+      record.branch === branch && sameWorktreePath(context, record.repoPath, repoPath));
+    const pending = find();
+    if (pending?.trigger === "creation_rollback" && pending.auxiliaryWorktreeRollback) await this.reapWorktree(pending);
+    return find();
+  }
+
+  /** Whether a session now works in, or owns, the worktree an auxiliary creation rollback names. A
+   * rollback is only for a worktree that never became anyone's, so such a record is stale, whatever
+   * wrote it and however it survived: it is dropped, never replayed against that worktree (#4209). */
+  private creationRollbackTargetInUse(record: WorktreeCleanupRecord): boolean {
+    const same = (path: string | null | undefined) => !!path && sameWorktreePath(record.context, path, record.worktreePath);
+    for (const [claimed, owner] of this.reusedWorktreeClaims) {
+      if (owner !== record.sessionId && same(claimed)) return true;
+    }
+    return this.store.listSessions().some((meta) => same(meta.worktreePath) ||
+      (meta.locationHistory ?? []).some((left) => same(left.worktreePath) || left.worktrees.some((worktree) => same(worktree.path))) ||
+      // A requested worktree's own session lists it during setup, before it ever activates.
+      (meta.sessionId !== record.sessionId && this.attributedWorktrees(meta).some((worktree) => same(worktree.path))));
   }
 
   /**
@@ -14867,21 +14886,73 @@ export class SessionManager {
       allowedProjectPaths: this.configuredProjectPaths };
     let worktree: SessionWorktreeView;
     let reused: { uncommittedChanges?: number } | undefined;
+    const targetOf = (view: SessionWorktreeView): SessionMeta => ({
+      ...meta, workspaceId: pending.workspaceId, repoPath: pending.repoPath, worktreePath: view.path,
+      worktreeBranch: view.branch, worktrees: [view], worktreeRecovery: undefined, launchWorktreeProof: undefined,
+    });
+    // The runner's own proof that this attempt, and nothing before it, makes the worktree: Git is
+    // about to create it, and only then. Everything destructive below depends on this and nothing
+    // else: a worktree without it is never set up, torn down or removed by this switch (#4209).
+    const reservation: { record?: WorktreeCleanupRecord; view?: SessionWorktreeView } = {};
+    // From the whole path, not its last segment: that is a hash of the branch name alone, shared by
+    // the same branch in another repository, and hooks, process markers and port blocks are keyed
+    // by this id. A failed switch must not touch what the session's current worktree holds.
+    const targetWorktreeId = (path: string) => createHash("sha256").update(path).digest("hex").slice(0, 16);
+    const reserveWorktree = (path: string, branch: string): void => {
+      // Claimed and journaled before Git registers the path, with no await in between. Another
+      // session's switch therefore never finds it free, even mid-checkout, and from here on a crash
+      // leaves a record that ends setup's processes, runs its teardown and removes the worktree.
+      const holder = this.worktreeHolder(sessionId, meta.context, path);
+      if (holder && holder.sessionId !== sessionId) {
+        throw new Error(`the worktree for branch ${branch} is held by session ${holder.sessionId}; continue the task in that session instead`);
+      }
+      this.reusedWorktreeClaims.set(path, sessionId);
+      claim.path = path;
+      const view: SessionWorktreeView = { id: targetWorktreeId(path), path, branch, baseRef: branch, source: "created",
+        // A recovered branch is the person's existing work: removing this worktree keeps it.
+        ...(pending.recoverBranch ? { branchPreexisted: true } : {}) };
+      const record = this.cleanupRecordForWorktree(targetOf(view), view, "creation_rollback", "force");
+      record.auxiliaryWorktreeRollback = true;
+      // Only this attempt's own trusted setup gives it a teardown, never an earlier worktree's.
+      delete record.hooks;
+      record.processMarker = randomUUID();
+      this.cleanupJournal.add(record);
+      reservation.record = record;
+      reservation.view = view;
+    };
+    /** Give back what this attempt made, and say so if it could not. A worktree it did not make was
+     * never its to give back, whether another owner's or this session's own from earlier. */
+    const release = async (): Promise<string | undefined> => {
+      const { record, view } = reservation;
+      if (!record || !view) return undefined;
+      const released = () => !this.cleanupJournal.list().includes(record);
+      try {
+        await this.reapCreationRollback(record, targetOf(view));
+      } catch (error) {
+        this.log(`session ${sessionId} could not release its unused Location switch worktree: ${errText(error)}`);
+      }
+      if (released()) return undefined;
+      return `The target worktree could not be removed and is still at ${record.worktreePath}. The runner tries again when it ` +
+        "next starts or when this switch is asked for again.";
+    };
     try {
       const repoPath = await verifyLocationSwitchTarget(meta.context, this.sharedDirectoryWorkspaces,
         { workspaceId: pending.workspaceId, workspacePath: pending.repoPath, repository: pending.repository });
       if (repoPath !== pending.repoPath) throw new LocationSwitchRefusal("path_changed");
+      const targetBranch = pending.recoverBranch ?? `agent/${sessionId}`;
+      const removal = await this.pendingWorktreeRemoval(sessionId, meta.context, repoPath, targetBranch);
+      if (removal) {
+        throw new Error(`the runner is still removing this session's earlier worktree for branch ${targetBranch} at ` +
+          `${removal.worktreePath}; ask again once that finishes`);
+      }
       const created: RecoveredBranchWorktree = pending.recoverBranch
         ? await createRecoveredBranchWorktree(repoPath, sessionId, pending.recoverBranch,
-          { ...options, holderOf: (path) => this.worktreeHolder(sessionId, meta.context, path) })
+          { ...options, reserveWorktree, holderOf: (path) => this.worktreeHolder(sessionId, meta.context, path) })
         : await createRequestedWorktree(repoPath, sessionId,
-          { baseRef: (await fetchRemoteDefaultBase(repoPath, options)).ref, branch: `agent/${sessionId}` }, options);
+          { baseRef: (await fetchRemoteDefaultBase(repoPath, options)).ref, branch: targetBranch }, { ...options, reserveWorktree });
       reused = created.reusedInPlace;
       // Checked again and claimed with no await in between, so two switches never both take one
-      // worktree while each is still verifying it. That covers one this switch just checked out too:
-      // Git registers it before its checkout ends, so another switch can find it free and claim it
-      // first. Its files are then that session's, and this switch neither sets up nor removes them.
-      // Setup can run for minutes while no record names this worktree, so the claim stays (#4209).
+      // worktree while each is still verifying it.
       const holder = this.worktreeHolder(sessionId, meta.context, created.path);
       if (holder && (reused || holder.sessionId !== sessionId)) {
         throw new Error(`branch ${created.branch} is checked out in worktree ${created.path}, which session ` +
@@ -14906,55 +14977,45 @@ export class SessionManager {
         }
       }
       const defaultBranch = await readRepositoryDefaultBranch(repoPath, options);
+      if (reservation.record) {
+        reservation.record.baseRef = created.baseRef;
+        this.cleanupJournal.add(reservation.record);
+      }
+      // This session's own worktree from when it last worked in this Location keeps what it had.
+      const earlier = !reused && !reservation.record ? (meta.locationHistory ?? []).flatMap((left) => left.worktrees)
+        .reverse().find((item) => sameWorktreePath(meta.context, item.path, created.path)) : undefined;
       worktree = reused
         // An existing worktree is continued as it is and stays its owner's: attached, so nothing
         // ever sets it up, tears it down or removes it with this session.
-        ? { id: createHash("sha256").update(created.path).digest("hex").slice(0, 16), path: created.path,
+        ? { id: targetWorktreeId(created.path), path: created.path,
           branch: created.branch, baseRef: created.baseRef, baseCommit: created.baseCommit, source: "attached",
           reusedInPlace: true, ...(defaultBranch ? { defaultBranch } : {}) }
         : {
-          id: created.path.split(/[\\/]/u).at(-1)!, path: created.path, branch: created.branch, baseRef: created.baseRef,
-          baseCommit: created.baseCommit, source: "created", ...(defaultBranch ? { defaultBranch } : {}),
+          id: targetWorktreeId(created.path), path: created.path, branch: created.branch, baseRef: created.baseRef,
+          baseCommit: created.baseCommit, source: "created",
           // A recovered branch is the person's existing work: removing this worktree keeps it.
           ...(pending.recoverBranch ? { branchPreexisted: true } : {}),
+          ...earlier,
+          ...(defaultBranch ? { defaultBranch } : {}),
         };
     } catch (error) {
+      const kept = await release();
       this.failLocationSwitch(sessionId, entry, pending, error instanceof LocationSwitchRefusal ? error.message
-        : `the target worktree could not be prepared: ${errText(error)}`);
+        : `the target worktree could not be prepared: ${errText(error)}`, kept);
       return;
     }
-    const target: SessionMeta = {
-      ...meta, workspaceId: pending.workspaceId, repoPath: pending.repoPath, worktreePath: worktree.path,
-      worktreeBranch: worktree.branch, worktrees: [worktree], worktreeRecovery: undefined, launchWorktreeProof: undefined,
-    };
-    const release = async () => {
-      // A reused worktree was never this switch's to give back: it stays exactly where it was.
-      if (reused) return;
-      const setup = this.detachedWorktreeSetups.get(worktree);
-      try {
-        // Trusted setup may have started: its processes, teardown and files go with the worktree.
-        if (setup?.hooks) {
-          await this.rollBackLocationSwitchWorktree(target, worktree, setup);
-          return;
-        }
-        this.worktreePortAllocator.release(this.worktreePortOwner(sessionId, worktree.id));
-        await (pending.recoverBranch
-          ? releaseRecoveredWorktree(pending.repoPath, worktree.path, options)
-          : removeWorktree(pending.repoPath, { path: worktree.path, branch: worktree.branch }, options));
-      } catch (error) {
-        this.log(`session ${sessionId} could not release its unused Location switch worktree: ${errText(error)}`);
-      }
-    };
-    // A worktree reused in place belongs to someone else and stays exactly as it was, so it never
-    // runs setup. Everything else is prepared before the old provider retires (#4209).
-    if (!reused) {
-      const setupFailure = await this.prepareLocationSwitchSetup(target, worktree, pending.locationName);
+    // Setup runs only in a worktree this attempt made, before the old provider retires (#4209). One
+    // reused in place is someone else's. This session's own from earlier holds its work, set up when
+    // it was made: running repository commands over that work again could only harm it, and a failure
+    // there would have no safe meaning, since nothing may be removed. Either is continued as it is.
+    if (reservation.record) {
+      const setupFailure = await this.prepareLocationSwitchSetup(targetOf(worktree), worktree, pending.locationName, reservation.record);
       if (setupFailure) {
-        await release();
+        const kept = await release();
         // A runner going down cancels setup too. That is no decision about the switch, which stays
         // durable and runs again once the runner is back.
         if (this.shuttingDown) return;
-        this.failLocationSwitch(sessionId, entry, pending, setupFailure);
+        this.failLocationSwitch(sessionId, entry, pending, setupFailure, kept);
         return;
       }
     }
@@ -14985,6 +15046,16 @@ export class SessionManager {
           worktrees: fresh.worktrees ?? [], switchedAt: Date.now(), toWorkspaceId: pending.workspaceId,
         };
         const setup = this.detachedWorktreeSetups.get(worktree);
+        // A worktree this attempt made is new at its id, even on a path the session used before, so
+        // what it records replaces anything an earlier worktree left there, including with nothing.
+        const worktreeHooks = { ...fresh.worktreeHooks };
+        const worktreeProcessMarkers = { ...fresh.worktreeProcessMarkers };
+        if (reservation.record) {
+          delete worktreeHooks[worktree.id];
+          delete worktreeProcessMarkers[worktree.id];
+          if (setup?.hooks) worktreeHooks[worktree.id] = setup.hooks;
+          if (setup?.processMarker) worktreeProcessMarkers[worktree.id] = setup.processMarker;
+        }
         const moved = this.store.patchMeta(sessionId, {
           workspaceId: pending.workspaceId,
           repoPath: pending.repoPath,
@@ -14994,9 +15065,7 @@ export class SessionManager {
           launchWorktreeProof: undefined,
           // Hook snapshots and process markers are keyed by worktree id, so the earlier Location's
           // stay for its worktrees' eventual teardown. Setup's join them with this write.
-          ...(setup?.hooks ? { worktreeHooks: { ...fresh.worktreeHooks, [worktree.id]: setup.hooks } } : {}),
-          ...(setup?.processMarker
-            ? { worktreeProcessMarkers: { ...fresh.worktreeProcessMarkers, [worktree.id]: setup.processMarker } } : {}),
+          ...(reservation.record ? { worktreeHooks, worktreeProcessMarkers } : {}),
           worktreeRecovery: undefined,
           locationHistory: [...(fresh.locationHistory ?? []), left],
           pendingLocationSwitch: undefined,
@@ -15011,7 +15080,14 @@ export class SessionManager {
             path: worktree.path,
             branch: worktree.branch, locationName: pending.locationName, repository: pending.repository },
         });
-        if (moved) this.store.flush(sessionId);
+        if (moved) {
+          this.store.flush(sessionId);
+          // The move commits the worktree to this session, so its rollback is over and what setup
+          // records now goes on the session as usual. A crash before this line leaves a record that
+          // replay drops, because the session now works there.
+          this.detachedWorktreeSetups.delete(worktree);
+          if (reservation.record) this.removeWorktreeCleanupRecord(reservation.record);
+        }
         return moved ?? undefined;
       },
       queueFailureReason: () => "the session could not resume in its new Location",
@@ -15035,14 +15111,14 @@ export class SessionManager {
       return;
     }
     const moved = this.store.readMeta(sessionId)?.repoPath === pending.repoPath;
-    if (!moved) await release();
+    const kept = moved ? undefined : await release();
     const reason = result.status === "prepare_failed" ? `the conversation could not be carried over: ${result.error}`
       : result.status === "not_resumable" ? LOCATION_SWITCH_FAILURES.not_resumable
       : result.status === "lock_unavailable" ? "this session is being driven by another runner process"
       : result.status === "retirement_failed" ? "the previous provider could not be stopped"
       : moved ? "the session moved, but its provider could not start in the new Location; send it a message to retry there"
       : "the provider could not resume in the new Location";
-    this.failLocationSwitch(sessionId, entry, pending, reason);
+    this.failLocationSwitch(sessionId, entry, pending, reason, kept);
   }
 
   /** Who on this runner still has a claim on `path` (#4138), from the runner's own records only: a
@@ -15119,10 +15195,13 @@ export class SessionManager {
 
   /** Record a failed switch where people see it. The session stays where its metadata says it is,
    * and the provider launches there on the next message. */
-  private failLocationSwitch(sessionId: string, entry: ActiveSession, pending: PendingLocationSwitch, reason: string): void {
+  private failLocationSwitch(sessionId: string, entry: ActiveSession, pending: PendingLocationSwitch, reason: string, kept?: string): void {
     entry.pendingLocationSwitch = undefined;
     const current = this.store.readMeta(sessionId);
-    const bounded = reason.length > 500 ? `${reason.slice(0, 499)}…` : reason;
+    // What is still on disk survives the bound: it is what the person has to act on.
+    const room = 500 - (kept ? kept.length + 2 : 0);
+    const shortened = reason.length > room ? `${reason.slice(0, Math.max(0, room - 1))}…` : reason;
+    const bounded = kept ? `${shortened}. ${kept}` : shortened;
     const updated = this.store.patchMeta(sessionId, {
       pendingLocationSwitch: undefined,
       locationSwitchFailure: { state: "failed", repository: pending.repository, workspaceId: pending.workspaceId,
@@ -18114,10 +18193,18 @@ export class SessionManager {
     isolationMeta?: SessionMeta,
   ): Promise<void> {
     cleanupCurrentGeneration ||= record.checkpointGenerationDisposable === true;
-    if (record.trigger === "creation_rollback" && record.auxiliaryWorktreeRollback === true &&
-        this.store.has(record.sessionId) && !cleanupCurrentGeneration) {
+    const auxiliaryRollback = record.trigger === "creation_rollback" && record.auxiliaryWorktreeRollback === true;
+    if (auxiliaryRollback && this.creationRollbackTargetInUse(record)) {
+      this.log(`worktree rollback for ${boundedSessionIdForLog(record.sessionId)} dropped: a session now uses that worktree`);
+      this.removeWorktreeCleanupRecord(record);
+      return;
+    }
+    if (auxiliaryRollback && this.store.has(record.sessionId) && !cleanupCurrentGeneration) {
       await this.runWorktreeOperation(record.sessionId, async () => {
-        await this.reapCreationRollback(record, this.store.readMeta(record.sessionId) ?? undefined);
+        // A Location switch's rollback names another repository than the session is still in, so
+        // its teardown takes its boundary from the record rather than from that session.
+        const meta = this.store.readMeta(record.sessionId) ?? undefined;
+        await this.reapCreationRollback(record, meta?.repoPath === record.repoPath ? meta : undefined);
       });
       return;
     }
