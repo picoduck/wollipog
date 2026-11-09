@@ -226,6 +226,39 @@ for (const theme of ["dark", "light"] as const) {
       await expect(launch).toContainText("Follow-ups from this campaign's other repositories can't be created in this Location's repository until its runner is on protocol version 327 or newer.");
       await row.scrollIntoViewIfNeeded();
       await assertNoHorizontalOverflow(page, ".campaign-status");
+      if (device === "phone") {
+        // The limited launch row, its repository and its whole reason show together: scroll with the
+        // wheel (a forced scroll moves the phone's overflow-hidden panel) until the section's heading sits
+        // just below whatever covers the top of the scrolling region (the panel's sticky header).
+        const heading = section.locator("h3", { hasText: /^Repositories$/ });
+        const geometry = () => heading.evaluate((dt) => {
+          let scroller = dt.parentElement;
+          while (scroller && !(scroller.scrollHeight > scroller.clientHeight && /auto|scroll/.test(getComputedStyle(scroller).overflowY))) scroller = scroller.parentElement;
+          const area = scroller!.getBoundingClientRect();
+          const x = dt.getBoundingClientRect().left + 2;
+          // The first point down from the region's top that shows its scrolled content, not a stuck header.
+          const covers = (element: Element | null) => {
+            for (let at = element; at && at !== scroller; at = at.parentElement) if (/sticky|fixed/.test(getComputedStyle(at).position)) return true;
+            return !element || !scroller!.contains(element);
+          };
+          let visibleTop = Math.max(area.top, 0);
+          while (visibleTop < area.bottom && covers(document.elementFromPoint(x, visibleTop))) visibleTop += 1;
+          return { gap: dt.getBoundingClientRect().top - visibleTop - 12, middle: { x: area.left + area.width / 2, y: (visibleTop + Math.min(area.bottom, innerHeight)) / 2 } };
+        });
+        const gap = async () => (await geometry()).gap;
+        const { middle } = await geometry();
+        await page.mouse.move(middle.x, middle.y);
+        for (let step = 0; step < 6 && Math.abs(await gap()) > 2; step += 1) {
+          await page.mouse.wheel(0, await gap());
+          await page.waitForTimeout(100);
+        }
+        expect(Math.abs(await gap())).toBeLessThanOrEqual(2);
+        expect(await page.locator("aside.rpanel").evaluate((panel) => panel.scrollTop)).toBe(0);
+        // Nothing of the row is under the tab bar band.
+        const band = await page.getByRole("navigation", { name: "App Navigation" }).boundingBox();
+        const shown = await launch.boundingBox();
+        expect(shown!.y + shown!.height).toBeLessThanOrEqual(band!.y);
+      }
       if (REPOSITORIES_EVIDENCE_DIR) await page.screenshot({ path: `${REPOSITORIES_EVIDENCE_DIR}/location-gates-listed-${device}-${theme}.png` });
     });
 
