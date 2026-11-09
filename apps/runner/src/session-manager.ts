@@ -18673,13 +18673,13 @@ export class SessionManager {
     return false;
   }
 
-  /** Nothing can be concluded yet, so the record stays, on the same schedule as any failed attempt.
-   * A repository that has gone for good can never answer, so once that schedule has ended, so does
-   * the record: there is nothing it could ever do, and the directory is left alone. */
+  /** A read that fails never removes anything. It is tried again on the schedule of any failed attempt,
+   * because a passing failure should not cost a teardown. Once that schedule has ended, the answer is
+   * to keep the worktree and end the record, rather than leave it refusing every next attempt. */
   private waitForRollbackAnswer(record: WorktreeCleanupRecord): boolean | Promise<boolean> {
     this.log(`worktree rollback for ${boundedSessionIdForLog(record.sessionId)} needs retry: its worktree could not be read`);
     this.noteRollbackFailure(record);
-    if (record.rollbackGaveUpAt && nativeRepositoryPathIsUnavailable(record.context, record.repoPath)) return this.endRollbackUnremoved(record);
+    if (record.rollbackGaveUpAt) return this.keepRollbackWorktree(record, "it could not be read, so nothing proves it is only what the runner left");
     return true;
   }
 

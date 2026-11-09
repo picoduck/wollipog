@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import type { RunnerToControlPlane, SessionLaunchSpec, SessionLocationSwitchMessage, SessionWorktreeView } from "@wollipog/protocol";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -2536,6 +2536,63 @@ test("retries after a removal that finished are counted too, so a stuck metadata
     (h.store as unknown as { readMeta: typeof original }).readMeta = original;
     assert.ok(journal(h)[0]?.worktreeRemovedAt, "the removal itself finished");
     assert.ok(journal(h)[0]?.rollbackGaveUpAt, "and the retries were counted");
+  });
+});
+
+test("a snapshot that cannot be read ends in keeping the worktree: it is never removed, and the record does not wait forever", async () => {
+  if (process.platform === "win32" || process.getuid?.() === 0) return;
+  await withSession("unreadable-snapshot", async (h) => {
+    const { record, removal } = await stuckProvedRollback(h);
+    const slot = record.worktreePath;
+    const before = files(slot);
+    const hidden = join(git(slot, "rev-parse", "--absolute-git-dir"), "unreadable");
+    writeFileSync(hidden, "recovery\n");
+    chmodSync(hidden, 0o000);
+    removal.free();
+    let now = Date.now();
+    internalsOf(h).worktreePullRequestDiscoveryNow = () => now;
+
+    // One failure is no decision: the record waits, so a passing failure costs nothing.
+    now += 24 * 60 * 60 * 1000;
+    await internalsOf(h).replayDeferredWorktreeRetirements();
+    assert.equal(journal(h).length, 1, "it tries again");
+    assert.deepEqual(files(slot), before);
+
+    for (let pass = 0; pass < 12; pass++) {
+      now += 24 * 60 * 60 * 1000;
+      await internalsOf(h).replayDeferredWorktreeRetirements();
+    }
+    assert.deepEqual(journal(h), [], "the schedule ended, so the record did");
+    assert.deepEqual(files(slot), before, "and the worktree is still there");
+    assert.ok(errorText(h).some((text) => text.includes(slot) && /kept/iu.test(text)), "and the session is told");
+    chmodSync(hidden, 0o644);
+
+    // And the next attempt continues there, rather than being refused by a record that cannot finish.
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message({ occurrenceId: "occurrence-next" })), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1, "the next attempt did not finish");
+    assert.equal(h.store.readMeta(h.sessionId)!.worktrees![0]!.source, "attached");
+  });
+});
+
+test("a read that comes back before the schedule ends goes on to remove an unchanged worktree", async () => {
+  if (process.platform === "win32" || process.getuid?.() === 0) return;
+  await withSession("snapshot-recovers", async (h) => {
+    const { record, removal } = await stuckProvedRollback(h);
+    // A passing failure of the read itself: its contents, which are all the snapshot records, never change.
+    const reflog = join(git(record.worktreePath, "rev-parse", "--absolute-git-dir"), "logs", "HEAD");
+    chmodSync(reflog, 0o000);
+    removal.free();
+    const internals = internalsOf(h);
+    dueLater(h);
+    await internals.replayDeferredWorktreeRetirements();
+    assert.equal(journal(h).length, 1, "no answer, so it waits");
+    assert.equal(existsSync(record.worktreePath), true);
+    chmodSync(reflog, 0o644);
+    const later = Date.now() + 365 * 24 * 60 * 60 * 1000;
+    internals.worktreePullRequestDiscoveryNow = () => later;
+    await internals.replayDeferredWorktreeRetirements();
+    assert.deepEqual(journal(h), []);
+    assert.equal(existsSync(record.worktreePath), false, "and then the snapshot still matches");
   });
 });
 
