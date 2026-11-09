@@ -301,6 +301,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   providerAccountSelectionPolicy: 334,
   /** v337 (#4353): a control plane reads an agent's account reference and lists the accounts it may name. */
   providerAccountAgentChoice: 337,
+  /** v338 (#4353): a run or workflow names an account per member. An older control plane ignores it on a run. */
+  memberProviderAccountChoice: 338,
   providerLogin: 171,
   providerAccountRemoval: 188,
   accountScopedAgentSkills: 172,
@@ -9206,6 +9208,11 @@ export interface CreateWorkflowRunRequest {
   agentBindings?: Record<string, string>;
   /** Optional manager agent started with the workflow instance id; workers receive no initial prompt. */
   orchestratorAgentId?: string;
+  /** Protocol v338: the account a role uses instead of the Machine's policy, by graph agent id, as in
+   * `agentBindings`. A person names an account id; an agent names an opaque reference. */
+  providerAccountBindings?: Record<string, string>;
+  /** Protocol v338: the same for `orchestratorAgentId`. */
+  orchestratorProviderAccountId?: string;
 }
 
 export interface CreateWorkflowRunResult {
@@ -13041,6 +13048,9 @@ export interface CreateRunRequest {
   costBudgetUsd?: number;
   /** Run-wide tool-call limit; absent ⇒ unlimited. Applied to each member. */
   maxToolCalls?: number;
+  /** Protocol v338: the account a member uses instead of the Machine's policy, by agent id. A person
+   * names an account id; an agent names an opaque reference. Omitted members follow the policy. */
+  providerAccountIds?: Record<string, string>;
 }
 
 export interface PromptRequest {

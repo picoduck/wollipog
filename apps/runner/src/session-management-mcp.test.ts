@@ -1769,7 +1769,7 @@ test("a launch with no eligible account tells the agent what it can do, without 
   const text = resultText(created);
   assert.match(text, /No Claude account/u);
   assert.match(text, /PROVIDER_ACCOUNT_CHOICE_REQUIRED refusal=no_eligible_account actions=choose_account, wait retryAt=2027-/u);
-  assert.match(text, /get_provider_account_selection .*create_session providerAccountId .*--provider-account/u);
+  assert.match(text, /get_provider_account_selection .*create_session providerAccountId .*--provider-account.*create_run providerAccountIds.*create_workflow_run providerAccountBindings/u);
   assert.ok(!text.includes("person-example-com"), text);
 });
 
@@ -1815,6 +1815,31 @@ test("create_session carries a named account, and refuses it before sending to a
 
   const blank = await callTool(current.deps, "create_session", { runnerId: "r1", agentId: "claude", workspaceId: "ws", providerAccountId: "  " });
   assert.equal(blank.isError, true);
+});
+
+test("create_run and create_workflow_run carry named accounts, and refuse them before an older control plane (#4353)", async () => {
+  const current = makeDeps(() => ({ status: 200, body: { run: { id: "r_1" }, sessions: [], instance: {} } }));
+  current.deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  const run = { runnerId: "r1", workspaceId: "ws", agentIds: ["claude"], task: "Do it" };
+  const workflow = { runnerId: "r1", workspaceId: "ws", workflowId: "builtin:build-review", task: "Do it" };
+  const accepted = await callTool(current.deps, "create_run", { ...run, providerAccountIds: { claude: "acct:aaaaaaaaaaaaaaaa" } });
+  assert.equal(accepted.isError, undefined, resultText(accepted));
+  assert.deepEqual((current.calls[0]?.body as { providerAccountIds?: unknown }).providerAccountIds, { claude: "acct:aaaaaaaaaaaaaaaa" });
+  const bound = await callTool(current.deps, "create_workflow_run", { ...workflow, providerAccountBindings: { claude: "acct:aaaaaaaaaaaaaaaa" } });
+  assert.equal(bound.isError, undefined, resultText(bound));
+  assert.deepEqual((current.calls[1]?.body as { providerAccountBindings?: unknown }).providerAccountBindings, { claude: "acct:aaaaaaaaaaaaaaaa" });
+
+  // v337 reads a session's reference, but its run ignores this field, so the choice would silently vanish.
+  const older = makeDeps(() => ({ status: 200, body: {} }));
+  older.deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.memberProviderAccountChoice - 1;
+  const refusedRun = await callTool(older.deps, "create_run", { ...run, providerAccountIds: { claude: "acct:aaaaaaaaaaaaaaaa" } });
+  assert.equal(refusedRun.isError, true);
+  assert.match(resultText(refusedRun), /Choosing a provider account from an agent needs/u);
+  const refusedWorkflow = await callTool(older.deps, "create_workflow_run", { ...workflow, providerAccountBindings: { claude: "acct:aaaaaaaaaaaaaaaa" } });
+  assert.equal(refusedWorkflow.isError, true);
+  assert.deepEqual(older.calls, [], "it never receives the choice");
+  const plain = await callTool(older.deps, "create_run", run);
+  assert.equal(plain.isError, undefined, "a run naming nothing still reaches it");
 });
 
 test("an agent hears that a plan wasn't checked only when it named a model under a policy (#4353)", async () => {

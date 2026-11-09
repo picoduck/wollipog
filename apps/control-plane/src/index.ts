@@ -119,6 +119,7 @@ import {
   type UpdateProjectRequest,
   providerAccountChoiceRequiredForAgent,
   providerAccountSelectionPreviewForAgent,
+  runnerViewForAgent,
   type AddProjectLocationRequest,
   type ProjectLocationView,
   type CreateProjectLocationRequest,
@@ -2368,7 +2369,11 @@ app.get("/index.html", serveShell);
 
 app.get("/api/runners", async (req) => {
   const principal = requestPrincipal(req);
-  return { runners: principal ? db.listRunnersForPrincipal(principal) : [] };
+  if (!principal) return { runners: [] };
+  const runners = db.listRunnersForPrincipal(principal);
+  // At this route, not in the list: get_campaign's Child Model check reads an agent's readiness and the
+  // saved policy from that same list, and never returns them.
+  return { runners: principal.kind === "agent" ? runners.map(runnerViewForAgent) : runners };
 });
 
 /* ------------------------------- Projects -------------------------------- */
