@@ -9,22 +9,42 @@ import { ChevronDownIcon } from "./Icons.js";
 
 type AccountAccess = ReadonlyMap<string, string | undefined>;
 
+interface AccountUsageReading {
+  api: unknown;
+  runnerId: string;
+  /** Each account's server access when this was read. */
+  access: AccountAccess;
+  response: SubscriptionUsageResponse;
+}
+
 function accountAccess(runner: RunnerView): AccountAccess {
   return new Map(runner.providerAccounts?.map(account => [account.id, account.profile?.access]));
 }
 
+/** What a reading may still say for this API and Machine: nothing for another of either, and nothing
+ * for an account that has left the inventory or whose server access has changed since it was read. */
+function retainedReading(reading: AccountUsageReading | null, api: unknown, runner: RunnerView): AccountUsageReading | null {
+  if (!reading || reading.api !== api || reading.runnerId !== runner.runnerId) return null;
+  const access = accountAccess(runner);
+  const sources = reading.response.sources.filter(({ providerAccountId: id }) => !id ||
+    (access.has(id) && reading.access.has(id) && access.get(id) === reading.access.get(id)));
+  return sources.length === reading.response.sources.length ? reading
+    : { ...reading, response: { ...reading.response, sources } };
+}
+
 /** Read cached usage, never probe credentials from the account overview. The response is already
  * permission-scoped. A failed read keeps the last reading for this API and Machine, which ages into
- * Last Known, rather than saying nothing was ever reported. It never carries to another API or Machine,
- * or to an account whose server access has changed since it was read. */
+ * Last Known, rather than saying nothing was ever reported. What `retainedReading` drops stays dropped
+ * until a read succeeds, so returning to an earlier state can't bring an old reading back. */
 export function useMachineAccountUsage(runner: RunnerView, online: boolean) {
   const api = useApi();
-  const [reading, setReading] = useState<{ api: unknown; runnerId: string; access: AccountAccess; response: SubscriptionUsageResponse } | null>(null);
+  const [reading, setReading] = useState<AccountUsageReading | null>(null);
   const [now, setNow] = useState(Date.now);
   const accountKey = JSON.stringify(runner.providerAccounts?.map(account => [account.id, account.provider, account.authStatus, account.profile?.access]));
   useEffect(() => {
     let current = true;
     let inFlight = false;
+    setReading(previous => retainedReading(previous, api, runner));
     const load = async () => {
       if (inFlight) return;
       inFlight = true;
@@ -40,11 +60,8 @@ export function useMachineAccountUsage(runner: RunnerView, online: boolean) {
     return () => { current = false; window.clearInterval(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `accountKey` carries what `runner` adds
   }, [api, runner.runnerId, accountKey, online]);
-  const access = accountAccess(runner);
-  const response = reading && reading.api === api && reading.runnerId === runner.runnerId ? { ...reading.response,
-    sources: reading.response.sources.filter(source => !source.providerAccountId ||
-      access.get(source.providerAccountId) === reading.access.get(source.providerAccountId)) } : null;
-  return { response, now: Math.max(now, Date.now()) };
+  // Also while rendering: the effect above runs only after this render has painted.
+  return { response: retainedReading(reading, api, runner)?.response ?? null, now: Math.max(now, Date.now()) };
 }
 
 export function ProviderAccountUsage({ account, runnerId, online, data }: {

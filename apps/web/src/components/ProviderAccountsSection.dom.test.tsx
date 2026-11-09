@@ -2101,6 +2101,42 @@ test("a kept reading never crosses to another Machine or an account whose access
   } finally { await ui.unmount(); }
 });
 
+test("a dropped reading stays dropped until a new read succeeds (#4353)", async () => {
+  const start = Date.now();
+  const granted = SIGN_IN_ACCOUNTS.map((account) => account.id === "work" ? { ...account, profile: { id: "p1", access: "granted" as const } } : account);
+  const scenarios: Array<[string, (ui: Awaited<ReturnType<typeof render>>) => Promise<void>]> = [
+    ["access lost and restored", async (ui) => {
+      await ui.rerender({ runner: runnerView({ providerAccounts: granted.map((account) => account.id === "work"
+        ? { ...account, profile: { id: "p1", access: "not_granted" as const } } : account) }) });
+    }],
+    ["the account removed and restored under its id", async (ui) => {
+      await ui.rerender({ runner: runnerView({ providerAccounts: granted.filter((account) => account.id !== "work") }) });
+    }],
+    ["another Machine and back", async (ui) => {
+      await ui.rerender({ runner: runnerView({ runnerId: "runner-2", providerAccounts: granted }) });
+    }],
+  ];
+  for (const [name, leave] of scenarios) {
+    let failing = false;
+    const api = { ...client().client, subscriptionUsage: async () => {
+      if (failing) throw new Error("Usage unavailable");
+      return usageReading(start, [{ id: "session", label: "Session Window", remainingPercent: 36 }]);
+    } };
+    const ui = await render({ api, runner: runnerView({ providerAccounts: granted }) });
+    try {
+      const text = () => ui.row("Work").querySelector(".provider-account-usage")?.textContent ?? "";
+      assert.match(text(), /36% Left/, name);
+      failing = true;
+      await leave(ui);
+      await ui.rerender({ runner: runnerView({ providerAccounts: granted }) });
+      assert.match(text(), /Usage Not Reported/, `${name}: the old reading doesn't come back by itself`);
+      failing = false;
+      await ui.rerender({ online: false });
+      assert.match(text(), /36% Left · Last Known/, `${name}: a successful read brings usage back`);
+    } finally { await ui.unmount(); }
+  }
+});
+
 test("Use for New Sessions stays available when the machine goes offline after a sign-in (#4353)", async () => {
   const saved: unknown[] = [];
   const base = client({ login: async () => ({ login: { ...runningLogin("codex-new", "Codex New"), provider: "codex" } }) });
