@@ -84,7 +84,12 @@ export function runReason(execution: AutomationExecution, currentPolicy?: Automa
 }
 
 /** Where a run's work can be opened: a workflow run, else its session. */
-export function runOpenTarget(execution: AutomationExecution): { label: "Open Run" | "Open Session"; view: View } | null {
+export function runOpenTarget(execution: AutomationExecution): { label: "Open Campaign" | "Open Run" | "Open Session"; view: View } | null {
+  const campaignSessionId = execution.campaignSessionId ?? (execution.sessionId &&
+    execution.specSnapshot?.action.kind === "create_session" && execution.specSnapshot.action.request.campaign ? execution.sessionId : undefined);
+  if (campaignSessionId) {
+    return { label: "Open Campaign", view: { name: "session", id: campaignSessionId, campaign: true } };
+  }
   if (execution.runId) return { label: "Open Run", view: { name: "run", id: execution.runId } };
   if (execution.sessionId) return { label: "Open Session", view: { name: "session", id: execution.sessionId } };
   return null;

@@ -105,7 +105,7 @@ for (const theme of ["dark", "light"] as const) {
         await page.goto(`/automations-e2e.html?theme=${theme}&capabilities`);
         await page.getByRole("button", { name: "New Automation" }).click();
         const form = page.locator(".automation-editor-form");
-        await expectTriggerType(page, form, ["Machine", "Folder", "Agent", "Model", "Reasoning Effort", "Permission Mode",
+        await expectTriggerType(page, form, ["Machine", "Folder", "Agent", "Session Role", "Model", "Reasoning Effort", "Permission Mode",
           "Workspace Strategy", "If a Run Is Missed", "If the Machine Is Offline", "If the Last Run Is Still Going"],
         form.getByRole("textbox", { name: "Name", exact: true }));
       });

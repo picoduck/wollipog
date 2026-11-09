@@ -1,4 +1,5 @@
 import React from "react";
+import { DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION, type OrchestratorSettingsView } from "@wollipog/protocol";
 import { Shell } from "../App.js";
 import { ThemeProvider } from "../components/ThemeProvider.js";
 import { createRoot } from "react-dom/client";
@@ -666,8 +667,46 @@ const pollingFixture = params.has("polling-recovery") ? {
 } : null;
 if (pollingFixture) Object.assign(window, { automationPollingFixture: pollingFixture });
 
+if (params.has("campaign")) {
+  runner.protocolVersion = PROTOCOL_VERSION;
+  runner.agents[0]!.capabilities = { models: [{ id: "parent-model", displayName: "Parent Model", efforts: ["medium", "high"] }],
+    effortLevels: ["medium", "high"], permissionModes: ["default", "orchestrator"], slashCommands: [],
+    supportsImages: true, supportsApprovals: true, orchestratorAdditive: true };
+  items[0]!.action = { kind: "create_session", request: { runnerId: runner.runnerId, workspaceId: runner.workspaces[0]!.id,
+    agentId: "agent-1", role: "orchestrator", prompt: "Review the daily reports and implement accepted follow-ups.", useWorktree: false,
+    config: { model: "parent-model", effort: "high", permissionMode: "default" },
+    orchestrator: { ...structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS), behavior: { ...DEFAULT_ORCHESTRATOR_DEFAULTS.behavior,
+      childHarness: { agentId: "codex-app-server", driver: "codex-app-server", context: { kind: "native" } }, childModel: "child-model", childEffort: "high",
+      followUps: "execute_approved", maximumConcurrentChildren: 3 } },
+    campaign: { controlMode: "full_control", repository: "example/project", tasks: [
+      { key: "maintenance", title: "Maintenance Review", prompt: "Investigate stale flags and report actionable findings." },
+      { key: "coverage", title: "Coverage Review", prompt: "Find meaningful coverage gaps." },
+    ] },
+  } };
+}
+
 const client = {
   ...api,
+  orchestratorSettings: async (): Promise<OrchestratorSettingsView> => ({
+    defaults: structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS), source: "system_default", controlModeSupported: true,
+    capabilities: { models: [], effortLevels: ["medium", "high"], installations: 2, compatibleInstallations: 2, status: "available",
+      harnesses: [
+        { agentId: "claude-code", driver: "claude-code", context: { kind: "native" }, name: "Claude Code", installations: 1,
+          models: [{ id: "parent-model", displayName: "Parent Model", efforts: ["medium", "high"] }], effortLevels: ["medium", "high"],
+          supportedPairs: [{ modelId: "parent-model", effortLevels: ["medium", "high"] }] },
+        { agentId: "codex-app-server", driver: "codex-app-server", context: { kind: "native" }, name: "Codex", installations: 1,
+          models: [{ id: "child-model", displayName: "Child Model", efforts: ["medium", "high"] }], effortLevels: ["medium", "high"],
+          supportedPairs: [{ modelId: "child-model", effortLevels: ["medium", "high"] }] },
+      ] },
+  }),
+  ...(params.has("campaign") ? {
+    updateAutomation: async (id: string, spec: AutomationSpec) => {
+      const index = items.findIndex(item => item.automationId === id);
+      items[index] = { ...items[index]!, ...spec };
+      Object.assign(window, { savedCampaignAutomation: structuredClone(spec) });
+      return items[index]!;
+    },
+  } : {}),
   automations: async () => {
     if (pollingFixture) pollingFixture.listCalls++;
     if (pollingFixture?.failure === "list") throw new Error("Synthetic polling failure");

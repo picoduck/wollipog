@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import fc from "fast-check";
 import type { AutomationSpec } from "@wollipog/protocol";
 import {
   alternateConfigError, buildSpec, defaults, formFrom, withAgent, withModel,
@@ -26,6 +27,23 @@ function baseSpec(action: AutomationSpec["action"]): AutomationSpec {
 function assertRoundTrips(spec: AutomationSpec): void {
   assert.deepEqual(buildSpec(formFrom(spec), { ...CONTEXT, base: spec }), spec);
 }
+
+test("campaign edits round-trip independent parent and child settings without provider-specific presets", () => {
+  fc.assert(fc.property(fc.record({
+    parentModel: fc.string({ minLength: 1, maxLength: 40 }), childModel: fc.string({ minLength: 1, maxLength: 40 }),
+    effort: fc.constantFrom("low", "medium", "high"), controlMode: fc.constantFrom("custom", "full_control"),
+    driver: fc.constantFrom("claude-code", "codex-app-server", "pi"),
+  }), ({ parentModel, childModel, effort, controlMode, driver }) => {
+    const spec = baseSpec({ kind: "create_session", request: { runnerId: "r", workspaceId: "w", agentId: "parent",
+      role: "orchestrator", prompt: "Review the daily reports", useWorktree: false, providerAccountId: "account", executionTargetId: "host",
+      config: { model: parentModel, effort, serviceTier: "tier", permissionMode: "default" },
+      orchestrator: { behavior: { childHarness: { agentId: "child", driver, context: { kind: "native" } }, childModel, childEffort: effort,
+        followUps: "execute_approved", completion: "retain", maximumConcurrentChildren: 3 } },
+      campaign: { controlMode, repository: "owner/repo", tasks: [{ key: "daily", title: "Daily Review", prompt: "Inspect the reports" }] },
+    } });
+    assertRoundTrips(spec);
+  }));
+});
 
 test("a create-session spec survives an unchanged edit", () => {
   assertRoundTrips(baseSpec({

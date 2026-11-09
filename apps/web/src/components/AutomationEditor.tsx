@@ -35,6 +35,7 @@ import { agentOptions } from "./agent-options.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { FieldError } from "./FieldError.js";
 import { AutomationScheduleFields } from "./AutomationScheduleFields.js";
+import { AutomationCampaignFields } from "./AutomationCampaignFields.js";
 import { AutomationsIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
 import { DetailBar } from "./PageHeader.js";
@@ -971,6 +972,7 @@ function AutomationEditorForm({
             )}
             {form.actionKind === "create_session" && (
               <>
+                <AutomationCampaignFields form={form} runner={runners.get(form.runnerId)} onChange={next => setForm(() => next)} />
                 {(modelOptions.length > 0 || effortOptions.length > 0) && (
                   <div className="field-row">
                     {modelOptions.length > 0 && (

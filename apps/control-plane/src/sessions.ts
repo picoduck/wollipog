@@ -4731,6 +4731,12 @@ export class SessionsService {
       [PREPARED_MEDIA_CAPTURE]?: PreparedMediaCapture;
       /** Trusted internal inspection seam. Returns before any stage, insert or provider call. */
       inspectLaunchPlan?: (plan: PreparedCampaignLaunch) => void;
+      /** Internal scheduled launch, bound to an approved immutable automation occurrence. */
+      scheduledCampaign?: {
+        automationId: string; executionId: string;
+        budget: import("@wollipog/protocol").CampaignBudgetAuthority;
+        tasks: import("@wollipog/protocol").AutomationCampaign["tasks"];
+      };
       /** Internal fixture/admission seam; never accepted from ordinary session request JSON. */
       humanCampaignLaunch?: {
         principal: HumanPrincipal; requestId: string; digest: string;
@@ -5522,7 +5528,8 @@ export class SessionsService {
       if (delivery) return fail("Campaign budget admission for pre-staged automation dispatch is unsupported.", 409);
       const ceilingError = this.controlledReviewCeilingError(budgetRoot, campaignBudgetUserLimits);
       if (ceilingError) return fail(ceilingError, 409);
-      const parentError=this.campaignBudgetConfigError(this.db.getSession(budgetSource!)!);
+      const parentError=this.campaignBudgetConfigError(this.db.getSession(budgetSource!)!, undefined, undefined,
+        { runnerId: req.runnerId, workspaceId });
       if(parentError) return campaignRefusalFail(parentError);
       const view = this.db.campaignBudgets.view(budgetRoot)!;
       const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model, view.authority.costUsd !== undefined);
@@ -5617,8 +5624,18 @@ export class SessionsService {
       return fail("internal launch preparation completed without creating a session", 409);
     }
     const humanLaunch = creationContext?.humanCampaignLaunch;
+    const scheduled = creationContext?.scheduledCampaign;
+    if (scheduled) {
+      const occurrence = this.db.getAutomationExecution(scheduled.executionId);
+      if (!delivery || delivery.automationOrigin?.executionId !== scheduled.executionId ||
+          delivery.automationOrigin.automationId !== scheduled.automationId ||
+          occurrence?.automationId !== scheduled.automationId || occurrence.status !== "dispatching" ||
+          occurrence.specSnapshot?.action.kind !== "create_session" || !occurrence.specSnapshot.action.request.campaign ||
+          this.db.automationSoleHumanAuthor(scheduled.automationId, true) !== creationContext.defaultOwnerUserId ||
+          parentSessionId || !orchestratorPolicy) return fail("Scheduled campaign admission is invalid", 409);
+    }
     if (humanLaunch) {
-      if (parentSessionId || delivery || !orchestratorPolicy || !workspaceId || adHoc || images.length ||
+      if (parentSessionId || (delivery && !scheduled) || !orchestratorPolicy || !workspaceId || adHoc || images.length ||
           req.launchSurface === "native_tui" || launch.context.kind !== "native" || executionTarget.adapter !== "host" ||
           humanLaunch.principal.kind !== "human" ||
           creationContext.defaultOwnerUserId !== humanLaunch.principal.userId ||
@@ -5739,7 +5756,7 @@ export class SessionsService {
     const snapshotReviews = campaignController?.orchestratorPolicy?.reviewPolicySnapshotVersion === 1 && !creationContext?.review;
     const reviewFields = snapshotReviews ? parseOrchestratorReviewPolicy(campaignController!.orchestratorPolicy!.behavior) : null;
     if (snapshotReviews && !reviewFields) return fail("the campaign's review policy is invalid; update it before launching a child", 409);
-    if (delivery) delivery.stage(plan!);
+    if (delivery && !scheduled) delivery.stage(plan!);
     let session: SessionView;
     const sessionInput: Parameters<ControlPlaneDb["createSession"]>[0] = {
       ...(reviewFields ? { reviewPolicyCapture: { fields: reviewFields,
@@ -5797,9 +5814,39 @@ export class SessionsService {
       }) : this.db.createSession(sessionInput);
     };
     try {
-      if (humanLaunch) {
+      if (scheduled) {
+        session = existing ?? this.db.campaignChildCreationTransaction(() => {
+          const created = humanLaunch
+            ? this.db.createHumanCampaignLaunch(sessionInput, humanLaunch.principal, humanLaunch.requestId, humanLaunch.digest).session
+            : insert();
+          if (!humanLaunch) {
+            // Preserve independently configured root ceilings before the aggregate allowance
+            // snapshots them, just as createHumanCampaignLaunch does for Full Control roots.
+            if (config.costBudgetUsd !== undefined) this.db.updateSessionCostBudget(id, config.costBudgetUsd, now);
+            if (config.maxToolCalls !== undefined) this.db.updateSessionMaxToolCalls(id, config.maxToolCalls, now);
+            if (config.costCheckpointsUsd?.length) this.db.updateSessionCostCheckpoints(id, config.costCheckpointsUsd, now);
+            this.db.campaignBudgets.authorize(id, scheduled.budget);
+            const allocation = this.db.campaignBudgets.allocation(id)!;
+            if (allocation.costUsd !== undefined) this.db.updateSessionCostBudget(id, allocation.costUsd, now);
+            if (allocation.toolCalls !== undefined) this.db.updateSessionMaxToolCalls(id, allocation.toolCalls, now);
+          }
+          const allocated = this.db.getSession(created.id)!;
+          config.costBudgetUsd = allocated.costBudgetUsd ?? undefined;
+          config.maxToolCalls = allocated.maxToolCalls ?? undefined;
+          const planned = this.db.campaignWorkLedger.recordPlan(id, id, {
+            items: scheduled.tasks.map(task => ({ key: task.key, title: task.title })), planComplete: true,
+          }, now);
+          if (!planned.ok) throw new Error(planned.error ?? "Scheduled tasks could not be recorded");
+          // Persist the initial command with its exact admitted allowance generation. Root,
+          // budget, task ledger and outbox plan commit together, before activation sends bytes.
+          if (command.type !== "start_session") throw new Error("Scheduled campaign command is invalid");
+          command.spec = { ...command.spec, campaignBudgetDispatch: this.db.campaignBudgets.dispatchTo(id) };
+          delivery!.stage(plan!);
+          return this.db.getSession(created.id)!;
+        });
+      } else if (humanLaunch) {
         const admitted = this.db.createHumanCampaignLaunch(sessionInput, humanLaunch.principal, humanLaunch.requestId, humanLaunch.digest);
-        if (!admitted.created) return ok(admitted.session);
+        if (!admitted.created && !scheduled) return ok(admitted.session);
         session = admitted.session;
         config.costBudgetUsd = session.costBudgetUsd ?? undefined;
         config.maxToolCalls = session.maxToolCalls ?? undefined;
@@ -5808,16 +5855,16 @@ export class SessionsService {
         : insert());
     } catch (error) {
       if (error instanceof CampaignAttemptRefusal) return fail(error.message, error.status);
-      if (budgetRoot || humanLaunch) return fail((error as Error).message, 409);
+      if (budgetRoot || humanLaunch || scheduled) return fail((error as Error).message, 409);
       throw error;
     }
-    if (!humanLaunch && config.costBudgetUsd && config.costBudgetUsd > 0) {
+    if (!humanLaunch && !scheduled && config.costBudgetUsd && config.costBudgetUsd > 0) {
       this.db.updateSessionCostBudget(id, config.costBudgetUsd, now);
     }
-    if (!humanLaunch && config.maxToolCalls && Math.floor(config.maxToolCalls) > 0) {
+    if (!humanLaunch && !scheduled && config.maxToolCalls && Math.floor(config.maxToolCalls) > 0) {
       this.db.updateSessionMaxToolCalls(id, Math.floor(config.maxToolCalls), now);
     }
-    if (!humanLaunch && config.costCheckpointsUsd?.length) {
+    if (!humanLaunch && !scheduled && config.costCheckpointsUsd?.length) {
       this.db.updateSessionCostCheckpoints(id, config.costCheckpointsUsd, now);
     }
     if (!snapshotCommand && images.length) {
@@ -5895,7 +5942,8 @@ export class SessionsService {
     if (!capture) this.log.info(`session created ${id} on ${req.runnerId} (${req.agentId} @ ${req.workspaceId})`);
     if (!capture && session.reviewPolicy) this.log.info(JSON.stringify({ event: "campaign_child_review_policy_snapshot",
       entryPoint: "create_session", sessionId: id, parentSessionId, ...session.reviewPolicy }));
-    if (!capture && session.orchestratorPolicy?.issueScopeSeed?.state === "pending") this.startCampaignIssueScopeSeed(id, requestedText, delivery ? "unattributed" : "launch_request");
+    if (!capture && session.orchestratorPolicy?.issueScopeSeed?.state === "pending") this.startCampaignIssueScopeSeed(id, requestedText,
+      delivery && !scheduled ? "unattributed" : "launch_request");
     if (!capture && session.orchestratorPolicy && !session.parentSessionId && session.projectId && session.orchestratorPolicy.control?.mode !== "full_control") {
       void this.establishCustomCampaignRepositories(id).catch((error: unknown) =>
         this.log.warn(`Could not read the Project's repositories for campaign ${id}: ${error instanceof Error ? error.message : String(error)}`));
@@ -12032,16 +12080,32 @@ export class SessionsService {
         ...(allocation.toolCalls === undefined ? {} : { maxToolCalls: allocation.toolCalls }) }, ...(holdFor ? { holdFor } : {}) });
   }
 
-  private campaignBudgetConfigError(session: SessionView, config?: SessionConfig, driver = session.driver): CampaignRefusal | null {
+  private campaignBudgetConfigError(session: SessionView, config?: SessionConfig, driver = session.driver,
+    placement?: Pick<SessionView, "runnerId" | "workspaceId">): CampaignRefusal | null {
     const rootId = this.db.campaignBudgets.governingRoot(session.id);
     if (!rootId) return null;
     const view = this.db.campaignBudgets.view(rootId)!;
     const controller = this.db.getSession(rootId), control = controller?.orchestratorPolicy?.control;
-    if (!controller || control?.mode !== "full_control" || !campaignBoundaryCurrent(controller)) return "campaign allowance boundary is stale or revoked";
-    const preflight = campaignAuthorityPreflight(control, driver, this.db.getRunner(session.runnerId)?.protocolVersion,
-      this.pacedVideoInstallationContract(session.runnerId, session.agentId));
-    if (!preflight.supported) return preflight.requirement ?? preflight.reason ?? "campaign allowance requires supported accounting peers";
-    if (!this.campaignServesOwnRepository(controller, session)) return "campaign allowance requires a Location of the same boundary repository as the session it serves";
+    const origin = this.db.raw().prepare("SELECT execution_id FROM automation_session_origins WHERE session_id=?").get(rootId) as { execution_id: string } | undefined;
+    const scheduled = origin ? this.db.getAutomationExecution(origin.execution_id)?.specSnapshot : undefined;
+    const customSchedule = scheduled?.action.kind === "create_session" && scheduled.action.request.campaign?.controlMode === "custom";
+    if (customSchedule && controller && !control) {
+      // An approved Custom schedule grants an aggregate allowance, never Full Control decisions.
+      // Its children stay in the inspected root Location; broader repository authority still
+      // requires the existing human-owned scope and control operations.
+      const target = placement ?? session;
+      if (controller.runnerId !== target.runnerId || controller.workspaceId !== target.workspaceId ||
+          !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "campaignBudgetAdmission") ||
+          view.authority.costUsd !== scheduled!.limits.maxCostUsd || view.authority.toolCalls !== scheduled!.limits.maxToolCalls) {
+        return "scheduled campaign allowance requires its approved limits and root Location";
+      }
+    } else {
+      if (!controller || control?.mode !== "full_control" || !campaignBoundaryCurrent(controller)) return "campaign allowance boundary is stale or revoked";
+      const preflight = campaignAuthorityPreflight(control, driver, this.db.getRunner(session.runnerId)?.protocolVersion,
+        this.pacedVideoInstallationContract(session.runnerId, session.agentId));
+      if (!preflight.supported) return preflight.requirement ?? preflight.reason ?? "campaign allowance requires supported accounting peers";
+      if (!this.campaignServesOwnRepository(controller, session)) return "campaign allowance requires a Location of the same boundary repository as the session it serves";
+    }
     if (view.state !== "active") return view.reason ?? "campaign allowance unavailable";
     if(view.authority.controlledReview && !this.controlledReviewAvailable(session.runnerId, view.authority.controlledReview)) {
       return "required native reviewer capability/profile is unavailable; protected dispatch refused";
@@ -21567,7 +21631,8 @@ export class SessionsService {
         const ceilingError = this.controlledReviewCeilingError(budgetRoot, campaignBudgetUserLimits);
         if (ceilingError) throw new Error(ceilingError);
         const view = this.db.campaignBudgets.view(budgetRoot)!;
-        const parentError=this.campaignBudgetConfigError(this.db.getSession(parentSessionId!)!);
+        const parentError=this.campaignBudgetConfigError(this.db.getSession(parentSessionId!)!, undefined, undefined,
+          { runnerId: req.runnerId, workspaceId: req.workspaceId });
         if(parentError) throw typeof parentError === "string" ? new Error(parentError) : new RunnerCapabilityRefusal(parentError);
         const peer = this.db.getRunner(req.runnerId)?.protocolVersion;
         if (!runnerSupportsProtocol(peer, "campaignBudgetAdmission")) {

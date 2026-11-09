@@ -395,6 +395,14 @@ export function Shell() {
     if (view.name === "session" && artifactsTarget) rightPanel.showArtifact?.(view.id, artifactsTarget.artifactId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [artifactsRouteKey]);
+  // A scheduled campaign's history opens Campaign Status once its projection has arrived.
+  // Waiting for the projection prevents the panel's unrelated-session fallback closing it
+  // during initial session hydration. Closing or changing tools afterwards remains the user's.
+  const campaignRouteSessionId = view.name === "session" && view.campaign && activeSession?.orchestratorCampaign ? view.id : null;
+  useEffect(() => {
+    if (campaignRouteSessionId) rightPanel.show("campaign");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [campaignRouteSessionId]);
 
   // Bottom terminal dock visibility (Codex layout: toggled, never an always-visible bar).
   // Migrates the legacy wollipog.shelldock.collapsed pref on first run.

@@ -34,6 +34,76 @@ For a workflow, both ceilings apply separately to every member session. A prompt
 an existing session ceiling; the strictest existing, per-action, or automation ceiling wins, and an
 already-exhausted session fails without a prompt.
 
+### Scheduled Orchestrator campaigns
+
+Choose **Start a Session → Session Role → Orchestrator** to start a fresh campaign for each
+occurrence. Select the parent installation, model, effort, provider account and supported provider
+settings independently of the children. **Customize…** opens the same policy editor as New Session:
+Child Harness, Child Model, Child Effort, concurrency, follow-ups, completion, review policy,
+execution isolation and decision owners. No model or harness is special-cased.
+
+Set **Campaign Repository** to the repository this automation may operate in. Each launch inspects
+that origin again before admitting work; changing a workspace's origin does not authorize a different
+repository. The selected Location is the initial boundary. Broader repository or issue scope still
+uses the campaign's existing authorization gates.
+
+Add **Recurring Child Tasks** to group several daily checks under one parent. The server records
+their stable keys in the occurrence's work ledger before dispatch. The Orchestrator delegates them,
+reviews their reports, deduplicates findings and takes accepted recommendations through the existing
+publication, scope-admission, implementation, review and delivery gates. **Recommend Only** retains
+that stopping point; **Execute Approved** permits eligible follow-up work. Full Control does not
+override mandatory human decisions or repository rules. **Maximum Issues** and **Follow-Ups Without
+Approval** can narrow or expand the configured limits through the human's schedule edit, within the
+existing campaign schema.
+
+The automation's finite cost and tool-call ceilings are an aggregate allowance for the parent,
+children, managed reviews and follow-up implementation. Full Control overrides may narrow those
+ceilings, never increase them. Account-level limits, provider permissions and governance still apply.
+Native review requires the same compatible managed reviewer as an interactive campaign; an
+unsupported reviewer never becomes an unaccounted subprocess.
+
+Wait/skip overlap policies remain held through unfinished child work and cleanup, even while the
+parent is idle or waiting for a human. A stopped parent does not release the slot while children
+remain unfinished. Run History offers **Open Campaign** and reports human waits, stuck work and
+pending cleanup. Success requires the campaign's verified completion, rather than one idle turn.
+
+The API retains `action.kind: "create_session"`, with `request.role: "orchestrator"`, ordinary
+`request.orchestrator` overrides and `request.campaign`:
+
+```json
+{
+  "controlMode": "full_control",
+  "repository": "example/project",
+  "tasks": [
+    { "key": "maintenance", "title": "Maintenance Review", "prompt": "Investigate and report actionable maintenance findings." }
+  ],
+  "fullControl": {
+    "issues": { "maxIssues": 10 },
+    "budget": { "acceptedFollowUps": 5 }
+  }
+}
+```
+
+`fullControl` accepts the existing launch overrides except `session`; the root's settings live in
+the session request. Use `custom` to keep the configured individual decision owners. The Custom
+aggregate allowance covers children in the inspected root Location. Agent-created schedules still
+require human approval of the complete configuration through the existing automation proposal flow.
+Signed triggers can fire the saved campaign but cannot replace its prompt, parameters or task scope.
+
+Scheduled authority is attributed to the schedule's sole human author while that person remains
+active and authorized. Another person's edits or trigger credentials invalidate unattended campaign
+launches; review and recreate that schedule to establish a new author. Capability drift, unsupported
+accounting and repository changes fail visibly instead of falling back to ordinary sessions.
+Older control planes reject the added fields; supported runner campaign/accounting capabilities are
+checked at save and launch. Existing session and workflow automations retain their behavior.
+
+The root, authority, allowance, original task ledger and exact durable launch command commit in one
+transaction. Recovery activates that retained command and allowance generation without recreating
+the campaign or resetting spend. Diagnose launches with the `automation_campaign_launch`,
+`automation_campaign_admitted`, `automation_campaign_refused` and
+`automation_campaign_recovery_pending` events, correlated by automation and execution identifiers.
+Task prompts and credentials are not included in those events.
+
 Runner policy is explicit:
 
 - `wait` leaves the occurrence unclaimed until the configured runner is online and compatible;

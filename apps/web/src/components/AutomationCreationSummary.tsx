@@ -1,5 +1,6 @@
 import React from "react";
 import type { AutomationCreationSnapshot } from "@wollipog/protocol";
+import { CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE } from "@wollipog/protocol";
 
 /** The human reviews the complete saved configuration, not a summary supplied by the agent. */
 export function AutomationCreationSummary({ snapshot }: { snapshot: AutomationCreationSnapshot }) {
@@ -16,6 +17,18 @@ export function AutomationCreationSummary({ snapshot }: { snapshot: AutomationCr
       {action.kind === "workflow_run" && <>
         <div><dt>Workflow</dt><dd>{action.request.workflowId}</dd></div>
         <div><dt>Workflow Version</dt><dd>{action.request.workflowVersion}</dd></div>
+      </>}
+      {action.kind === "create_session" && action.request.campaign && <>
+        <div><dt>Session Role</dt><dd>Orchestrator</dd></div>
+        <div><dt>Orchestrator Control</dt><dd>{action.request.campaign.controlMode === "full_control" ? "Full Control" : "Custom"}</dd></div>
+        <div><dt>Campaign Repository</dt><dd>{action.request.campaign.repository}</dd></div>
+        <div><dt>Campaign Settings</dt><dd><div className="code-well"><pre>{JSON.stringify(action.request.orchestrator, null, 2)}</pre></div></dd></div>
+        <div><dt>Full Control Overrides</dt><dd><div className="code-well"><pre>{JSON.stringify(action.request.campaign.fullControl ?? {}, null, 2)}</pre></div></dd></div>
+        <div><dt>Provider Account</dt><dd>{action.request.providerAccountId ?? "Default"}</dd></div>
+        <div><dt>Execution Target</dt><dd>{action.request.executionTargetId ?? "Host"}</dd></div>
+        <div><dt>Recurring Child Tasks</dt><dd>{action.request.campaign.tasks.map(task => <div key={task.key}>
+          <strong>{task.title}</strong><div className="code-well"><pre>{task.prompt}</pre></div>
+        </div>)}</dd></div>
       </>}
       <div><dt>Schedule</dt><dd><code>{spec.cron}</code> · {spec.timezone}</dd></div>
       <div><dt>Next Occurrence</dt><dd>{new Date(snapshot.nextFireAt).toISOString()}</dd></div>
@@ -34,6 +47,7 @@ export function AutomationCreationSummary({ snapshot }: { snapshot: AutomationCr
       <div><dt>Prompt</dt><dd><div className="code-well"><pre>{prompt || "No additional prompt."}</pre></div></dd></div>
       <div><dt>Proposal Expires</dt><dd>{new Date(snapshot.expiresAt).toISOString()}</dd></div>
     </dl>
+    {action.kind === "create_session" && action.request.campaign?.controlMode === "full_control" && <p>{CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE}</p>}
     {snapshot.effectiveTargets.length > 0 && <>
       <p>Unspecified settings are inherited at run time. This preview shows observed target defaults and explicit settings; it does not override future session settings.</p>
       <dl className="facts">{snapshot.effectiveTargets.map((target, index) => <div key={index}>

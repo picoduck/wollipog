@@ -263,6 +263,7 @@ import { registerOrchestratorSettingsRoutes } from "./orchestrator-settings-rout
 import { registerReviewSettingsRoutes } from "./review-settings-route.js";
 import { ReviewSettingsService } from "./review-settings.js";
 import { registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
+import { ScheduledCampaignRuntime } from "./scheduled-campaigns.js";
 import { CampaignLocations, registerCampaignLocationRoutes } from "./campaign-locations.js";
 import { CampaignRepositoryAdditions, registerCampaignRepositoryAdditionRoutes } from "./campaign-repository-additions.js";
 import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosures.js";
@@ -1175,6 +1176,7 @@ registerPromptImageRoutes(app, {
   actor: workflowActor,
 });
 
+const scheduledCampaigns = new ScheduledCampaignRuntime(db, hub, svc, orchestratorSettings, evidenceAuthorityDisclosures);
 const automations = new AutomationsService(
   db,
   hub,
@@ -1189,6 +1191,7 @@ const automations = new AutomationsService(
       { kind: "organization_admin", organizationId: db.localIdentityContext().organizationId },
     );
   },
+  scheduledCampaigns,
 );
 automations.recover(Date.now());
 
@@ -4889,7 +4892,7 @@ app.post("/api/sessions/:id/orchestrator-campaign/recommendations/:recommendatio
 });
 
 registerCampaignIssueScopeRoutes(app, {db,svc,requestPrincipal});
-registerAutomationCreationRoutes(app, { service: new AutomationCreationService(db, svc, hub), requestPrincipal });
+registerAutomationCreationRoutes(app, { service: new AutomationCreationService(db, svc, hub, scheduledCampaigns), requestPrincipal });
 registerCampaignRepositoryAdditionRoutes(app, { requestPrincipal, additions: new CampaignRepositoryAdditions({ db, hub, sessions: svc,
   // The same verified-Location inspection as a launch (#4117), on a runner that can hold the boundary.
   inspect: (locationId, options) => inspectProjectLocation({ db, hub }, locationId, { ...options, requireProtocol: "campaignRepositoryBoundary" }),

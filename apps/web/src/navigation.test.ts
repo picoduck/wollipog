@@ -98,6 +98,15 @@ test("an artifact link names its session's Browser tab and, optionally, one arti
   assert.equal(viewFromPath(`/sessions/~${encodeResourceId("s")}/artifacts/`)?.name, "session");
 });
 
+test("a campaign link preserves its root and opens Campaign Status", () => {
+  const view: View = { name: "session", id: "campaign / ✅", campaign: true };
+  const path = viewPath(view);
+  assert.deepEqual(viewFromPath(path), view);
+  assert.equal(sameView(view, { name: "session", id: view.id }), false);
+  assert.equal(viewFromPath(path, "?unexpected=1"), null);
+  assert.equal(viewFromPath("/sessions/~!/campaign"), null);
+});
+
 test("a run's phone member is in its URL, so a reload and a shared link keep it (#2975)", () => {
   const path = `/runs/~${encodeResourceId("run_abc")}`;
   for (const member of ["s_claude", "member / ✅ &?#"]) {

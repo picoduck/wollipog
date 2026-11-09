@@ -17478,14 +17478,17 @@ export class ControlPlaneDb {
    * or trigger credential would otherwise make the creator answer for sessions whose instructions or
    * callers they never authorized. Read from the audit trail rather than an execution's schedule,
    * which a trigger invocation attributes to its trigger. */
-  automationSoleHumanAuthor(automationId: string): string | null {
+  automationSoleHumanAuthor(automationId: string, allowInstallationPins = false): string | null {
     const created = this.stmt(`SELECT actor_id FROM automation_events WHERE automation_id=? AND kind='created'
         AND actor_kind='human' AND actor_id IS NOT NULL ORDER BY event_id LIMIT 1`).get(automationId) as
       { actor_id: string } | undefined;
     if (!created) return null;
     const changed = this.stmt(`SELECT 1 FROM automation_events WHERE automation_id=?
         AND kind IN ('updated','enabled','disabled','trigger_created','trigger_rotated')
-        AND (actor_kind<>'human' OR actor_id IS NOT ?) LIMIT 1`).get(automationId, created.actor_id);
+        AND (actor_kind<>'human' OR actor_id IS NOT ?)
+        AND NOT (?=1 AND kind='updated' AND actor_kind='system' AND actor_id IS ('automation:' || automation_id)
+          AND COALESCE(json_extract(detail,'$.installationPinned'),0)=1)
+        LIMIT 1`).get(automationId, created.actor_id, allowInstallationPins ? 1 : 0);
     return changed ? null : created.actor_id;
   }
 
@@ -34341,7 +34344,9 @@ export class ControlPlaneDb {
         }
       }
     }
-    this.db.exec("BEGIN IMMEDIATE");
+    // A scheduled campaign stages inside the root/authority/allowance transaction. A savepoint
+    // preserves this method's rollback contract both there and for ordinary standalone plans.
+    this.db.exec("SAVEPOINT automation_delivery_plan");
     try {
       const execution = this.stmt(
         "SELECT automation_id, status, delivery_mode, delivery_plan_json, runner_id, session_id, run_id, workflow_instance_id FROM automation_executions WHERE execution_id=?",
@@ -34368,7 +34373,7 @@ export class ControlPlaneDb {
               row.dependency_command_id === (command.dependencyCommandId ?? null);
           });
         if (!samePlan) throw new Error("automation execution already has a different delivery plan");
-        this.db.exec("COMMIT");
+        this.db.exec("RELEASE automation_delivery_plan");
         return existing.map((row) => this.automationCommand(row));
       }
       if (input.commands.some((command) => command.deliveryDeadlineAt === null)) {
@@ -34396,9 +34401,9 @@ export class ControlPlaneDb {
           detail: { commandId: command.commandId, state: "staged", ordinal: command.ordinal }, now: input.now,
         });
       }
-      this.db.exec("COMMIT");
+      this.db.exec("RELEASE automation_delivery_plan");
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.db.exec("ROLLBACK TO automation_delivery_plan; RELEASE automation_delivery_plan");
       throw error;
     }
     return this.listAutomationCommands(input.executionId);
@@ -34808,6 +34813,37 @@ export class ControlPlaneDb {
     const row = this.stmt("SELECT * FROM automation_commands WHERE command_id=?")
       .get(commandId) as unknown as AutomationCommandRow | undefined;
     return row ? this.automationCommand(row) : null;
+  }
+
+  /** Persist the authenticated cancellation separately from the command's transport outcome.
+   * A paused scheduled campaign stays active after its initial command fails; the marker must
+   * survive the owner answering the card, so reconnect cannot reclassify it as a rejected launch. */
+  recordAutomationCampaignCommandPause(commandId: string, trip: NonNullable<AutomationExecution["governancePause"]>, now: number): boolean {
+    const command = this.getAutomationCommand(commandId);
+    const execution = command && this.getAutomationExecution(command.executionId);
+    if (!command || !execution || execution.specSnapshot?.action.kind !== "create_session" ||
+        !execution.specSnapshot.action.request.campaign || command.sessionId !== execution.sessionId ||
+        command.sessionId !== trip.sessionId ||
+        !this.hasRunnerGovernanceTripForCommand(command.sessionId, trip, trip.commandId,
+          trip.commandId ? execution.createdAt : Math.max(execution.createdAt, command.startedAt ?? Infinity),
+          command.completedAt ?? now) ||
+        (trip.commandId !== undefined && trip.commandId !== commandId)) return false;
+    if (!this.automationCampaignCommandPaused(commandId)) this.insertAutomationEvent({
+      automationId: execution.automationId, executionId: execution.executionId, kind: "command_status_changed",
+      actor: { kind: "system", id: "runner-governance" },
+      detail: { ...trip, commandId, campaignGovernancePause: true }, now,
+    });
+    return true;
+  }
+
+  automationCampaignCommandPaused(commandId: string): boolean {
+    return Boolean(this.stmt(`SELECT 1 FROM automation_commands command
+      JOIN automation_executions execution ON execution.execution_id=command.execution_id
+      JOIN automation_events event ON event.automation_id=execution.automation_id AND event.execution_id=execution.execution_id
+      WHERE command.command_id=? AND event.kind='command_status_changed'
+      AND event.actor_kind='system' AND event.actor_id='runner-governance'
+      AND json_extract(event.detail,'$.commandId')=command.command_id AND json_extract(event.detail,'$.campaignGovernancePause')=1
+      LIMIT 1`).get(commandId));
   }
 
   settleAutomationExecution(input: {

@@ -102,7 +102,11 @@ export function AutomationRunHistory({ executions, now, nextRun, policy, onOpen,
               return (
                 <tr key={execution.executionId} data-execution-id={execution.executionId}>
                   <th scope="row">{started}</th>
-                  <td className="cell-status"><StatusBadge inline meta={statusMeta("automation_run", execution.status)} /></td>
+                  <td className="cell-status"><StatusBadge inline meta={
+                    execution.campaignStatus === "waiting_human" ? { ...statusMeta("workflow", "awaiting_decision"), label: "Waiting for You" }
+                    : execution.campaignStatus === "stuck" ? statusMeta("session", "campaign_stuck")
+                    : execution.campaignStatus === "complete_needs_cleanup" ? statusMeta("session", "campaign_needs_cleanup")
+                    : statusMeta("automation_run", execution.status)} /></td>
                   <td className="cell-meta">{runStartedBy(execution)}</td>
                   {/* On a phone a run with no duration yet (or ever) leaves it off line 2. */}
                   <td className={took ? "cell-meta num" : "cell-meta num cell-extra"}>

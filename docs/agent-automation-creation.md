@@ -55,6 +55,13 @@ installations, records an effective settings preview for each target and exact
 Project placement, and presents the resulting configuration to the human. Prompt
 session and workflow actions use the existing automation schema and admission.
 
+A create-session action may also request a fresh Orchestrator campaign per occurrence with
+`role: "orchestrator"`, independently configurable `orchestrator` overrides, and `campaign`
+settings. See [scheduled Orchestrator campaigns](./automations.md#scheduled-orchestrator-campaigns)
+for recurring child tasks, Full Control and aggregate limits. The approval preview includes those
+settings and task prompts. Approval is still human-only and bound to the complete schedule;
+no agent can insert authority provenance or bypass the campaign's existing typed gates.
+
 The request returns a pending typed decision, not an automation. Its approval card
 shows the schedule, timezone, next occurrence, enabled state, task and complete
 configuration. The proposed occurrence is a preview: execution calculates the
