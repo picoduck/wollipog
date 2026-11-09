@@ -535,7 +535,7 @@ interface LedgerSnapshot {
    * requests have not merged and a merge dependency holds them. */
   verifiedHeld: ReadonlySet<string>;
   /** A verified item whose merge hold has ended, when each merge that could end it has a known time. */
-  endedHolds: ReadonlyMap<string, { kind: "unmerged" | "failed"; until: number }>;
+  endedHolds: ReadonlyMap<string, number>;
   /** #4120: each item's repository, and its prerequisites in other repositories. */
   repositories: Map<string, string | null>;
   mergePrerequisites: Map<string, CampaignMergePrerequisite[]>;
@@ -2162,16 +2162,14 @@ export class CampaignWorkLedgerStore {
     // Waiting Time: a verified item with merge dependencies reads delivered from the first of its own
     // merge and its last prerequisite's merge, the two ends `deriveCampaignWorkItemState` knows. Each
     // that happened needs a known time: the true end is the earlier, so one alone could overstate it.
-    const endedHolds = new Map<string, { kind: "unmerged" | "failed"; until: number }>();
+    const endedHolds = new Map<string, number>();
     for (const record of records) {
       const own = ownMerges.get(record.id);
       if (!own || !record.latestAttempt?.delivered || record.recordedDelivery || derived.get(record.id)?.state !== "delivered") continue;
       const prerequisitesMerged = record.mergeDependencies.every((status) => status === "merged");
       const ends = [...(own.merged ? [own.at] : []),
         ...(prerequisitesMerged ? [latestMergeOf(mergePrerequisites.get(record.id)!.flatMap(({ pullRequests }) => pullRequests.map(({ fact }) => fact)))] : [])];
-      if (ends.length && !ends.includes(null)) {
-        endedHolds.set(record.id, { kind: record.mergeDependencies.includes("failed") ? "failed" : "unmerged", until: Math.min(...ends as number[]) });
-      }
+      if (ends.length && !ends.includes(null)) endedHolds.set(record.id, Math.min(...ends as number[]));
     }
     return {
       revision: ledger?.revision ?? 0,
@@ -2225,10 +2223,12 @@ export class CampaignWorkLedgerStore {
     const transitions = this.accounting.itemTransitions(campaignId);
     const statuses = this.accounting.attemptStatuses(campaignId);
     // #4120: a verified item held on a merge dependency since its verification, until now (the live
-    // state says so) or until a merge ended it.
+    // state says so) or until a merge ended it. An ended hold always replays as waiting, even over a
+    // failed prerequisite: the item's Waiting Time counts both, and only a blocked item would take
+    // Queue Time from an unassigned dependent, which reads as before.
     const heldAfterDelivery = (id: string): Pick<CampaignItemTimelineInput, "heldAfterDelivery" | "heldUntil"> => {
-      const ended = snapshot.endedHolds.get(id);
-      if (ended) return { heldAfterDelivery: ended.kind, heldUntil: ended.until };
+      const heldUntil = snapshot.endedHolds.get(id);
+      if (heldUntil !== undefined) return { heldAfterDelivery: "unmerged", heldUntil };
       const derived = snapshot.derived.get(id);
       if (!derived || derived.state === "delivered" || !snapshot.verifiedHeld.has(id)) return {};
       return derived.causes.includes("dependency_blocked") && derived.state === "blocked" ? { heldAfterDelivery: "failed" }

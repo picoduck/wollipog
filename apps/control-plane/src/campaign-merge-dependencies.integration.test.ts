@@ -1009,6 +1009,30 @@ test("a hold's end stays in Waiting Time after its own merge, from the forge's m
   } finally { h.observer.dispose(); h.db.close(); }
 });
 
+test("an ended hold over a failed prerequisite adds Waiting Time to the held item and leaves its dependent's Queue Time alone (#4120)", async () => {
+  const { h, verifiedAt } = await verifiedHolding(pull("open"));
+  try {
+    const beforePlan = Date.now();
+    const plan = h.svc.recordCampaignPlan("root", { planComplete: true, items: [
+      { key: "later", title: "Follow the Account Field", issue: { repository: "owner/app", number: 1 }, dispatchState: "queued", dependsOnKeys: ["app"] },
+    ] });
+    assert.ok(plan.ok, plan.error ?? "plan refused");
+    const later = plan.data!.items.find((entry) => entry.key === "later")!.workItemId;
+    const afterPlan = Date.now();
+    h.forge.set("owner/api#7", pull("closed"));
+    await tick();
+    const mergedAt = Date.now();
+    await tick();
+    h.forge.set("owner/app#5", pull("merged", { mergedAt }));
+    assert.equal(await heldFor(h, verifiedAt), mergedAt - verifiedAt);
+    // It was created before the merge ended the hold, and is queued from then on, through the hold.
+    const until = Date.now() + 60 * 60_000;
+    const metric = h.db.campaignWorkLedger.detail("root", later, until)!.times!.queue;
+    const queued = "value" in metric ? metric.value : NaN;
+    assert.ok(queued >= until - afterPlan && queued <= until - beforePlan, `queued ${queued}, ${until - afterPlan} to ${until - beforePlan} expected`);
+  } finally { h.observer.dispose(); h.db.close(); }
+});
+
 test("a dependent naming several pull requests is held until the last merges, and one closed unmerged is set aside (#4120)", async () => {
   const { h, verifiedAt } = await verifiedHolding(pull("open"));
   try {

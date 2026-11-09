@@ -145,6 +145,5 @@ test("a verified item's merge hold counts as waiting from its last attempt's ver
   // A hold that ended stops counting there, whenever it is read, and one that ended before the
   // verification never counted.
   assert.deepEqual(durations([{ ...item, heldUntil: 115 }], "a", 200).waiting, { availability: "known", value: 5 });
-  assert.deepEqual(durations([{ ...item, heldAfterDelivery: "failed", heldUntil: 115 }], "a", 200).waiting, { availability: "known", value: 5 });
   assert.deepEqual(durations([{ ...item, heldUntil: 105 }], "a", 200).waiting, { availability: "known", value: 0 });
 });
