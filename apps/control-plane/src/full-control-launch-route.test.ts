@@ -4970,6 +4970,144 @@ test("while a limit stands, another repository's Location stays available howeve
   } finally { await c.server.close(); c.f.db.close(); }
 });
 
+/** A three-repository Full Control campaign whose first message limited it to third/repo, so its
+ * launch entry, owner/repo, stays listed and grants no work (#4117), with recorded work that needs it. */
+async function launchLeftOutOfLimit() {
+  const c = await threeRepositoryProposals("Fix the top bug in r2 c, and nothing else.");
+  c.f.decision.state.check = (message) => scopeCheckAnswer(message);
+  const admitted = await c.propose([thirdChosen(50)], { repositoryNames: ["r2 c"] });
+  assert.equal(c.apply(admitted.data!.occurrenceId).ok, true);
+  assert.deepEqual(repositoriesOf(c.boundary()), ["owner/repo", "third/repo"]);
+  c.f.db.raw().prepare(`INSERT INTO orchestrator_campaign_follow_ups (id, campaign_session_id, origin_session_id, repository, title, recommendation_key, normalized_key, duplicate_of, created_at)
+    VALUES ('fu_launch', ?, NULL, 'owner/repo', 'Needs the Launch Repository', NULL, 'owner/repo:fu_launch', NULL, ?)`).run(c.id, Date.now());
+  const ask = (requestId: string, locationId: string) => c.additions.request(c.id, { requestId, locationId,
+    reason: "The follow-up lives in the launch repository.", work: { kind: "follow_up", id: "fu_launch" } }, c.orchestrator);
+  const limits = () => campaignRepositoryLimits(c.policy());
+  const approve = (occurrenceId: string) => c.f.sessions.resolveWorkflowDecision(c.id, c.id, occurrenceId, { outcome: "approve" }, "human",
+    { kind: "human", id: c.f.human.userId }, () => true);
+  return { ...c, ask, limits, approve };
+}
+
+test("only the owner's approved addition brings a launch repository its first message left out back into the limit (cwi_a3182360, #4117)", async () => {
+  const c = await launchLeftOutOfLimit();
+  const { f, id } = c;
+  try {
+    const revision = c.boundary().revision;
+    const listed = structuredClone(c.boundary().repositories);
+    // The launch Location is already listed, and its repository has an entry: either used to refuse the request.
+    const requested = await c.ask("add-launch", c.p.launchLocation.id);
+    assert.equal(requested.status, 201, requested.error ?? "");
+    assert.equal(requested.data!.authority, "human", "the decision is the owner's");
+    assert.equal(requested.data!.resourceSnapshot.category === "campaign_repository_addition" && requested.data!.resourceSnapshot.repository, "owner/repo");
+    // A request alone, or the Orchestrator's own answer, changes nothing.
+    assert.equal((await c.additions.execute(id, requested.data!.occurrenceId, requested.data!.resourceDigest, c.orchestrator)).ok, false);
+    assert.equal(f.sessions.resolveWorkflowDecision(id, id, requested.data!.occurrenceId, { outcome: "approve" }, "orchestrator",
+      { kind: "agent", id }, () => true).ok, false, "nobody acting for the campaign approves it");
+    assert.deepEqual(c.limits(), ["third/repo"]);
+    assert.equal(c.delegate().ok, false);
+
+    assert.equal(c.approve(requested.data!.occurrenceId).ok, true);
+    const executed = await c.additions.execute(id, requested.data!.occurrenceId, requested.data!.resourceDigest, c.orchestrator);
+    assert.equal(executed.ok, true, executed.error ?? "");
+    assert.equal(executed.data!.status, "consumed");
+    assert.deepEqual(c.limits(), ["third/repo", "owner/repo"], "the limit now holds the launch repository");
+    // Nothing joins and nothing is re-minted: the boundary already listed every one of its Locations.
+    assert.equal(c.boundary().revision, revision);
+    assert.deepEqual(c.boundary().repositories, listed);
+    assert.equal(c.policy().pendingLocations?.length ?? 0, 0, "no Location of it is left waiting");
+    assert.equal(c.policy().locationJoins?.some((join) => join.source === "addition_approved") ?? false, false, "no join is recorded for a listed Location");
+
+    // It now grants work like the limit's other repository: a child, a delegated gate, and its issues.
+    const delegated = c.delegate();
+    assert.equal(delegated.ok, true, delegated.error ?? "");
+    const root = f.db.getSession(id)!;
+    const head = "a".repeat(40);
+    const merge: WorkflowDecisionResourceSnapshot = { category: "pr_merge", repository: "owner/repo", pullRequest: 7, headSha: head, reviewResult: "merge",
+      requiredChecks: { headSha: head, status: "passed", checkedAt: 1, checks: [{ name: "CI", state: "passed" }] } };
+    const { owner } = evaluateCampaignAuthority(root, { ...root, boundaryRepository: campaignBoundaryRepositoryAt(f.db, root, root) }, PROTOCOL_VERSION, merge,
+      { revision: root.parentControlPolicy!.revision, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } }, PROTOCOL_VERSION);
+    assert.equal(owner, "orchestrator");
+    const inside = await c.propose([chosen(60)]);
+    assert.equal(inside.ok, true, inside.error ?? "");
+    // Once inside the limit, it is one of the campaign's repositories again, and asking twice is refused.
+    const again = await c.ask("add-launch-again", c.p.twin.id);
+    assert.equal(again.ok, false);
+    assert.match(again.error!, /already part of this campaign/u, "its Locations are listed, so none is named again");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a declined launch-repository addition leaves the limit as it was, and a listed Location reading as another repository is refused (cwi_a3182360, #4117)", async () => {
+  const c = await launchLeftOutOfLimit();
+  const { f, id } = c;
+  try {
+    const requested = await c.ask("add-launch", c.p.twin.id);
+    assert.equal(requested.status, 201, requested.error ?? "");
+    assert.equal(f.sessions.resolveWorkflowDecision(id, id, requested.data!.occurrenceId, { outcome: "deny" }, "human",
+      { kind: "human", id: f.human.userId }, () => true).ok, true);
+    assert.equal((await c.additions.execute(id, requested.data!.occurrenceId, requested.data!.resourceDigest, c.orchestrator)).ok, false);
+    assert.deepEqual(c.limits(), ["third/repo"]);
+    assert.equal(c.delegate().ok, false);
+    assert.match((await c.ask("add-launch-retry", c.p.launchLocation.id)).error!, /declined adding this repository for this work/u);
+
+    // A listed Location of the launch entry that now reads as the limit's repository would widen it to nothing new.
+    const inspect = f.state.inspect;
+    f.state.inspect = (frame) => {
+      const answer = inspect(frame);
+      return frame.workspacePath === "/fixture/repository" && answer?.ok ? { ...answer, repository: "other/repo" } : answer;
+    };
+    f.db.raw().prepare(`INSERT INTO orchestrator_campaign_follow_ups (id, campaign_session_id, origin_session_id, repository, title, recommendation_key, normalized_key, duplicate_of, created_at)
+      VALUES ('fu_other', ?, NULL, 'other/repo', 'Elsewhere', NULL, 'other/repo:fu_other', NULL, ?)`).run(id, Date.now());
+    const repointed = await c.additions.request(id, { requestId: "repointed", locationId: c.p.launchLocation.id, reason: "x",
+      work: { kind: "follow_up", id: "fu_other" } }, c.orchestrator);
+    assert.equal(repointed.ok, false);
+    assert.match(repointed.error!, /part of this campaign as owner\/repo but now verifies as other\/repo/u);
+    assert.equal(f.db.latestCampaignRepositoryAddition(id, "campaign_repository_addition:other/repo"), null);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a launch-repository addition is refused when the limit already took it in while its Location was inspected (cwi_a3182360, #4117)", async () => {
+  const c = await launchLeftOutOfLimit();
+  const { f, id } = c;
+  try {
+    const additions = new CampaignRepositoryAdditions({ db: f.db, hub: f.hub, sessions: f.sessions, synchronize: async () => undefined,
+      inspect: async (locationId, options) => {
+        const result = await inspectProjectLocation({ db: f.db, hub: f.hub }, locationId, { ...options, requireProtocol: "campaignRepositoryBoundary" });
+        // Meanwhile another approval brought the launch repository into the limit.
+        const policy = c.policy();
+        const first = policy.firstMessageScope!;
+        if (first.state === "established") first.initialScope = { ...first.initialScope!, repositoryLimits: ["third/repo", "owner/repo"] };
+        f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), id);
+        return result;
+      } });
+    const requested = await additions.request(id, { requestId: "raced", locationId: c.p.launchLocation.id, reason: "x",
+      work: { kind: "follow_up", id: "fu_launch" } }, c.orchestrator);
+    assert.equal(requested.ok, false);
+    assert.match(requested.error!, /changed while it was being inspected/u);
+    assert.equal(f.db.latestCampaignRepositoryAddition(id, "campaign_repository_addition:owner/repo"), null);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("back in Custom, the owner's approved addition brings the launch repository into the limit without listing its Location twice (cwi_a3182360, #4118)", async () => {
+  const c = await launchLeftOutOfLimit();
+  const { f, id } = c;
+  try {
+    assert.equal(f.sessions.setCampaignControl(id, { mode: "custom" }, f.db.getSession(id)!.parentControlPolicy!.revision, f.human).ok, true);
+    const before = structuredClone(c.policy().repositories);
+    const joinsBefore = c.policy().locationJoins?.length ?? 0;
+    const requested = await c.ask("custom-launch", c.p.launchLocation.id);
+    assert.equal(requested.status, 201, requested.error ?? "");
+    assert.equal(requested.data!.authority, "human");
+    assert.equal(c.approve(requested.data!.occurrenceId).ok, true);
+    const executed = await c.additions.execute(id, requested.data!.occurrenceId, requested.data!.resourceDigest, c.orchestrator);
+    assert.equal(executed.ok, true, executed.error ?? "");
+    assert.deepEqual(c.limits(), ["third/repo", "owner/repo"]);
+    assert.deepEqual(c.policy().repositories, before, "the list is unchanged");
+    assert.equal(c.policy().locationJoins?.length ?? 0, joinsBefore, "a listed Location records no join");
+    const delegated = c.delegate();
+    assert.equal(delegated.ok, true, delegated.error ?? "");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
 test("a re-authorization and a reviewed enable keep a first-message limit; an enable leaves another repository available (#4117)", async () => {
   const c = await threeRepositoryProposals("Fix the top bug in r2 c, and nothing else.");
   const { f, id, server } = c;

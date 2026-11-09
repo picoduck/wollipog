@@ -18422,15 +18422,21 @@ export class ControlPlaneDb {
         if (scope?.owner.kind !== "user" || scope.owner.userId !== ownerUserId) return refuse(403, "Only the campaign's owner can add a repository.");
         const repositories = structuredClone(policy.repositories ?? (options.customBase ? [options.customBase] : []));
         const join = update.joins[0]!;
-        if (!repositories.some((entry) => entry.locationIds.includes(join.locationId))) {
+        // A Location already listed (the launch entry a first-message limit left out) joins nothing:
+        // the approval only brings its repository back into the limit, below.
+        const listed = repositories.some((entry) => entry.locationIds.includes(join.locationId));
+        if (!listed) {
           const entry = repositories.find((item) => item.repository.toLowerCase() === join.repository.toLowerCase());
           if (entry) entry.locationIds.push(join.locationId);
           else repositories.push({ repository: join.repository.toLowerCase(), locationIds: [join.locationId] });
         }
         if (!validCampaignRepositoryList(repositories)) return refuse(409, "The campaign cannot hold more repositories or Locations.");
-        policy.repositories = repositories;
-        policy.locationJoins = [...(policy.locationJoins ?? []), { locationId: join.locationId, name: join.name,
-          repository: join.repository.toLowerCase(), revision: 0, at: now, source: join.source }].slice(-CAMPAIGN_LOCATION_JOINS_MAX);
+        // With no list, the own Location's base is recorded only when another Location joins it.
+        if (!listed || policy.repositories) policy.repositories = repositories;
+        if (!listed) {
+          policy.locationJoins = [...(policy.locationJoins ?? []), { locationId: join.locationId, name: join.name,
+            repository: join.repository.toLowerCase(), revision: 0, at: now, source: join.source }].slice(-CAMPAIGN_LOCATION_JOINS_MAX);
+        }
         policy.excludedLocations = (policy.excludedLocations ?? []).filter((item) => item.locationId !== join.locationId);
         policy.pendingLocations = (policy.pendingLocations ?? []).filter((item) => item.locationId !== join.locationId);
         if (!policy.excludedLocations.length) delete policy.excludedLocations;
@@ -18441,7 +18447,7 @@ export class ControlPlaneDb {
         finishAddition(0);
         const revoked = this.revokeLiftedRefusals(rootId, refusedBefore, policy, now);
         this.db.exec("COMMIT");
-        return { ok: true, revision: 0, joined: true, revoked };
+        return { ok: true, revision: 0, joined: !listed, revoked };
       }
       if (policy && control?.mode !== "full_control" && policy.repositories) {
         // Custom's owner Location whose runner has now updated (#4319). Its list has no revision, and

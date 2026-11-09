@@ -4,6 +4,7 @@ import {
   type CampaignBoundaryRepository, type CampaignRepositoryAdditionRequest, type CampaignRepositoryAdditionSnapshot,
   type ProjectLocationInspection, type ProjectLocationView, type SessionView, type WorkflowDecisionView,
 } from "@wollipog/protocol";
+import { campaignRepositoryOutsideLimit } from "./campaign-authority.js";
 import type { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
 import type { AgentPrincipal, AuthPrincipal, HumanPrincipal } from "./identity.js";
@@ -107,7 +108,12 @@ export class CampaignRepositoryAdditions {
         "report that the work needs a repository with no Location in this Project, so its owner can add one.", 404);
     }
     const covered = campaignRepositories(root);
-    if (covered?.some((entry) => entry.locationIds.includes(location.id))) return fail("That Location is already part of this campaign");
+    // The launch entry a first-message limit leaves out stays in the list because the root runs there,
+    // yet grants no work (#4117). Only the owner's approval brings it back into the limit, so one of its
+    // Locations, already listed, may still be named.
+    const outsideLimit = (session: SessionView, repository: string) => campaignRepositoryOutsideLimit(session.orchestratorPolicy, repository);
+    const listedIn = covered?.find((entry) => entry.locationIds.includes(location.id));
+    if (listedIn && !outsideLimit(root, listedIn.repository)) return fail("That Location is already part of this campaign");
     const title = db.campaignRepositoryAdditionWork(rootId, workKind, workId);
     if (!title) return fail(`This campaign has no recorded ${workKind === "follow_up" ? "follow-up" : "work item"} ${workId}`, 404);
     if (!db.canAccessProject(owner, root.projectId!) || !db.canAccessWorkspace(owner, location.runnerId, location.workspaceId)) {
@@ -120,7 +126,13 @@ export class CampaignRepositoryAdditions {
     // A one-entry Custom list exists only to show an old runner's exclusion (#4319), and adding a Location
     // of its repository has no other route in Custom, just as with no list at all.
     const onlyListedForAnExclusion = root.orchestratorPolicy?.control?.mode !== "full_control" && covered?.length === 1;
-    if (!onlyListedForAnExclusion && covered?.some((entry) => entry.repository.toLowerCase() === repository)) {
+    // A listed Location is named only to bring its own entry back into the limit: one that now reads
+    // as another repository would widen a limit to a repository with no entry.
+    if (listedIn && listedIn.repository.toLowerCase() !== repository) {
+      return fail(`That Location is part of this campaign as ${listedIn.repository.toLowerCase()} but now verifies as ${repository}, so it can't be added`);
+    }
+    const restoresLimited = outsideLimit(root, repository) && covered?.some((entry) => entry.repository.toLowerCase() === repository);
+    if (!onlyListedForAnExclusion && !restoresLimited && covered?.some((entry) => entry.repository.toLowerCase() === repository)) {
       return fail(`${repository} is already one of this campaign's repositories; that Location joins it through its owner, not an addition`);
     }
     // The inspection ran on another machine; the campaign or the Location may have changed meanwhile.
@@ -128,7 +140,8 @@ export class CampaignRepositoryAdditions {
     const still = this.root(principal, rootId);
     if (!still.ok) return fail(still.error!, still.status);
     if (still.data!.owner.userId !== owner.userId || still.data!.root.projectId !== root.projectId ||
-        !this.stillBound(location, root.projectId!, still.data!.owner)) {
+        !this.stillBound(location, root.projectId!, still.data!.owner) ||
+        (restoresLimited && !outsideLimit(still.data!.root, repository))) {
       return fail("That Location changed while it was being inspected; ask again");
     }
     const resourceKey = `campaign_repository_addition:${repository}`;

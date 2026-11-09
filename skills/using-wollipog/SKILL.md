@@ -929,6 +929,10 @@ Control or Custom, asks the campaign's owner to add it:
   It inspects the exact approved Location again and adds its repository at a new boundary revision.
 - When the owner declines, record the dependent work as blocked on the owner, never as delivered.
 
+When the owner's first message limited the campaign to other repositories, its launch repository stays
+listed but gets no work. To bring it back, request an addition naming one of its Locations, even one
+already listed. Its approval adds the repository to the limit and changes no Location.
+
 You cannot create a Location. When no Location of the repository exists in the Project, report that
 the work needs one; once the owner adds it, it joins the campaign on its own.
 
