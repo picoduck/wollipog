@@ -159,7 +159,7 @@ function timestampFormatter(style: "clock" | "recorded" | "title", locale?: stri
   return formatter;
 }
 
-/** Wall-clock time without seconds ("12:26 AM"), the transcript's one visible timestamp. */
+/** Wall-clock time without seconds ("12:26 AM"), for compact clock-only displays. */
 export function formatClock(
   timestamp: number | undefined,
   locale?: string,
@@ -169,6 +169,13 @@ export function formatClock(
   const date = new Date(timestamp!);
   if (Number.isNaN(date.getTime())) return "";
   return timestampFormatter("clock", locale, timeZone).format(date);
+}
+
+/** Full local date and time for messages and settled turn footers. */
+export function formatMessageTimestamp(timestamp: number | undefined): RecordedTimestamp | null {
+  const recorded = formatRecordedTimestamp(timestamp);
+  if (!recorded) return null;
+  return { ...recorded, label: timestampFormatter("title").format(new Date(timestamp!)) };
 }
 
 /** A local day in words: "Today", "Yesterday", then the date ("Oct 3, 2026"). */

@@ -136,7 +136,7 @@ test("steps show one trailing duration with their exact span in its tooltip, and
     assert.equal(container.querySelectorAll("details.tl-step").length, 4, "the thought and the tool with output disclose");
     assert.equal(container.querySelectorAll(".tl-step time, .tl-step .tl-timestamp-meta").length, 0,
       "no step carries a Started, Last Activity or Recorded line");
-    assert.equal(container.querySelectorAll(".tl-agent-msg time").length, 0, "message rows carry no timestamp");
+    assert.equal(container.querySelectorAll(".tl-agent-msg time").length, 2, "each message carries its recorded date and time");
 
     const details = stepNamed(container, "Details Tool");
     assert.ok(details);
@@ -416,7 +416,7 @@ test("a live one-observation tool counts its elapsed time until it becomes a sta
   }
 });
 
-test("live point-in-time rows remain one Recorded timestamp, and a prompt carries none", async () => {
+test("a live prompt carries its recorded date and time", async () => {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -425,7 +425,7 @@ test("live point-in-time rows remain one Recorded timestamp, and a prompt carrie
       items={[{ kind: "user_message", id: 34, text: "Queued prompt", createdAt: startedAt }]}
       sessionActive
     />));
-    assert.equal(container.querySelectorAll("time").length, 0, "the turn footer, not the prompt, carries its time");
+    assert.equal(container.querySelectorAll("time").length, 1, "the prompt carries its own time before a footer exists");
     assert.doesNotMatch(container.textContent ?? "", /Recorded|Started|Last Activity/);
 
   } finally {
@@ -556,5 +556,38 @@ test("inactive sessions show stable absolute times and bound dangling tools to o
     await act(async () => root.unmount());
     container.remove();
     Object.defineProperty(globalThis, "setInterval", { configurable: true, writable: true, value: originalSetInterval });
+  }
+});
+
+
+test("every user and assistant message shows its own full date and time", async () => {
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  const messages: TimelineItem[] = [
+    { kind: "user_message", id: 91, text: "Earlier prompt", createdAt: startedAt },
+    { kind: "agent_message", id: 92, text: "Earlier reply", createdAt: startedAt + 15_000 },
+    { kind: "user_message", id: 93, text: "Next day prompt", createdAt: startedAt + 86_400_000 },
+    { kind: "agent_message", id: 94, text: "Next day reply", createdAt: startedAt + 86_420_000 },
+  ];
+  try {
+    for (const sessionActive of [true, false]) {
+      await act(async () => root.render(<EventTimeline items={messages} sessionActive={sessionActive} />));
+      const times = [...container.querySelectorAll(".tl-message-timestamp")];
+      assert.equal(times.length, 4);
+      for (const [index, time] of times.entries()) {
+        const date = new Date((messages[index] as { createdAt: number }).createdAt);
+        assert.equal(time.getAttribute("datetime"), date.toISOString());
+        assert.equal(time.textContent, new Intl.DateTimeFormat(undefined, {
+          dateStyle: "medium", timeStyle: "medium",
+        }).format(date));
+      }
+    }
+    await act(async () => root.render(<EventTimeline items={[
+      { kind: "user_message", id: 95, text: "No known time" },
+      { kind: "agent_message", id: 96, text: "Invalid time", createdAt: NaN },
+    ]} />));
+    assert.equal(container.querySelectorAll(".tl-message-timestamp").length, 0);
+  } finally {
+    await act(async () => root.unmount());
   }
 });

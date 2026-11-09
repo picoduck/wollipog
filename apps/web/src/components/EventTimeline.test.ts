@@ -1261,18 +1261,18 @@ test("an old nested progressive edit patches its indexed parent child", () => {
   assert.equal(updated.rows.some((row) => row.kind === "item" && row.item.kind === "file_edit" && row.item.diff === "second"), true);
 });
 
-test("message rows carry no time; the turn footer holds one clock time, its span and contextual copy", () => {
+test("message rows and the turn footer show their own times and retain contextual copy", () => {
   const html = renderToStaticMarkup(React.createElement(EventTimeline, {
     items: [
       { kind: "user_message", id: 1, text: "raw user text", createdAt: 1_700_000_000_000, durationMs: 26_000, durationSource: "provider" },
       { kind: "agent_message", id: 2, text: "**raw assistant text**", createdAt: 1_700_000_001_000, lastActivityAt: 1_700_000_026_000 },
     ],
   }));
-  assert.equal((html.match(/<time /g) ?? []).length, 1, "only the footer shows a time");
+  assert.equal((html.match(/<time /g) ?? []).length, 3, "both messages and the footer show a time");
   assert.match(html, /<div class="tl-turn-footer"[^>]*>[\s\S]*<time dateTime="2023-11-14T22:13:46\.000Z"/,
     "the footer's clock is when the turn finished");
   assert.match(html, /role="tooltip">Started [^<]+, finished [^<]+ \(26s\)<\/span>/);
-  assert.doesNotMatch(html.replace(/<span[^>]*role="tooltip">[^<]*<\/span>/, ""), /Recorded|Started|Last Activity|→|Ago/,
+  assert.doesNotMatch(html.replace(/<span[^>]*role="tooltip">[^<]*<\/span>/, "").replace(/title="Recorded [^"]*"/g, ""), /Recorded|Started|Last Activity|→|Ago/,
     "outside the footer's tooltip, no row names a time range or timestamp label");
   assert.match(html, /aria-label="Copy Message"/);
   assert.match(html, /aria-label="Copy Response"/);
