@@ -1029,6 +1029,56 @@ test("account menus save independent defaults and explicitly recover a missing d
   await expect(accountRow(page, "Codex Solo").locator(".provider-default-marker")).toHaveText("Default");
 });
 
+test.describe("usage through a failed refresh (#4353)", () => {
+  const dropAndFailReads = async (page: import("@playwright/test").Page) => {
+    await page.evaluate(() => {
+      window.__WOLLIPOG_MACHINE_E2E__.setUsageReadFailure(true);
+      window.__WOLLIPOG_MACHINE_E2E__.setRunnerStatus("offline");
+    });
+  };
+  const usage = (page: import("@playwright/test").Page) =>
+    accountRow(page, "Codex Team").getByRole("button", { name: /Usage Details/u });
+
+  test("keeps each account's last reading, marked Last Known, and keeps it after a reconnect", async ({ page }) => {
+    await page.goto(`/machine-management-e2e.html?${DESIGN_WORKSTATION}`);
+    await expect(usage(page)).toContainText("% Left");
+    await expect(usage(page)).not.toContainText("Last Known");
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/usage-1-read-desktop.png" });
+
+    await dropAndFailReads(page);
+    await expect(usage(page)).toContainText("Last Known");
+    await expect(usage(page)).toContainText("% Left");
+    await expect(usage(page)).not.toContainText("Usage Not Reported");
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/usage-2-failed-refresh-offline-desktop.png" });
+
+    await usage(page).click();
+    await expect(accountRow(page, "Codex Team").getByText(/^Last known reading/u)).toBeVisible();
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/usage-3-details-desktop.png" });
+    await usage(page).click();
+
+    // Back online with reads still failing: nothing newer is known, and a recent reading stays.
+    await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setRunnerStatus("online"));
+    await expect(usage(page)).toContainText("% Left");
+    await expect(usage(page)).not.toContainText("Last Known");
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/usage-4-reconnected-read-failing-desktop.png" });
+  });
+
+  for (const theme of ["dark", "light"] as const) {
+    test(`reads at phone width in the ${theme} theme`, async ({ browser }) => {
+      // The same touch device in both themes, so their controls are the same size.
+      const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+      const phone = await context.newPage();
+      try {
+        await phone.goto(`/machine-management-e2e.html?theme=${theme}&${DESIGN_WORKSTATION}`);
+        await expect(usage(phone)).toContainText("% Left");
+        await dropAndFailReads(phone);
+        await expect(usage(phone)).toContainText("Last Known");
+        await providerAccounts(phone).screenshot({ path: `playwright-report/provider-accounts/usage-failed-refresh-${theme}-phone.png` });
+      } finally { await context.close(); }
+    });
+  }
+});
+
 test.describe("Priority Order (#4353)", () => {
   const openPriority = async (page: import("@playwright/test").Page, query: string, viewport?: { width: number; height: number }) => {
     if (viewport) await page.setViewportSize(viewport);

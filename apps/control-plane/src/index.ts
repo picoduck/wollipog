@@ -117,6 +117,8 @@ import {
   type CreateWorkspaceReferenceRequest,
   type CreateProjectRequest,
   type UpdateProjectRequest,
+  providerAccountChoiceRequiredForAgent,
+  providerAccountSelectionPreviewForAgent,
   type AddProjectLocationRequest,
   type ProjectLocationView,
   type CreateProjectLocationRequest,
@@ -3842,14 +3844,17 @@ app.get("/api/runners/:id/provider-account-selection", async (req, reply) => {
         ...(ownership.scope ? { scope: ownership.scope } : {}) };
     }
   }
-  return respond(reply, svc.providerAccountSelectionPreview(id, {
+  const preview = svc.providerAccountSelectionPreview(id, {
     ...(query.agentId ? { agentId: query.agentId } : {}),
     ...(query.provider ? { provider: query.provider as "claude" | "codex" } : {}),
     ...(query.workspaceId ? { workspaceId: query.workspaceId } : {}),
     ...(parentSessionId ? { parentSessionId } : {}),
     ...(query.model ? { model: query.model } : {}),
     ...project,
-  }));
+  });
+  return respond(reply, principal.kind === "agent" && preview.ok && preview.data
+    ? { ...preview, data: providerAccountSelectionPreviewForAgent(preview.data) }
+    : preview);
 });
 
 app.delete("/api/runners/:id", async (req, reply) => {
@@ -7770,13 +7775,20 @@ function lanIpv4(): string[] {
   return out;
 }
 
+/** Sends a service result. Takes Fastify's reply, whose request says who is asking. */
 function respond(
-  reply: { code: (n: number) => { send: (b: unknown) => unknown } },
+  reply: { code: (n: number) => { send: (b: unknown) => unknown }; request?: FastifyRequest },
   result: {
     ok: boolean; status: number; data?: unknown; error?: string;
     capabilityRequirement?: RunnerCapabilityRequirementDetails; errorDetails?: Record<string, string | number>;
     providerAccountSelection?: import("@wollipog/protocol").ProviderAccountChoiceRequired;
   },
 ) {
-  return reply.code(result.status).send(result.ok ? result.data : failureBody(result));
+  if (result.ok) return reply.code(result.status).send(result.data);
+  // Every launch route's account refusal passes here, so an agent's credential never gets its candidates.
+  const { providerAccountSelection: selection, ...refusal } = result;
+  const agentCaller = reply.request && requestPrincipals.get(reply.request)?.kind === "agent";
+  return reply.code(result.status).send(selection && agentCaller
+    ? { ...failureBody(refusal), providerAccountSelection: providerAccountChoiceRequiredForAgent(selection) }
+    : failureBody(result));
 }

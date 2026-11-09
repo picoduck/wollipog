@@ -356,6 +356,7 @@ const busyMachine = fixtureParams.has("busy");
 /** `reconnect=hold` leaves Reconnect's request unanswered; `reconnect=fail` never reaches the server (#3525). */
 const reconnectOutcome = fixtureParams.get("reconnect");
 let reconnectRequests = 0;
+let usageReadFails = false;
 const activeSessionsConflict = () => new ApiError("this machine has 2 active sessions", 409, "BOX_HAS_ACTIVE_SESSIONS", {
   activeSessions: [
     { id: "s1", title: "Fix the half-cent rounding bug", status: "running" },
@@ -465,7 +466,9 @@ const skillsReport = () => ({
 
 const client = {
   ...api,
-  subscriptionUsage: async () => ({
+  subscriptionUsage: async () => {
+    if (usageReadFails) throw new ApiError("usage is unavailable", 503);
+    return {
     sources: (runner?.providerAccounts ?? []).filter(account => account.authStatus === "authenticated").map(account => ({
       sourceId: `fixture-${account.id}`, runnerId: runner!.runnerId, runnerName: "Design Workstation", runnerStatus: runner!.status,
       agentId: "fixture", agentName: "Fixture", provider: account.provider, providerAccountId: account.id,
@@ -474,7 +477,8 @@ const client = {
       buckets: fixturePolicyUsage().find((usage) => usage.providerAccountId === account.id)?.buckets ?? [{ id: "session", label: "Session Window", remainingPercent: 74, resetsAt: Date.now() + 18 * 60 * 60_000 },
         { id: "weekly", label: "Weekly Window", remainingPercent: 81, resetsAt: Date.now() + 5 * 24 * 60 * 60_000 }],
     })), staleAfterMs: 600_000, generatedAt: Date.now(),
-  }),
+    };
+  },
   // Skills on This Machine (#1981): the machine's own skills diagnostics, read when opened.
   runnerSkills: async () => {
     if (skillsFailures > 0) {
@@ -877,6 +881,8 @@ declare global {
       /** Fails every save of this Machine Settings field until called with null (#2991). */
       setSettingsSaveFailure(field: "capacity" | null): void;
       setRunnerStatus(status: RunnerView["status"]): void;
+      /** Fails every cached usage read until called with false (#4353). */
+      setUsageReadFailure(failing: boolean): void;
       /** A host name long enough that the detail's meta line has to truncate (#2988). */
       setRunnerHostname(hostname: string): void;
       restoreIdentity(): void;
@@ -1165,6 +1171,7 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
   },
   setSettingsSaveFailure: (field) => { failingSettingsSave = field; },
+  setUsageReadFailure: (failing) => { usageReadFails = failing; },
   setRunnerStatus: (status) => {
     if (!runner) return;
     runner.status = status;

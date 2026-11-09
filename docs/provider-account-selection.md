@@ -22,8 +22,10 @@ them when it reconnects. Sign-in and other machine-executed actions still requir
 Usage in the overview is informational. It comes from the existing permission-scoped cached usage
 endpoint, matched by machine, provider, and account. Expand **Usage Details** to see the reported
 windows and their reset times. Stale readings are marked **Last Known**; an unavailable reading
-does not imply zero allowance or prevent account management. No credential probe runs when this
-section opens.
+does not imply zero allowance or prevent account management. If a refresh fails, as during a
+reconnect, the section keeps the last reading for that machine and lets it age into **Last Known**. It
+drops a reading for an account whose server access has changed since. No credential probe runs when
+this section opens.
 
 **Switch Accounts at a Usage Limit** is one inline switch, independent of provider defaults. It
 controls the existing machine-wide handoff. Enabling it retains the provider-terms confirmation;
@@ -145,8 +147,9 @@ refusal text names this route. Both need protocol 337 on the control plane; the 
 sending anything to an older one, so a choice is never silently dropped.
 
 Agents see accounts only as opaque `accountRef` values, stable for one account on one Machine, because
-an account's id contains its label. The control plane resolves a reference to the account and sends
-the runner the real one, and it accepts a real id too. A reference that matches none of this agent's
+an account's id contains its label. The server enforces this on the selection route and on a launch's
+refusal: an agent's credential gets no `candidates` or `accountId` from either. The control plane
+resolves a reference to the account and sends the runner the real one, and it accepts a real id too. A reference that matches none of this agent's
 provider's accounts is refused like any unknown id.
 
 A named account overrides the policy and goes through the same checks as the API. An agent is also
@@ -182,9 +185,10 @@ nothing: every launch resolves again.
 Account labels are personal data and account ids are derived from them. Refusal sentences, log lines,
 the runner's launch refusal and the reason stored on a session (`providerAccountSelection`: source,
 mode, policy revision and skip counts by reason) name no account. Only `candidates` and a saved
-default's `accountId`, returned to a caller who can already read the machine's account inventory,
-carry account ids. Agent tools pass on only references and reason codes from that reply, so no id or
-label reaches a model's context through them.
+default's `accountId`, returned to a person who can read the machine's account inventory, carry
+account ids. An agent's credential gets references and reason codes instead, so no id or label reaches
+a model's context through the agent tools. `GET /api/runners` still returns the inventory to that
+credential, though no tool passes it on.
 
 ## Remaining Work in #4353
 
