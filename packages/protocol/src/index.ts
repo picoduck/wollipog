@@ -9321,8 +9321,23 @@ export interface AutomationNotificationRouting {
   pushEvents: AutomationNotificationEvent[];
 }
 
+/** A fresh campaign per occurrence. The human approves its repository and settings with the
+ * schedule; a provider prompt cannot grant or broaden this authority. */
+export interface AutomationCampaign {
+  controlMode: "custom" | "full_control";
+  repository: string;
+  tasks: Array<{ key: string; title: string; prompt: string }>;
+  fullControl?: Omit<import("./campaign-control-launch.js").FullControlLaunchOverrides, "session">;
+}
+
+export type AutomationSessionRequest = Pick<CreateSessionRequest,
+  "runnerId" | "workspaceId" | "projectId" | "projectLocationId" | "agentId" | "providerAccountId" |
+  "title" | "prompt" | "useWorktree" | "executionTargetId" | "config" | "role" | "orchestrator"> & {
+    campaign?: AutomationCampaign;
+  };
+
 export type AutomationAction =
-  | { kind: "create_session"; request: CreateSessionRequest; installationBindings?: AutomationInstallationBindings }
+  | { kind: "create_session"; request: AutomationSessionRequest; installationBindings?: AutomationInstallationBindings }
   | { kind: "prompt_session"; sessionId: string; request: Omit<PromptRequest, "images"> }
   | { kind: "workflow_run"; request: CreateWorkflowRunRequest; installationBindings?: AutomationInstallationBindings };
 
@@ -9595,6 +9610,8 @@ export interface AutomationCommandView {
 }
 
 export interface AutomationExecution {
+  /** Live campaign projection for scheduled Orchestrators; root idleness is not completion. */
+  campaignStatus?: OrchestratorCampaignProjection["status"];
   executionId: string;
   automationId: string;
   /** Unique stable key `<automationId>:<scheduledFor>` used to reject duplicate ticks. */

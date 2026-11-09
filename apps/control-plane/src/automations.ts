@@ -36,6 +36,7 @@ import {
 } from "./sessions.js";
 import { nextCronFire, parseCron, validateTimeZone } from "@wollipog/protocol/cron-schedule";
 import { automationCommandDigest, AutomationCommandOutbox } from "./automation-command-outbox.js";
+import { validAutomationCampaign, type ScheduledCampaignRuntime } from "./scheduled-campaigns.js";
 import {
   automationTriggerBodySha256,
   newAutomationTriggerSecret,
@@ -150,7 +151,7 @@ function validateTriggerDeliveryPolicy(
   if (!policy.allowPrompt && !policy.parameterNames.length && !policy.sessionSelectors?.length) {
     return fail("automation trigger delivery policy must allow at least one delivery field");
   }
-  if (action.kind === "workflow_run") {
+  if (action.kind === "workflow_run" || (action.kind === "create_session" && action.request.campaign)) {
     return fail("automation trigger delivery fields are available only for session actions");
   }
   if (policy.sessionSelectors?.length && action.kind !== "prompt_session") {
@@ -206,10 +207,10 @@ function validProjectAssignment(value: Record<string, unknown>): boolean {
 
 function validConfig(value: unknown): boolean {
   if (value === undefined) return true;
-  if (!object(value) || !keysOnly(value, ["model", "effort", "permissionMode", "costBudgetUsd", "maxToolCalls", "costCheckpointsUsd"])) return false;
+  if (!object(value) || !keysOnly(value, ["model", "effort", "serviceTier", "permissionMode", "costBudgetUsd", "maxToolCalls", "costCheckpointsUsd"])) return false;
   if (value.costCheckpointsUsd !== undefined && (!Array.isArray(value.costCheckpointsUsd) ||
       !value.costCheckpointsUsd.every((usd) => Number.isFinite(usd) && Number(usd) > 0))) return false;
-  for (const key of ["model", "effort", "permissionMode"] as const) {
+  for (const key of ["model", "effort", "serviceTier", "permissionMode"] as const) {
     if (value[key] !== undefined && !boundedString(value[key])) return false;
   }
   return (value.costBudgetUsd === undefined || (Number.isFinite(value.costBudgetUsd) && Number(value.costBudgetUsd) > 0)) &&
@@ -233,9 +234,14 @@ function validateAction(value: unknown): string | null {
     const request = value.request;
     if (!keysOnly(request, [
       "runnerId", "workspaceId", "projectId", "projectLocationId", "agentId", "title", "prompt", "useWorktree", "config",
+      "providerAccountId", "executionTargetId", "role", "orchestrator", "campaign",
     ]) ||
         !boundedString(request.runnerId) || !boundedString(request.workspaceId) || !boundedString(request.agentId) ||
         !validProjectAssignment(request) ||
+        (request.role !== undefined && request.role !== "normal" && request.role !== "orchestrator") ||
+        (request.providerAccountId !== undefined && !boundedString(request.providerAccountId)) ||
+        (request.executionTargetId !== undefined && !boundedString(request.executionTargetId)) ||
+        !validAutomationCampaign(request) ||
         !optionalString(request.title, 120) || !optionalString(request.prompt, 65_536) ||
         (request.useWorktree !== undefined && typeof request.useWorktree !== "boolean") || !validConfig(request.config)) {
       return "create-session action requires a secret-free runner/workspace/agent request, an exact Project assignment when supplied, and cannot persist images or ACP context";
@@ -563,6 +569,7 @@ export class AutomationsService {
     private readonly sessions: SessionsService,
     private readonly log: Logger,
     private readonly notify?: AutomationNotifier,
+    private readonly campaigns?: ScheduledCampaignRuntime,
   ) {
     this.commandOutbox = new AutomationCommandOutbox(
       db,
@@ -620,7 +627,12 @@ export class AutomationsService {
     if (!automation) return fail("automation not found", 404);
     return ok({
       automation,
-      executions: this.db.listAutomationExecutions(automationId).map(automationExecutionView),
+      executions: this.db.listAutomationExecutions(automationId).map(execution => {
+        const view = automationExecutionView(execution);
+        const campaignStatus = execution.sessionId && execution.specSnapshot?.action.kind === "create_session" &&
+          execution.specSnapshot.action.request.campaign ? this.db.getSession(execution.sessionId)?.orchestratorCampaign?.status : undefined;
+        return { ...view, ...(campaignStatus ? { campaignStatus } : {}) };
+      }),
       events: this.db.listAutomationEvents(automationId),
     });
   }
@@ -629,6 +641,8 @@ export class AutomationsService {
     const parsed = validateAutomationSpec(input);
     if (!parsed.ok) return fail(parsed.error ?? "automation request is malformed", parsed.status);
     const spec = pinAutomationSpec(this.db, parsed.data!);
+    const campaignError = this.campaignError(spec, actor);
+    if (campaignError) return fail(campaignError, 409);
     const capabilityError = automationCapabilityError(this.db, this.sessions, spec);
     if (capabilityError) return fail(capabilityError, 409);
     let nextFireAt: number | null = null;
@@ -651,6 +665,8 @@ export class AutomationsService {
     const parsed = validateAutomationSpec(input);
     if (!parsed.ok) return fail(parsed.error ?? "automation request is malformed", parsed.status);
     const spec = pinAutomationSpec(this.db, parsed.data!, previous);
+    const campaignError = spec.enabled ? this.campaignError(spec, actor) : null;
+    if (campaignError) return fail(campaignError, 409);
     // Always allow disabling so capability drift cannot trap a failing automation in the enabled state.
     const capabilityError = spec.enabled ? automationCapabilityError(this.db, this.sessions, spec) : null;
     if (capabilityError) return fail(capabilityError, 409);
@@ -666,6 +682,11 @@ export class AutomationsService {
   delete(automationId: string, actor: GovernanceActor, now = Date.now()): ServiceResult<{ deleted: true }> {
     if (!this.db.deleteAutomation(automationId, actor, now)) return fail("automation not found", 404);
     return ok({ deleted: true });
+  }
+
+  private campaignError(spec: AutomationSpec, actor: GovernanceActor): string | null {
+    if (spec.action.kind !== "create_session" || !spec.action.request.campaign) return null;
+    return this.campaigns ? this.campaigns.validate(spec, actor) : "Scheduled campaigns are unavailable on this server";
   }
 
   triggers(automationId: string): ServiceResult<{ triggers: AutomationTriggerView[] }> {
@@ -919,6 +940,19 @@ export class AutomationsService {
         if (!session) {
           terminal = "failed";
           error = "target session no longer exists";
+        } else if (session.orchestratorPolicy && execution.specSnapshot?.action.kind === "create_session" &&
+            execution.specSnapshot.action.request.campaign) {
+          if (session.orchestratorCampaign?.status === "verified_complete") terminal = "succeeded";
+          else if (session.status === "failed" || session.status === "stopped") {
+            const unfinishedChildren = this.db.campaignDescendantIds(session.id).some(id => {
+              const child = this.db.getSession(id);
+              return child && !child.archived && !["completed", "failed", "stopped"].includes(child.status);
+            });
+            if (!unfinishedChildren) {
+              terminal = "failed";
+              error = `campaign root ${session.status}`;
+            }
+          }
         } else if (session.status === "idle" || session.status === "completed") terminal = "succeeded";
         else if (session.status === "failed" || session.status === "stopped") {
           terminal = "failed";
@@ -1686,6 +1720,45 @@ export class AutomationsService {
     };
   }
 
+  private readonly campaignLaunches = new Set<string>();
+
+  private executeCampaign(automation: AutomationSchedule, execution: AutomationExecution,
+    target: AutomationRunnerTarget, now: number, snapshots?: DurableSessionCommand[]): void {
+    if (this.campaignLaunches.has(execution.executionId)) return;
+    this.campaignLaunches.add(execution.executionId);
+    const startedAt = performance.now();
+    this.log.info(JSON.stringify({ event: "automation_campaign_launch", entryPoint: "automation_scheduler",
+      automationId: automation.automationId, executionId: execution.executionId, revision: execution.automationRevision,
+      recovering: snapshots !== undefined }));
+    const delivery = this.deliveryOptions(automation, execution, { sessionId: `s_auto_${execution.executionId}` }, now, target, snapshots);
+    Promise.resolve().then(() => this.campaigns?.launch(automation, execution, target, delivery) ??
+      fail("Scheduled campaigns are unavailable on this server", 409)).then(result => {
+      if (result.ok) {
+        this.log.info(JSON.stringify({ event: "automation_campaign_admitted", executionId: execution.executionId,
+          automationId: automation.automationId, sessionId: `s_auto_${execution.executionId}`, durationMs: Math.round(performance.now() - startedAt) }));
+        this.reconcileExecution(execution.executionId, Date.now());
+        return;
+      }
+      const settled = this.db.settleAutomationExecution({ executionId: execution.executionId, status: "failed",
+        actor: { kind: "system", id: `automation:${automation.automationId}` }, error: result.error, now: Date.now() });
+      if (settled) this.emit(automation, settled, "failed");
+      this.log.warn(JSON.stringify({ event: "automation_campaign_refused", automationId: automation.automationId,
+        executionId: execution.executionId, status: result.status, durationMs: Math.round(performance.now() - startedAt) }));
+    }).catch(() => {
+      // The root and its outbox may have committed before activation or a notification threw.
+      // Keep that exact occurrence recoverable; a new root or failure verdict could release the
+      // overlap lock while its first command is already in flight.
+      if (this.db.listAutomationCommands(execution.executionId).length) {
+        this.log.warn(JSON.stringify({ event: "automation_campaign_recovery_pending", automationId: automation.automationId,
+          executionId: execution.executionId }));
+        return;
+      }
+      const settled = this.db.settleAutomationExecution({ executionId: execution.executionId, status: "failed",
+        actor: { kind: "system", id: `automation:${automation.automationId}` }, error: "Scheduled campaign launch failed", now: Date.now() });
+      if (settled) this.emit(automation, settled, "failed");
+    }).finally(() => this.campaignLaunches.delete(execution.executionId));
+  }
+
   private execute(
     automation: AutomationSchedule,
     execution: AutomationExecution,
@@ -1693,6 +1766,10 @@ export class AutomationsService {
     now: number,
     commandSnapshots?: DurableSessionCommand[],
   ): void {
+    if (automation.action.kind === "create_session" && automation.action.request.campaign) {
+      this.executeCampaign(automation, execution, target, now, commandSnapshots);
+      return;
+    }
     let result: ServiceResult<unknown>;
     let controlPlaneWorkflow: { runId: string; workflowInstanceId: string; status: string } | undefined;
     if (automation.action.kind === "create_session") {

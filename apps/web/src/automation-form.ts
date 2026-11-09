@@ -1,6 +1,8 @@
 import type {
   AgentCapabilities,
   AutomationAction,
+  AutomationCampaign,
+  OrchestratorCampaignOverrides,
   AutomationNotificationEvent,
   AutomationSchedule,
   AutomationSpec,
@@ -21,6 +23,12 @@ import { timeZoneDisplayName } from "./reminder-schedule.js";
 export type ActionKind = AutomationAction["kind"];
 
 export interface FormState {
+  sessionRole?: "normal" | "orchestrator";
+  campaign?: AutomationCampaign;
+  orchestrator?: OrchestratorCampaignOverrides;
+  providerAccountId?: string;
+  executionTargetId?: string;
+  serviceTier?: string;
   name: string;
   cron: string;
   timezone: string;
@@ -103,6 +111,12 @@ export function formFrom(spec: AutomationSpec): FormState {
     form.workspaceId = spec.action.request.workspaceId;
     form.prompt = spec.action.kind === "workflow_run" ? spec.action.request.task : (spec.action.request.prompt ?? "");
     if (spec.action.kind === "create_session") {
+      form.campaign = spec.action.request.campaign;
+      form.sessionRole = spec.action.request.role;
+      form.orchestrator = spec.action.request.orchestrator;
+      form.providerAccountId = spec.action.request.providerAccountId;
+      form.executionTargetId = spec.action.request.executionTargetId;
+      form.serviceTier = spec.action.request.config?.serviceTier;
       form.agentId = spec.action.request.agentId;
       // Omitted `useWorktree` means in-place for a create-session action: the control plane's
       // legacy strategy treats a falsy value as `in_place`. Loading it as unchecked therefore
@@ -137,6 +151,8 @@ function sessionConfig(form: FormState, base: SessionConfig | undefined): Sessio
   const config: SessionConfig = {
     ...(base?.costBudgetUsd !== undefined ? { costBudgetUsd: base.costBudgetUsd } : {}),
     ...(base?.maxToolCalls !== undefined ? { maxToolCalls: base.maxToolCalls } : {}),
+    ...(base?.costCheckpointsUsd !== undefined ? { costCheckpointsUsd: base.costCheckpointsUsd } : {}),
+    ...(form.serviceTier ? { serviceTier: form.serviceTier } : {}),
     ...(form.model ? { model: form.model } : {}),
     ...(form.effort ? { effort: form.effort } : {}),
     ...(form.permissionMode ? { permissionMode: form.permissionMode } : {}),
@@ -151,7 +167,8 @@ function sessionConfig(form: FormState, base: SessionConfig | undefined): Sessio
  * automation fails on every scheduled run instead of at the moment the choice was made.
  */
 export function withAgent(form: FormState, agentId: string): FormState {
-  return { ...form, agentId, model: "", effort: "", permissionMode: "" };
+  const { serviceTier: _tier, providerAccountId: _account, ...rest } = form;
+  return { ...rest, agentId, model: "", effort: "", permissionMode: "" };
 }
 
 /**
@@ -284,6 +301,10 @@ export function buildSpec(form: FormState, context: BuildSpecContext): Automatio
     action = { kind: "create_session", request: {
       runnerId: form.runnerId, workspaceId: form.workspaceId, agentId: form.agentId,
       prompt: form.prompt, ...primaryPlacement,
+      ...(form.campaign ? { role: "orchestrator" as const, campaign: form.campaign, orchestrator: form.orchestrator } : {}),
+      ...(!form.campaign && form.sessionRole === "normal" ? { role: "normal" as const } : {}),
+      ...(form.providerAccountId ? { providerAccountId: form.providerAccountId } : {}),
+      ...(form.executionTargetId ? { executionTargetId: form.executionTargetId } : {}),
       // A stored request may legitimately omit `useWorktree`; `formFrom` loads that as unchecked,
       // so an untouched control must round-trip as absence rather than durably rewriting the field.
       ...(baseCreate !== undefined && baseCreate.useWorktree === undefined && form.useWorktree === false

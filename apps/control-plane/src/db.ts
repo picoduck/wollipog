@@ -34341,7 +34341,9 @@ export class ControlPlaneDb {
         }
       }
     }
-    this.db.exec("BEGIN IMMEDIATE");
+    // A scheduled campaign stages inside the root/authority/allowance transaction. A savepoint
+    // preserves this method's rollback contract both there and for ordinary standalone plans.
+    this.db.exec("SAVEPOINT automation_delivery_plan");
     try {
       const execution = this.stmt(
         "SELECT automation_id, status, delivery_mode, delivery_plan_json, runner_id, session_id, run_id, workflow_instance_id FROM automation_executions WHERE execution_id=?",
@@ -34368,7 +34370,7 @@ export class ControlPlaneDb {
               row.dependency_command_id === (command.dependencyCommandId ?? null);
           });
         if (!samePlan) throw new Error("automation execution already has a different delivery plan");
-        this.db.exec("COMMIT");
+        this.db.exec("RELEASE automation_delivery_plan");
         return existing.map((row) => this.automationCommand(row));
       }
       if (input.commands.some((command) => command.deliveryDeadlineAt === null)) {
@@ -34396,9 +34398,9 @@ export class ControlPlaneDb {
           detail: { commandId: command.commandId, state: "staged", ordinal: command.ordinal }, now: input.now,
         });
       }
-      this.db.exec("COMMIT");
+      this.db.exec("RELEASE automation_delivery_plan");
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.db.exec("ROLLBACK TO automation_delivery_plan; RELEASE automation_delivery_plan");
       throw error;
     }
     return this.listAutomationCommands(input.executionId);
