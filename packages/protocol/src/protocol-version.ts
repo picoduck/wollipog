@@ -1378,9 +1378,9 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   //      control plane would ignore it.
   338,
   // v339 slot
-  // 339: Server-derived owner scope review causes retain verified publication lineage (#4333).
-  339,
   // v340 slot
+  // 340: Server-derived owner scope review causes retain verified publication lineage (#4333).
+  340,
   // v341 slot
   // v342 slot
   // v343 slot
