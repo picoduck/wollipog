@@ -1,6 +1,6 @@
 import { boundedIssueNumbers, campaignIssueLimitsRequirement, campaignIssueScopeChangesRequirement, campaignRepositoryLocation,
   campaignScopeChangeGroups, campaignScopeForRepository, campaignScopeIssues, canonicalCampaignIssues,
-  gitlabCampaignIssuesRequirement, normalizeCampaignIssueScopeSnapshot, RUNNER_CAPABILITY_MIN_PROTOCOL, runnerCapabilityRequirementError, runnerSupportsProtocol,
+  gitlabCampaignIssuesRequirement, normalizeCampaignIssueScopeSnapshot, validIssueLineage, RUNNER_CAPABILITY_MIN_PROTOCOL, runnerCapabilityRequirementError, runnerSupportsProtocol,
   type CampaignIssueRef, type CampaignIssueScope, type CampaignIssueScopeRepositoryView, type RunnerCapabilityRequirementDetails,
   type CampaignIssueScopeRequest, type CampaignIssueScopeSnapshot, type CampaignIssueScopeView, type CampaignScopeProposalView, type SessionView,
   type WorkflowDecisionView, isTerminal } from "@wollipog/protocol";
@@ -172,7 +172,8 @@ export function scopeSnapshot(db: ControlPlaneDb, root: SessionView, repository:
   proposal: Pick<CampaignIssueScopeSnapshot, "scopeProposal" | "issueAdmission"> = {}): CampaignIssueScopeSnapshot | null {
   const launch = repository.toLowerCase();
   const allowed = new Set([launch, ...campaignScopeRepositories(root).map((entry) => entry.repository)]);
-  if (!request || typeof request.requestId !== "string" || !request.requestId || request.requestId.length > 256 ||
+  // Validate the untrusted shape before canonicalization can rebuild keys or read repository text.
+  if (!request || !validIssueLineage(request.lineage) || typeof request.requestId !== "string" || !request.requestId || request.requestId.length > 256 ||
       !Array.isArray(request.additions) || !Array.isArray(request.removals) ||
       [...request.additions, ...request.removals].some((r) => !r || typeof r.repository !== "string" || !allowed.has(r.repository.toLowerCase()))) return null;
   const additions = canonicalCampaignIssues(request.additions);

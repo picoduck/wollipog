@@ -4780,3 +4780,28 @@ test("#4333 owner routing states a required increase and refuses a mismatched pu
     assert.equal(mismatch.db.admittedCampaignPublicationIssue("root", p.decision.occurrenceId), null);
   } finally { mismatch.db.close(); }
 });
+
+test("#4333 malformed lineage is refused before canonicalization without creating owner work", async (t) => {
+  for (const lineage of [
+    { kind: "bogus", epic: 999 },
+    { kind: "selection", epic: 1 },
+    { kind: "follow_up", publicationOccurrenceId: "x", extra: 1 },
+    { kind: "epic", epic: 100, extra: 1 },
+    { kind: "epic", epic: 999, repository: "" },
+    { kind: "epic", epic: 100, repository: 123 },
+    null, [], "epic",
+  ]) {
+    await t.test(JSON.stringify(lineage), async () => {
+      const h = harness();
+      try {
+        const request = { requestId: "invalid-lineage", expectedRevision: 1, additions: [{ repository: "team/repo", number: 101 }],
+          removals: [], explanation: "Malformed lineage must remain a refusal", lineage } as unknown as import("@wollipog/protocol").CampaignIssueScopeRequest;
+        const result = await h.svc.proposeCampaignIssueScope("root", request);
+        assert.equal(result.ok, false);
+        assert.equal(result.status, 400);
+        assert.equal(pendingScopeRequests(h).length, 0);
+        assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100]);
+      } finally { h.db.close(); }
+    });
+  }
+});
