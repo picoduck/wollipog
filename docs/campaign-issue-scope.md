@@ -205,8 +205,11 @@ A repository whose only Location is excluded has no entry until that Location jo
 like a repository the campaign never knew of. A follow-up, merge, branch deletion or closure naming it is
 refused by the Location's name and version, at request and again at consume and execute, and a forge read
 goes through that Location or not at all, so no other login stands in. An exclusion recorded mid-action
-stops it too: an armed merge is refused where its command can be seen and its approval withdrawn, since no
-new request could replace it. A requester running in that very Location still acts in its own repository. An unknown repository keeps its rule: a person's approval lets
+stops it too. An armed merge is refused where its command can be seen, and as with a merge hold Claude's
+policy hook denies the session's shell commands while it stands, since it can't tell them apart. The
+approval stays armed, because its command may already have run. Reconciling it, the runner updating, or a
+new request for the same pull request lifts that. A requester running in that very Location still acts in
+its own repository. An unknown repository keeps its rule: a person's approval lets
 the requester act with its own login. A runner too old to read a Location names no repository, so its
 repository can't be told apart from an unknown one.
 

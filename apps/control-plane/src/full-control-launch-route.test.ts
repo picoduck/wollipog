@@ -8080,6 +8080,11 @@ async function mergeHeldAtPreflight(f: ReturnType<typeof fixture>) {
   const send = f.hub.sendToRunner.bind(f.hub);
   f.hub.sendToRunner = (runnerId, message) => {
     if (message.type === "forge_decision_action") { actions.push(message.action); return true; }
+    if (message.type === "reconcile_workflow_action") {
+      queueMicrotask(() => f.hub.resolveRunnerRequest({ type: "workflow_action_reconciliation_result", requestId: message.requestId, sessionId: message.sessionId,
+        occurrenceId: message.occurrenceId, accepted: true, commandDigest: createHash("sha256").update(message.command, "utf8").digest("hex"), forgeHeadSha: message.expectedHeadSha }, runnerId));
+      return true;
+    }
     if (message.type !== "github_merge_preflight") return send(runnerId, message);
     const answer = () => f.hub.resolveRunnerRequest({ type: "github_merge_preflight_result", requestId: message.requestId, sessionId: message.sessionId, ok: true,
       check: { checkedAt: Date.now(), closures: [] } }, runnerId);
@@ -8156,10 +8161,13 @@ test("an armed merge whose repository is left out afterward is rejected when its
     await armedThenExcluded(f, m);
     f.sent.length = 0;
     askPermission(f, m.child, "other-command", "git status");
-    assert.equal(f.db.workflowDecisionByOccurrence(m.occurrenceId)!.status, "approved", "another command doesn't withdraw the approval");
+    const refusedHere = () => f.db.listGovernanceAudit(m.child).filter((entry) => JSON.stringify(entry).includes("campaign-excluded-repository")).map((entry) => entry.requestId);
+    assert.deepEqual(refusedHere(), [], "another command isn't this refusal's business");
     askPermission(f, m.child, "armed-command");
+    assert.deepEqual(refusedHere(), ["armed-command"]);
     assert.deepEqual(resolutionsOf(f).filter(([id]) => id === "armed-command"), [["armed-command", "reject"]]);
-    assert.equal(f.db.workflowDecisionByOccurrence(m.occurrenceId)!.status, "revoked", "withdrawn, since no new request can replace it");
+    const decision = f.db.workflowDecisionByOccurrence(m.occurrenceId)!;
+    assert.deepEqual([decision.status, decision.actionAdmission?.kind], ["approved", "pr_merge_enqueue"], "still armed: its command may already have run");
   } finally { await m.server.close(); f.db.close(); }
 });
 
@@ -8193,26 +8201,84 @@ test("a person can't allow a parked policy hook's shell command while that armed
     const allowed = f.sessions.approve(m.child, parked.data!.approvalRequestId!, "allow", { kind: "human", id: f.human.userId });
     assert.equal(allowed.ok, false);
     assert.match(allowed.error!, NAMES_THE_FLOOR);
-    assert.equal(f.db.workflowDecisionByOccurrence(m.occurrenceId)!.status, "revoked");
+    assert.equal(f.db.workflowDecisionByOccurrence(m.occurrenceId)!.status, "approved");
   } finally { await m.server.close(); f.db.close(); }
 });
 
-test("Claude's policy hook, which can't see the command, denies one shell command for that armed merge and then lets the session work (#4319)", async () => {
+const childHook = (f: ReturnType<typeof fixture>, child: string, toolUseId: string, toolName = "Bash") => f.sessions.evaluatePolicyHook(child, { hookEventName: "PreToolUse",
+  providerSessionId: "provider-child", permissionMode: "bypassPermissions", toolUseId, context: { toolName } });
+
+test("Claude's policy hook, which can't see the command, keeps denying shell commands while that armed merge stands, so a first refusal opens no way to run it (#4319)", async () => {
   const f = fixture();
   const m = await mergeHeldAtPreflight(f);
   try {
     assert.equal((await armMerge(f, m)).ok, true);
-    const hook = (toolUseId: string, toolName = "Bash") => f.sessions.evaluatePolicyHook(m.child, { hookEventName: "PreToolUse", providerSessionId: "provider-child",
-      permissionMode: "bypassPermissions", toolUseId, context: { toolName } });
-    assert.equal(hook("before").data?.decision, "defer");
+    assert.equal(childHook(f, m.child, "before").data?.decision, "defer");
     await armedThenExcluded(f, m);
-    assert.equal(hook("read", "Read").data?.decision, "defer", "only tools that can run a command");
-    const denied = hook("armed");
-    assert.equal(denied.data?.decision, "deny");
-    assert.match(denied.data?.reason ?? "", NAMES_THE_FLOOR);
-    assert.match(denied.data?.reason ?? "", /approval was withdrawn, so don't run it/u);
+    assert.equal(childHook(f, m.child, "read", "Read").data?.decision, "defer", "only tools that can run a command");
+    for (const call of ["unrelated", "the-saved-merge"]) {
+      const denied = childHook(f, m.child, call);
+      assert.equal(denied.data?.decision, "deny", call);
+      assert.match(denied.data?.reason ?? "", NAMES_THE_FLOOR);
+      assert.match(denied.data?.reason ?? "", /If it already ran, reconcile it\./u);
+    }
+    const decision = f.db.workflowDecisionByOccurrence(m.occurrenceId)!;
+    assert.deepEqual([decision.status, decision.actionAdmission?.kind], ["approved", "pr_merge_enqueue"]);
+  } finally { await m.server.close(); f.db.close(); }
+});
+
+test("a merge that already ran before its repository was left out still reconciles, which lifts the block (#4319)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    assert.equal((await armMerge(f, m)).ok, true);
+    await armedThenExcluded(f, m);
+    assert.equal(childHook(f, m.child, "unrelated").data?.decision, "deny");
+    const reconciled = await f.sessions.reconcileWorkflowDecision(m.child, m.occurrenceId, { resourceSnapshot: m.snapshot }, () => true);
+    assert.equal(reconciled.ok, true, reconciled.error ?? "");
+    assert.equal(f.db.workflowDecisionByOccurrence(m.occurrenceId)!.status, "consumed");
+    assert.equal(childHook(f, m.child, "after").data?.decision, "defer");
+  } finally { await m.server.close(); f.db.close(); }
+});
+
+test("the runner updating lifts the block: its join revokes the armed merge, which needs a new approval (#4319)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    assert.equal((await armMerge(f, m)).ok, true);
+    await armedThenExcluded(f, m);
+    assert.equal(childHook(f, m.child, "while-old").data?.decision, "deny");
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    await m.locations.runnerReconnected("below");
+    assert.ok(m.boundary().repositories!.some((entry) => entry.repository === "below/repo"));
     assert.equal(f.db.workflowDecisionByOccurrence(m.occurrenceId)!.status, "revoked");
-    assert.equal(hook("after").data?.decision, "defer", "the session isn't left unable to run anything");
+    assert.equal(childHook(f, m.child, "after-update").data?.decision, "defer");
+  } finally { await m.server.close(); f.db.close(); }
+});
+
+test("a new request for the same pull request replaces that armed merge and lifts the block, and consuming it is still refused by name (#4319)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    assert.equal((await armMerge(f, m)).ok, true);
+    await armedThenExcluded(f, m);
+    assert.equal(childHook(f, m.child, "stuck").data?.decision, "deny");
+    // Another pull request of that repository is no replacement, so it's refused as ever.
+    const other = await f.sessions.createWorkflowDecisionWithVideo(m.child, { requestId: "other-pull-request", resourceKey: "other-pull-request",
+      resourceSnapshot: { ...m.snapshot, pullRequest: 9 } as WorkflowDecisionResourceSnapshot }, () => true);
+    assert.equal(other.ok, false);
+    assert.match(other.error!, NAMES_THE_FLOOR);
+    const replacement = await f.sessions.createWorkflowDecisionWithVideo(m.child, { requestId: "replace-held-merge", resourceKey: "ask-held-merge", resourceSnapshot: m.snapshot }, () => true);
+    assert.equal(replacement.ok, true, replacement.error ?? "");
+    assert.equal(f.db.workflowDecisionByOccurrence(m.occurrenceId)!.status, "superseded");
+    const lifted = childHook(f, m.child, "free").data;
+    assert.notEqual(lifted?.decision, "deny", "no longer blocked: ordinary governance decides again");
+    assert.doesNotMatch(lifted?.reason ?? "", /can't perform its gates/u);
+    assert.equal(personApproves(f, m.rootId, m.child, replacement.data!.occurrenceId).ok, true);
+    const consumed = await f.sessions.consumeWorkflowDecision(m.child, replacement.data!.occurrenceId,
+      { resourceSnapshot: replacement.data!.resourceSnapshot, action: { kind: "pr_merge_enqueue", command: armedCommand } });
+    assert.equal(consumed.ok, false);
+    assert.match(consumed.error!, NAMES_THE_FLOOR);
   } finally { await m.server.close(); f.db.close(); }
 });
 
