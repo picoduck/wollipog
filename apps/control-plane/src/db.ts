@@ -35575,12 +35575,13 @@ function validExcludedLocations(value: unknown): boolean {
   });
 }
 
-/** A malformed record is dropped alone: its neighbours still refuse (#4319). */
+/** A malformed record is dropped alone: its neighbours still refuse (#4319). Unbounded, as its writer
+ * is: a refusal is never dropped to make room. */
 function validRefusedRepositories(value: unknown): import("@wollipog/protocol").CampaignRefusedRepository[] {
   return (Array.isArray(value) ? value : []).filter((item) => {
     const repository = locationRecord(item, ["locationId", "name", "repository"])?.repository;
     return typeof repository === "string" && campaignRepositoryLocation(repository) !== null;
-  }).slice(0, CAMPAIGN_BOUNDARY_LOCATIONS_MAX);
+  });
 }
 
 function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCampaignPolicy | null {

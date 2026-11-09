@@ -1,5 +1,5 @@
 import {
-  CAMPAIGN_BOUNDARY_LOCATIONS_MAX, campaignAuthorityPreflight, campaignBoundaryRepositories, campaignBoundaryRepository, campaignScopeHolds, initialScopeRepositoryLimits, resolveCampaignAuthority, runnerSupportsProtocol, validCampaignControl,
+  campaignAuthorityPreflight, campaignBoundaryRepositories, campaignBoundaryRepository, campaignScopeHolds, initialScopeRepositoryLimits, resolveCampaignAuthority, runnerSupportsProtocol, validCampaignControl,
   type CampaignAuthorityEvaluation, type CampaignBoundaryRepository, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope, type CampaignRefusedRepository, type CredentialScreenFact,
   type OrchestratorCampaignPolicy, type ParentControlPolicy, type PendingApproval, type SessionView, type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
@@ -190,11 +190,12 @@ export function campaignRefusedRepositories(root: Pick<SessionView, "orchestrato
 /** Keep every repository `policy` refuses now in its durable record (#4319), so no later change to
  * its exclusions forgets one, and drop those that now hold an entry. Call it at the start of every
  * write that can replace or drop an exclusion. Until such a write, the exclusion itself names the
- * repository, and every reader reads both. The record keeps its oldest; past its bound a repository
- * is refused only while its exclusion stands. */
+ * repository, and every reader reads both. The record has no bound, so it never drops a refusal to
+ * make room: it grows only when a read names a new repository behind a Location below the gates,
+ * and shrinks when one gains an entry. */
 export function rememberRefusedRepositories(policy: OrchestratorCampaignPolicy): void {
   const refused = campaignRefusedRepositories({ orchestratorPolicy: policy });
-  if (refused.length) policy.refusedRepositories = refused.slice(0, CAMPAIGN_BOUNDARY_LOCATIONS_MAX);
+  if (refused.length) policy.refusedRepositories = refused;
   else delete policy.refusedRepositories;
 }
 

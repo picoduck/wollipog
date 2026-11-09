@@ -8606,6 +8606,24 @@ test("a refused repository's Location detached and added again, which drops its 
   } finally { await c.server.close(); f.db.close(); }
 });
 
+test("a campaign that has refused 100 repositories before still keeps the next one refused through a failed re-read, with its armed merge blocked (#4319 review)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    assert.equal((await armMerge(f, m)).ok, true);
+    // A long-running campaign whose Project's history refused 100 other repositories.
+    const history = Array.from({ length: 100 }, (_, index) => ({ repository: `old/repo-${index}`, locationId: `loc_old_${index}`, name: `Old ${index}` }));
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify({ ...m.policy(), refusedRepositories: history }), m.rootId);
+    await armedThenExcluded(f, m);
+    failBelowReads(f);
+    await m.locations.runnerReconnected("below");
+    assert.equal(m.policy().refusedRepositories!.length, 101, "no refusal is dropped to make room");
+    await stillRefused(f, m.rootId, m.child, "as the 101st refusal");
+    assert.equal(childHook(f, m.child, "the-101st").data?.decision, "deny");
+    assert.deepEqual(armedState(f, m.occurrenceId), ["approved", "pr_merge_enqueue"]);
+  } finally { await m.server.close(); f.db.close(); }
+});
+
 test("a malformed refused-repository record is dropped alone, and the others still refuse (#4319)", async () => {
   const f = fixture();
   const c = await launchedMultiRepositoryCampaign(f);
