@@ -45,7 +45,7 @@ import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignClosureIssueHeld, campaignRepositoryLimits, campaignControlForRunner, campaignControlRevisionForRunner, campaignLaunchRepository, campaignOtherRepository, campaignScopeRepositories, carriedCampaignRepositories } from "./campaign-authority.js";
-import { campaignRefusedRepositories, campaignRepositoryOutsideLimit } from "./campaign-authority.js";
+import { campaignRefusedRepositories, campaignRepositoryOutsideLimit, campaignUnreadLocations } from "./campaign-authority.js";
 import { campaignBoundaryRepositoryAt, campaignRepositoryPlaces, launchBoundaryRepositories, type CampaignRepositoryPlace } from "./campaign-repository-boundary.js";
 import { CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL, type CampaignBoundaryRepository, type CampaignExcludedLocation } from "@wollipog/protocol";
 import { inspectBoundaryPublication, verifyBoundaryPublishedIssue } from "./project-location-inspection.js";
@@ -2386,6 +2386,9 @@ function queueHoldReleaseRefusal(reason: ReleaseQueueHoldRefusal | undefined): s
 
 const DELEGATED_IMAGE_REVIEW = Symbol("server-created image reviewer");
 const PREPARED_MEDIA_CAPTURE = Symbol("private prepared media Session capture");
+/** Why a gate refuses a repository left out for a runner's version (#4319), and, when the refusal is
+ * an unread Location's rather than a named repository's, that Location's name. */
+type ExcludedRepositoryDetail = { sentence: string; unread: string | null };
 type PreparedMediaCapture = { identity: PreparedMediaIdentity; subject: PreparedMediaSubject; decision: WorkflowDecisionView; operatorValidation?: OperatorVideoValidationPurpose; command: Extract<DurableSessionCommand, { type: "start_session" }> | null };
 
 export class SessionsService {
@@ -5657,6 +5660,8 @@ export class SessionsService {
       }
       orchestratorPolicy.control = control;
       if (humanLaunch.excludedLocations?.length) orchestratorPolicy.excludedLocations = structuredClone(humanLaunch.excludedLocations);
+      // An old runner's Location the survey couldn't read stays unread until a read resolves it (#4319).
+      this.db.trackUnreadLocations(orchestratorPolicy, [], new Set(), control.boundary.authorizedByUserId);
       if (humanLaunch.launchDisclosure && validCampaignLaunchDisclosure(humanLaunch.launchDisclosure)) {
         orchestratorPolicy.launchDisclosure = structuredClone(humanLaunch.launchDisclosure);
       }
@@ -5912,7 +5917,7 @@ export class SessionsService {
    * so that campaign reads as it always has, and so does one whose own Location can't be read now,
    * unless a Location was left out for its runner's version: that one-entry list is what shows the
    * exclusion and lets a reconnect retry it (#4319). */
-  private async establishCustomCampaignRepositories(rootId: string): Promise<void> {
+  async establishCustomCampaignRepositories(rootId: string): Promise<void> {
     const root = this.db.getSession(rootId);
     const scope = this.db.sessionScope(rootId);
     const owner = scope?.owner.kind === "user" ? this.db.operatingHumanPrincipal(scope.owner.userId, scope.organizationId) : null;
@@ -5929,7 +5934,16 @@ export class SessionsService {
       inspectProjectLocation({ db: this.db, hub: this.hub }, launchLocationId, { projectId, requireProtocol: "campaignRepositoryBoundary" }),
       survey.inspect(new AbortController().signal),
     ]);
-    if (!own.ok) return;
+    if (!own.ok) {
+      // Its own Location unread on an old runner may hold any repository without an entry, so it is
+      // recorded as unread, and its runner's reconnect runs this again (#4319). On a current runner it
+      // records nothing, as before.
+      if (this.db.recordCustomUnreadLaunchLocation(rootId, { projectId, projectLocationId: launchLocationId },
+        { locationId: launchLocationId, name: ownBefore.name, failure: own.failure, reason: own.reason }, owner.userId, Date.now())) {
+        this.hub.sessionChangedById(rootId);
+      }
+      return;
+    }
     // Everything is read again now that every inspection has finished: a Location that changed
     // while another was pending is not the one that was inspected, the campaign's own included.
     const settled = survey.settled();
@@ -5941,8 +5955,10 @@ export class SessionsService {
     // nobody would see the exclusion and no reconnect could retry it (#4319). So is one an old runner
     // left unnamed some other way, such as by being offline: until a reconnect names its repository,
     // every repository without an entry is refused.
+    // So is a list that resolves its own Location's earlier unread record.
+    const ownUnread = campaignUnreadLocations(this.db.getSession(rootId)?.orchestratorPolicy).some((item) => item.locationId === launchLocationId);
     if ((repositories.length > 1 || excluded.some((item) => item.failure === "runner_below_gates") ||
-        this.db.unnamedBelowGatesLocations(excluded, projectId).length) &&
+        this.db.unreadExclusions(excluded, owner.userId).length || ownUnread) &&
         this.db.recordCustomCampaignRepositories(rootId, { projectId, projectLocationId: launchLocationId }, repositories, excluded, Date.now())) {
       this.hub.sessionChangedById(rootId);
     }
@@ -11705,9 +11721,13 @@ export class SessionsService {
     for (const decision of this.db.unconsumedWorkflowDecisionsForSession(session.id)) {
       if (decision.status !== "approved" || decision.resourceSnapshot.category !== "pr_merge" || decision.actionAdmission?.kind !== "pr_merge_enqueue" ||
           (approval && decision.actionAdmission.command !== command)) continue;
-      const refusal = this.excludedRepositoryRefusal(session, null, decision.resourceSnapshot);
-      if (refusal) return `${refusal} Command tools are blocked while this session's armed merge can't run, since it must not. If it already ran, reconcile it. ` +
-        "Otherwise this lifts when a Location of that repository joins the campaign, which revokes the armed merge, " +
+      const refusal = this.excludedRepositoryRefusalDetail(session, null, decision.resourceSnapshot);
+      // An unread Location's refusal ends by a read or its removal, not by a join (#4319).
+      if (refusal) return `${refusal.sentence} Command tools are blocked while this session's armed merge can't run, since it must not. If it already ran, reconcile it. ` +
+        (refusal.unread
+          ? `Otherwise update the runner of ${refusal.unread} so a read can name its repository, which lifts this unless it names this one, ` +
+            `or remove ${refusal.unread} from the Project, which lifts this and revokes the armed merge, `
+          : "Otherwise this lifts when a Location of that repository joins the campaign, which revokes the armed merge, ") +
         "or when you request a new pr_merge decision for the same pull request with the request_workflow_decision tool " +
         "(the CLI needs the shell), which replaces the armed one.";
     }
@@ -12570,13 +12590,22 @@ export class SessionsService {
    * unknown placement proves nothing. Exclusions change no revision, so anything that awaits after this
    * check asks again with nothing awaited before the action. The approval, if any, still stands. */
   private excludedRepositoryRefusal(requester: SessionView, controller: SessionView | null, snapshot: WorkflowDecisionResourceSnapshot): string | null {
+    return this.excludedRepositoryRefusalDetail(requester, controller, snapshot)?.sentence ?? null;
+  }
+
+  private excludedRepositoryRefusalDetail(requester: SessionView, controller: SessionView | null, snapshot: WorkflowDecisionResourceSnapshot):
+    ExcludedRepositoryDetail | null {
     if (snapshot.category !== "follow_up_issue_publication" && snapshot.category !== "pr_merge" && snapshot.category !== "merged_branch_deletion") return null;
     const rootId = this.db.campaignRootForMember(requester.id);
     const root = (rootId ? this.db.getSession(rootId) : null) ?? controller ?? requester;
-    return this.excludedRepositorySentence(root, snapshot.repository, requester);
+    return this.excludedRepositoryDetail(root, snapshot.repository, requester);
   }
 
   private excludedRepositorySentence(root: SessionView, repository: string, requester: Pick<SessionView, "runnerId" | "workspaceId">): string | null {
+    return this.excludedRepositoryDetail(root, repository, requester)?.sentence ?? null;
+  }
+
+  private excludedRepositoryDetail(root: SessionView, repository: string, requester: Pick<SessionView, "runnerId" | "workspaceId">): ExcludedRepositoryDetail | null {
     const named = repository.toLowerCase();
     // The durable record, not the latest read: a later read that fails, a move to waiting or a revoke
     // never turns a refused repository back into an unknown one. Only an entry ends it.
@@ -12585,21 +12614,41 @@ export class SessionsService {
       const location = this.db.getProjectLocation(item.locationId);
       return location?.runnerId === requester.runnerId && location?.workspaceId === requester.workspaceId;
     };
-    if (excluded.length) {
-      if (excluded.some(here)) return null;
-      return `${named} isn't in this campaign because the runner of ${excluded.map((item) => item.name).join(", ")} can't perform its gates. ` +
-        `Update and restart it to protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer, and it can join. Until then no other login stands in, and nothing was performed.`;
+    if (excluded.length && !excluded.some(here)) {
+      return { sentence: `${named} isn't in this campaign because the runner of ${excluded.map((item) => item.name).join(", ")} can't perform its gates. ` +
+        `${this.refusedRepositoryWayIn(root, named, excluded)} Until then no other login stands in, and nothing was performed.`, unread: null };
     }
     // A Location whose repository no read has named may hold this one (#4319), so every repository
-    // without an entry is refused while it stands, including ones the campaign never had. Even a
-    // requester in that Location can't show which repository it acts in.
+    // without an entry is refused while it stands, including ones the campaign never had. That comes
+    // before a named Location's own exemption, since the unnamed one may hold that repository too, and
+    // a requester in the unnamed Location can't show which repository it acts in either.
     if (campaignScopeRepositories(root).some((entry) => entry.repository === named)) return null;
-    const unnamed = this.db.unnamedBelowGatesLocations(root.orchestratorPolicy?.excludedLocations, root.projectId);
+    const unnamed = this.db.unnamedBelowGatesLocations(root);
     if (!unnamed.length) return null;
-    return `${named} can't be acted on while the runner of ${unnamed.map((item) => item.name).join(", ")} can't perform this campaign's gates ` +
+    const names = unnamed.map((item) => item.name).join(", ");
+    return { sentence: `${named} can't be acted on while the runner of ${names} can't perform this campaign's gates ` +
       "and no read has named the repository it holds, which may be this one. " +
       `Update and restart that runner to protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer so it can be read, or remove that Location from the Project. ` +
-      "Until then no other login stands in, and nothing was performed.";
+      "Until then no other login stands in, and nothing was performed.", unread: names };
+  }
+
+  /** What actually brings a refused repository in (#4319), so the refusal never promises a join that
+   * won't happen: the owner's own Location joins once its runner updates; someone else's then waits for
+   * Include in Campaign; one a Custom campaign only reads to name, or one that left the Project, needs
+   * an approved repository addition or another Location of that repository. */
+  private refusedRepositoryWayIn(root: SessionView, named: string, refused: ReadonlyArray<{ locationId: string }>): string {
+    const floor = `protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer`;
+    const owner = this.db.campaignOwnerForRoot(root.id, root.orchestratorPolicy);
+    const ways = new Set(refused.map(({ locationId }) => {
+      const location = this.db.getProjectLocation(locationId);
+      if (!location || location.projectId !== root.projectId) return "gone";
+      if (root.orchestratorPolicy?.excludedLocations?.some((item) => item.locationId === locationId && item.nameOnly)) return "addition";
+      return owner && this.db.projectLocationAddedBy(locationId) === owner ? "join" : "include";
+    }));
+    if (ways.has("join")) return `Update and restart it to ${floor}, and it can join.`;
+    if (ways.has("include")) return `Update and restart it to ${floor}; then the campaign's owner can bring it in with Include in Campaign.`;
+    if (ways.has("addition")) return `Even on ${floor}, only an approved repository addition brings ${named} into this campaign.`;
+    return `That Location has left the Project, so only another Location of ${named} on ${floor} joining, or an approved repository addition, brings it in.`;
   }
 
   /** The campaign entry a publication must be created through (#4119), or null when its requester

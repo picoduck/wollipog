@@ -1101,6 +1101,7 @@ registerFullControlLaunchRoutes(app, { db, hub, sessions: svc, settings: orchest
   videoCertification: (runnerId) => videoEvidence.launchCertification(runnerId) });
 const campaignLocations = new CampaignLocations({ db, hub, synchronize: (rootId) => svc.synchronizeCampaignIssueScope(rootId),
   settle: (before, revoked, owner, now) => svc.settleCampaignBoundaryChange(before, revoked, owner, now),
+  reestablish: (rootId) => svc.establishCustomCampaignRepositories(rootId),
   log: { warn: (message) => app.log.warn(message) } });
 registerCampaignLocationRoutes(app, { campaignLocations, requestPrincipal });
 registerHostingVideoEvidenceRoutes(app, { video: videoEvidence, requestPrincipal });
@@ -2720,7 +2721,9 @@ app.post("/api/projects/:id/locations/move", async (req, reply) => {
     .map((session) => session.id);
   let moved: ProjectLocationView | null;
   try {
-    moved = db.moveProjectLocation(location.id, id, Date.now(), principal.userId);
+    // What a move ends of an unread Location's refusal leaves its pauses like any revocation (#4319).
+    moved = db.moveProjectLocation(location.id, id, Date.now(), principal.userId,
+      (root, revoked) => svc.settleCampaignBoundaryChange(root, revoked, principal.userId));
   } catch (error) {
     return reply.code(400).send({ error: (error as Error).message });
   }
@@ -2743,7 +2746,8 @@ app.delete("/api/projects/:id/locations/:locationId", async (req, reply) => {
   if (!canManageAffectedSessions(principal, (session) => session.projectLocationId === locationId)) {
     return reply.code(409).send({ error: "project location contains sessions you cannot manage" });
   }
-  db.removeProjectLocation(locationId);
+  // What removing it ends of an unread Location's refusal leaves its pauses like any revocation (#4319).
+  db.removeProjectLocation(locationId, Date.now(), (root, revoked) => svc.settleCampaignBoundaryChange(root, revoked, principal.userId));
   const project = db.getProject(id)!;
   hub.projectChanged(project);
   for (const session of db.listSessions({ includeArchived: true })) {

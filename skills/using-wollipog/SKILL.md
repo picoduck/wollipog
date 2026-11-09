@@ -916,8 +916,9 @@ needs updating. The refusal holds until a Location of that repository joins, wit
 owner's own Location joins once its runner updates, and someone else's then waits for the owner's Include
 in Campaign. A join revokes what was approved in that repository meanwhile, so request again afterward.
 While such a Location's repository hasn't been read yet, every repository the campaign holds no entry
-for is refused the same way, naming that Location: report that its runner needs updating, or that the
-owner can remove the Location from the Project.
+for is refused the same way, naming that Location: report that its runner needs updating so it can be
+read, or that the owner can remove the Location from the Project. Removing it revokes what was approved
+in those repositories, so request again afterward. The refusal's own text says which way in applies.
 
 ## Inspecting and Changing Campaign Issue Scope
 

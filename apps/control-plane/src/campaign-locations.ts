@@ -57,6 +57,8 @@ export class CampaignLocations {
     synchronize: (rootId: string) => Promise<unknown>;
     /** Settles the decisions a boundary change revoked and publishes every member (Sessions). */
     settle: (before: SessionView, revoked: WorkflowDecisionView[], ownerUserId: string, now: number) => void;
+    /** Reads a Custom campaign's own Location again and records its list (#4319). */
+    reestablish?: (rootId: string) => Promise<unknown>;
     log: { warn(message: string): void };
     inspectionTimeoutMs?: number;
   }) {}
@@ -83,7 +85,9 @@ export class CampaignLocations {
   /** A runner reconnected: retry its Locations that were excluded only because it was away. */
   runnerReconnected(runnerId: string): Promise<void> {
     const { db } = this.deps;
-    return this.forRoots([...db.campaignRepositoryRoots({ runnerId }), ...db.customCampaignRepositoryRoots(runnerId)], (root) => {
+    // A Custom campaign whose own Location was unread at creation reads it again (#4319).
+    const awaiting = this.deps.reestablish ? this.forRoots(db.customRootsAwaitingLaunchRead(runnerId), (root) => this.deps.reestablish!(root.id)) : Promise.resolve([]);
+    const retried = this.forRoots([...db.campaignRepositoryRoots({ runnerId }), ...db.customCampaignRepositoryRoots(runnerId)], (root) => {
       const custom = root.orchestratorPolicy?.control?.mode !== "full_control";
       const retry = (root.orchestratorPolicy?.excludedLocations ?? [])
         .filter((item) => retriedOnReconnect(item, custom))
@@ -92,7 +96,8 @@ export class CampaignLocations {
           location.projectId === root.projectId && location.availability !== "runner_removed" &&
           (!custom || this.customSurveyLists(root, location))));
       return retry.length ? this.inspectAndRecord(root, retry, "runner_reconnected") : Promise.resolve();
-    }).then(() => undefined);
+    });
+    return Promise.all([awaiting, retried]).then(() => undefined);
   }
 
   /** Nobody reviews a Custom campaign's list, so only what its survey would list joins it: a Location
@@ -164,6 +169,8 @@ export class CampaignLocations {
     const joins: Array<{ locationId: string; name: string; repository: string; source: CampaignLocationJoin["source"] }> = [];
     const excluded: CampaignExcludedLocation[] = [];
     const pending: CampaignPendingLocation[] = [];
+    // Locations read on a current runner, whatever is recorded for them: no longer unread (#4319).
+    const read: string[] = [];
     let changed = false;
     results.forEach((result: ProjectLocationInspection, index) => {
       const location = locations[index]!;
@@ -180,12 +187,18 @@ export class CampaignLocations {
         (source !== "owner_included" || Boolean(includer && includer.userId === owner &&
           db.canAccessWorkspace(includer, now.runnerId, now.workspaceId))));
       if (!eligible) { changed = true; return; }
-      // A Custom Location read only to name its repository never joins: a read that succeeds leaves it
-      // as it was, and one that fails records what it found, with any repository it named (#4319).
+      // A Custom Location read only to name its repository never joins (#4319). A read that names it
+      // records the repository, which stays refused until an approved addition brings it in, even on a
+      // current runner; one that fails records what it found.
       const previous = fresh.orchestratorPolicy?.excludedLocations?.find((item) => item.locationId === location.id);
       if (custom && source === "runner_reconnected" && previous && !customRejoins(previous)) {
-        if (!result.ok) excluded.push({ locationId: location.id, name: location.name, failure: result.failure, reason: result.reason,
-          ...(result.repository ? { repository: result.repository } : {}), nameOnly: true });
+        if (result.ok) {
+          excluded.push({ locationId: location.id, name: location.name, failure: previous.failure, reason: previous.reason,
+            repository: result.location.repository.toLowerCase(), nameOnly: true });
+        } else {
+          excluded.push({ locationId: location.id, name: location.name, failure: result.failure, reason: result.reason,
+            ...(result.repository ? { repository: result.repository } : {}), nameOnly: true });
+        }
         return;
       }
       // Only the owner's own Location joins on a reconnect. Anyone else's, or one with no recorded
@@ -193,6 +206,7 @@ export class CampaignLocations {
       // While its runner is still too old, Include in Campaign can't help, so it keeps the reason that says why.
       if (source === "runner_reconnected" && was.addedBy !== owner && (result.ok || result.failure !== "runner_below_gates")) {
         pending.push({ locationId: location.id, name: location.name, reason: "added_by_other" });
+        if (result.ok) read.push(location.id);
         return;
       }
       if (result.ok) joins.push({ locationId: location.id, name: location.name, repository: result.location.repository, source });
@@ -202,14 +216,15 @@ export class CampaignLocations {
         ...(custom && result.failure !== "runner_below_gates" && RETRIED_ON_RECONNECT.has(result.failure) ? { rejoinsOnReconnect: true as const } : {}) });
     });
     if (changed && source === "owner_included") return { ok: false, status: 409, error: "That Location changed while it was inspected; try again." };
-    return this.record(fresh, { joins, excluded, pending });
+    // Include in Campaign is the owner's consent to someone else's Location: left unread, it counts (#4319).
+    return this.record(fresh, { joins, excluded, pending, read, ...(source === "owner_included" ? { consented: locations.map((location) => location.id) } : {}) });
   }
 
   private async record(root: SessionView, update: { joins: Array<{ locationId: string; name: string; repository: string;
-    source: CampaignLocationJoin["source"] }>; excluded: CampaignExcludedLocation[]; pending: CampaignPendingLocation[] }): Promise<Outcome> {
+    source: CampaignLocationJoin["source"] }>; excluded: CampaignExcludedLocation[]; pending: CampaignPendingLocation[]; read?: string[]; consented?: string[] }): Promise<Outcome> {
     const owner = this.owner(root);
     if (!owner) return { ok: false, status: 409, error: "This campaign has no Full Control owner." };
-    if (!update.joins.length && !update.excluded.length && !update.pending.length) {
+    if (!update.joins.length && !update.excluded.length && !update.pending.length && !update.read?.length) {
       return { ok: true, data: { joined: false, revision: this.revision(root) } };
     }
     const now = Date.now();

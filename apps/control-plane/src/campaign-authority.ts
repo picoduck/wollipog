@@ -178,12 +178,25 @@ export function campaignRefusedRepositories(root: Pick<SessionView, "orchestrato
   const entries = new Set(campaignScopeRepositories(root).map((entry) => entry.repository));
   const latest = new Map<string, CampaignRefusedRepository>();
   for (const item of [...policy?.refusedRepositories ?? [],
-    ...(policy?.excludedLocations ?? []).flatMap((exclusion) => exclusion.failure === "runner_below_gates" && exclusion.repository
+    // A Custom Location read only to name its repository refuses it whatever its runner now is (#4319).
+    ...(policy?.excludedLocations ?? []).flatMap((exclusion) => (exclusion.failure === "runner_below_gates" || exclusion.nameOnly) && exclusion.repository
       ? [{ repository: exclusion.repository, locationId: exclusion.locationId, name: exclusion.name }] : [])]) {
     latest.delete(item.locationId);
     latest.set(item.locationId, { repository: item.repository.toLowerCase(), locationId: item.locationId, name: item.name });
   }
   return [...latest.values()].filter((item) => !entries.has(item.repository));
+}
+
+/** The campaign's own record of Locations whose repository no read has named, excluded on a runner
+ * that couldn't perform its gates (#4319). Each may hold any repository without an entry. */
+export function campaignUnreadLocations(policy: OrchestratorCampaignPolicy | undefined): Array<{ locationId: string; name: string }> {
+  return (policy?.unreadLocations ?? []).map((item) => ({ locationId: item.locationId, name: item.name }));
+}
+
+/** The person whose consent a campaign's Locations rest on (#4319): a Full Control boundary's author,
+ * otherwise the Custom campaign's owner. */
+export function campaignOwnerId(policy: OrchestratorCampaignPolicy | undefined, customOwner: string | null): string | null {
+  return policy?.control?.mode === "full_control" ? policy.control.boundary.authorizedByUserId : customOwner;
 }
 
 /** Keep every repository `policy` refuses now in its durable record (#4319), so no later change to
