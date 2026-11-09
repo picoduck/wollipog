@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { PassThrough } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 import { test } from "node:test";
 import type { AgentDefinition, SubscriptionUsageSnapshot } from "@wollipog/protocol";
 import {
   ClaudeUsageUnsupportedError,
   CLAUDE_USAGE_PROBE_ARGS,
   normalizeClaudeUsageReply,
+  probeClaudeSubscriptionIdentity,
   probeClaudeSubscriptionUsage,
   SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS,
   SubscriptionUsageManager,
@@ -199,6 +200,55 @@ test("an older Claude Code that refuses get_usage is told apart from a failed re
   const exited = await runProbe(() => "exit");
   await assert.rejects(exited.result, /exited before/);
   assert.deepEqual(exited.reaped(), { killed: 1, finished: 1 });
+});
+
+test("a Claude Code that closed its input rejects the probe instead of crashing the runner", async () => {
+  const child = new EventEmitter() as unknown as AgentProcess;
+  Object.assign(child, {
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    stdin: new Writable({
+      write(_chunk, _encoding, callback) {
+        callback(Object.assign(new Error("write EPIPE"), { code: "EPIPE" }));
+      },
+    }),
+  });
+  let killed = 0;
+  await assert.rejects(probeClaudeSubscriptionUsage(
+    claudeAgent(),
+    {},
+    { cwd: "/safe/subscription-probe" },
+    { spawn: () => child, kill: () => { killed += 1; } },
+    2_000,
+  ), /EPIPE/);
+  assert.equal(killed, 1);
+});
+
+test("the Claude identity probe survives a status command that closed its input", async () => {
+  const child = new EventEmitter() as unknown as AgentProcess;
+  const stdout = new PassThrough();
+  Object.assign(child, {
+    stdout,
+    stderr: new PassThrough(),
+    stdin: new Writable({
+      final(callback) {
+        callback(Object.assign(new Error("write EPIPE"), { code: "EPIPE" }));
+      },
+    }),
+  });
+  const identity = probeClaudeSubscriptionIdentity(
+    claudeAgent(),
+    {},
+    { cwd: "/safe/subscription-probe" },
+    { spawn: () => child, kill: () => {} },
+    2_000,
+  );
+  stdout.once("end", () => (child as unknown as EventEmitter).emit("close", 0));
+  stdout.end(JSON.stringify({
+    loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty", email: "p@example.test", orgId: "org-1",
+  }));
+  assert.equal(await identity, JSON.stringify(["claude", "p@example.test", "org-1"]),
+    "the status it printed still decides");
 });
 
 interface ManagerOptions {

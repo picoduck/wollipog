@@ -787,6 +787,9 @@ export async function probeClaudeSubscriptionIdentity(
   let timer: NodeJS.Timeout | undefined;
   try {
     child.stderr.resume();
+    // A status command that already closed its input fails this end with EPIPE. That is no read
+    // error, since the status it prints decides, and unheard it would crash the runner.
+    child.stdin.on("error", () => {});
     child.stdin.end();
     const stdout = await new Promise<string>((resolve, reject) => {
       let output = "";
@@ -909,6 +912,9 @@ export async function probeClaudeSubscriptionUsage(
       });
       child.on("close", () => reject(new Error("Claude Code exited before answering get_usage")));
       child.on("error", reject);
+      // A Claude Code that closed its input fails the request's write with EPIPE on stdin itself,
+      // which the process's own error event never carries; unheard it would crash the runner.
+      child.stdin.on("error", reject);
       timer = setTimeout(() => reject(new Error("claude get_usage timed out")), timeoutMs);
       child.stdin.write(`${JSON.stringify({
         type: "control_request",

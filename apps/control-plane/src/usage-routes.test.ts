@@ -299,7 +299,7 @@ test("refresh deadlines count Claude sources only for runners that read Claude u
       auth: { status: "authenticated" as const, billingSource: "subscription" as const },
     },
   };
-  const deadline = async (protocolVersion: number) => {
+  const deadline = async (protocolVersion: number, target?: { runnerId: string; providerAccountId: string }) => {
     const db = ControlPlaneDb.open(":memory:");
     db.registerRunner({
       runnerId: "claude-box", hostname: "claude-box", os: "linux", version: "1",
@@ -319,13 +319,16 @@ test("refresh deadlines count Claude sources only for runners that read Claude u
         return { type: "subscription_usage_refresh_result", requestId, ok: true, snapshots: [] };
       },
     });
-    const response = await app.inject({ method: "POST", url: "/api/usage/subscriptions/refresh" });
+    const response = await app.inject({ method: "POST", url: "/api/usage/subscriptions/refresh", ...(target ? { payload: target } : {}) });
     assert.equal(response.statusCode, 200);
     await app.close();
     db.close();
     return timeoutMs;
   };
-  assert.equal(await deadline(PROTOCOL_VERSION), 18_000, "two Claude accounts read in turn get two probe budgets");
+  // Each Claude account reads its identity and then its usage, one probe budget each.
+  assert.equal(await deadline(PROTOCOL_VERSION), 34_000, "two Claude accounts read in turn get four probe budgets");
+  assert.equal(await deadline(PROTOCOL_VERSION, { runnerId: "claude-box", providerAccountId: "personal" }), 18_000,
+    "one Claude account refreshed alone still gets two");
   assert.equal(await deadline(341), 10_000, "an older runner reads no Claude usage on request");
 });
 
