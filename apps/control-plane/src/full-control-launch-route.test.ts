@@ -8954,6 +8954,23 @@ test("a Custom Location whose folder was missing at creation is read again when 
   } finally { f.db.close(); }
 });
 
+test("a Location's later read naming another repository revokes the armed merge in the one it stops refusing, so that block never lifts with it armed (#4319 security review)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    assert.equal((await armMerge(f, m)).ok, true);
+    answerBelowWithEach(f, ["below/repo", "below/two"]);
+    const below = f.db.addProjectLocation(m.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await m.locations.locationAdded(below.id, f.human);
+    assert.equal(childHook(f, m.child, "while-refused").data?.decision, "deny");
+    await m.locations.runnerReconnected("below");
+    assert.equal(m.policy().excludedLocations!.find((item) => item.locationId === below.id)?.repository, "below/two");
+    assert.equal(f.db.workflowDecisionByOccurrence(m.occurrenceId)!.status, "revoked", "below/repo stopped being refused with no join, so its armed merge is revoked");
+    assert.match(JSON.stringify(f.db.listGovernanceAudit(m.child)), /campaign_control_changed/u, "and settled");
+    assert.equal(childHook(f, m.child, "after").data?.decision, "defer");
+  } finally { await m.server.close(); f.db.close(); }
+});
+
 test("one Location naming a different repository on each read keeps one refusal, its latest, so a runner can't grow the record (#4319)", async () => {
   const f = fixture();
   const c = await launchedMultiRepositoryCampaign(f);

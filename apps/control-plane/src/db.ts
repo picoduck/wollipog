@@ -18164,9 +18164,10 @@ export class ControlPlaneDb {
     }
   }
 
-  /** Revoke what is approved in each repository a Custom join or addition stops refusing (#4319). A
-   * Custom list has no revision, so nothing else would: an armed merge's block would lift with its
-   * approval still armed. A Full Control join revokes every authority-bound decision already. */
+  /** Revoke what is approved in each repository a recorded change stops refusing (#4319): a Custom join
+   * or addition, whose list has no revision, or a Location's later read naming another repository, in
+   * either mode. Nothing else would revoke it, and an armed merge's block would lift with its approval
+   * still armed. A Full Control join revokes every authority-bound decision already. */
   private revokeLiftedRefusals(rootId: string, before: ReadonlySet<string>, policy: OrchestratorCampaignPolicy, now: number): WorkflowDecisionView[] {
     const still = new Set(campaignRefusedRepositories({ orchestratorPolicy: policy }).map((item) => item.repository));
     const lifted = new Set([...before].filter((repository) => !still.has(repository)));
@@ -18351,6 +18352,9 @@ export class ControlPlaneDb {
       if (available.length) policy.availableLocations = available.slice(-CAMPAIGN_BOUNDARY_LOCATIONS_MAX); else delete policy.availableLocations;
       if (consumed) widenCampaignRepositoryLimit(policy, update.joins[0]!);
       this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(policy), now, rootId);
+      // A Location's later read naming another repository stops refusing its earlier one with no join
+      // (#4319): what was approved there is revoked here, so that block never lifts with it armed.
+      revoked = [...revoked, ...this.revokeLiftedRefusals(rootId, refusedBefore, policy, now)];
       this.db.exec("COMMIT");
       return { ok: true, revision, joined: joins.length > 0, revoked };
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
