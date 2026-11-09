@@ -11708,12 +11708,14 @@ export class SessionsService {
     return null;
   }
 
-  /** The armed merge of this exact pull request a new request would replace (#4319): the one way out
-   * for a session whose armed merge's repository was left out, so that request isn't refused. */
-  private replacesArmedMerge(session: SessionView, snapshot: WorkflowDecisionResourceSnapshot): boolean {
-    return snapshot.category === "pr_merge" && this.db.unconsumedWorkflowDecisionsForSession(session.id).some((decision) =>
+  /** The armed merges of this exact pull request a new request replaces (#4319): the one way out for a
+   * session whose armed merge's repository was left out, so that request isn't refused. */
+  private armedMergesOf(session: SessionView, snapshot: WorkflowDecisionResourceSnapshot): string[] {
+    if (snapshot.category !== "pr_merge") return [];
+    return this.db.unconsumedWorkflowDecisionsForSession(session.id).filter((decision) =>
       decision.status === "approved" && decision.actionAdmission?.kind === "pr_merge_enqueue" && decision.resourceSnapshot.category === "pr_merge" &&
-      decision.resourceSnapshot.repository.toLowerCase() === snapshot.repository.toLowerCase() && decision.resourceSnapshot.pullRequest === snapshot.pullRequest);
+      decision.resourceSnapshot.repository.toLowerCase() === snapshot.repository.toLowerCase() && decision.resourceSnapshot.pullRequest === snapshot.pullRequest)
+      .map((decision) => decision.occurrenceId);
   }
 
   /** #4120: refuse a held merge with its fixed reason, leaving the approval as it is. A prerequisite
@@ -12206,7 +12208,7 @@ export class SessionsService {
     // Asking anyone to approve what no login may carry out helps no one (#4319). The exception replaces
     // an armed merge left out after arming, which is how its session gets its shell back.
     const requesting = normalized.ok && normalized.data ? this.db.getSession(sessionId) : null;
-    const excludedRepository = requesting && normalized.data && !this.replacesArmedMerge(requesting, normalized.data)
+    const excludedRepository = requesting && normalized.data && !this.armedMergesOf(requesting, normalized.data).length
       ? this.excludedRepositoryRefusal(requesting, null, normalized.data) : null;
     if (excludedRepository) return fail(excludedRepository, 409);
     if (normalized.ok && normalized.data?.category === "follow_up_issue_publication" && normalized.data.recommendationId) {
@@ -14551,6 +14553,9 @@ export class SessionsService {
     }
     const now = Date.now();
     const resourceDigest = workflowDecisionResourceDigest(normalized.data);
+    // #4319: the refusal tells a blocked session to ask again for this pull request, under whatever
+    // key it chooses, so the armed merge left out after arming is replaced by name, not by key.
+    const replacedArmed = child && this.excludedRepositoryRefusal(child, controller.session, normalized.data) ? this.armedMergesOf(child, normalized.data) : [];
     const created = this.db.createWorkflowDecision({
       requestId: request.requestId,
       occurrenceId: `workflow_${randomUUID().replace(/-/gu, "")}`,
@@ -14565,7 +14570,7 @@ export class SessionsService {
       authorityEvaluation,
       ...(evaluated.effectiveOwner === "human" && evaluated.fallback ? { humanFallback: evaluated.fallback } : {}),
       ...(category === "pr_merge" && internal?.closingReferenceCheck ? { closingReferenceCheck: internal.closingReferenceCheck } : {}),
-      ...(retired.length ? { alsoSupersede: retired } : {}),
+      ...(retired.length || replacedArmed.length ? { alsoSupersede: [...retired, ...replacedArmed] } : {}),
       ...(keptRule && authority === "human" ? { ownerRule: keptRule } : {}),
       createdAt: now,
     });

@@ -8268,7 +8268,8 @@ test("a new request for the same pull request replaces that armed merge and lift
       resourceSnapshot: { ...m.snapshot, pullRequest: 9 } as WorkflowDecisionResourceSnapshot }, () => true);
     assert.equal(other.ok, false);
     assert.match(other.error!, NAMES_THE_FLOOR);
-    const replacement = await f.sessions.createWorkflowDecisionWithVideo(m.child, { requestId: "replace-held-merge", resourceKey: "ask-held-merge", resourceSnapshot: m.snapshot }, () => true);
+    // Under a key of its own: the refusal names the pull request, not the key it was armed under.
+    const replacement = await f.sessions.createWorkflowDecisionWithVideo(m.child, { requestId: "replace-held-merge", resourceKey: "a-key-of-its-own", resourceSnapshot: m.snapshot }, () => true);
     assert.equal(replacement.ok, true, replacement.error ?? "");
     assert.equal(f.db.workflowDecisionByOccurrence(m.occurrenceId)!.status, "superseded");
     const lifted = childHook(f, m.child, "free").data;
