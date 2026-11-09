@@ -102,6 +102,9 @@ export interface WorktreeHandle {
   /** True only when this create call materialized the linked worktree. A healthy registered
    * worktree is returned with false so a losing launch cannot reap durable user changes. */
   created?: boolean;
+  /** (#4209) The worktree is new but its branch is not: it holds commits from before this call, so
+   * undoing this call removes the worktree and never the branch. */
+  branchPreexisted?: boolean;
   /** The ref a newly created worktree started from when it was not the primary checkout's HEAD:
    * the fetched remote default branch, because HEAD was strictly behind it (#4288). */
   baseRef?: string;
@@ -1647,7 +1650,7 @@ export async function createWorktree(repoPath: string, sessionId: string, option
     !await command(context, repoPath, ["merge-base", "--is-ancestor", branchRef, target]).then(() => true, () => false);
   if (holdsOwnCommits) {
     await command(context, repoPath, ["worktree", "add", path, branch], 120_000);
-    return { path, branch, created: true };
+    return { path, branch, created: true, branchPreexisted: true };
   }
   await command(context, repoPath, ["worktree", "add", "-B", branch, path, target], 120_000);
   return { path, branch, created: true, ...(fresher ? { baseRef: fresher.ref } : {}) };
@@ -2985,9 +2988,15 @@ export async function worktreeRollbackProofState(
     return "unavailable";
   }
   if (nativeRepositoryPathIsUnavailable(context, repoPath)) return "unavailable";
+  // A read that fails is no answer, and neither is one through a refs directory Git could not read:
+  // Git then reports no ref, and succeeds. Either way the proof may well be there.
+  let proofUnread = false;
   if (proof) {
     const ref = `${ROLLBACK_PROOF_REF_PREFIX}/${proof}`;
-    const found = await command(context, path, ["for-each-ref", "--format=%(refname)", ref]).catch(() => "");
+    const found = await command(context, path, ["for-each-ref", "--format=%(refname)", ref]).then((value) => value, () => {
+      proofUnread = true;
+      return "";
+    });
     if (found.trim() === ref) return "proved";
   }
   // No proof here. That alone means little: a refusal may be a passing failure in a worktree setup
@@ -2999,10 +3008,32 @@ export async function worktreeRollbackProofState(
     if (!entry) return "mismatch";
     const toplevel = (await command(context, path, ["rev-parse", "--path-format=absolute", "--show-toplevel"])).trim();
     if (!sameWorktreePath(context, toplevel, path)) return "unavailable";
+    if (proof && (proofUnread || !await worktreeRefsReadable(context, path))) return "unavailable";
     if (!proof && reservedBranch && entry.branch === reservedBranch && await worktreeHoldsNoFiles(path, options)) return "unpopulated";
     return "mismatch";
   } catch {
     return "unavailable";
+  }
+}
+
+/** Whether every directory under a worktree's own refs can be read, so that Git saying it holds no ref
+ * means it holds none. A refs directory that is missing altogether is readable: it holds none. */
+async function worktreeRefsReadable(context: AgentContext, path: string): Promise<boolean> {
+  const gitDir = (await command(context, path, ["rev-parse", "--absolute-git-dir"])).trim();
+  if (context.kind === "wsl") {
+    return runContextCommand(context, "sh", ["-c", 'test ! -e "$1/refs" || find "$1/refs" >/dev/null', "sh", gitDir],
+      { cwd: "/", timeoutMs: 8_000 }).then(() => true, () => false);
+  }
+  const walk = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) walk(join(directory, entry.name));
+    }
+  };
+  try {
+    walk(join(gitDir, "refs"));
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" && !existsSync(join(gitDir, "refs"));
   }
 }
 
@@ -3108,7 +3139,8 @@ export async function releaseUnchangedBranch(
 ): Promise<boolean> {
   const context = options.context ?? nativeContext;
   try {
-    await command(context, repoPath, ["worktree", "prune"]);
+    // No prune: that would also drop other worktrees whose directories are only away for now. A stale
+    // registration that still names this branch just keeps the branch.
     const listed = parseWorktreePorcelain(await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]));
     if (listed.some((entry) => entry.branch === branch)) return false;
     const history = (await command(context, repoPath, ["reflog", "show", "--format=%H", `refs/heads/${branch}`])).split("\n").filter(Boolean);

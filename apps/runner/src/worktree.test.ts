@@ -1135,7 +1135,7 @@ test("a file's name and contents cannot be traded for another's without changing
     const options = { dataDir: fixture.dataDir };
     const { path } = await createRequestedWorktree(fixture.repo, "s_collide", { baseRef: "HEAD", branch: "fix/collide" }, options);
     const gitDir = execFileSync("git", ["-C", path, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" }).trim();
-    writeFileSync(join(gitDir, "a"), "1\u0000b\u00002");
+    writeFileSync(join(gitDir, "a"), "1\u0000file b\u00002");
     const first = await captureRollbackSnapshot(path, options);
     // The same bytes in a row, if a digest ran names and contents together: one file, or two.
     writeFileSync(join(gitDir, "a"), "1");
@@ -1205,6 +1205,30 @@ test("a registered worktree whose index was never written, with files to check o
     assert.equal(await worktreeCheckoutNeverFinished(unfinished, options), true);
     execFileSync("git", ["-C", unfinished, "checkout", "--force", "HEAD"]);
     assert.equal(await worktreeCheckoutNeverFinished(unfinished, options), false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a proof that cannot be read is no answer, never a missing proof", { skip: !haveGit() || process.platform === "win32" || process.getuid?.() === 0 }, async () => {
+  const fixture = staleMarkerFixture("proof-unreadable");
+  try {
+    const options = { dataDir: fixture.dataDir };
+    const handle = await createRequestedWorktree(fixture.repo, "s_proof", { baseRef: "HEAD", branch: "fix/proof" }, options);
+    await stampWorktreeRollbackProof(handle.path, "token-1", options);
+    const gitDir = execFileSync("git", ["-C", handle.path, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" }).trim();
+    // Git reads an unreadable refs directory as holding nothing, and says so with success.
+    for (const blocked of [join(gitDir, "refs", "worktree"), join(gitDir, "refs")]) {
+      chmodSync(blocked, 0o000);
+      try {
+        assert.equal(execFileSync("git", ["-C", handle.path, "for-each-ref", "refs/worktree/wollipog-rollback/token-1"], { encoding: "utf8" }), "",
+          "the trap: no error, no ref");
+        assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-1", options), "unavailable");
+      } finally {
+        chmodSync(blocked, 0o755);
+      }
+      assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-1", options), "proved");
+    }
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }

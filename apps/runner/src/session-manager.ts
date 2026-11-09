@@ -7856,16 +7856,24 @@ export class SessionManager {
     const launchWorktreeCleanup = (): WorktreeCleanupRecord => {
       if (!worktree) throw new Error("worktree cleanup requested before materialization");
       const latest = this.store.readMeta(spec.sessionId) ?? meta;
+      // A worktree remade on a branch that already held commits: undoing this launch removes the
+      // worktree and keeps the branch (#4209). Only the rollback record carries this, so the session's
+      // own row, and what deleting the session later does, stay as they were.
+      const keptBranch = worktree.branchPreexisted ? { preserveBranch: true } : {};
       if (worktreeIdentity) {
-        return this.cleanupRecordForWorktree(
-          latest,
-          { ...worktreeIdentity, path: worktree.path, branch: worktree.branch },
-          "creation_rollback",
-          "force",
-        );
+        return {
+          ...this.cleanupRecordForWorktree(
+            latest,
+            { ...worktreeIdentity, path: worktree.path, branch: worktree.branch },
+            "creation_rollback",
+            "force",
+          ),
+          ...keptBranch,
+        };
       }
       const checkpointOwnerHash = this.checkpointOwnerHash(meta);
       return {
+        ...keptBranch,
         sessionId: spec.sessionId,
         worktreeId: "legacy",
         repoPath,
@@ -15128,13 +15136,14 @@ export class SessionManager {
     };
     /** Give back what this attempt made, and say so if it could not. A worktree it did not make was
      * never its to give back, whether another owner's or this session's own from earlier. */
-    const release = async (): Promise<string | undefined> => {
+    const release = async ({ beforeSetup = false }: { beforeSetup?: boolean } = {}): Promise<string | undefined> => {
       const { record, view } = reservation;
       if (!record || !view) return undefined;
       const released = () => !this.cleanupJournal.list().includes(record);
-      // This attempt is still here and failed before it recorded anything, a checkout that failed say.
-      // What is there is what it left, and only now, while nothing else can have been there, can it say so.
-      if (record.rollbackProof && !record.rollbackSnapshot) await this.recordRollbackSnapshot(record);
+      // Only while preparing, before setup and before anything else could have been there, can this
+      // attempt say what it left: a checkout that failed is the case. Later, a missing snapshot means
+      // a read failed, and that means keep: one taken then would adopt whatever happened meanwhile.
+      if (beforeSetup && record.rollbackProof && !record.rollbackSnapshot) await this.recordRollbackSnapshot(record);
       try {
         await this.reapCreationRollback(record, targetOf(view));
       } catch (error) {
@@ -15239,7 +15248,7 @@ export class SessionManager {
           ...(defaultBranch ? { defaultBranch } : {}),
         };
     } catch (error) {
-      const kept = await release();
+      const kept = await release({ beforeSetup: true });
       this.failLocationSwitch(sessionId, entry, pending, error instanceof LocationSwitchRefusal ? error.message
         : `the target worktree could not be prepared: ${errText(error)}`, kept);
       return;
@@ -18660,9 +18669,12 @@ export class SessionManager {
     if (state === "unavailable") return this.waitForRollbackAnswer(record);
     if (state === "mismatch") {
       this.log(`worktree rollback for ${boundedSessionIdForLog(record.sessionId)} dropped: what is at its path is not what it made`);
-      // Only an attempt that really made a worktree replaced what its history described. One that made
-      // nothing, like a refusal of a stale directory, leaves the session's own row where it was.
-      if (record.rollbackProof) this.forgetEarlierRowsAt(record);
+      // An attempt that really made a worktree, now replaced by another: that is kept like any changed
+      // worktree, so the session is told, earlier rows at the path go, and a row of this session there
+      // loses the setup it could otherwise re-run over someone else's worktree. One that made nothing,
+      // like a refusal of a stale directory or an older runner's record, leaves the session's own row
+      // where it was: any setup on it is that row's own.
+      if (record.rollbackProof) return this.keepRollbackWorktree(record, "what is there now is not the worktree it made");
       return this.endRollbackUnremoved(record);
     }
     if (state === "proved") {

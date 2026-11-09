@@ -2231,6 +2231,111 @@ test("a branch moved and put back from another worktree keeps its reflog: the br
   });
 });
 
+test("a snapshot that could not be taken after setup is never taken late: a release after the move began keeps the worktree", async () => {
+  await withSession("late-snapshot", async (h) => {
+    const internals = internalsOf(h) as unknown as Internals & { recordRollbackSnapshot: (record: WorktreeCleanupRecord) => Promise<void> };
+    const record = internals.recordRollbackSnapshot.bind(h.manager);
+    let calls = 0;
+    // The second recording is the one after setup: its read fails, so the record holds none.
+    internals.recordRollbackSnapshot = async (item) => {
+      calls++;
+      if (calls !== 2) return record(item);
+      delete item.rollbackSnapshot;
+      internalsOf(h).cleanupJournal.add(item);
+    };
+    const replace = internals.replaceProviderProcess.bind(h.manager);
+    let slot = "";
+    internals.replaceProviderProcess = async (...args) => {
+      // In the gap: the old provider is retiring and anyone may already have written here.
+      slot = journal(h)[0]!.worktreePath;
+      writeFileSync(join(slot, "written-in-the-gap.txt"), "someone's work\n");
+      const pending = h.store.readMeta(h.sessionId)!.pendingLocationSwitch!;
+      h.store.patchMeta(h.sessionId, { pendingLocationSwitch: { ...pending, occurrenceId: "occurrence-other" } });
+      return replace(...args);
+    };
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => slot !== "" && journal(h).length === 0, "the superseded attempt did not settle");
+    assert.equal(calls, 2, "nothing was recorded after the move began");
+    assert.equal(readFileSync(join(slot, "written-in-the-gap.txt"), "utf8"), "someone's work\n", "kept, not removed");
+    assert.ok(errorText(h).some((text) => text.includes(slot) && /kept/iu.test(text)));
+  });
+});
+
+test("a rollback whose worktree was replaced tells the session, and the request row it kept cannot run setup again", async () => {
+  await withSession("mismatch-told", async (h) => {
+    git(h.docs, "checkout", "--quiet", "-b", "config-base");
+    writeFileSync(join(h.docs, ".wollipog.json"), JSON.stringify({ version: 1, setup: [{ name: "Leave a File", command: write("from-setup", "'x'"), timeoutSeconds: 30 }] }));
+    git(h.docs, "add", ".wollipog.json");
+    git(h.docs, "commit", "--quiet", "-m", "setup");
+    git(h.docs, "checkout", "--quiet", "main");
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    const internals = internalsOf(h);
+    const activate = internals.activateWorktreeWithNotice.bind(h.manager);
+    internals.activateWorktreeWithNotice = async () => { throw new Error("activation failed"); };
+    const removal = stickRemoval(h);
+    const failing = h.manager.requestWorktree(h.sessionId, { baseRef: "config-base", branch: "fix/other" });
+    await answerTrust(h, "trust");
+    await assert.rejects(failing, /activation failed/u);
+    internals.activateWorktreeWithNotice = activate;
+    const slot = journal(h)[0]!.worktreePath;
+    // A person replaces it with a worktree of their own on that path.
+    git(h.docs, "worktree", "remove", "--force", slot);
+    git(h.docs, "worktree", "add", "--quiet", slot, "fix/other");
+    removal.free();
+    dueLater(h);
+    await internals.replayDeferredWorktreeRetirements();
+    assert.deepEqual(journal(h), []);
+    assert.equal(existsSync(slot), true);
+    assert.ok(errorText(h).some((text) => text.includes(slot) && /kept/iu.test(text)), "the session is told");
+    const row = h.store.readMeta(h.sessionId)!.worktrees!.find((item) => item.path === slot);
+    assert.equal(row?.setup, undefined, "and its row has no setup to retry over their worktree");
+    await assert.rejects(h.manager.retryWorktreeSetup(h.sessionId, slot), /not failed/u);
+  });
+});
+
+test("a launch that loses after remaking a session worktree on a branch with its own commits keeps that branch and its reflog", async () => {
+  if (process.platform === "win32") return;
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-launch-kept-branch-")));
+  const fake = fakeProvider();
+  const sessionId = "s_launch_kept_branch";
+  const dataDir = join(root, "data");
+  const store = new SessionStore(join(dataDir, "sessions"));
+  const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, fake.factory as never, dataDir, 2);
+  try {
+    // No origin, so nothing waits on a network.
+    const app = join(root, "app");
+    mkdirSync(app);
+    git(app, "init", "--quiet", "--initial-branch=main");
+    git(app, "commit", "--quiet", "--allow-empty", "-m", "base");
+    manager.configureSharedDirectories([{ id: "app", name: "App", path: realpathSync(app) }] as never);
+    // The session's branch holds its own commit, with a setup, and its directory has gone.
+    git(app, "checkout", "--quiet", "-b", `agent/${sessionId}`);
+    writeFileSync(join(app, ".wollipog.json"), JSON.stringify({ version: 1, setup: [{ name: "Step", command: sleep, timeoutSeconds: 120 }] }));
+    git(app, "add", ".wollipog.json");
+    git(app, "commit", "--quiet", "-m", "the session's own commit");
+    const tip = git(app, "rev-parse", "HEAD");
+    git(app, "checkout", "--quiet", "main");
+
+    const starting = manager.start({ sessionId, workspaceId: "app", workspacePath: realpathSync(app), agentId: "claude-code", command: "claude-code",
+      args: [], env: {}, useWorktree: true, driver: "claude-code", context: { kind: "native" } }).catch(() => undefined);
+    const cards = () => store.readEvents(sessionId).map((event) => event.payload).filter((payload) => payload.kind === "permission_request");
+    await waitFor(() => store.has(sessionId) && cards().length > 0, "the remade worktree's setup did not ask for trust");
+    const worktrees = () => git(app, "worktree", "list", "--porcelain").split("\n").filter((line) => line.startsWith("worktree ")).length;
+    assert.equal(worktrees(), 2, "the launch made a worktree on that branch");
+    // Stopped while trust is open: the launch loses, and rolls back what it made.
+    manager.stop(sessionId);
+    await starting;
+    await waitFor(() => worktrees() === 1, "the launch did not give back its worktree");
+    assert.equal(git(app, "rev-parse", `refs/heads/agent/${sessionId}`), tip, "the branch and its commit stay");
+    assert.ok(git(app, "reflog", "show", "--format=%H", `refs/heads/agent/${sessionId}`).includes(tip), "and so does its reflog");
+  } finally {
+    manager.shutdownAll();
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a forced removal of an unchanged worktree still happens, and reports itself", async () => {
   await withSession("removal-reported", async (h) => {
     const { record, removal } = await stuckProvedRollback(h, { setup: [
