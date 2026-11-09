@@ -1088,26 +1088,23 @@ test("a rollback snapshot matches only while nothing at all has changed, whateve
   }
 });
 
-test("a symlink in the admin directory counts: adding one, or pointing it elsewhere, is a change", { skip: !haveGit() || process.platform === "win32" }, async () => {
+test("anything in the admin directory that cannot be read as a file proves nothing: no snapshot, and no answer", { skip: !haveGit() || process.platform === "win32" }, async () => {
   const fixture = staleMarkerFixture("rollback-symlink");
   try {
     const options = { dataDir: fixture.dataDir };
     const { path } = await createRequestedWorktree(fixture.repo, "s_link", { baseRef: "HEAD", branch: "fix/link" }, options);
     const gitDir = execFileSync("git", ["-C", path, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" }).trim();
     const before = await captureRollbackSnapshot(path, options);
-    symlinkSync("/nowhere/one", join(gitDir, "recovery-link"));
-    assert.equal((await worktreeRollbackWork(path, before!, options)).state, "changed");
-    const linked = await captureRollbackSnapshot(path, options);
-    assert.deepEqual(await worktreeRollbackWork(path, linked!, options), { state: "unchanged" });
-    rmSync(join(gitDir, "recovery-link"));
-    symlinkSync("/nowhere/two", join(gitDir, "recovery-link"));
-    assert.equal((await worktreeRollbackWork(path, linked!, options)).state, "changed");
-    rmSync(join(gitDir, "recovery-link"));
-
-    // Something that cannot be read as a file proves nothing, so it is no snapshot and no answer.
-    execFileSync("mkfifo", [join(gitDir, "a-pipe")]);
-    await assert.rejects(captureRollbackSnapshot(path, options), /cannot be read as a file/u);
-    assert.deepEqual(await worktreeRollbackWork(path, before!, options), { state: "unavailable" });
+    assert.ok(before, "Git puts nothing like that there itself, so an ordinary worktree still has a snapshot");
+    for (const plant of [
+      () => symlinkSync("/nowhere/one", join(gitDir, "something")),
+      () => execFileSync("mkfifo", [join(gitDir, "something")]),
+    ]) {
+      plant();
+      await assert.rejects(captureRollbackSnapshot(path, options), /cannot be read as a file/u);
+      assert.deepEqual(await worktreeRollbackWork(path, before!, options), { state: "unavailable" });
+      rmSync(join(gitDir, "something"));
+    }
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -1132,7 +1129,24 @@ test("an admin directory that cannot be read whole gives no snapshot and no answ
 });
 
 // The WSL form of that digest cannot run here without a distro, but the script itself is plain sh.
-test("the digest script fails when it cannot read something, covers links, and flags what it cannot read as a file", { skip: !haveGit() || process.platform === "win32" }, () => {
+test("a file's name and contents cannot be traded for another's without changing the snapshot", { skip: !haveGit() || process.platform === "win32" }, async () => {
+  const fixture = staleMarkerFixture("rollback-collision");
+  try {
+    const options = { dataDir: fixture.dataDir };
+    const { path } = await createRequestedWorktree(fixture.repo, "s_collide", { baseRef: "HEAD", branch: "fix/collide" }, options);
+    const gitDir = execFileSync("git", ["-C", path, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" }).trim();
+    writeFileSync(join(gitDir, "a"), "1\u0000file b\u00002");
+    const first = await captureRollbackSnapshot(path, options);
+    // The same bytes in a row, if a digest ran names and contents together: one file, or two.
+    writeFileSync(join(gitDir, "a"), "1");
+    writeFileSync(join(gitDir, "b"), "2");
+    assert.equal((await worktreeRollbackWork(path, first!, options)).state, "changed");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("the digest script fails when it cannot read something, and flags what it cannot read as a file", { skip: !haveGit() || process.platform === "win32" }, () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-digest-script-")));
   const listing = () => execFileSync("sh", ["-c", ADMIN_DIGEST_LISTING, "sh", root], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   try {
@@ -1145,16 +1159,22 @@ test("the digest script fails when it cannot read something, covers links, and f
     writeFileSync(join(root, "refs", "saved"), "changed\n");
     const edited = digestAdminListing(listing());
     assert.notEqual(edited, first, "contents count");
-    symlinkSync("/nowhere/one", join(root, "link"));
-    const linked = digestAdminListing(listing());
-    assert.notEqual(linked, edited, "a link counts");
-    rmSync(join(root, "link"));
-    symlinkSync("/nowhere/two", join(root, "link"));
-    assert.notEqual(digestAdminListing(listing()), linked, "and where it points");
-    rmSync(join(root, "link"));
+    writeFileSync(join(root, "a b"), "same contents\n");
+    const spaced = digestAdminListing(listing());
+    rmSync(join(root, "a b"));
+    writeFileSync(join(root, "a"), "same contents\n");
+    assert.notEqual(digestAdminListing(listing()), spaced, "names count, whatever they hold");
+    rmSync(join(root, "a"));
 
+    // Round 7's collision: `a b` to `c`, and `a` to `b c`. A link is no longer described at all.
+    symlinkSync("c", join(root, "a b"));
+    assert.throws(() => digestAdminListing(listing()), /cannot be read as a file/u, "a link is no proof");
+    rmSync(join(root, "a b"));
+    symlinkSync("b c", join(root, "a"));
+    assert.throws(() => digestAdminListing(listing()), /cannot be read as a file/u);
+    rmSync(join(root, "a"));
     execFileSync("mkfifo", [join(root, "pipe")]);
-    assert.throws(() => digestAdminListing(listing()), /cannot be read as a file/u, "what it cannot read is no proof");
+    assert.throws(() => digestAdminListing(listing()), /cannot be read as a file/u, "and neither is anything else that is not a file");
     rmSync(join(root, "pipe"));
 
     if (process.getuid?.() !== 0) {

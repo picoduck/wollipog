@@ -15,7 +15,6 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
-  readlinkSync,
   readdirSync,
   realpathSync,
   renameSync,
@@ -3024,8 +3023,7 @@ export async function worktreeCheckoutNeverFinished(path: string, options: Workt
 
 /** For a context with no Node of its own. Each `find` exits non-zero if it cannot read a directory or
  * a file, so nothing is ever left out of the listing unnoticed. Exported for tests. */
-export const ADMIN_DIGEST_LISTING = 'cd "$1" && find . -type f -exec sha256sum -- {} + && ' +
-  'find . -type l -printf "link %p %l\\n" && find . ! -type f ! -type d ! -type l -printf "other %p\\n"';
+export const ADMIN_DIGEST_LISTING = 'cd "$1" && find . -type f -exec sha256sum -- {} + && find . ! -type f ! -type d -printf "other %p\\n"';
 
 /** Exported for tests. */
 export function digestAdminListing(listing: string): string {
@@ -3034,8 +3032,11 @@ export function digestAdminListing(listing: string): string {
   return createHash("sha256").update(lines.join("\n")).digest("hex");
 }
 
-/** A digest of everything in a worktree's own Git admin directory, by path and content, or target for
- * a link. Throws if any of it cannot be read: part of a directory proves nothing about the whole. */
+/** A digest of everything in a worktree's own Git admin directory: each file's path and its own hash,
+ * so one file's bytes cannot stand in for another's name. Throws if any of it cannot be read, or is
+ * anything but a file or directory, like a link. Git puts none there, and describing one exactly is
+ * more rule than it is worth: part of a directory proves nothing about the whole, so that worktree is
+ * kept. */
 async function adminDirectoryDigest(context: AgentContext, gitDir: string): Promise<string> {
   if (context.kind === "wsl") {
     return digestAdminListing((await runContextCommand(context, "sh", ["-c", ADMIN_DIGEST_LISTING, "sh", gitDir], { cwd: "/", timeoutMs: 30_000 })).stdout);
@@ -3046,8 +3047,7 @@ async function adminDirectoryDigest(context: AgentContext, gitDir: string): Prom
       const relative = `${prefix}${entry.name}`;
       const full = join(directory, entry.name);
       if (entry.isDirectory()) walk(full, `${relative}/`);
-      else if (entry.isFile()) hash.update(`file ${relative}\0`).update(readFileSync(full)).update("\0");
-      else if (entry.isSymbolicLink()) hash.update(`link ${relative}\0${readlinkSync(full)}\0`);
+      else if (entry.isFile()) hash.update(`${relative}\0${createHash("sha256").update(readFileSync(full)).digest("hex")}\0`);
       else throw new Error("the admin directory holds something that cannot be read as a file");
     }
   };
