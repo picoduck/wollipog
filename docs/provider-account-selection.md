@@ -99,7 +99,7 @@ the saved default nor the saved order. `GET /api/runners/:id/provider-account-se
 launch's own code, with an `enforcement` of `enforced`, `machine_offline` or
 `runner_update_required`. A preview promises nothing: every launch resolves again.
 
-- A runner below protocol 333 can't recheck a choice, so Priority Order is refused for it, both when
+- A runner below protocol 334 can't recheck a choice, so Priority Order is refused for it, both when
   saving and when launching. Explicit accounts and Default Account keep working.
 - An offline machine whose last-known runner supports Priority Order can save it. The preview reports
   `machine_offline` until it reconnects, and no session can start there meanwhile.

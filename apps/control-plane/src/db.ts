@@ -481,7 +481,7 @@ function safeProviderAccounts(value: RunnerView["providerAccounts"]): NonNullabl
       provider: account.provider,
       authStatus: account.authStatus,
       ...(account.profile ? { profile: { id: account.profile.id, access: account.profile.access } } : {}),
-      // Protocol v333 (#4353). An unrecognized value reads as unverified, which selection passes over.
+      // Protocol v334 (#4353). An unrecognized value reads as unverified, which selection passes over.
       ...(account.billing === "subscription" || account.billing === "api" || account.billing === "unknown"
         ? { billing: account.billing } : {}),
       ...(Number.isSafeInteger(account.selectionCooldownUntil) && account.selectionCooldownUntil! > 0

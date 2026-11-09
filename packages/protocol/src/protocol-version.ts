@@ -1357,12 +1357,12 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   //      Absent kind retains legacy approval semantics; older peers refuse new question requests.
   332,
   // v333 slot
-  // 333: Per-provider account selection policy (#4353). A runner reports each account's verified
-  //      billing and usage-limit cooldown, and rechecks a policy-chosen account before binding a new
-  //      session. Priority Order is refused on a runner below v333, which could not recheck it, and
-  //      its explicit account choices keep working. Older clients cannot overwrite a non-fixed policy.
-  333,
   // v334 slot
+  // 334: Per-provider account selection policy (#4353). A runner reports each account's verified
+  //      billing and usage-limit cooldown, and rechecks a policy-chosen account before binding a new
+  //      session. Priority Order is refused on a runner below v334, which could not recheck it, and
+  //      its explicit account choices keep working. Older clients cannot overwrite a non-fixed policy.
+  334,
   // v335 slot
   // v336 slot
   // v337 slot

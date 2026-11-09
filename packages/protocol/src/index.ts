@@ -295,9 +295,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v180 current-identity inspection and account selection from an Authentication Required card. */
   providerAuthenticationAccountRecovery: 180,
   providerAccounts: 170,
-  /** v333 (#4353): a runner reports each account's billing and cooldown and rechecks a policy-chosen
+  /** v334 (#4353): a runner reports each account's billing and cooldown and rechecks a policy-chosen
    * account at launch, so the control plane may enforce a non-fixed account selection policy. */
-  providerAccountSelectionPolicy: 333,
+  providerAccountSelectionPolicy: 334,
   providerLogin: 171,
   providerAccountRemoval: 188,
   accountScopedAgentSkills: 172,
@@ -2998,10 +2998,10 @@ export interface ProviderAccountDefinition {
    * plane may use it. Absent means a legacy, unadopted HOME. Older control planes never receive
    * it, nor any profile-bearing account they are not granted. */
   profile?: ProviderAccountProfileView;
-  /** Protocol v333 (#4353): how this account's provider status check says it bills. Only
+  /** Protocol v334 (#4353): how this account's provider status check says it bills. Only
    * `subscription` qualifies for automatic selection; absent or `unknown` is unverified. */
   billing?: import("./provider-account-selection.js").ProviderAccountBilling;
-  /** Protocol v333 (#4353): an automatic switch left this account at a usage limit, so automatic
+  /** Protocol v334 (#4353): an automatic switch left this account at a usage limit, so automatic
    * selection passes over it until this time (epoch milliseconds). */
   selectionCooldownUntil?: number;
 }
@@ -8287,7 +8287,7 @@ export interface SessionView {
   providerAccountLabel?: string;
   /** True when the current binding was chosen by the Machine's opt-in automatic policy. */
   providerAccountAutomaticallySelected?: boolean;
-  /** Protocol v333 (#4353): why this session started on its account. Fixed at creation, so a later
+  /** Protocol v334 (#4353): why this session started on its account. Fixed at creation, so a later
    * policy change or usage-limit switch leaves it describing the launch. Names no account. */
   providerAccountSelection?: import("./provider-account-selection.js").ProviderAccountSelectionRecord;
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView;
@@ -10629,7 +10629,7 @@ export interface SessionLaunchSpec {
   campaignBudgetDispatch?: import("./campaign-budget.js").CampaignBudgetDispatch;
   artifactUploads?: ArtifactUploadPreference;
   projectMemory?: SessionProjectMemory;
-  /** Protocol v333 (#4353): why the control plane chose `providerAccountId`. Never names an account. */
+  /** Protocol v334 (#4353): why the control plane chose `providerAccountId`. Never names an account. */
   providerAccountSelection?: import("./provider-account-selection.js").ProviderAccountSelectionRecord;
   sessionId: string;
   /** Opaque identity used to prove that an ambiguous replacement start reached the runner. */
