@@ -124,6 +124,9 @@ export interface RequestedWorktreeOptions extends WorktreeOptions {
   /** Called with no await before it, just before Git makes a NEW worktree, and never for one that
    * already exists, so a caller can claim and journal it first (#4209). A throw creates nothing. */
   reserveWorktree?: (path: string, branch: string) => void;
+  /** Awaited as soon as Git has made the worktree `reserveWorktree` announced, so what the caller
+   * reserved can be tied to the worktree that resulted before anything runs in it. */
+  materializedWorktree?: (path: string) => Promise<void>;
 }
 
 export interface WorktreeCleanupRecord {
@@ -181,6 +184,14 @@ export interface WorktreeCleanupRecord {
   processesTerminatedAt?: number;
   /** Durable proof that removal completed even if port/history finalization must retry. */
   worktreeRemovedAt?: number;
+  /** (#4209) The token stamped in the worktree an auxiliary creation rollback made. Absent until Git
+   * has made it: a rollback whose proof does not hold at its path never removes anything there. */
+  rollbackProof?: string;
+  /** (#4209) Failed attempts at an auxiliary creation rollback, when the schedule next tries it, and
+   * when the schedule gave up. A restart or a new request for the worktree still tries it. */
+  rollbackAttempts?: number;
+  rollbackRetryAt?: number;
+  rollbackGaveUpAt?: number;
   createdAt?: number;
   completedAt?: number;
   /** Forge-verified head used only for safe cleanup when the branch upstream disappeared. */
@@ -775,7 +786,8 @@ export async function isAutomaticSessionWorktree(
     await sessionPath(repoPath, sessionId, options, false));
 }
 
-function requestedSlot(value: string): string {
+/** The last path segment of a requested worktree: a hash of its branch name. Exported for tests. */
+export function requestedSlot(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 16);
 }
 
@@ -909,6 +921,7 @@ export async function createRequestedWorktree(
   options.reserveWorktree?.(path, branch);
   await removeExternalDirectory(context, repoPath, path, options);
   await command(context, repoPath, ["worktree", "add", "-b", branch, path, baseCommit], 120_000);
+  await options.materializedWorktree?.(path);
   return { path, branch, baseRef, baseCommit, attached: false, created: true };
 }
 
@@ -1026,6 +1039,7 @@ export async function createRecoveredBranchWorktree(
     await command(context, repoPath, ["fetch", "--no-tags", remote, `+${branchRef}:${trackingRef}`], 120_000);
     await command(context, repoPath, ["worktree", "add", "--track", "-b", branch, path, trackingRef], 120_000);
   }
+  await options.materializedWorktree?.(path);
   const head = (await command(context, path, ["rev-parse", "HEAD"])).trim();
   if (!/^[a-f0-9]{40,64}$/u.test(head)) throw new Error("the recovered branch did not resolve to a commit");
   return { path, branch, baseRef: branch, baseCommit: head, attached: false, created: true };
@@ -2894,6 +2908,57 @@ export async function removeWorktree(repoPath: string, handle: WorktreeHandle, o
   if (failures.length) throw new Error(`worktree cleanup incomplete (${failures.join("; ")})`);
 }
 
+const ROLLBACK_PROOF_REF_PREFIX = "refs/worktree/wollipog-rollback";
+
+/** Tie a creation rollback to the exact worktree it made (#4209), in that worktree's own Git admin
+ * directory: a per-worktree ref exists only there, and goes with the registration. A worktree made
+ * later on the same path is a new registration without it, whatever its branch or inode. */
+export async function stampWorktreeRollbackProof(path: string, proof: string, options: WorktreeOptions = {}): Promise<void> {
+  await command(options.context ?? nativeContext, path, ["update-ref", `${ROLLBACK_PROOF_REF_PREFIX}/${proof}`, "HEAD"]);
+}
+
+/** Best effort: a proof left behind names a rollback that no longer exists, so it proves nothing. */
+export async function clearWorktreeRollbackProof(path: string, proof: string, options: WorktreeOptions = {}): Promise<void> {
+  await command(options.context ?? nativeContext, path, ["update-ref", "-d", `${ROLLBACK_PROOF_REF_PREFIX}/${proof}`]);
+}
+
+/** What a creation rollback finds at its path:
+ * - `proved`: the worktree it made, so it may remove it;
+ * - `absent`: nothing;
+ * - `mismatch`: something it did not make, or that nothing proves it made. Never removed;
+ * - `unavailable`: Git could not say, so nothing can be concluded yet. */
+export type WorktreeRollbackProofState = "proved" | "absent" | "mismatch" | "unavailable";
+
+export async function worktreeRollbackProofState(
+  repoPath: string,
+  path: string,
+  proof: string | undefined,
+  options: WorktreeOptions = {},
+): Promise<WorktreeRollbackProofState> {
+  const context = options.context ?? nativeContext;
+  try {
+    if (await removalPathIdentity(context, path) === null) return "absent";
+  } catch {
+    return "unavailable";
+  }
+  if (!proof) return "mismatch";
+  if (nativeRepositoryPathIsUnavailable(context, repoPath)) return "unavailable";
+  const ref = `${ROLLBACK_PROOF_REF_PREFIX}/${proof}`;
+  try {
+    return (await command(context, path, ["for-each-ref", "--format=%(refname)", ref])).trim() === ref ? "proved" : "mismatch";
+  } catch (error) {
+    // The directory is no repository any more (its registration went, say). Nothing there is proved.
+    return isMissingGitRepositoryError(error) ? "mismatch" : "unavailable";
+  }
+}
+
+/** A linked worktree's directory outlived its Git registration: `git worktree prune` ran while a
+ * volume was away, say. Nothing distinguishes what is in it from a person's uncommitted work. */
+function staleWorktreeRefusal(path: string): Error {
+  return new Error(`the directory ${path} holds a Git worktree that is no longer registered, perhaps with uncommitted work, so it ` +
+    "was left as it is. Move anything you want to keep out of it, delete the directory, then try again");
+}
+
 async function removeExternalDirectory(
   context: AgentContext,
   repoPath: string,
@@ -2919,7 +2984,8 @@ async function removeExternalDirectory(
           'elif [ -f "$marker" ]; then gitdir=$(sed -n "s/^gitdir: //p" "$marker"); ' +
           'if [ -z "$gitdir" ]; then printf registered; else case "$gitdir" in /*) ;; *) gitdir="$1/$gitdir" ;; esac; ' +
           'if [ -e "$gitdir" ] || [ -L "$gitdir" ]; then printf registered; ' +
-          'else case "$gitdir" in "$2"/worktrees/*) printf stale ;; *) printf registered ;; esac; fi; fi; fi',
+          'else case "$gitdir" in "$2"/worktrees/*) if [ "$(ls -A "$1")" = ".git" ]; then printf stale; else printf stale-content; fi ;; ' +
+          '*) printf registered ;; esac; fi; fi; fi',
         "sh",
         path,
         commonDir,
@@ -2930,6 +2996,7 @@ async function removeExternalDirectory(
       throw new Error("refusing to recursively remove a path that may still be a registered worktree");
     }
     if (marker.stdout === "absent") return;
+    if (marker.stdout === "stale-content") throw staleWorktreeRefusal(path);
     if (marker.stdout === "stale") {
       await runContextCommand(context, "rm", ["-rf", "--", path], { cwd: "/", timeoutMs: 120_000 });
     } else {
@@ -2973,6 +3040,9 @@ async function removeExternalDirectory(
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   if (staleMarker) {
+    // Only the marker itself is proof of nothing to lose. Anything beside it may be someone's work,
+    // whichever caller asked and whether or not its branch still exists (#4209).
+    if (readdirSync(absolutePath).some((name) => name !== ".git")) throw staleWorktreeRefusal(path);
     await rm(absolutePath, { recursive: true, force: true });
     return;
   }
@@ -2981,7 +3051,8 @@ async function removeExternalDirectory(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
       throw new Error(
-        `refusing to recursively remove an unproved runner-owned path: ${(error as Error).message}`,
+        `refusing to recursively remove an unproved runner-owned path: ${(error as Error).message}. ` +
+        `Move or delete ${path} if it is not needed, then try again`,
       );
     }
   }

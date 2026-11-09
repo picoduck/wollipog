@@ -160,6 +160,17 @@ export class WorktreePortAllocator {
     });
   }
 
+  /** The block an existing worktree can really use before a session commits to it (#4209): the one
+   * its view names, or a new one when another owner took that block or this owner holds another.
+   * Throws only when no block can be had at all. */
+  revalidate(owner: string, preferred: WorktreePortBlock): { block: WorktreePortBlock; replaced: boolean } {
+    try {
+      return { block: this.allocate(owner, preferred), replaced: false };
+    } catch {
+      return { block: this.allocate(owner), replaced: true };
+    }
+  }
+
   release(owner: string): boolean {
     return this.withMutation(() => {
       const allocation = this.allocations.get(owner);

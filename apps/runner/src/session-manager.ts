@@ -299,6 +299,9 @@ import {
   createWorktree,
   createRequestedWorktree,
   createRecoveredBranchWorktree,
+  clearWorktreeRollbackProof,
+  stampWorktreeRollbackProof,
+  worktreeRollbackProofState,
   releaseRecoveredWorktree,
   attachRequestedWorktree,
   fetchRemoteDefaultBase,
@@ -1233,6 +1236,28 @@ const CHECKPOINT_REF_MAINTENANCE_CONCURRENCY = 4;
 const ORPHAN_RECOVERY_RETRY_MS = 30_000;
 /** (#4138) Why a moved session waits: the runner restarted between the move and its relaunch. */
 const INTERRUPTED_MOVE_REASON = "The session moved there, but the runner restarted before it continued the task.";
+
+/** (#4209) A stuck creation rollback is retried with these delays, doubling, about eleven hours in
+ * all, rather than only at the next runner start or request. */
+const WORKTREE_ROLLBACK_RETRY_BASE_MS = WORKTREE_PR_RECONCILIATION_MS;
+const WORKTREE_ROLLBACK_MAX_ATTEMPTS = 8;
+
+/** What the agent reads first when a Location switch brought it back to its own earlier worktree and
+ * that worktree is not quite as it was (#4209). Exported for tests. */
+export function returningWorktreeNotice(
+  path: string,
+  { setupUnavailable, portBlock }: { setupUnavailable?: boolean; portBlock?: WorktreePortBlock },
+): string {
+  return [
+    "[Wollipog Returning Worktree]",
+    `You are back in your own earlier worktree, ${JSON.stringify(path)}, with its files as you left them.`,
+    ...(setupUnavailable ? ["Its worktree setup never finished, and a worktree that already exists does not run setup again, so " +
+      "its setup environment is not available. Run any step you need yourself."] : []),
+    ...(portBlock ? [`Another session now holds the ports it had, so its port block changed to ${portBlock.start}-${portBlock.end}. ` +
+      "Anything in it that names the old ports needs updating."] : []),
+    "[End Wollipog Returning Worktree]",
+  ].join("\n");
+}
 
 /** What the agent reads first after a Location switch continued in an existing worktree (#4138):
  * the runner's own facts, framed as Wollipog's, so a routine reset or clean does not discard work
@@ -3440,6 +3465,11 @@ export class SessionManager {
     if (this.store.readMeta(meta.sessionId)?.providerHistoryBlock) {
       throw new Error("this session's provider conversation is quarantined — recover it before changing worktrees");
     }
+    // A worktree a rollback still means to remove is never handed to the session: the rollback is
+    // proved against this very worktree, so it would take it back from under whoever selected it.
+    const rollback = this.cleanupJournal.list().find((record) => this.isAuxiliaryRollback(record) &&
+      record.sessionId === meta.sessionId && sameWorktreePath(meta.context, record.worktreePath, worktree.path));
+    if (rollback) throw new Error(this.pendingRemovalRefusal(rollback, worktree.branch));
     // A request can arrive during the current provider turn. Anchor that turn's remaining diff at
     // the newly selected tree so capture/checkpoint logic never compares two different worktrees.
     const baseTree = await withGitExecutionContext(meta.context, () => captureWorktreeTree(worktree.path));
@@ -3584,6 +3614,8 @@ export class SessionManager {
         allowedProjectPaths: this.configuredProjectPaths,
         onProgress: report,
       };
+      await this.refuseWhileRollbackPending(meta, (record) => record.branch === request.branch &&
+        sameWorktreePath(meta.context, record.repoPath, meta.repoPath));
       // When no base is chosen we ask the remote, and that answer is authoritative for BOTH the
       // base ref and the repository's default branch. `git fetch` never refreshes the locally
       // tracked remote HEAD, so preferring this avoids stamping a default that moved after clone.
@@ -3660,6 +3692,13 @@ export class SessionManager {
               "force",
             );
             cleanup.auxiliaryWorktreeRollback = true;
+            // This attempt's own create made the worktree, so this is where that gets on record. If
+            // Git cannot record it, the rollback proves nothing and removes nothing.
+            const proof = randomUUID();
+            await stampWorktreeRollbackProof(worktree.path, proof, options).then(
+              () => { cleanup.rollbackProof = proof; },
+              (stampError) => this.log(`requested worktree rollback for ${boundedSessionIdForLog(sessionId)} has no proof: ${errText(stampError)}`),
+            );
             this.cleanupJournal.add(cleanup);
             await this.reapCreationRollback(cleanup, cleanupMeta);
             this.forgetTransientWorktreeSetupState(sessionId, worktree);
@@ -4590,6 +4629,12 @@ export class SessionManager {
       record.processesTerminatedAt = Date.now();
       this.cleanupJournal.add(record);
       await this.runCleanupTeardown(record, meta);
+      // Those steps can take a long time, and a forced removal comes next. Prove it again last.
+      if (this.isAuxiliaryRollback(record)) {
+        const state = await worktreeRollbackProofState(record.repoPath, record.worktreePath, record.rollbackProof,
+          { context: record.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash });
+        if (state !== "proved" && state !== "absent") throw new Error("the worktree is no longer the one this rollback made");
+      }
     };
     // A branch that existed before this worktree (#4138) is never deleted, and its worktree is
     // removed only when nothing in it changed; otherwise the worktree stays for its person.
@@ -5449,7 +5494,7 @@ export class SessionManager {
   private async replayDeferredWorktreeRetirements(): Promise<void> {
     for (const record of this.cleanupJournal.list()) {
       if (this.shuttingDown) return;
-      if (record.removalMode !== "safe") continue;
+      if (record.removalMode !== "safe" && !this.rollbackRetryDue(record)) continue;
       try {
         await this.reapWorktree(record);
       } catch (error) {
@@ -14821,9 +14866,14 @@ export class SessionManager {
     return undefined;
   }
 
-  /** A rollback an earlier attempt of this session left for this branch's worktree, retried once
-   * now, in case the runner has not got to it or what blocked it has passed. Returns what is still
-   * pending: no session moves into a worktree a recorded removal is about to take (#4209). */
+  /** A removal an earlier attempt or request of this session left for this branch's worktree, retried
+   * once now, in case the runner has not got to it or what blocked it has passed. Returns what is
+   * still pending: no session moves into a worktree a recorded removal is about to take (#4209).
+   *
+   * A safe retirement is different. It was asked for while the session worked here, and stopped at
+   * something like a dirty tree. The session left, so that retirement can no longer finish, and the
+   * session coming back to its own worktree overrides it. It keeps every file: dropping the record
+   * removes nothing, and this is what keeps a safe record from refusing that return forever. */
   private async pendingWorktreeRemoval(
     sessionId: string,
     context: AgentContext,
@@ -14833,8 +14883,77 @@ export class SessionManager {
     const find = () => this.cleanupJournal.list().find((record) => record.sessionId === sessionId &&
       record.branch === branch && sameWorktreePath(context, record.repoPath, repoPath));
     const pending = find();
-    if (pending?.trigger === "creation_rollback" && pending.auxiliaryWorktreeRollback) await this.reapWorktree(pending);
+    if (pending && this.isAuxiliaryRollback(pending)) await this.reapWorktree(pending);
+    else if (pending?.removalMode === "safe") {
+      await this.runWorktreeOperation(sessionId, async () => {
+        if (!this.cleanupJournal.list().includes(pending)) return;
+        if (pending.worktreeRemovedAt) await this.reapLiveSafeWorktree(pending, true);
+        else this.dropOvertakenRetirement(pending);
+      });
+    }
     return find();
+  }
+
+  /** Why the session cannot have a worktree yet, in the words the person acts on. */
+  private pendingRemovalRefusal(record: WorktreeCleanupRecord, branch: string): string {
+    return `the runner is still removing this session's earlier worktree for branch ${branch} at ${record.worktreePath}; ` +
+      (record.rollbackGaveUpAt
+        ? "it has stopped trying on its own, so check what is still using that directory, then ask again"
+        : "ask again once that finishes");
+  }
+
+  private isAuxiliaryRollback(record: WorktreeCleanupRecord): boolean {
+    return record.trigger === "creation_rollback" && record.auxiliaryWorktreeRollback === true;
+  }
+
+  /** Whether the periodic sweep owes this rollback an attempt: it backs off, and it stops. Giving up
+   * ends only the schedule, since a restart or a new request for the worktree still tries it. */
+  private rollbackRetryDue(record: WorktreeCleanupRecord): boolean {
+    return this.isAuxiliaryRollback(record) && !record.rollbackGaveUpAt &&
+      (record.rollbackRetryAt ?? 0) <= this.worktreePullRequestDiscoveryNow();
+  }
+
+  /** Count one failed rollback attempt and schedule the next, saying so once when the schedule ends. */
+  private noteRollbackFailure(record: WorktreeCleanupRecord): void {
+    if (!this.cleanupJournal.list().includes(record)) return;
+    const now = this.worktreePullRequestDiscoveryNow();
+    const attempts = (record.rollbackAttempts ?? 0) + 1;
+    record.rollbackAttempts = attempts;
+    record.rollbackRetryAt = now + WORKTREE_ROLLBACK_RETRY_BASE_MS * 2 ** (attempts - 1);
+    const givingUp = attempts >= WORKTREE_ROLLBACK_MAX_ATTEMPTS && !record.rollbackGaveUpAt;
+    if (givingUp) record.rollbackGaveUpAt = now;
+    this.cleanupJournal.add(record);
+    if (givingUp && this.store.has(record.sessionId)) {
+      this.emitEvent(record.sessionId, { kind: "error", message: `The worktree at ${record.worktreePath}, left by a Location switch or ` +
+        `worktree request that failed, could not be removed after ${attempts} attempts, so the runner has stopped trying on its own. ` +
+        "Check what is still using it. The runner tries once more when it next starts, or when that worktree is asked for again." });
+    }
+  }
+
+  /** Refuse a worktree a rollback still means to remove, after one more try at the rollback. Callers
+   * hold the session's worktree lane. */
+  private async refuseWhileRollbackPending(meta: SessionMeta, matches: (record: WorktreeCleanupRecord) => boolean): Promise<void> {
+    const find = () => this.cleanupJournal.list().find((record) => record.sessionId === meta.sessionId &&
+      this.isAuxiliaryRollback(record) && matches(record));
+    const pending = find();
+    if (!pending) return;
+    await this.reapAuxiliaryRollbackLocked(pending);
+    const still = find();
+    if (still) throw new Error(this.pendingRemovalRefusal(still, still.branch ?? meta.worktreeBranch ?? "this worktree"));
+  }
+
+  /** A safe retirement whose session left the Location before it could finish. It can never finish
+   * now, because its session has no worktree there to retire. Nothing is removed: the worktree stays
+   * as this session's own from an earlier Location, which keeps whatever deferred the retirement. */
+  private dropOvertakenRetirement(record: WorktreeCleanupRecord): void {
+    if (!this.removeWorktreeCleanupRecord(record, true)) return;
+    if (record.trigger === "archive_retirement") {
+      this.send({ type: "session_worktree_retirement_refused", sessionId: record.sessionId, worktreeId: record.worktreeId ?? "",
+        path: record.worktreePath, reason: "the session moved to another Location before the worktree could be retired" });
+    }
+    this.emitEvent(record.sessionId, { kind: "error", message: `The retirement of worktree ${record.worktreePath} did not finish before ` +
+      "this session left its Location, and it cannot finish now. The worktree stays, with everything in it. Switch back and " +
+      "discard it if you still want it gone." });
   }
 
   /** Whether a session now works in, or owns, the worktree an auxiliary creation rollback names. A
@@ -14932,24 +15051,38 @@ export class SessionManager {
         this.log(`session ${sessionId} could not release its unused Location switch worktree: ${errText(error)}`);
       }
       if (released()) return undefined;
-      return `The target worktree could not be removed and is still at ${record.worktreePath}. The runner tries again when it ` +
-        "next starts or when this switch is asked for again.";
+      return `The target worktree could not be removed and is still at ${record.worktreePath}. The runner tries again on a ` +
+        "schedule, when it next starts, and when this switch is asked for again.";
     };
+    /** A release that could not finish has nobody else to tell when no failure is being recorded. */
+    const reportKept = (kept: string | undefined): void => {
+      if (kept && this.store.has(sessionId)) this.emitEvent(sessionId, { kind: "error", message: kept });
+    };
+    // Written the moment Git has made the worktree and before anything runs in it, so a rollback that
+    // finds this token is looking at what this attempt made, and one that does not never removes it.
+    const materializedWorktree = async (path: string): Promise<void> => {
+      const { record } = reservation;
+      if (!record || !sameWorktreePath(meta.context, record.worktreePath, path)) return;
+      const proof = randomUUID();
+      await stampWorktreeRollbackProof(path, proof, options);
+      record.rollbackProof = proof;
+      this.cleanupJournal.add(record);
+    };
+    // What the session is told about a worktree it comes back to, if it is not quite as it was.
+    let returning: { setupUnavailable?: boolean; portBlock?: WorktreePortBlock } | undefined;
     try {
       const repoPath = await verifyLocationSwitchTarget(meta.context, this.sharedDirectoryWorkspaces,
         { workspaceId: pending.workspaceId, workspacePath: pending.repoPath, repository: pending.repository });
       if (repoPath !== pending.repoPath) throw new LocationSwitchRefusal("path_changed");
       const targetBranch = pending.recoverBranch ?? `agent/${sessionId}`;
       const removal = await this.pendingWorktreeRemoval(sessionId, meta.context, repoPath, targetBranch);
-      if (removal) {
-        throw new Error(`the runner is still removing this session's earlier worktree for branch ${targetBranch} at ` +
-          `${removal.worktreePath}; ask again once that finishes`);
-      }
+      if (removal) throw new Error(this.pendingRemovalRefusal(removal, targetBranch));
       const created: RecoveredBranchWorktree = pending.recoverBranch
         ? await createRecoveredBranchWorktree(repoPath, sessionId, pending.recoverBranch,
-          { ...options, reserveWorktree, holderOf: (path) => this.worktreeHolder(sessionId, meta.context, path) })
+          { ...options, reserveWorktree, materializedWorktree, holderOf: (path) => this.worktreeHolder(sessionId, meta.context, path) })
         : await createRequestedWorktree(repoPath, sessionId,
-          { baseRef: (await fetchRemoteDefaultBase(repoPath, options)).ref, branch: targetBranch }, { ...options, reserveWorktree });
+          { baseRef: (await fetchRemoteDefaultBase(repoPath, options)).ref, branch: targetBranch },
+          { ...options, reserveWorktree, materializedWorktree });
       reused = created.reusedInPlace;
       // Checked again and claimed with no await in between, so two switches never both take one
       // worktree while each is still verifying it.
@@ -14982,8 +15115,14 @@ export class SessionManager {
         this.cleanupJournal.add(reservation.record);
       }
       // This session's own worktree from when it last worked in this Location keeps what it had.
-      const earlier = !reused && !reservation.record ? (meta.locationHistory ?? []).flatMap((left) => left.worktrees)
+      const recorded = !reused && !reservation.record ? (meta.locationHistory ?? []).flatMap((left) => left.worktrees)
         .reverse().find((item) => sameWorktreePath(meta.context, item.path, created.path)) : undefined;
+      let earlier: SessionWorktreeView | undefined;
+      if (recorded) {
+        const settled = await this.settleReturningWorktree(sessionId, meta.context, repoPath, recorded);
+        earlier = settled.view;
+        if (settled.setupUnavailable || settled.portBlock) returning = settled;
+      }
       worktree = reused
         // An existing worktree is continued as it is and stays its owner's: attached, so nothing
         // ever sets it up, tears it down or removes it with this session.
@@ -15024,7 +15163,7 @@ export class SessionManager {
     // durable, so the session's next provider carries it out at its own turn boundary.
     if (!this.worktreeRebindCanProceed(sessionId, entry) || this.store.readMeta(sessionId)?.status === "stopped" ||
         this.store.readMeta(sessionId)?.pendingLocationSwitch?.occurrenceId !== pending.occurrenceId) {
-      await release();
+      reportKept(await release());
       const current = this.active.get(sessionId);
       if (current?.pendingLocationSwitch && !current.running) setImmediate(() => this.scheduleDrain(sessionId));
       return;
@@ -15073,10 +15212,14 @@ export class SessionManager {
           // Owed in the same write as the move, so a runner that stops before the relaunch still
           // continues the task in the new Location when it recovers.
           // A reused worktree's uncommitted changes are someone else's work, so the turn opens with
-          // the runner's own account of them, ahead of the control plane's continuation.
+          // the runner's own account of them, ahead of the control plane's continuation. So does
+          // anything about the session's own earlier worktree that is not as it left it.
           pendingLocationContinuation: { occurrenceId: pending.occurrenceId,
-            text: reused ? `${reusedWorktreeNotice(worktree.path, worktree.branch, reused.uncommittedChanges)}\n\n${pending.continuation}`
-              : pending.continuation,
+            text: [
+              ...(reused ? [reusedWorktreeNotice(worktree.path, worktree.branch, reused.uncommittedChanges)] : []),
+              ...(returning ? [returningWorktreeNotice(worktree.path, returning)] : []),
+              pending.continuation,
+            ].join("\n\n"),
             path: worktree.path,
             branch: worktree.branch, locationName: pending.locationName, repository: pending.repository },
         });
@@ -15086,7 +15229,15 @@ export class SessionManager {
           // records now goes on the session as usual. A crash before this line leaves a record that
           // replay drops, because the session now works there.
           this.detachedWorktreeSetups.delete(worktree);
-          if (reservation.record) this.removeWorktreeCleanupRecord(reservation.record);
+          if (reservation.record) {
+            this.removeWorktreeCleanupRecord(reservation.record);
+            const proof = reservation.record.rollbackProof;
+            if (proof) {
+              void clearWorktreeRollbackProof(worktree.path, proof, options).catch((error) => {
+                this.log(`session ${sessionId} left a spent rollback proof in its worktree: ${errText(error)}`);
+              });
+            }
+          }
         }
         return moved ?? undefined;
       },
@@ -15098,7 +15249,9 @@ export class SessionManager {
             `in the existing worktree ${worktree.path}, as it was` +
             (changes === undefined ? "." : changes === 0 ? ", with no uncommitted changes."
               : `, with its ${changes} uncommitted change${changes === 1 ? "" : "s"} kept.`)
-          : `Moved this session to Location "${pending.locationName}" (${pending.repository}), worktree ${worktree.branch}.` });
+          : `Moved this session to Location "${pending.locationName}" (${pending.repository}), worktree ${worktree.branch}.` +
+            (returning?.setupUnavailable ? " Its worktree setup never finished and did not run again, so its setup environment is not available." : "") +
+            (returning?.portBlock ? ` Its port block changed to ${returning.portBlock.start}-${returning.portBlock.end}.` : "") });
         this.queueLocationContinuation(sessionId, replacementEntry);
       },
     });
@@ -15107,7 +15260,12 @@ export class SessionManager {
       return;
     }
     if (result.status === "stopped" || result.status === "superseded") {
-      if (this.store.readMeta(sessionId)?.pendingLocationSwitch?.occurrenceId === pending.occurrenceId) await release();
+      // Whatever replaced or cleared the occurrence, a worktree this attempt made and never moved into
+      // is still its own to give back. One the move committed to is not, so that one stays.
+      const latest = this.store.readMeta(sessionId);
+      const committed = latest?.repoPath === pending.repoPath && !!latest.worktreePath &&
+        sameWorktreePath(latest.context, latest.worktreePath, worktree.path);
+      if (!committed) reportKept(await release());
       return;
     }
     const moved = this.store.readMeta(sessionId)?.repoPath === pending.repoPath;
@@ -15119,6 +15277,47 @@ export class SessionManager {
       : moved ? "the session moved, but its provider could not start in the new Location; send it a message to retry there"
       : "the provider could not resume in the new Location";
     this.failLocationSwitch(sessionId, entry, pending, reason, kept);
+  }
+
+  /** What a session's own earlier worktree really can be on its way back (#4209), settled before the
+   * move so nothing it finds can leave the session unable to launch afterwards.
+   *
+   * A worktree that already existed never runs setup again. Setup only stays on the row when it
+   * ended and its configuration still reads the same, because the relaunch then just restores its
+   * environment. Anything else would either run repository commands over the session's work or
+   * refuse the launch, so the row keeps no setup and the session is told what that means. That also
+   * ends Retry Setup for this row: running it over existing work is what this rule rules out.
+   *
+   * Its port block is confirmed, or replaced if another owner took it meanwhile. A throw means no
+   * block can be had at all, and it fails the switch while the session has not moved. */
+  private async settleReturningWorktree(
+    sessionId: string,
+    context: AgentContext,
+    repoPath: string,
+    recorded: SessionWorktreeView,
+  ): Promise<{ view: SessionWorktreeView; setupUnavailable?: boolean; portBlock?: WorktreePortBlock }> {
+    const view: SessionWorktreeView = { ...recorded };
+    const { setup, setupConfig } = recorded;
+    let keep = !setup && setupConfig?.status !== "invalid";
+    if (setup?.status === "completed" || setup?.status === "declined") {
+      try {
+        const loaded = recorded.baseCommit ? await loadWorktreeSetupConfig(context, repoPath, recorded.baseCommit) : null;
+        keep = loaded?.hash === setup.configHash;
+      } catch {
+        keep = false;
+      }
+    }
+    if (!keep) {
+      delete view.setup;
+      delete view.setupConfig;
+    }
+    let portBlock: WorktreePortBlock | undefined;
+    if (recorded.portBlock && recorded.source !== "attached") {
+      const settled = this.worktreePortAllocator.revalidate(this.worktreePortOwner(sessionId, recorded.id), recorded.portBlock);
+      view.portBlock = settled.block;
+      if (settled.replaced) portBlock = settled.block;
+    }
+    return { view, ...(!keep && setup?.status !== "declined" ? { setupUnavailable: true } : {}), ...(portBlock ? { portBlock } : {}) };
   }
 
   /** Who on this runner still has a claim on `path` (#4138), from the runner's own records only: a
@@ -18193,21 +18392,19 @@ export class SessionManager {
     isolationMeta?: SessionMeta,
   ): Promise<void> {
     cleanupCurrentGeneration ||= record.checkpointGenerationDisposable === true;
-    const auxiliaryRollback = record.trigger === "creation_rollback" && record.auxiliaryWorktreeRollback === true;
+    const auxiliaryRollback = this.isAuxiliaryRollback(record);
+    if (auxiliaryRollback && this.rollbackAttemptIsLive(record)) return;
     if (auxiliaryRollback && this.creationRollbackTargetInUse(record)) {
       this.log(`worktree rollback for ${boundedSessionIdForLog(record.sessionId)} dropped: a session now uses that worktree`);
       this.removeWorktreeCleanupRecord(record);
       return;
     }
     if (auxiliaryRollback && this.store.has(record.sessionId) && !cleanupCurrentGeneration) {
-      await this.runWorktreeOperation(record.sessionId, async () => {
-        // A Location switch's rollback names another repository than the session is still in, so
-        // its teardown takes its boundary from the record rather than from that session.
-        const meta = this.store.readMeta(record.sessionId) ?? undefined;
-        await this.reapCreationRollback(record, meta?.repoPath === record.repoPath ? meta : undefined);
-      });
+      await this.runWorktreeOperation(record.sessionId, () => this.reapAuxiliaryRollbackLocked(record));
       return;
     }
+    // The session is gone, but its record still only speaks for the worktree it made.
+    if (auxiliaryRollback && await this.settleUnprovedRollback(record)) return;
     if (record.removalMode === "safe" && this.store.has(record.sessionId)) {
       await this.reapLiveSafeWorktree(record);
       return;
@@ -18277,6 +18474,7 @@ export class SessionManager {
       this.finishWorktreeCleanup(record);
       return;
     }
+    if (auxiliaryRollback && !worktreeRemoved) this.noteRollbackFailure(record);
     // Keep cleanup diagnostics bounded and free of repository paths, ref values, and provider
     // errors. The durable journal retains the complete operator-independent retry coordinates.
     const failedPhases = checkpointRefsCleaned
@@ -18285,13 +18483,78 @@ export class SessionManager {
     this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after ${failedPhases}`);
   }
 
+  /** A switch still running owns its reservation: it is on record while its setup runs, and giving it
+   * back is that attempt's job. Only a crash or a finished attempt leaves one for anyone else. */
+  private rollbackAttemptIsLive(record: WorktreeCleanupRecord): boolean {
+    return this.reusedWorktreeClaims.get(record.worktreePath) === record.sessionId;
+  }
+
+  /** Replay one auxiliary creation rollback. Callers hold the session's worktree lane, and the state
+   * is read again here because waiting for that lane can take a long time. */
+  private async reapAuxiliaryRollbackLocked(record: WorktreeCleanupRecord): Promise<void> {
+    if (!this.cleanupJournal.list().includes(record) || this.rollbackAttemptIsLive(record)) return;
+    if (this.creationRollbackTargetInUse(record)) {
+      this.log(`worktree rollback for ${boundedSessionIdForLog(record.sessionId)} dropped: a session now uses that worktree`);
+      this.removeWorktreeCleanupRecord(record);
+      return;
+    }
+    // A Location switch's rollback names another repository than the session is still in, so
+    // its teardown takes its boundary from the record rather than from that session.
+    const meta = this.store.readMeta(record.sessionId) ?? undefined;
+    await this.reapCreationRollback(record, meta?.repoPath === record.repoPath ? meta : undefined);
+  }
+
+  /** Hold an auxiliary rollback to what it made (#4209), before anything destructive. Its proof is in
+   * the worktree's own Git admin directory, so a foreign directory, a worktree made there later, or a
+   * registration that went away all fail it. In each of those the rollback made nothing that is
+   * there, so it ends here and leaves all of it alone. Setup only ever runs after the proof is
+   * written, so nothing of the attempt's is left to tear down. Returns whether the rollback is settled
+   * or has to wait; otherwise it may go on. */
+  private async settleUnprovedRollback(record: WorktreeCleanupRecord): Promise<boolean> {
+    if (record.worktreeRemovedAt) return false;
+    const state = await worktreeRollbackProofState(record.repoPath, record.worktreePath, record.rollbackProof,
+      { context: record.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash });
+    if (state === "proved") return false;
+    if (state === "unavailable") {
+      this.log(`worktree rollback for ${boundedSessionIdForLog(record.sessionId)} needs retry: its worktree could not be read`);
+      this.noteRollbackFailure(record);
+      return true;
+    }
+    if (state === "absent") {
+      // Nothing to remove. With no proof this attempt never made the branch either, so it stays.
+      if (!record.rollbackProof && !record.preserveBranch) {
+        record.preserveBranch = true;
+        this.cleanupJournal.add(record);
+      }
+      return false;
+    }
+    this.log(`worktree rollback for ${boundedSessionIdForLog(record.sessionId)} dropped: what is at its path is not what it made`);
+    const meta = this.store.readMeta(record.sessionId);
+    const idInUse = !!meta && [...this.attributedWorktrees(meta), ...(meta.locationHistory ?? []).flatMap((left) => left.worktrees)]
+      .some((item) => item.id === record.worktreeId);
+    if (record.worktreeId && !idInUse) {
+      try {
+        this.worktreePortAllocator.release(this.worktreePortOwner(record.sessionId, record.worktreeId));
+      } catch (error) {
+        this.log(`worktree rollback for ${boundedSessionIdForLog(record.sessionId)} kept its port block: ${errText(error)}`);
+      }
+    }
+    this.removeWorktreeCleanupRecord(record, true);
+    return true;
+  }
+
   /** A newly created worktree that never activated owns no conversation checkpoints. Reclaim its
    * own processes, hooks, directory, branch, and port without entering the session-wide orphan
    * lane, both synchronously and when replaying a crash-journaled creation rollback. */
   private async reapCreationRollback(record: WorktreeCleanupRecord, meta?: SessionMeta): Promise<void> {
+    // A record that has left the journal has been settled, by the move committing or by another
+    // attempt finishing it. It speaks for nothing now.
+    if (!this.cleanupJournal.list().includes(record)) return;
+    if (this.isAuxiliaryRollback(record) && await this.settleUnprovedRollback(record)) return;
     if (!record.worktreeRemovedAt) {
       const removal = await this.removeRecordedWorktree(record, meta);
       if (!removal.removed) {
+        this.noteRollbackFailure(record);
         this.log(`requested worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after worktree removal`);
         return;
       }
@@ -18514,8 +18777,8 @@ export class SessionManager {
   /** Resume an interrupted explicit or post-merge cleanup without treating its still-live session
    * as a replacement generation. The safe lane never reclaims checkpoint refs: those belong to
    * the live conversation, even when its selected worktree is being retired. */
-  private async reapLiveSafeWorktree(record: WorktreeCleanupRecord): Promise<void> {
-    await this.runWorktreeOperation(record.sessionId, async () => {
+  private async reapLiveSafeWorktree(record: WorktreeCleanupRecord, laneHeld = false): Promise<void> {
+    const reap = async () => {
       const meta = this.store.readMeta(record.sessionId);
       if (!meta) {
         this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after live session metadata became unreadable`);
@@ -18529,6 +18792,9 @@ export class SessionManager {
           const repaired = await this.forgetRemovedWorktree(record);
           if (repaired) this.finishWorktreeCleanup(record);
           else this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after live metadata cleanup`);
+        } else if ((meta.locationHistory ?? []).some((left) => left.worktrees.some((item) => item.id === record.worktreeId &&
+            sameWorktreePath(meta.context, item.path, record.worktreePath)))) {
+          this.dropOvertakenRetirement(record);
         } else {
           this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after live worktree identity changed`);
         }
@@ -18640,7 +18906,9 @@ export class SessionManager {
           this.store.releaseWorktreeLease(record.sessionId, cleanupLeaseOwner);
         }
       }
-    });
+    };
+    if (laneHeld) await reap();
+    else await this.runWorktreeOperation(record.sessionId, reap);
   }
 
   private removeWorktreeCleanupRecord(
