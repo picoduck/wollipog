@@ -1873,6 +1873,87 @@ for (const { kind, work } of [
   });
 }
 
+test("work that exists only in the index is kept: a staged edit with its working file restored is still someone's", async () => {
+  await withSession("keeps-index-only", async (h) => {
+    const { record, removal } = await stuckProvedRollback(h);
+    const slot = record.worktreePath;
+    const original = readFileSync(join(slot, ".wollipog.json"));
+    writeFileSync(join(slot, ".wollipog.json"), "{\"staged\":\"only here\"}\n");
+    git(slot, "add", ".wollipog.json");
+    writeFileSync(join(slot, ".wollipog.json"), original);
+    const staged = git(slot, "show", ":.wollipog.json");
+    removal.free();
+    dueLater(h);
+    await internalsOf(h).replayDeferredWorktreeRetirements();
+    assert.deepEqual(journal(h), []);
+    assert.equal(git(slot, "show", ":.wollipog.json"), staged, "the staged version is still there");
+    assert.ok(errorText(h).some((text) => text.includes(slot) && /kept/iu.test(text)));
+  });
+});
+
+test("work written while setup's processes were ending is kept, and no teardown runs over it", async () => {
+  await withSession("keeps-during-retirement", async (h) => {
+    const teardownLog = join(h.root, "teardown-log");
+    commitSetup(h, { ...FAILING_STEP, teardown: [{ name: "Tear Down", command: [process.execPath, "-e",
+      `require('fs').appendFileSync(${JSON.stringify(teardownLog)},'x')`], timeoutSeconds: 30 }] });
+    const internals = internalsOf(h);
+    const retire = internals.retireWorktreeProcesses.bind(h.manager);
+    let wrote = false;
+    internals.retireWorktreeProcesses = async (...args) => {
+      await retire(...args);
+      if (wrote) return;
+      wrote = true;
+      writeFileSync(join(args[2] as string, "notes.txt"), "written while the rollback was under way\n");
+    };
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await answerTrust(h, "trust");
+    await waitFor(() => failure(h) !== undefined, "the failed setup did not fail the switch");
+    const [, slot] = docsWorktrees(h);
+    assert.ok(slot, "the worktree stays");
+    assert.equal(readFileSync(join(slot, "notes.txt"), "utf8"), "written while the rollback was under way\n");
+    assert.equal(existsSync(teardownLog), false, "no teardown ran over it");
+    assert.deepEqual(journal(h), [], "the record ended at once, not on a later try");
+    assert.ok(errorText(h).some((text) => text.includes(slot) && /kept/iu.test(text)));
+    assert.doesNotMatch(failure(h)!.reason!, /could not be removed/u, "and it is not reported as stuck");
+  });
+});
+
+test("a file that appears while teardown runs is kept, whoever wrote it, since nothing can say whose it is", async () => {
+  await withSession("keeps-during-teardown", async (h) => {
+    const written = "notes-during-teardown.txt";
+    commitSetup(h, { ...FAILING_STEP, teardown: [{ name: "Tear Down", command: write(written, "'written while teardown waited\\n'"), timeoutSeconds: 30 }] });
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await answerTrust(h, "trust");
+    await waitFor(() => failure(h) !== undefined, "the failed setup did not fail the switch");
+    const [, slot] = docsWorktrees(h);
+    assert.ok(slot, "the worktree stays");
+    assert.equal(readFileSync(join(slot, written), "utf8"), "written while teardown waited\n");
+    assert.deepEqual(journal(h), []);
+    assert.ok(errorText(h).some((text) => text.includes(slot) && /kept/iu.test(text)));
+  });
+});
+
+test("a teardown that changes nothing Git tracks still ends in a removal, and a retry does not run it again", async () => {
+  await withSession("teardown-unchanged", async (h) => {
+    const teardownLog = join(h.root, "teardown-log");
+    const { record, removal } = await stuckProvedRollback(h, { ...FAILING_STEP, teardown: [{ name: "Tear Down", command: [process.execPath, "-e",
+      `require('fs').appendFileSync(${JSON.stringify(teardownLog)},'x')`], timeoutSeconds: 30 }] });
+    git(h.docs, "worktree", "lock", record.worktreePath);
+    removal.free();
+    dueLater(h);
+    await internalsOf(h).replayDeferredWorktreeRetirements();
+    assert.equal(readFileSync(teardownLog, "utf8"), "x", "teardown ran");
+    assert.equal(journal(h).length, 1, "a lock still stops the removal");
+    git(h.docs, "worktree", "unlock", record.worktreePath);
+    const later = Date.now() + 365 * 24 * 60 * 60 * 1000;
+    internalsOf(h).worktreePullRequestDiscoveryNow = () => later;
+    await internalsOf(h).replayDeferredWorktreeRetirements();
+    assert.deepEqual(journal(h), []);
+    assert.equal(existsSync(record.worktreePath), false);
+    assert.equal(readFileSync(teardownLog, "utf8"), "x", "once");
+  });
+});
+
 test("a person's work kept from a rollback is what the next attempt continues in, with a notice and no setup", async () => {
   await withSession("kept-next-attempt", async (h) => {
     const ranLog = join(h.root, "ran");
@@ -2101,6 +2182,7 @@ test("when nothing on record can explain a dirty tree, it is kept", async () => 
     // A crash during setup: its output is there, and the runner never got to record what it left.
     writeFileSync(join(slot, "output-or-work.txt"), "cannot tell which\n");
     delete record.rollbackTree;
+    delete record.rollbackIndexTree;
     internalsOf(h).cleanupJournal.add(record);
     const before = files(slot);
     removal.free();

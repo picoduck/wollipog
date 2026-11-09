@@ -3760,10 +3760,7 @@ export class SessionManager {
             if (requestProof) cleanup.rollbackProof = requestProof;
             cleanup.rollbackCheckedOut = true;
             cleanup.rollbackBranchBase = created.baseCommit;
-            await captureRollbackBaseline(worktree.path, options).then(
-              (tree) => { cleanup.rollbackTree = tree; },
-              (captureError) => this.log(`requested worktree rollback for ${boundedSessionIdForLog(sessionId)} has no baseline: ${errText(captureError)}`),
-            );
+            await this.recordRollbackBaseline(cleanup, worktree.path);
             this.cleanupJournal.add(cleanup);
             await this.reapCreationRollback(cleanup, cleanupMeta);
             // Only a worktree that really went takes its row with it. One kept or still stuck stays
@@ -4701,26 +4698,13 @@ export class SessionManager {
       );
       record.processesTerminatedAt = Date.now();
       this.cleanupJournal.add(record);
-      const teardownRanNow = (record.hooks?.teardown.length ?? 0) > 0 && !record.teardown?.completedAt;
+      // Ending processes can take a long time, and a teardown is repository code that should not run
+      // over someone's work, so this is proved again before it as well as before the forced removal.
+      await this.assertRollbackUntouched(record);
       await this.runCleanupTeardown(record, meta);
-      // Those steps can take a long time, and a forced removal comes next, so prove it again last.
-      if (this.isAuxiliaryRollback(record)) {
-        const state = await this.rollbackTargetState(record);
-        if (state !== "proved" && state !== "absent" && state !== "unpopulated") {
-          throw new Error("the worktree is no longer the one this rollback made");
-        }
-        if (state === "proved") {
-          // A teardown is free to change the tree, so what it left is the new baseline, for this
-          // removal and for any retry of it. Only HEAD and the branch can be held across one.
-          const work = await worktreeRollbackWork(record.worktreePath, record.rollbackProof!,
-            this.rollbackExpectation(record, teardownRanNow), this.rollbackGitOptions(record));
-          if (work.state !== "unchanged") throw new Error("the worktree changed while this rollback was retiring it");
-          if (teardownRanNow) {
-            record.rollbackTree = await captureRollbackBaseline(record.worktreePath, this.rollbackGitOptions(record));
-            this.cleanupJournal.add(record);
-          }
-        }
-      }
+      // A file that appears during teardown may be the teardown's or a person's. Nothing can say, so
+      // it counts as changed like any other, and the worktree is kept.
+      await this.assertRollbackUntouched(record);
     };
     // A branch that existed before this worktree (#4138) is never deleted, and its worktree is
     // removed only when nothing in it changed; otherwise the worktree stays for its person. An
@@ -15261,13 +15245,8 @@ export class SessionManager {
     // there would have no safe meaning, since nothing may be removed. Either is continued as it is.
     if (reservation.record) {
       const setupFailure = await this.prepareLocationSwitchSetup(targetOf(worktree), worktree, pending.locationName, reservation.record);
-      // What setup left, however it ended. A rollback removes this and nothing else. With no record
-      // of it, only a tree matching its commit is known to be the runner's alone.
-      const baselined = reservation.record;
-      await captureRollbackBaseline(worktree.path, options).then((tree) => {
-        baselined.rollbackTree = tree;
-        this.cleanupJournal.add(baselined);
-      }, (error) => this.log(`session ${sessionId} has no baseline for its Location switch worktree: ${errText(error)}`));
+      await this.recordRollbackBaseline(reservation.record, worktree.path);
+      this.cleanupJournal.add(reservation.record);
       if (setupFailure) {
         const kept = await release();
         // A runner going down cancels setup too. That is no decision about the switch, which stays
@@ -18594,7 +18573,10 @@ export class SessionManager {
       this.finishWorktreeCleanup(record);
       return;
     }
-    if (auxiliaryRollback && !worktreeRemoved) this.noteRollbackFailure(record);
+    if (auxiliaryRollback && !worktreeRemoved) {
+      if (await this.settleRollbackTarget(record)) return;
+      this.noteRollbackFailure(record);
+    }
     // Keep cleanup diagnostics bounded and free of repository paths, ref values, and provider
     // errors. The durable journal retains the complete operator-independent retry coordinates.
     const failedPhases = checkpointRefsCleaned
@@ -18632,13 +18614,39 @@ export class SessionManager {
     return worktreeRollbackProofState(record.repoPath, record.worktreePath, record.rollbackProof, this.rollbackGitOptions(record), record.branch);
   }
 
-  private rollbackExpectation(record: WorktreeCleanupRecord, identityOnly = false) {
+  private rollbackExpectation(record: WorktreeCleanupRecord) {
     return {
       ...(record.branch ? { branch: record.branch } : {}),
       checkoutFinished: record.rollbackCheckedOut === true,
-      ...(record.rollbackTree ? { baselineTree: record.rollbackTree } : {}),
-      identityOnly,
+      ...(record.rollbackTree ? { baseline: {
+        tree: record.rollbackTree, ...(record.rollbackIndexTree ? { indexTree: record.rollbackIndexTree } : {}),
+      } } : {}),
     };
+  }
+
+  /** Record what setup left, however it ended. A rollback removes this and nothing else. With no
+   * record of it, only a tree matching its commit is known to be the runner's alone. */
+  private async recordRollbackBaseline(record: WorktreeCleanupRecord, path: string): Promise<void> {
+    try {
+      const baseline = await captureRollbackBaseline(path, this.rollbackGitOptions(record));
+      record.rollbackTree = baseline.tree;
+      if (baseline.indexTree) record.rollbackIndexTree = baseline.indexTree;
+    } catch (error) {
+      this.log(`worktree rollback for ${boundedSessionIdForLog(record.sessionId)} has no baseline: ${errText(error)}`);
+    }
+  }
+
+  /** Throws unless what is at a rollback's path may still be force-removed. A throw ends this attempt
+   * at removal, and the rollback's next look at the worktree decides what happens to it. */
+  private async assertRollbackUntouched(record: WorktreeCleanupRecord): Promise<void> {
+    if (!this.isAuxiliaryRollback(record)) return;
+    const state = await this.rollbackTargetState(record);
+    if (state !== "proved" && state !== "absent" && state !== "unpopulated") {
+      throw new Error("the worktree is no longer the one this rollback made");
+    }
+    if (state !== "proved") return;
+    const work = await worktreeRollbackWork(record.worktreePath, record.rollbackProof!, this.rollbackExpectation(record), this.rollbackGitOptions(record));
+    if (work.state !== "unchanged") throw new Error("the worktree changed while this rollback was retiring it");
   }
 
   /** Decide what an auxiliary rollback may do with what is at its path (#4209), before anything
@@ -18760,6 +18768,9 @@ export class SessionManager {
     if (!record.worktreeRemovedAt) {
       const removal = await this.removeRecordedWorktree(record, meta);
       if (!removal.removed) {
+        // What stopped it may be a change that appeared during the removal. That is answered now, with
+        // the worktree kept and the session told, rather than reported as stuck and left for a retry.
+        if (this.isAuxiliaryRollback(record) && await this.settleRollbackTarget(record)) return;
         this.noteRollbackFailure(record);
         this.log(`requested worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after worktree removal`);
         return;

@@ -1026,11 +1026,32 @@ test("what a proved worktree holds is judged against what the runner left, not a
     // Setup's own output is the runner's once recorded, and nothing beyond it is.
     writeFileSync(join(path, "output.txt"), "from setup\n");
     assert.equal((await state()).state, "changed", "with nothing recorded it looks like anyone's");
-    const baselineTree = await captureRollbackBaseline(path, options);
-    assert.deepEqual(await worktreeRollbackWork(path, "t", { ...finished, baselineTree }, options), { state: "unchanged" });
+    const baseline = await captureRollbackBaseline(path, options);
+    assert.deepEqual(await worktreeRollbackWork(path, "t", { ...finished, baseline }, options), { state: "unchanged" });
     writeFileSync(join(path, "a.txt"), "edited\n");
-    assert.equal((await worktreeRollbackWork(path, "t", { ...finished, baselineTree }, options)).state, "changed");
+    assert.equal((await worktreeRollbackWork(path, "t", { ...finished, baseline }, options)).state, "changed");
     writeFileSync(join(path, "a.txt"), "first\n");
+    rmSync(join(path, "output.txt"));
+
+    // A version only the index holds, with the file itself back as it was.
+    writeFileSync(join(path, "a.txt"), "staged only\n");
+    execFileSync("git", ["-C", path, "add", "a.txt"]);
+    writeFileSync(join(path, "a.txt"), "first\n");
+    assert.equal((await state()).state, "changed", "the index holds something the commit does not");
+    assert.equal((await worktreeRollbackWork(path, "t", { branch: "fix/work" }, options)).state, "changed", "nor does a checkout that never finished explain it");
+    execFileSync("git", ["-C", path, "reset", "--quiet", "--mixed"]);
+    assert.deepEqual(await state(), { state: "unchanged" });
+
+    // Setup may stage things too: then that index is the baseline, and only a different one counts.
+    writeFileSync(join(path, "output.txt"), "staged by setup\n");
+    execFileSync("git", ["-C", path, "add", "output.txt"]);
+    const stagedBaseline = await captureRollbackBaseline(path, options);
+    assert.deepEqual(await worktreeRollbackWork(path, "t", { ...finished, baseline: stagedBaseline }, options), { state: "unchanged" });
+    writeFileSync(join(path, "output.txt"), "staged by someone else\n");
+    execFileSync("git", ["-C", path, "add", "output.txt"]);
+    writeFileSync(join(path, "output.txt"), "staged by setup\n");
+    assert.equal((await worktreeRollbackWork(path, "t", { ...finished, baseline: stagedBaseline }, options)).state, "changed");
+    execFileSync("git", ["-C", path, "rm", "--quiet", "--force", "--cached", "output.txt"]);
     rmSync(join(path, "output.txt"));
 
     // A checkout that never finished explains missing files, and nothing else.

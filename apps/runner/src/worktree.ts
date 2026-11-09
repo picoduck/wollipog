@@ -193,8 +193,10 @@ export interface WorktreeCleanupRecord {
   rollbackBranchBase?: string;
   /** (#4209) The worktree's checkout finished, so a file missing from it means something. */
   rollbackCheckedOut?: boolean;
-  /** (#4209) The tree the runner left when setup ended. Anything else there is not the runner's. */
+  /** (#4209) The tree the runner left when setup ended, and its index as a tree. Anything else there
+   * is not the runner's. */
   rollbackTree?: string;
+  rollbackIndexTree?: string;
   /** (#4209) Failed attempts at an auxiliary creation rollback, when the schedule next tries it, and
    * when the schedule gave up. A restart or a new request for the worktree still tries it. */
   rollbackAttempts?: number;
@@ -3014,24 +3016,34 @@ export async function worktreeHoldsNoFiles(path: string, options: WorktreeOption
   return (await command(context, path, ["ls-files", "--cached", "--others"])).trim() === "";
 }
 
-/** What the runner leaves in a worktree it may roll back: a tree of everything Git does not ignore,
- * so anything that appears after this was not the runner's own. Written to the object store only. */
-export async function captureRollbackBaseline(path: string, options: WorktreeOptions = {}): Promise<string> {
-  return withGitExecutionContext(options.context ?? nativeContext, () => captureWorktreeTree(path));
+/** What the runner leaves in a worktree it may roll back, so anything that appears after this was not
+ * its own: a tree of everything Git does not ignore, which reads the working files through a
+ * temporary index, and a tree of the real index, since a version can live there and nowhere else.
+ * Both are written to the object store only. */
+export interface RollbackBaseline {
+  tree: string;
+  indexTree?: string;
+}
+
+export async function captureRollbackBaseline(path: string, options: WorktreeOptions = {}): Promise<RollbackBaseline> {
+  const context = options.context ?? nativeContext;
+  const tree = await withGitExecutionContext(context, () => captureWorktreeTree(path));
+  const indexTree = await command(context, path, ["write-tree"]).then((value) => value.trim(), () => undefined);
+  return { tree, ...(indexTree ? { indexTree } : {}) };
 }
 
 export type WorktreeRollbackWork = { state: "unchanged" } | { state: "changed"; reason: string } | { state: "unavailable" };
 
 /** Whether a proved worktree still holds only what the attempt that made it left there. The proof
  * says which worktree this is, not what happened in it since. HEAD and branch must be where the proof
- * pinned them. The tree must match what the runner recorded when it finished, or the commit when it
- * recorded nothing, allowing files a checkout that never finished did not reach. A person's work and
- * setup output look alike when nothing was recorded, and then this says "changed": a worktree kept
- * by mistake can be deleted, and lost work cannot be got back. */
+ * pinned them. The index and the tree must match what the runner recorded when it finished, or the
+ * commit when it recorded nothing, allowing files a checkout that never finished did not reach. A
+ * person's work and setup output look alike when nothing was recorded, and then this says "changed":
+ * a worktree kept by mistake can be deleted, and lost work cannot be got back. */
 export async function worktreeRollbackWork(
   path: string,
   proof: string,
-  expected: { branch?: string; baselineTree?: string; checkoutFinished?: boolean; identityOnly?: boolean },
+  expected: { branch?: string; baseline?: RollbackBaseline; checkoutFinished?: boolean },
   options: WorktreeOptions = {},
 ): Promise<WorktreeRollbackWork> {
   const context = options.context ?? nativeContext;
@@ -3044,10 +3056,17 @@ export async function worktreeRollbackWork(
       return { state: "changed", reason: symbolic ? `it is on ${symbolic.replace(/^refs\/heads\//u, "")} instead` : "its HEAD is detached" };
     }
     if (head !== pinned) return { state: "changed", reason: "it has commits since it was made" };
-    if (expected.identityOnly) return { state: "unchanged" };
-    const tree = await captureRollbackBaseline(path, options);
-    if (expected.baselineTree) {
-      return tree === expected.baselineTree ? { state: "unchanged" } : { state: "changed", reason: "its files changed after the runner finished with it" };
+    // Read without taking the index's lock, which a killed checkout can leave behind for good. A
+    // conflict in progress shows up here too. A checkout that never finished has written no index yet.
+    const staged = (await command(context, path, ["diff-index", "--cached", "--name-only", expected.baseline?.indexTree ?? `${head}^{tree}`])).trim();
+    if (staged) {
+      const indexNeverWritten = !expected.baseline?.indexTree && !expected.checkoutFinished &&
+        (await command(context, path, ["ls-files", "--cached"])).trim() === "";
+      if (!indexNeverWritten) return { state: "changed", reason: "its index holds changes nothing on record explains" };
+    }
+    const { tree } = await captureRollbackBaseline(path, options);
+    if (expected.baseline) {
+      return tree === expected.baseline.tree ? { state: "unchanged" } : { state: "changed", reason: "its files changed after the runner finished with it" };
     }
     const differences = (await command(context, path, ["diff-tree", "-r", "--no-renames", "--name-status", `${head}^{tree}`, tree]))
       .split("\n").filter(Boolean);
