@@ -8,7 +8,7 @@ import path from "node:path";
 import net from "node:net";
 import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
-import { buildBwrapArgs, bwrapPathWritable, bwrapTemporaryEnvironment, buildCloudArgs, buildContainerArgs, buildWslAgentControlRelayArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, wslProviderPidfile, type AgentProcess } from "./spawn.js";
+import { buildBwrapArgs, bwrapPathWritable, bwrapTemporaryEnvironment, buildCloudArgs, buildContainerArgs, buildWslAgentControlRelayArgs, buildWslArgs, killTree, killTreeAndWait, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, wslProviderPidfile, type AgentProcess } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { WSL_BWRAP_LAUNCHER_PATH } from "./wsl-bwrap-launcher.js";
 import { captureLiveProcess, runFixtureCleanup, terminateOriginalProcess, waitForOriginalProcessToStop, type PosixProcessIdentity } from "../test-support/posix-process.js";
@@ -30,6 +30,39 @@ const windowsJobIsolation = {
   ],
   network: "inherit" as const,
 };
+
+// taskkill /T terminates children first. A root that exits as soon as its child dies, as a tsx
+// process does when its esbuild service stops, can be gone by the time taskkill reaches it. taskkill
+// then exits nonzero about a process that is no longer running.
+test("Windows tree kill proves a root that exits as its child is terminated", {
+  skip: process.platform !== "win32",
+  timeout: 180_000,
+}, async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "wollipog-windows-tree-kill-"));
+  const root = path.join(dir, "root.cjs");
+  writeFileSync(root, `
+    const { spawn } = require("node:child_process");
+    const worker = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    worker.once("exit", () => process.exit(7));
+    worker.once("spawn", () => console.log("READY"));
+  `);
+  const unproven: number[] = [];
+  try {
+    for (let round = 0; round < 40; round += 1) {
+      const child = spawnAgent({ command: process.execPath, args: [root], cwd: dir, windowsShell: false });
+      child.stdin.end();
+      child.stdout.setEncoding("utf8");
+      await new Promise<void>((resolve, reject) => {
+        child.once("error", reject);
+        child.stdout.on("data", (text: string) => { if (text.includes("READY")) resolve(); });
+      });
+      if (!await killTreeAndWait(child)) unproven.push(round);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+  assert.deepEqual(unproven, [], "every terminated tree is proven gone");
+});
 
 test("Windows Job launcher is materialized, caches its bridge, and clears both specs", () => {
   assert.equal(materializeWindowsJobLauncher(windowsJobTestCacheRoot), windowsJobLauncherPath);
