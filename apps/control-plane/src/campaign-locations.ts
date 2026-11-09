@@ -170,12 +170,14 @@ export class CampaignLocations {
       if (!eligible) { changed = true; return; }
       // Only the owner's own Location joins on a reconnect. Anyone else's, or one with no recorded
       // adder, waits for Include in Campaign however it read: nobody has seen its repository.
-      if (source === "runner_reconnected" && was.addedBy !== owner) {
+      // While its runner is still too old, Include in Campaign can't help, so it keeps the reason that says why.
+      if (source === "runner_reconnected" && was.addedBy !== owner && (result.ok || result.failure !== "runner_below_gates")) {
         pending.push({ locationId: location.id, name: location.name, reason: "added_by_other" });
         return;
       }
       if (result.ok) joins.push({ locationId: location.id, name: location.name, repository: result.location.repository, source });
       else excluded.push({ locationId: location.id, name: location.name, failure: result.failure, reason: result.reason,
+        ...(result.repository ? { repository: result.repository } : {}),
         // A transient read after the update must not end this Location's way back into a Custom list.
         ...(custom && result.failure !== "runner_below_gates" && RETRIED_ON_RECONNECT.has(result.failure) ? { rejoinsOnReconnect: true as const } : {}) });
     });

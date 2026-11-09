@@ -45,7 +45,7 @@ import {
 } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignDispatchScopeRefusal, campaignBoundaryCurrent, campaignIssueInScope, campaignLaunchRepository, campaignOtherRepository, campaignRepositoryLimits, campaignScopeRepositories, remintCampaignBoundary } from "./campaign-authority.js";
-import { campaignBoundaryRepositoryAt, campaignLocationRepository, campaignRepositoryPlaces } from "./campaign-repository-boundary.js";
+import { campaignBoundaryRepositoryAt, campaignLocationRepository, campaignRepositoryPlaces, limitedLaunchLocations } from "./campaign-repository-boundary.js";
 import { genericRequestScreenData, storedCredentialScreenFact } from "./credential-screen.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
 import { grantReviewMaxIssues, ownerReviewMaxIssues, proposalMaxIssues, scopeApprovalMaxIssuesIncrease } from "./scope-grant.js";
@@ -6591,6 +6591,16 @@ export class ControlPlaneDb {
     const root = repository ? { projectId: row.project_id, orchestratorPolicy: orchestratorCampaignPolicyFromJson(row.orchestrator_policy) ?? undefined } : null;
     const other = root ? campaignOtherRepository(root, repository) : null;
     const entry = other ? campaignScopeRepositories(root!).find((candidate) => candidate.repository === other) : undefined;
+    // A repository left out for its runner's version (#4319) is read through that Location or not at
+    // all: the root's login no more stands in than it does for a repository that holds an entry.
+    if (root && other && !entry) {
+      const excluded = root.orchestratorPolicy?.excludedLocations?.find((item) => item.failure === "runner_below_gates" && item.repository === other);
+      const location = excluded ? this.getProjectLocation(excluded.locationId) : null;
+      if (excluded) {
+        const workspacePath = location ? this.getWorkspacePath(location.runnerId, location.workspaceId) : null;
+        return location && workspacePath ? { ...reader(location.runnerId), location: { workspaceId: location.workspaceId, workspacePath, repository: other } } : null;
+      }
+    }
     if (!root || !entry) return reader(row.runner_id);
     const places = campaignRepositoryPlaces(this, root, entry).map((place) => ({ ...reader(place.runnerId), location:
       { workspaceId: place.workspaceId, workspacePath: place.workspacePath, repository: place.repository } }));
@@ -17789,10 +17799,16 @@ export class ControlPlaneDb {
     const listed = control?.mode === "full_control" ? control.boundary.repositories : policy.repositories;
     if (!listed) return null;
     // Read the row directly: a session view embeds this projection.
-    const projectId = (this.stmt("SELECT project_id FROM sessions WHERE id=?").get(rootId) as { project_id: string | null } | undefined)?.project_id;
+    const root = this.stmt("SELECT project_id, project_location_id, runner_id FROM sessions WHERE id=?").get(rootId) as
+      { project_id: string | null; project_location_id: string | null; runner_id: string } | undefined;
+    const projectId = root?.project_id;
     const project = projectId ? this.getProject(projectId) : null;
     const current = new Map((project?.locations ?? []).map((location) => [location.id, location]));
     const named = new Map([...(policy.locationJoins ?? []).map((join) => [join.locationId, join.name] as const)]);
+    const limited = limitedLaunchLocations({ launchRepository: campaignLaunchRepository({ orchestratorPolicy: policy }), launchLocationId: root?.project_location_id,
+      repositories: listed, rootProtocolVersion: root ? this.getRunner(root.runner_id)?.protocolVersion : undefined,
+      publishes: (id) => runnerSupportsProtocol(this.getRunner(current.get(id)?.runnerId ?? "")?.protocolVersion, "locationIssuePublication"),
+      name: (id) => current.get(id)?.name });
     return {
       revision: control?.mode === "full_control" ? control.boundary.revision : 0,
       repositories: listed.map((entry) => ({ repository: entry.repository,
@@ -17804,6 +17820,7 @@ export class ControlPlaneDb {
             availability: location?.availability ?? "removed" as const, isDefault: location?.isDefault ?? false };
         }) })),
       excludedLocations: structuredClone(policy.excludedLocations ?? []),
+      ...(limited.length ? { limitedLocations: limited } : {}),
       pendingLocations: structuredClone((policy.pendingLocations ?? []).filter((item) => current.has(item.locationId))),
       availableLocations: structuredClone((policy.availableLocations ?? []).filter((item) => current.has(item.locationId))),
       ...(campaignRepositoryLimits(policy).length ? { repositoryLimits: campaignRepositoryLimits(policy) } : {}),
@@ -21665,6 +21682,9 @@ export class ControlPlaneDb {
       const { derivedLimits: _stale, ...rest } = waiting;
       campaign.firstMessageScope = { ...rest, ...(control.mode === "full_control" && derivedLimits ? { derivedLimits: { ...derivedLimits } } : {}) };
     }
+    // A revoke ends the boundary these describe (#4319). A list an approved addition recreates later
+    // must not take one of them in on a reconnect, with nobody having approved that.
+    if (control.mode !== "full_control" && campaign.control?.mode === "full_control") delete campaign.excludedLocations;
     campaign.control = structuredClone(control);
     if (control.mode === "full_control" && launchDisclosure && validCampaignLaunchDisclosure(launchDisclosure)) {
       campaign.launchDisclosure = structuredClone(launchDisclosure);
@@ -35522,8 +35542,9 @@ function validExcludedLocations(value: unknown): boolean {
   return Array.isArray(value) && value.length <= CAMPAIGN_BOUNDARY_LOCATIONS_MAX && value.every((item) => {
     const entry = item as Record<string, unknown> | null;
     return Boolean(entry && typeof entry === "object" && !Array.isArray(entry) &&
-      Object.keys(entry).every((key) => ["locationId", "name", "failure", "reason", "rejoinsOnReconnect"].includes(key)) &&
+      Object.keys(entry).every((key) => ["locationId", "name", "failure", "reason", "rejoinsOnReconnect", "repository"].includes(key)) &&
       (entry.rejoinsOnReconnect === undefined || entry.rejoinsOnReconnect === true) &&
+      (entry.repository === undefined || (typeof entry.repository === "string" && campaignRepositoryLocation(entry.repository) !== null)) &&
       typeof entry.locationId === "string" && entry.locationId.length > 0 && entry.locationId.length <= 256 &&
       typeof entry.name === "string" && entry.name.length <= 256 &&
       typeof entry.failure === "string" && Object.hasOwn(PROJECT_LOCATION_INSPECTION_FAILURES, entry.failure) &&

@@ -47,7 +47,7 @@ import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campai
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignClosureIssueHeld, campaignRepositoryLimits, campaignControlForRunner, campaignControlRevisionForRunner, campaignLaunchRepository, campaignOtherRepository, campaignScopeRepositories, carriedCampaignRepositories } from "./campaign-authority.js";
 import { campaignRepositoryOutsideLimit } from "./campaign-authority.js";
 import { campaignBoundaryRepositoryAt, campaignRepositoryPlaces, launchBoundaryRepositories, type CampaignRepositoryPlace } from "./campaign-repository-boundary.js";
-import type { CampaignBoundaryRepository } from "@wollipog/protocol";
+import { CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL, type CampaignBoundaryRepository, type CampaignExcludedLocation } from "@wollipog/protocol";
 import { inspectBoundaryPublication, verifyBoundaryPublishedIssue } from "./project-location-inspection.js";
 import { campaignBoundaryRepository } from "@wollipog/protocol";
 import { genericRequestScreenData, implementationQuestionScreenData, ownerDecisionScreenData, screenCredentialRequest, type CredentialScreenSurface } from "./credential-screen.js";
@@ -5907,7 +5907,9 @@ export class SessionsService {
    * its owner added and can reach, inspected in its own path, as a Full Control enable builds its
    * boundary. It grants nothing: a person still approves every scope change, and any other Location
    * still needs an approved repository addition. A Project with one such repository records nothing,
-   * so that campaign reads as it always has, and so does one whose own Location can't be read now. */
+   * so that campaign reads as it always has, and so does one whose own Location can't be read now,
+   * unless a Location was left out for its runner's version: that one-entry list is what shows the
+   * exclusion and lets a reconnect retry it (#4319). */
   private async establishCustomCampaignRepositories(rootId: string): Promise<void> {
     const root = this.db.getSession(rootId);
     const scope = this.db.sessionScope(rootId);
@@ -10626,6 +10628,32 @@ export class SessionsService {
     return !served || campaignBoundaryRepositoryAt(this.db, root, served) === repository;
   }
 
+  /** What a participant outside the boundary is told, with the Location and version when its own
+   * Location was left out (#4319). */
+  private participantOutsideBoundary(participant: SessionView, excluded: readonly CampaignExcludedLocation[]): string {
+    const left = excluded.find((item) => {
+      const location = this.db.getProjectLocation(item.locationId);
+      return location?.runnerId === participant.runnerId && location?.workspaceId === participant.workspaceId;
+    });
+    return `campaign participants must run in a Location of a repository in the campaign's boundary${left ? `: ${participant.title} runs in ${left.name}. ${left.reason}` : ""}`;
+  }
+
+  /** What an enable's preflight says about its live participants under the boundary it would set
+   * (#4319), or null. The enable would be refused the same way, so it reports that instead of ready. */
+  campaignParticipantRefusal(rootId: string, launchRepository: string, repositories: readonly CampaignBoundaryRepository[], excluded: readonly CampaignExcludedLocation[]): string | null {
+    const session = this.db.getSession(rootId);
+    if (!session) return null;
+    const control = { mode: "full_control", boundary: { repository: launchRepository, repositories } } as unknown as CampaignControl;
+    const proposed = { ...session, orchestratorPolicy: { ...session.orchestratorPolicy!, control } };
+    for (const id of [rootId, ...this.db.campaignDescendantIds(rootId)]) {
+      const participant = this.db.getSession(id);
+      if (participant && !isTerminal(participant.status) && !this.campaignServesOwnRepository(proposed, participant)) {
+        return this.participantOutsideBoundary(participant, excluded);
+      }
+    }
+    return null;
+  }
+
   /** The session other than the root that this one works for, from trusted records: its parent, a
    * review session's requester, or the child whose video a paced-video reviewer reviews. */
   private campaignServedSessionId(root: SessionView, session: SessionView): string | null {
@@ -10896,7 +10924,7 @@ export class SessionsService {
         }
         // Under the boundary being authorized, each participant runs in one of its Locations (#4119).
         if (!this.campaignServesOwnRepository({ ...session, orchestratorPolicy: { ...session.orchestratorPolicy!, control } }, participant)) {
-          return fail("campaign participants must run in a Location of a repository in the campaign's boundary", 409);
+          return fail(this.participantOutsideBoundary(participant, projectRepositories?.excludedLocations ?? session.orchestratorPolicy?.excludedLocations ?? []), 409);
         }
         const preflight = campaignAuthorityPreflight(control, participant.driver, this.db.getRunner(participant.runnerId)?.protocolVersion,
           this.pacedVideoInstallationContract(participant.runnerId, participant.agentId));
@@ -12144,6 +12172,10 @@ export class SessionsService {
     const ownerRule = normalizeWorkflowDecisionOwnerRule(request?.ownerRule);
     if (!ownerRule.ok) return fail(ownerRule.message, 400);
     const normalized = normalizeWorkflowDecisionSnapshot(request?.resourceSnapshot);
+    // Asking anyone to approve what no login may carry out helps no one (#4319).
+    const requesting = normalized.ok && normalized.data ? this.db.getSession(sessionId) : null;
+    const excludedRepository = requesting && normalized.data ? this.excludedRepositoryRefusal(requesting, null, normalized.data) : null;
+    if (excludedRepository) return fail(excludedRepository, 409);
     if (normalized.ok && normalized.data?.category === "follow_up_issue_publication" && normalized.data.recommendationId) {
       if (normalized.data.issueAdmission) return this.createWorkflowDecision(sessionId, request, canAccess);
       const initialCaller = this.db.getSession(sessionId);
@@ -12487,6 +12519,32 @@ export class SessionsService {
       issueEvidenceDigest(publicationEvidence(this.db, this.db.getSession(parent.id)!, snapshot)) !== issueEvidenceDigest(evidence) ||
       !this.workflowDecisionAuthorityCurrent(this.db.getSession(parent.id)!, policy, decision)
       ? "Fresh publication evidence changed; request a new exact grant" : null;
+  }
+
+  /** Why this gate can't proceed in a repository the campaign left out for its runner's version
+   * (#4319), or null. A repository that holds an entry refuses by version at its own gate, so with no
+   * entry the requester's login must not stand in by default. A repository the campaign never knew of
+   * keeps its rule, and a requester running in that very Location still acts in its own repository. A
+   * merge or deletion is left alone when the requester's own repository isn't known, since that gate
+   * normally is its own. The approval, if any, still stands. */
+  private excludedRepositoryRefusal(requester: SessionView, controller: SessionView | null, snapshot: WorkflowDecisionResourceSnapshot): string | null {
+    if (snapshot.category !== "follow_up_issue_publication" && snapshot.category !== "pr_merge" && snapshot.category !== "merged_branch_deletion") return null;
+    const rootId = this.db.campaignRootForMember(requester.id);
+    const root = (rootId ? this.db.getSession(rootId) : null) ?? controller ?? requester;
+    if (snapshot.category !== "follow_up_issue_publication" && requester.id !== root.id && !this.db.campaignParticipantRepository(root, requester)) return null;
+    return this.excludedRepositorySentence(root, snapshot.repository, requester);
+  }
+
+  private excludedRepositorySentence(root: SessionView, repository: string, requester: Pick<SessionView, "runnerId" | "workspaceId">): string | null {
+    const named = repository.toLowerCase();
+    if (campaignScopeRepositories(root).some((entry) => entry.repository === named)) return null;
+    const excluded = (root.orchestratorPolicy?.excludedLocations ?? []).filter((item) => item.failure === "runner_below_gates" && item.repository === named);
+    if (!excluded.length || excluded.some((item) => {
+      const location = this.db.getProjectLocation(item.locationId);
+      return location?.runnerId === requester.runnerId && location?.workspaceId === requester.workspaceId;
+    })) return null;
+    return `${named} isn't in this campaign because the runner of ${excluded.map((item) => item.name).join(", ")} can't perform its gates. ` +
+      `Update and restart it to protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer, and it can join. Until then no other login stands in, and nothing was performed.`;
   }
 
   /** The campaign entry a publication must be created through (#4119), or null when its requester
@@ -13743,7 +13801,8 @@ export class SessionsService {
     if (otherRepository && !campaignScopeRepositories(session).some((entry) => entry.repository === otherRepository)) {
       this.log.info(JSON.stringify({ event: "campaign_issue_closure_refused", entryPoint: "closure_proposal", sessionId, requestId: request.requestId,
         issue: request.issue, reason: "repository_outside_boundary", repository: otherRepository }));
-      return { ok: false, ...repositoryOutsideBoundary(otherRepository) };
+      const excluded = this.excludedRepositorySentence(session, otherRepository, session);
+      return { ok: false, ...repositoryOutsideBoundary(otherRepository), ...(excluded ? { error: excluded } : {}) };
     }
     const scopeRefusal = issueClosureScopeRefusal(this.db, session, request.issue, this.scopeGrantReview(session)?.cause, request.repository);
     if (scopeRefusal) {
@@ -15473,6 +15532,9 @@ export class SessionsService {
       this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
       return fail("workflow decision authority was revoked or ancestry changed before action start", 409);
     }
+    // Consuming hands the action to the requester's own login. The approval still stands (#4319).
+    const excludedRepository = this.excludedRepositoryRefusal(child, parent, normalized.data);
+    if (excludedRepository) return fail(excludedRepository, 409);
     if (normalized.data.category === "pr_merge") {
       const snapshot = normalized.data;
       const run = this.db.reviewSessions.history(child.id, { repository: snapshot.repository, number: snapshot.pullRequest });
@@ -15763,6 +15825,8 @@ export class SessionsService {
       }
       return fail("workflow decision authority was revoked or ancestry changed before the action", 409);
     }
+    const excludedRepository = this.excludedRepositoryRefusal(child, parent, snapshot);
+    if (excludedRepository) return fail(excludedRepository, 409);
     let action: ForgeDecisionAction;
     // A publication whose earlier attempt may have run only looks for its issue from then on. A
     // dispatch still `in_progress` here is one the begin below will read as stale, so uncertain too.

@@ -117,7 +117,10 @@ export class CampaignRepositoryAdditions {
     const inspection = await this.deps.inspect(location.id, { projectId: root.projectId!, joinsCampaign: true });
     if (!inspection.ok) return fail(`That Location failed inspection, so it can't be added: ${inspection.reason}`);
     const repository = inspection.location.repository.toLowerCase();
-    if (covered?.some((entry) => entry.repository.toLowerCase() === repository)) {
+    // A one-entry Custom list exists only to show an old runner's exclusion (#4319), and adding a Location
+    // of its repository has no other route in Custom, just as with no list at all.
+    const onlyListedForAnExclusion = root.orchestratorPolicy?.control?.mode !== "full_control" && covered?.length === 1;
+    if (!onlyListedForAnExclusion && covered?.some((entry) => entry.repository.toLowerCase() === repository)) {
       return fail(`${repository} is already one of this campaign's repositories; that Location joins it through its owner, not an addition`);
     }
     // The inspection ran on another machine; the campaign or the Location may have changed meanwhile.

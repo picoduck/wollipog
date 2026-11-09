@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { CampaignExcludedLocation, CampaignLaunchPreflight, CreateSessionRequest, FullControlLaunchRequest, SessionView } from "@wollipog/protocol";
 import { ApiError, type ApiClient } from "../api.js";
-import { FullControlBlockedError, launchFullControlCampaign, locationGatesWarning, type FullControlLocationWarning } from "./FullControlPreparation.js";
+import { FullControlBlockedError, FullControlLocationsToReview, fullControlLocationReport, launchFullControlCampaign, type FullControlLocationReport } from "./FullControlPreparation.js";
 
 const ready = { ready: true, digest: "b".repeat(64), capabilities: [], summary: { blockers: [] } } as unknown as CampaignLaunchPreflight;
 const request: CreateSessionRequest = { runnerId: "r", workspaceId: "w", projectId: "p", projectLocationId: "l", agentId: "claude",
@@ -37,40 +37,39 @@ test("a Full Control launch forwards Run On and Harness to the server and never 
 
 const OLD = "The Location's runner can't perform this campaign's gates. Update and restart it to protocol version 327 or newer.";
 const excluded = (locationId: string, name: string, failure: CampaignExcludedLocation["failure"], reason: string): CampaignExcludedLocation => ({ locationId, name, failure, reason });
+const withSummary = (summary: Partial<CampaignLaunchPreflight["summary"]>) => ({ ...ready, summary: { blockers: [], ...summary } }) as unknown as CampaignLaunchPreflight;
 
-test("a start that leaves out a Location for its runner's version says so, naming the version, and admits nothing differently (#4319)", async () => {
-  const warned = { summary: { blockers: [], excludedLocations: [excluded("a", "Old Mac", "runner_below_gates", OLD), excluded("b", "Notes", "not_repository", "not a repository")] } };
-  const { client, sent } = api(async () => ({ preflight: { ...ready, ...warned } as unknown as CampaignLaunchPreflight }));
-  const warnings: FullControlLocationWarning[] = [];
-  await launchFullControlCampaign(client, request, (warning) => warnings.push(warning));
-  assert.deepEqual(warnings, [{ message: "Old Mac isn't in this campaign yet.", detail: `${OLD} Campaign Status lists it until it can join.` }]);
-  assert.equal(sent.admissions.length, 1, "a left-out Location never blocks a start");
+test("a start stops to show a Location left out for its runner's version before the campaign exists, and then proceeds with that report (#4319)", async () => {
+  const old = excluded("a", "Old Mac", "runner_below_gates", OLD);
+  const { client, sent } = api(async () => ({ preflight: withSummary({ excludedLocations: [old, excluded("b", "Notes", "not_repository", "not a repository")] }) }));
+  let report: FullControlLocationReport | null = null;
+  await assert.rejects(launchFullControlCampaign(client, request), (error: unknown) => {
+    assert.ok(error instanceof FullControlLocationsToReview);
+    report = error.report;
+    return true;
+  });
+  assert.deepEqual(report, { excluded: [old], limited: [] }, "only the version's exclusion: another stays in Campaign Status, as it always has");
+  assert.equal(sent.admissions.length, 0, "the person hasn't approved this boundary yet");
+  await launchFullControlCampaign(client, request, report);
+  assert.equal(sent.admissions.length, 1, "shown once, it never blocks the start");
 });
 
-test("no warning comes before the start succeeds, or twice when the server's facts moved (#4319)", async () => {
-  const warned = { summary: { blockers: [], excludedLocations: [excluded("a", "Old Mac", "runner_below_gates", OLD)] } };
-  const { client, sent } = api(async () => ({ preflight: { ...ready, ...warned } as unknown as CampaignLaunchPreflight }));
-  const warnings: FullControlLocationWarning[] = [];
-  const create = client.createFullControlCampaign;
-  let attempts = 0;
-  client.createFullControlCampaign = async (input) => {
-    attempts += 1;
-    if (attempts === 1) throw new ApiError("launch preflight changed; refresh and review the exact proposal again", 409);
-    return create(input);
-  };
-  await launchFullControlCampaign(client, request, (warning) => warnings.push(warning));
-  assert.equal(warnings.length, 1);
-  client.createFullControlCampaign = async () => { throw new ApiError("Full Control launch is blocked: nothing started.", 409); };
-  await assert.rejects(launchFullControlCampaign(client, request, (warning) => warnings.push(warning)));
-  assert.equal(warnings.length, 1, "a refused start warns about nothing");
+test("a start stops again when the check finds something the person wasn't shown, and a limited launch Location counts (#4319)", async () => {
+  const old = excluded("a", "Old Mac", "runner_below_gates", OLD);
+  const limited = { locationId: "l", name: "Laptop", reason: "limited" };
+  const { client, sent } = api(async () => ({ preflight: withSummary({ excludedLocations: [old, excluded("d", "Desk", "runner_below_gates", OLD)], limitedLocations: [limited] }) }));
+  await assert.rejects(launchFullControlCampaign(client, request, { excluded: [old], limited: [] }),
+    (error: unknown) => error instanceof FullControlLocationsToReview && error.report.excluded.length === 2 && error.report.limited.length === 1);
+  assert.equal(sent.admissions.length, 0);
+  // A limit alone is still something the person approves.
+  assert.deepEqual(fullControlLocationReport(withSummary({ excludedLocations: [], limitedLocations: [limited] })), { excluded: [], limited: [limited] });
+});
+
+test("a campaign whose runners are all current starts in one action, even with other exclusions (#4319)", async () => {
+  const { client, sent } = api(async () => ({ preflight: withSummary({ excludedLocations: [excluded("b", "Notes", "not_repository", "not a repository"), excluded("c", "Away", "runner_offline", "offline")] }) }));
+  await launchFullControlCampaign(client, request);
   assert.equal(sent.admissions.length, 1);
-});
-
-test("a campaign whose runners are all current gets no warning, even with other exclusions (#4319)", () => {
-  assert.equal(locationGatesWarning([]), null);
-  assert.equal(locationGatesWarning([excluded("b", "Notes", "not_repository", "not a repository"), excluded("c", "Away", "runner_offline", "offline")]), null);
-  assert.deepEqual(locationGatesWarning([excluded("a", "Old Mac", "runner_below_gates", OLD), excluded("d", "Desk", "runner_below_gates", OLD)]), {
-    message: "2 Locations aren't in this campaign yet.", detail: `Old Mac, Desk: ${OLD} Campaign Status lists them until they can join.` });
+  assert.equal(fullControlLocationReport(withSummary({ excludedLocations: [] })), null);
 });
 
 test("the server's placement refusal is the inline sentence, and nothing is admitted (#2940)", async () => {

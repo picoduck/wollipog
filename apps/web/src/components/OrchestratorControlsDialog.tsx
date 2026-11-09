@@ -27,8 +27,7 @@ import { StatusBadge } from "./StatusBadge.js";
 import { ChoiceRows, SegmentedControl, type ChoiceRowOption } from "./ui/ChoiceControls.js";
 import { SAVED_MS } from "./ui/SettingsRows.js";
 import { BusyButton } from "./ui/BusyButton.js";
-import { enableFullControlCampaign, OrchestratorControlChoice } from "./FullControlPreparation.js";
-import { useFeedback } from "./FeedbackProvider.js";
+import { enableFullControlCampaign, FullControlLocationNotices, FullControlLocationsToReview, OrchestratorControlChoice, type FullControlLocationReport } from "./FullControlPreparation.js";
 import { CampaignBehaviorEditor } from "./CampaignBehaviorEditor.js";
 
 /** Who answers a descendant session's requests (§8.4 choice rows). The off choice is "Human",
@@ -239,7 +238,6 @@ export function OrchestratorControlsDialog({
   returnFocusRef?: { current: HTMLElement | null };
 }) {
   const api = useApi();
-  const { showToast } = useFeedback();
   const ids = useId();
   const [controlPreview, setControlPreview] = useState<"custom" | "full_control">(() =>
     session.orchestratorCampaign?.control !== undefined && Number.isSafeInteger(session.orchestratorCampaign.policyRevision)
@@ -331,15 +329,19 @@ export function OrchestratorControlsDialog({
   // campaign's own scope or first message, and only a genuine impossibility stops it.
   const [enabling, setEnabling] = useState(false);
   const [enableError, setEnableError] = useState<string | null>(null);
-  useEffect(() => { setEnableError(null); }, [controlPreview]);
+  const [enableReport, setEnableReport] = useState<FullControlLocationReport | null>(null);
+  useEffect(() => { setEnableError(null); setEnableReport(null); }, [controlPreview]);
   const enable = async () => {
     if (enabling) return;
     setEnabling(true); setEnableError(null);
     try {
-      onSessionChanged(await enableFullControlCampaign(api, session.id, ({ message, detail }) => showToast(message, { tone: "warning", detail })));
+      onSessionChanged(await enableFullControlCampaign(api, session.id, enableReport));
+      setEnableReport(null);
       showSaved("control");
     } catch (cause) {
-      setEnableError(cause instanceof Error ? cause.message : "Full Control was not enabled.");
+      // Not a failure (#4319): the person sees what this enable leaves out, and Enable again proceeds.
+      if (cause instanceof FullControlLocationsToReview) setEnableReport(cause.report);
+      else setEnableError(cause instanceof Error ? cause.message : "Full Control was not enabled.");
     } finally { setEnabling(false); }
   };
   // Full Control, chosen or in effect, shows only its choice, its line and its one action (#2940): the
@@ -372,6 +374,7 @@ export function OrchestratorControlsDialog({
         <p className="section-note">Effective Mode: {effectiveMode === "full_control" ? "Full Control" : effectiveMode === "custom" ? "Custom" : "Current Root State Not Reported"}.</p>
         {canEnable && <>
           <OrchestratorControlChoice embedded mode={controlPreview} onChange={setControlPreview} disabled={refusal !== null || enabling} />
+          {controlPreview === "full_control" && <FullControlLocationNotices report={enableReport} />}
           {controlPreview === "full_control" && enableError && <Notice tone="danger" role="alert" title="Couldn't Enable Full Control">{enableError}</Notice>}
         </>}
         {/* Readiness from the server's live facts (#2940): the bare "end to end" line only when

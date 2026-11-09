@@ -909,8 +909,9 @@ the work needs one; once the owner adds it, it joins the campaign on its own.
 
 A Location on a runner too old to perform the campaign's gates doesn't join: `repositoryBoundary` lists
 it under `excludedLocations` with a reason naming the version it needs, and asking to add its repository
-is refused with that reason. Report that its runner needs updating. It can join once that runner updates,
-without a new launch.
+is refused with that reason. A merge, branch deletion, closure or follow-up naming that repository is
+refused the same way, with no other login standing in, so don't look for one: report that its runner
+needs updating. It can join once that runner updates, without a new launch.
 
 ## Inspecting and Changing Campaign Issue Scope
 

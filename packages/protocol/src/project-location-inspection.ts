@@ -41,7 +41,21 @@ export interface CampaignExcludedLocation {
   /** A Custom campaign only (#4319): this exclusion began as `runner_below_gates`, so a reconnect still
    * retries it whatever the last read found. Full Control retries by `failure` alone. */
   rejoinsOnReconnect?: true;
+  /** What a `runner_below_gates` Location verified as, when its runner can still read one (v288+):
+   * while it is left out, that repository's gates refuse by this Location's name (#4319). */
+  repository?: string;
 }
+
+/** A launch Location kept in the boundary although its root runner can't create issues through a
+ * Location, so a follow-up routed to its repository from another of the campaign's can't be created
+ * (#4319). Its repository's other gates run in the root's own checkout and aren't affected. */
+export interface CampaignLimitedLocation {
+  locationId: string;
+  name: string;
+  reason: string;
+}
+
+export const CAMPAIGN_LIMITED_LOCATION_REASON = `Follow-ups from this campaign's other repositories can't be created in this Location's repository until its runner is on protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer.`;
 
 /** A Project Location someone other than the campaign's owner added mid-campaign (#4117). It joins
  * only when the owner uses Include in Campaign. */
@@ -82,6 +96,8 @@ export interface CampaignRepositoryBoundaryView {
   repositories: Array<{ repository: string; locations: Array<{ locationId: string; name: string;
     availability: import("./index.js").ProjectLocationAvailability | "removed"; isDefault: boolean }> }>;
   excludedLocations: CampaignExcludedLocation[];
+  /** Read live from the root's runner, so it clears when that runner updates. Absent with none. */
+  limitedLocations?: CampaignLimitedLocation[];
   pendingLocations: CampaignPendingLocation[];
   /** Absent from a control plane before v320. */
   availableLocations?: CampaignAvailableLocation[];
@@ -94,4 +110,4 @@ export type ProjectLocationInspection =
   | { ok: true; location: VerifiedProjectLocation; issueFacts?: import("./index.js").CampaignIssueFacts[];
     /** The asked-for epic and its members, all in `location.repository`. */
     candidates?: NonNullable<import("./index.js").CampaignIssueScopeView["candidates"]> }
-  | { ok: false; locationId: string; failure: ProjectLocationInspectionFailure; reason: string };
+  | { ok: false; locationId: string; failure: ProjectLocationInspectionFailure; reason: string; repository?: string };

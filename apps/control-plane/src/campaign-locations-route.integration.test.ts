@@ -220,7 +220,8 @@ test("a runner's real registration below the gates' floor records why, and its r
   await cp.until("the exclusion to name the version", () => exclusion()?.failure === "runner_below_gates");
   assert.match(exclusion()!.reason, new RegExp(`protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer`, "u"));
   assert.equal(cp.boundary().revision, before);
-  assert.equal(old.some((message) => message.type === "campaign_launch_inspect"), false, "that runner is never asked");
+  assert.equal(exclusion()!.repository, "owner/third", "it read which repository this is, so its gates can refuse by name");
+  assert.ok(old.some((message) => message.type === "campaign_launch_inspect"));
   const updated = await cp.connect(runnerMetadata(AWAY, AWAY_WORKSPACES), AWAY_TOKEN, []);
   await cp.until("the Location to join after the update", () => Boolean(cp.boundary().repositories?.some((entry) => entry.repository === "owner/third")));
   assert.equal(cp.boundary().revision, before + 1);
