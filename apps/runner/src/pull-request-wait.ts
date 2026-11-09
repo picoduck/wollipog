@@ -766,7 +766,7 @@ async function workflowChecks(
       if (valid) for (const ids of suites.values()) for (const id of ids) {
         // Absence from a list is not immutable evidence: only cache suites actually returned.
         if (!found.has(id)) continue;
-        const identity = found.get(id)!;
+        const identity = found.get(id) ?? cache.get(id) ?? null;
         cache.set(id, identity);
         if (cache.size > 2_000) cache.delete(cache.keys().next().value!);
       }

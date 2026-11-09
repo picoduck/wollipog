@@ -1425,7 +1425,7 @@ test("transient optional identity failure at the deadline returns timeout", asyn
 });
 
 for (const absent of [false, true]) {
-  test(`complete non-comparable suite lookup is cached (${absent})`, async () => {
+  test(`returned non-comparable identities are cached, absent suites are re-read (${absent})`, async () => {
     const fake = fakeGh([ok(pr({}, [suiteJob(null, 100, 1), suiteJob("SUCCESS", 101, 2)]))], {
       runs: ok(absent ? { total_count: 0, workflow_runs: [] } : suiteRuns(["workflow_dispatch", "workflow_dispatch"])),
     });
@@ -1509,4 +1509,26 @@ test("a suite absent from one complete lookup can acquire provenance on the next
   assert.equal(result.summary.outcome, "checks_passed");
   assert.equal(result.summary.polls, 2);
   assert.equal(reads, 2);
+});
+
+
+test("an incomplete later listing cannot erase an established suite identity", async () => {
+  const nodes = (conclusions: Array<string | null>) => conclusions.map((conclusion, index) => suiteJob(conclusion, 100 + index, index + 1));
+  const fake = fakeGh([
+    ok(pr({}, nodes([null, null, null]))),
+    ok(pr({}, nodes(["CANCELLED", "SUCCESS", "SUCCESS"]))),
+  ]);
+  let reads = 0;
+  const gh: GhRunner = async (args) => {
+    if (!args.some((arg) => arg.includes("/actions/runs?"))) return fake.gh(args);
+    reads++;
+    const runs = suiteRuns();
+    if (reads === 2) runs.workflow_runs[0]!.pull_requests = [];
+    return ok(runs);
+  };
+  const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "checks_passed");
+  assert.equal(result.summary.polls, 2);
+  assert.equal(reads, 2, "the absent third suite requires a later lookup");
 });
