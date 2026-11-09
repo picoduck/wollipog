@@ -8,7 +8,7 @@ import path from "node:path";
 import net from "node:net";
 import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
-import { buildBwrapArgs, bwrapPathWritable, bwrapTemporaryEnvironment, buildCloudArgs, buildContainerArgs, buildWslAgentControlRelayArgs, buildWslArgs, killTree, killTreeAndWait, killWindowsTreeAndWait, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, windowsTreeKillFailures, winQuoteArg, wslProviderPidfile, type AgentProcess, type WindowsTreeKillDeps } from "./spawn.js";
+import { buildBwrapArgs, protectedWorktreeGitConfig, bwrapPathWritable, bwrapTemporaryEnvironment, buildCloudArgs, buildContainerArgs, buildWslAgentControlRelayArgs, buildWslArgs, killTree, killTreeAndWait, killWindowsTreeAndWait, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, windowsTreeKillFailures, winQuoteArg, wslProviderPidfile, type AgentProcess, type WindowsTreeKillDeps } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { WSL_BWRAP_LAUNCHER_PATH } from "./wsl-bwrap-launcher.js";
 import { captureLiveProcess, runFixtureCleanup, terminateOriginalProcess, waitForOriginalProcessToStop, type PosixProcessIdentity } from "../test-support/posix-process.js";
@@ -596,18 +596,55 @@ test("buildBwrapArgs pins a managed worktree root below a read-only parent", () 
   assert.ok(parent > args.indexOf("--tmpfs") && requested > parent && child > requested && git > child && registration > git);
 });
 
-test("buildBwrapArgs turns rerere off only in a protected worktree's boundary, and adds no mount for it", () => {
-  const base = { backend: "bwrap" as const, command: "/usr/bin/bwrap", args: [] as string[], network: "inherit" as const };
-  const setenv = (args: string[]) => args.flatMap((value, index) => value === "--setenv" ? [[args[index + 1], args[index + 2]]] : []);
-  const mounts = (args: string[]) => args.filter((value) => /^--(?:ro-)?bind$/u.test(value)).length;
+test("turning rerere off adds nothing to a protected worktree's mounts", () => {
   const worktree = { parent: "/work/trees", path: "/work/trees/s1", gitWritableRoots: ["/repo/.git/objects"] };
-  const protectedArgs = buildBwrapArgs({ command: "/bin/sh", args: [], cwd: worktree.path }, { ...base, protectedWorktree: worktree });
-  assert.deepEqual(setenv(protectedArgs), [["GIT_CONFIG_PARAMETERS", "'rerere.enabled=false'"]]);
-  assert.ok(protectedArgs.indexOf("--setenv") < protectedArgs.indexOf("--"), "it is an option of bwrap, not of the command");
-  assert.equal(protectedArgs.some((value) => /rr-cache|packed-refs/u.test(value)), false, "nothing of rerere's is bound");
-  assert.equal(mounts(protectedArgs), 4, "the root, the parent, the worktree and the one Git root");
-  assert.deepEqual(setenv(buildBwrapArgs({ command: "/bin/sh", args: [], cwd: "/work/other" }, base)), [],
-    "a launch outside a protected worktree keeps its repository's configuration");
+  const args = buildBwrapArgs({ command: "/bin/sh", args: [], cwd: worktree.path },
+    { backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "inherit", protectedWorktree: worktree });
+  assert.equal(args.some((value) => /rr-cache|packed-refs|GIT_CONFIG/u.test(value)), false, "nothing of rerere's is bound or set");
+  assert.equal(args.filter((value) => /^--(?:ro-)?bind$/u.test(value)).length, 4, "the root, the parent, the worktree and the one Git root");
+});
+
+test("rerere is turned off after any Git configuration the launch already carries", () => {
+  assert.equal(protectedWorktreeGitConfig(undefined), "'rerere.enabled=false'");
+  assert.equal(protectedWorktreeGitConfig("  "), "'rerere.enabled=false'");
+  assert.equal(protectedWorktreeGitConfig("'core.hooksPath=/dev/null' 'core.fsmonitor=false'"),
+    "'core.hooksPath=/dev/null' 'core.fsmonitor=false' 'rerere.enabled=false'");
+  assert.equal(protectedWorktreeGitConfig("'rerere.enabled=true' \n"), "'rerere.enabled=true' 'rerere.enabled=false'", "the last entry wins");
+});
+
+test("a protected worktree's provider starts with rerere off and every inherited Git setting kept", {
+  skip: process.platform === "win32" ? "a native bwrap launch is POSIX only" : false,
+}, async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "wollipog-protected-git-env-"));
+  const probe = path.join(root, "probe.js");
+  // Stands in for bubblewrap: it ignores its arguments and reports the environment it was given.
+  await fs.writeFile(probe, "process.stdout.write(JSON.stringify({ git: process.env.GIT_CONFIG_PARAMETERS ?? null }));\n");
+  const previous = process.env.GIT_CONFIG_PARAMETERS;
+  const launch = async (isolation: Parameters<typeof buildBwrapArgs>[1], env: Record<string, string>) => {
+    const child = spawnAgent({ command: "/bin/sh", args: [], cwd: path.join(root, "s1"), env, isolation, trackDescendants: false });
+    child.stdin.end();
+    let out = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (text: string) => (out += text));
+    await new Promise<void>((resolve, reject) => { child.on("error", reject); child.on("close", () => resolve()); });
+    return (JSON.parse(out) as { git: string | null }).git;
+  };
+  try {
+    await fs.mkdir(path.join(root, "s1"));
+    const base = { backend: "bwrap" as const, command: process.execPath, args: [probe], network: "inherit" as const };
+    const protectedWorktree = { parent: root, path: path.join(root, "s1"), gitWritableRoots: [] };
+    process.env.GIT_CONFIG_PARAMETERS = "'core.fsmonitor=false'";
+    assert.equal(await launch({ ...base, protectedWorktree }, {}), "'core.fsmonitor=false' 'rerere.enabled=false'", "inherited");
+    assert.equal(await launch({ ...base, protectedWorktree }, { GIT_CONFIG_PARAMETERS: "'core.hooksPath=/dev/null'" }),
+      "'core.hooksPath=/dev/null' 'rerere.enabled=false'", "configured for the agent");
+    assert.equal(await launch(base, {}), "'core.fsmonitor=false'", "a launch outside a protected worktree is unchanged");
+    delete process.env.GIT_CONFIG_PARAMETERS;
+    assert.equal(await launch({ ...base, protectedWorktree }, {}), "'rerere.enabled=false'", "nothing inherited");
+  } finally {
+    if (previous === undefined) delete process.env.GIT_CONFIG_PARAMETERS;
+    else process.env.GIT_CONFIG_PARAMETERS = previous;
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });
 
 test("buildBwrapArgs rejects a different cwd under a protected worktree launch", () => {

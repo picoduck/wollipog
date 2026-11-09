@@ -6,7 +6,7 @@ import { after, test } from "node:test";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { managedWorktreeGitLayout, managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths } from "./managed-worktree-sandbox.js";
-import { buildBwrapArgs } from "./spawn.js";
+import { buildBwrapArgs, spawnAgent } from "./spawn.js";
 import { confinedGitRunner, deleteOwnedWorktreeRefs, findBubblewrap, SEQUENCER_LEFTOVER_REFS } from "./worktree-ref-deletion.js";
 
 /** Never inherit this process's stdin: a sandboxed child that reads it blocks the whole suite
@@ -705,13 +705,28 @@ test("a conflict in a real sandbox commits cleanly while rerere's shared cache s
     },
   );
   assert.equal(isolation?.backend, "bwrap");
-  const sandboxed = (script: string) => run(isolation!.command, buildBwrapArgs(
-    { command: "/bin/sh", args: ["-c", script], cwd: worktreePath },
-    isolation as Extract<typeof isolation, { backend: "bwrap" }>,
-  ), worktreePath);
+  // Through the launcher a provider uses, so the environment it gives the provider is the one tested.
+  const sandboxed = async (script: string) => {
+    const child = spawnAgent({
+      command: "/bin/sh", args: ["-c", script], cwd: worktreePath, context: { kind: "native" },
+      env: { GIT_CONFIG_PARAMETERS: "'core.fsmonitor=false'" },
+      isolation: isolation as Extract<typeof isolation, { backend: "bwrap" }>, trackDescendants: false,
+    });
+    child.stdin.end();
+    let output = "";
+    child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+    child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+    const status = await new Promise<number | null>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code) => resolve(code));
+    });
+    return { status, output };
+  };
   const admin = gitAdminDirectory(worktreePath);
 
-  const work = sandboxed([
+  const configured = await sandboxed("git config --type=bool --get rerere.enabled; git config --type=bool --get core.fsmonitor");
+  assert.equal(configured.output.trim(), "false\nfalse", "rerere off, and the launch's own setting kept");
+  const work = await sandboxed([
     "set -e",
     "printf feature > tracked.txt",
     `${COMMITTER} commit --quiet -am feature`,
@@ -736,7 +751,7 @@ test("a conflict in a real sandbox commits cleanly while rerere's shared cache s
     `printf x > ${JSON.stringify(join(common, "packed-refs.lock"))}`,
     `printf x >> ${JSON.stringify(join(admin, "config.worktree"))}`,
   ]) {
-    const attempted = sandboxed(script);
+    const attempted = await sandboxed(script);
     assert.notEqual(attempted.status, 0, `${script}: ${attempted.output}`);
   }
   assert.deepEqual(readdirSync(join(common, "rr-cache")), ["0".repeat(40)]);

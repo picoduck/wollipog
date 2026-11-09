@@ -382,9 +382,20 @@ export function buildCloudArgs(
  *
  * This variable rather than `GIT_CONFIG_COUNT` and `GIT_CONFIG_KEY_0`: a provider that filters
  * environment names containing `KEY` would keep the count and drop the key, and Git then fails every
- * command. Filtering this one only restores the behavior above. It replaces any inherited value.
+ * command. Filtering this one only restores the behavior above.
  */
 export const PROTECTED_WORKTREE_GIT_CONFIG = "'rerere.enabled=false'";
+
+/**
+ * The launch environment's `GIT_CONFIG_PARAMETERS` for a protected worktree: whatever it already
+ * carried, such as `core.hooksPath` or `core.fsmonitor` overrides, with rerere turned off after it.
+ * Git reads the entries in order and the last one wins, so nothing earlier is lost. It goes into the
+ * environment itself rather than a bubblewrap `--setenv`, because the Claude namespace provider
+ * re-executes its worker with the serialized launch environment, not the supervisor's.
+ */
+export function protectedWorktreeGitConfig(existing: string | undefined): string {
+  return existing?.trim() ? `${existing.trimEnd()} ${PROTECTED_WORKTREE_GIT_CONFIG}` : PROTECTED_WORKTREE_GIT_CONFIG;
+}
 
 export function buildBwrapArgs(opts: Pick<SpawnAgentOptions, "command" | "args" | "cwd">, isolation: BwrapSpawnIsolation): string[] {
   const bridge = isolation.wslAgentControl;
@@ -448,7 +459,6 @@ export function buildBwrapArgs(opts: Pick<SpawnAgentOptions, "command" | "args" 
         "--remount-ro", isolation.guardStateMask.directory,
       ]
       : []),
-    ...(isolation.protectedWorktree ? ["--setenv", "GIT_CONFIG_PARAMETERS", PROTECTED_WORKTREE_GIT_CONFIG] : []),
     "--chdir", opts.cwd,
     "--",
     opts.command,
@@ -870,6 +880,9 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
     worktreeDescendantMarker ? { [WORKTREE_DESCENDANT_MARKER_ENV]: worktreeDescendantMarker } : {},
   ]);
   if (bwrapOptions) Object.assign(launchEnv, bwrapTemporaryEnvironment(launchEnv, bwrapOptions));
+  if (opts.isolation?.backend === "bwrap" && opts.isolation.protectedWorktree) {
+    launchEnv.GIT_CONFIG_PARAMETERS = protectedWorktreeGitConfig(launchEnv.GIT_CONFIG_PARAMETERS);
+  }
   if (opts.claudeNamespaceProvider && opts.isolation?.backend === "bwrap" &&
       opts.context?.kind !== "wsl" && opts.descendantOwner) {
     return spawnClaudeNamespaceProvider(

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
-import { PROTECTED_WORKTREE_GIT_CONFIG } from "./spawn.js";
+import { protectedWorktreeGitConfig } from "./spawn.js";
 
 /**
  * Ordinary Git in a repository with a protected worktree's shape: the worktree, its admin directory
@@ -20,7 +20,7 @@ const ENV = {
   GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid",
 };
 
-function fixture(t: { after(fn: () => void): void }) {
+function fixture(t: { after(fn: () => void): void }, inherited?: string) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-protected-worktree-git-")));
   const repo = join(root, "repo"), worktree = join(root, "worktree"), common = join(repo, ".git");
   const run = (cwd: string, args: string[], env: Record<string, string> = {}) => {
@@ -58,7 +58,7 @@ function fixture(t: { after(fn: () => void): void }) {
   });
   const admin = join(common, "worktrees", "worktree");
   // Each command as a process inside the boundary runs it.
-  const git = (...args: string[]) => run(worktree, args, { GIT_CONFIG_PARAMETERS: PROTECTED_WORKTREE_GIT_CONFIG });
+  const git = (...args: string[]) => run(worktree, args, { GIT_CONFIG_PARAMETERS: protectedWorktreeGitConfig(inherited) });
   const edit = (content: string) => writeFileSync(join(worktree, "f.txt"), `${content}\n`);
   const log = () => run(worktree, ["log", "--format=%s", "-3"]).output.trim().split("\n");
   const recordedResolutions = () => readdirSync(join(common, "rr-cache"));
@@ -114,6 +114,18 @@ test("a lock an earlier launch left behind no longer fails commits", { skip: CAN
   f.edit("after the lock");
   const committed = f.git("commit", "--quiet", "-am", "after the lock");
   assert.equal(committed.status, 0, committed.output);
+});
+
+test("settings the launch already carried still apply, and a conflict still commits", { skip: CANNOT_EMULATE }, (t) => {
+  const f = fixture(t, "'core.hooksPath=/dev/null' 'core.fsmonitor=false' 'rerere.enabled=true'");
+  assert.equal(f.git("config", "--get", "core.hooksPath").output.trim(), "/dev/null");
+  assert.equal(f.git("config", "--type=bool", "--get", "core.fsmonitor").output.trim(), "false");
+  assert.equal(f.git("config", "--type=bool", "--get", "rerere.enabled").output.trim(), "false", "rerere stays off even when asked for");
+  assert.equal(f.git("merge", "--no-edit", "side").status, 1, "the conflict");
+  f.edit("resolved");
+  assert.equal(f.git("add", "f.txt").status, 0);
+  const merged = f.git("commit", "--no-edit");
+  assert.equal(merged.status, 0, merged.output);
 });
 
 test("a command that asks for its own configuration keeps it, beside rerere staying off", { skip: CANNOT_EMULATE }, (t) => {
