@@ -8,7 +8,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
-import { providerAccountExpectationSentence, providerAccountPreviewPlacement, providerAccountSelectionRefreshKey, providerAccountSkipLabel, useProviderAccountSelection } from "./ProviderAccountSelection.js";
+import { providerAccountDescription, providerAccountExpectationSentence, providerAccountPreviewPlacement, providerAccountSelectionRefreshKey, providerAccountSkipLabel, useProviderAccountSelection } from "./ProviderAccountSelection.js";
 import {
   PROVIDER_ACCOUNT_CHOICE_REQUIRED,
   providerAccountPolicyMode,
@@ -78,7 +78,6 @@ import { folderName } from "../run-dialog-choices.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { FieldError } from "./FieldError.js";
 import { FieldWarning } from "./FieldWarning.js";
-import { statusMeta } from "../status-meta.js";
 import { Notice } from "./Notice.js";
 import { FullControlBlockedError, launchFullControlCampaign } from "./FullControlPreparation.js";
 import {
@@ -111,14 +110,6 @@ import {
 function usd(amount: number): string {
   return `$${Number.isInteger(amount) ? amount
     : amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 20, useGrouping: false })}`;
-}
-
-/** An account's sign-in in the words Switch Account and Choose Another Account use (§11.2). */
-function providerAccountDescription(authStatus: "authenticated" | "unauthenticated" | "unknown" | undefined): string {
-  const status = authStatus === "authenticated" ? "signed_in"
-    : authStatus === "unauthenticated" ? "sign_in_required" : "status_unknown";
-  const { label } = statusMeta("provider_account", status);
-  return status === "sign_in_required" ? `${label} · Sign in again before using it.` : label;
 }
 
 /** Why a chosen location cannot host the session, and what to do about it (§8.5). */

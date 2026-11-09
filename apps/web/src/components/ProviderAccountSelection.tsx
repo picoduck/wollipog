@@ -12,6 +12,7 @@ import {
 import type { ProviderAccountSelectionTarget } from "../api.js";
 import { useApi } from "../api-context.js";
 import { subscriptionResetLabel } from "../account-unavailable-reasons.js";
+import { statusMeta } from "../status-meta.js";
 import { AccountIdentifier } from "./AccountIdentifier.js";
 
 /**
@@ -46,6 +47,14 @@ export function providerAccountSkipLabel(candidate: Pick<ProviderAccountSelectio
   const reset = candidate.retryAt !== undefined && candidate.retryAt > now ? subscriptionResetLabel(candidate.retryAt, now) : null;
   const when = reset === null ? "" : ` ${candidate.reason === "cooldown" ? reset.replace(/^Resets in/u, "Available again in") : reset}.`;
   return `Skipped: ${SKIP_LABEL[candidate.reason]}${limit}.${when}`;
+}
+
+/** An account's sign-in in the words Switch Account and Choose Another Account use (§11.2). */
+export function providerAccountDescription(authStatus: "authenticated" | "unauthenticated" | "unknown" | undefined): string {
+  const status = authStatus === "authenticated" ? "signed_in"
+    : authStatus === "unauthenticated" ? "sign_in_required" : "status_unknown";
+  const { label } = statusMeta("provider_account", status);
+  return status === "sign_in_required" ? `${label} · Sign in again before using it.` : label;
 }
 
 /** Everything a preview reads from the Machine, so it refreshes when any of them change. */

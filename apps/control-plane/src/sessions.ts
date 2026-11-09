@@ -3,7 +3,7 @@ import { normalizeDeliveryVerificationFailure } from "@wollipog/protocol";
 import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
 import {
   isProviderAccountRef, PROVIDER_ACCOUNT_CHOICE_REQUIRED, PROVIDER_ACCOUNT_REF_PREFIX, providerAccountChoiceRequired, providerAccountChoiceRequiredSentence,
-  providerAccountExplicitRecord, providerAccountIneligibility, providerAccountNamedRefusal, providerAccountNamedRefusalSentence,
+  memberProviderAccountsError, providerAccountExplicitRecord, providerAccountIneligibility, providerAccountNamedRefusal, providerAccountNamedRefusalSentence,
   providerAccountSelectionRecord, providerForDriver, resolveProviderAccountSelection,
   supportsClaudeProjectMemory, type AgentDefinition, type ProviderAccountChoice, type ProviderAccountChoiceRequired, type ProviderAccountDefinition, type ProviderAccountSelectionPreview,
   type ProviderAccountSelectionRecord, type ProviderAccountSelectionResult, type RunnerProviderAccountDefault, type RunnerView,
@@ -19924,6 +19924,7 @@ export class SessionsService {
     const allowed = new Set([
       "runnerId", "workspaceId", "projectId", "projectLocationId", "workflowId", "workflowVersion", "task", "title", "useWorktree",
       "config", "costBudgetUsd", "maxToolCalls", "agentBindings", "orchestratorAgentId",
+      "providerAccountBindings", "orchestratorProviderAccountId",
     ]);
     if (Object.keys(req).some((key) => !allowed.has(key))) return fail("workflow run request is malformed", 400);
     if (typeof req.runnerId !== "string" || !req.runnerId || typeof req.workspaceId !== "string" || !req.workspaceId ||
@@ -19971,6 +19972,10 @@ export class SessionsService {
         Object.values(bindings).some((value) => typeof value !== "string" || !value || value.length > 256)) {
       return fail("workflow agent bindings are malformed", 400);
     }
+    const namedAccountsError = memberProviderAccountsError(req.providerAccountBindings, logicalAgentIds, "providerAccountBindings") ??
+      memberProviderAccountsError(req.orchestratorProviderAccountId === undefined ? undefined : { orchestrator: req.orchestratorProviderAccountId },
+        req.orchestratorAgentId ? ["orchestrator"] : [], "orchestratorProviderAccountId");
+    if (namedAccountsError) return fail(namedAccountsError, 400);
 
     const members: Array<{
       roleId: string;
@@ -20006,7 +20011,8 @@ export class SessionsService {
       const configError = workflowMemberCapabilityError(agentId, req.config, launch);
       if (configError) return fail(configError, 409);
       const account = this.workflowMemberAccount(req, agentId, launch, snapshot, this.memberLaunchProjectId(requestedProject.data, req, parentSessionId),
-        delivery?.memberSessionId?.(members.length) ?? delivery?.memberSessionIds?.[members.length]);
+        delivery?.memberSessionId?.(members.length) ?? delivery?.memberSessionIds?.[members.length],
+        { key: roleId, named: req.providerAccountBindings && Object.hasOwn(req.providerAccountBindings, roleId) ? req.providerAccountBindings[roleId] : undefined, namedByAgent: Boolean(parentSessionId) });
       if (!account.ok || !account.data) return failAs(account);
       members.push({ roleId, agentId, launch, orchestrator: false, account: account.data });
     }
@@ -20031,7 +20037,8 @@ export class SessionsService {
       const configError = workflowMemberCapabilityError(req.orchestratorAgentId, req.config, launch);
       if (configError) return fail(configError, 409);
       const account = this.workflowMemberAccount(req, req.orchestratorAgentId, launch, snapshot, this.workflowOrchestratorLaunchProjectId(requestedProject.data, req),
-        delivery?.memberSessionId?.(members.length) ?? delivery?.memberSessionIds?.[members.length]);
+        delivery?.memberSessionId?.(members.length) ?? delivery?.memberSessionIds?.[members.length],
+        { key: "orchestrator", named: req.orchestratorProviderAccountId, namedByAgent: Boolean(parentSessionId) });
       if (!account.ok || !account.data) return failAs(account);
       members.push({ roleId: "__orchestrator__", agentId: req.orchestratorAgentId, launch, orchestrator: true, account: account.data });
     }
@@ -21093,6 +21100,22 @@ export class SessionsService {
       .filter((session): session is SessionView => Boolean(session));
   }
 
+  /** One run or workflow member's account: what it names, else the Machine's policy. A refusal of a named
+   * account says whose it was, since a launch has several members and none of them started. */
+  private namedMemberProviderAccount(
+    runner: RunnerView,
+    member: string,
+    named: string | undefined,
+    launch: { agentId: string; launch: AgentLaunch; namedByAgent?: boolean; model?: string;
+      pinned?: { accountId?: string; selection?: ProviderAccountSelectionRecord } },
+  ): ServiceResult<WorkflowMemberAccount> {
+    if (named && !launch.pinned && !runnerSupportsProtocol(runner.protocolVersion, "providerAccounts")) {
+      return capabilityFail(runnerCapabilityRequirementError(runner.protocolVersion, "providerAccounts", "choosing an account"));
+    }
+    const account = this.launchProviderAccount({ ...launch, runner, hostTarget: true, ...(named ? { requestedId: named } : {}) });
+    return named && !account.ok ? { ...account, error: `${member}: ${account.error}` } : account;
+  }
+
   /** One workflow member's account. A recorded command keeps the account it was staged with. */
   private workflowMemberAccount(
     req: Pick<CreateWorkflowRunRequest, "runnerId" | "config">,
@@ -21101,6 +21124,7 @@ export class SessionsService {
     snapshot: DurableSessionCommand | undefined,
     projectId: string | null | undefined,
     stagedSessionId: string | undefined,
+    member: { key: string; named: string | undefined; namedByAgent: boolean },
   ): ServiceResult<WorkflowMemberAccount> {
     const runner = this.db.getRunner(req.runnerId);
     if (!runner) return fail("runner not found", 404);
@@ -21109,7 +21133,8 @@ export class SessionsService {
     const pinned = snapshot?.type === "start_session"
       ? { accountId: snapshot.spec.providerAccountId, selection: snapshot.spec.providerAccountSelection }
       : staged ? { accountId: staged.providerAccountId, selection: staged.providerAccountSelection } : undefined;
-    const account = this.launchProviderAccount({ runner, agentId, launch, hostTarget: true, ...(pinned ? { pinned } : {}),
+    const account = this.namedMemberProviderAccount(runner, member.key, member.named, {
+      agentId, launch, ...(pinned ? { pinned } : {}), ...(member.namedByAgent ? { namedByAgent: true } : {}),
       ...(req.config?.model ? { model: req.config.model } : {}) });
     if (!account.ok || !account.data) return failAs(account);
     const memoryRefusal = pinned ? null : this.accountMemoryRefusal<WorkflowMemberAccount>(runner, agentId, launch, account.data.selection, projectId);
@@ -21478,10 +21503,13 @@ export class SessionsService {
     // without an account refuses the run rather than leaving part of it started.
     const runRunner = this.db.getRunner(req.runnerId);
     if (!runRunner) return fail("runner not found", 404);
+    const namedAccountsError = memberProviderAccountsError(req.providerAccountIds, resolved.map((member) => member.agentId), "providerAccountIds");
+    if (namedAccountsError) return fail(namedAccountsError, 400);
     const memberAccounts = new Map<string, { providerAccount?: ProviderAccountDefinition; selection?: ProviderAccountSelectionRecord }>();
     for (const { agentId, launch } of resolved) {
-      const account = this.launchProviderAccount({ runner: runRunner, agentId, launch, hostTarget: true,
-        ...(req.config?.model ? { model: req.config.model } : {}) });
+      const named = req.providerAccountIds && Object.hasOwn(req.providerAccountIds, agentId) ? req.providerAccountIds[agentId] : undefined;
+      const account = this.namedMemberProviderAccount(runRunner, agentId, named, {
+        agentId, launch, ...(parentSessionId ? { namedByAgent: true } : {}), ...(req.config?.model ? { model: req.config.model } : {}) });
       if (!account.ok || !account.data) return failAs(account);
       const memoryRefusal = this.accountMemoryRefusal<{ run: RunView; sessions: SessionView[] }>(
         runRunner, agentId, launch, account.data.selection, this.memberLaunchProjectId(requestedProject.data, req, parentSessionId));

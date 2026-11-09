@@ -47,7 +47,8 @@ that left the machine keeps its place until removed. Turning Priority Order on s
 default, then the listed accounts this server may use; returning to Default Account restores the
 default. New Session and New Multi-Agent Run show the expected account and its reason. Choosing a
 different account in New Session overrides the policy for that session. When no account is eligible,
-New Session asks for one before it can start.
+New Session asks for one before it can start, and New Multi-Agent Run asks for each member that needs
+one, under either Run Type. A member whose account is fine stays with its expected account.
 
 ## Selection Policy
 
@@ -77,9 +78,11 @@ Missing or old usage readings don't disqualify an account: only a reading that s
 Selection never crosses providers.
 
 Explicit choices win. A session or child that names an account uses it, whatever the policy says or
-would skip. Runs and workflows can't name one yet. All of them resolve through one function
-(`launchProviderAccount`), and multi-agent runs and workflows now bind the same account a session
-would, including a fixed default. WSL agents keep their context-local account, because a POSIX path
+would skip. A run or workflow names one per member (`providerAccountIds` by agent id,
+`providerAccountBindings` by role, `orchestratorProviderAccountId`), and a member it doesn't name
+follows the policy. All of them resolve through one function (`launchProviderAccount`), and multi-agent
+runs and workflows bind the same account a session would, including a fixed default. Automations can't
+name one: they resolve at each launch. WSL agents keep their context-local account, because a POSIX path
 doesn't identify its owning distribution, so a machine policy doesn't apply to them.
 
 Resolution happens at dispatch and again at launch. The runner rechecks a Priority Order choice
@@ -144,7 +147,10 @@ of them. Unattended callers can act on this result; interactive ones offer the s
 `create_session` and `wollipog session create --provider-account` accept an optional account, and
 `get_provider_account_selection` and `wollipog session accounts` list what can be named. An agent's
 refusal text names this route. Both need protocol 337 on the control plane; the tools refuse before
-sending anything to an older one, so a choice is never silently dropped.
+sending anything to an older one, so a choice is never silently dropped. `create_run`
+(`providerAccountIds`) and `create_workflow_run` (`providerAccountBindings`) do the same per member
+and need protocol 338, for the same reason. A key that is no member is refused rather than ignored, and
+a refusal of a named account starts no member and names the member it was for.
 
 Agents see accounts only as opaque `accountRef` values, stable for one account on one Machine, because
 an account's id contains its label. The server enforces this on the selection route and on a launch's
@@ -186,9 +192,10 @@ Account labels are personal data and account ids are derived from them. Refusal 
 the runner's launch refusal and the reason stored on a session (`providerAccountSelection`: source,
 mode, policy revision and skip counts by reason) name no account. Only `candidates` and a saved
 default's `accountId`, returned to a person who can read the machine's account inventory, carry
-account ids. An agent's credential gets references and reason codes instead, so no id or label reaches
-a model's context through the agent tools. `GET /api/runners` still returns the inventory to that
-credential, though no tool passes it on.
+account ids. An agent's credential gets references and reason codes instead, on the selection route, on
+a launch's refusal and on `GET /api/runners`, which omits the Machine's accounts, saved policies and sign-in
+operations for that credential, along with each agent's default account and readiness. Each agent's
+`available` and `authStatus` stay. People read the same route as before.
 
 ## Remaining Work in #4353
 
