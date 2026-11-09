@@ -249,7 +249,8 @@ function scopeProposalCard(requestId: string): PendingApproval {
   };
 }
 const ownerQuestion = params.get("set") === "owner-question";
-const childQuestion = params.get("set") === "child-question";
+const childDelegated = params.get("set") === "child-delegated";
+const childQuestion = params.get("set") === "child-question" || childDelegated;
 const childRaw = params.get("set") === "child-raw";
 const childQuestionSnapshot = { category: "implementation_question" as const, kind: "question" as const,
   question: "Which approach should the child session use?", recommendedOptionId: "retry", options: ownerDecision.options };
@@ -258,6 +259,7 @@ function childQuestionCard(requestId: string): PendingApproval {
   const { kind: _kind, ...legacy } = childQuestionSnapshot;
   return { ...card, async: undefined, title: childRaw ? "Implementation Decision Required" : "Question",
     workflowDecision: { ...card.workflowDecision!, category: "implementation_question", controllingSessionId: "campaign-root",
+      authority: childDelegated ? "orchestrator" : "human",
       resourceSnapshot: childRaw ? legacy : childQuestionSnapshot } };
 }
 /** The owner decision card as the control plane stores it: an Owner Approval (`owner-raw`), or the
@@ -509,6 +511,9 @@ function Fixture() {
   const ownerStatusSession = useMemo(() => ownerQuestion || childQuestion || childRaw ? withPresentedOwnerQuestions({
     id: SESSION_ID, runnerId: "runner-1", title: "Agent Questions", status: "running",
     pendingApproval: resolved ? undefined : childQuestion || childRaw ? childQuestionCard(requestId) : ownerRawCard(requestId, ownerQuestionSnapshot),
+    ...(childDelegated ? { pendingRequestOwners: { human: 0, orchestrator: 1, requests: [
+      { requestId: childQuestionCard(requestId).requestId, owner: "orchestrator" },
+    ] } } : {}),
   } as SessionView) : null, [requestId, resolved]);
 
   // Reading back and Show Where Asked work as in a session: the reader follows its tail, and a reveal
@@ -551,7 +556,8 @@ function Fixture() {
 
   // Composer Response answers in the composer (#2212): the dock's card is compact, and while Answer
   // Mode is open the question is shown there alone.
-  const composerAnswers = !resolved && !ownerRaw && !childRaw && responseStyle === "composer" && (!recoveryRequired || recoveryCanResume);
+  const composerAnswers = request?.kind === "question" && !resolved && !ownerRaw && !childRaw &&
+    responseStyle === "composer" && (!recoveryRequired || recoveryCanResume);
   const answering = composerAnswers && answerActive;
   const composerContent = answering ? (
     <div className="composer-box answer-mode">

@@ -23,6 +23,7 @@ import {
   SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
+  WORKFLOW_QUESTION_ANSWER_MAX_CHARS,
   OWNER_DECISION_LIMITS,
   SESSION_WAIT_PROGRESS_REPORT_MS,
   type SessionWaitKind,
@@ -2332,7 +2333,7 @@ export const TOOLS: McpTool[] = [
         sessionId: { type: "string" },
         occurrenceId: { type: "string" },
         outcome: { type: "string", enum: ["approve", "deny"] },
-        selectedOptionId: { type: "string", description: "Required approved option for implementation questions only" },
+        selectedOptionId: { type: "string", description: "A suggested choice for kind:question, optional with a free-text childMessage. Legacy implementation approvals require one offered option." },
         evidenceReviewed: { type: "array", items: { type: "string" }, description: "Every evidence id directly inspected by this owner; excludes original videos covered by admitted managed-media proof. Omit when denying or for another category" },
         delegatedVideoEvidence: { type: "array", minItems: 1, maxItems: 32, items: {
           type: "object", properties: { evidenceId: { type: "string", maxLength: 256 }, reviewId: { type: "string", maxLength: 256 },
@@ -2350,8 +2351,8 @@ export const TOOLS: McpTool[] = [
         childMessage: {
           type: "string",
           minLength: 1,
-          maxLength: WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
-          description: "Optional message for the child: shown in its get_workflow_decision view and delivered as the prompt that resumes it. Say what to change after a denial.",
+          maxLength: WORKFLOW_QUESTION_ANSWER_MAX_CHARS,
+          description: "For kind:question, the free-text answer or note (up to 8002 characters); outcome approve delivers it without action authority. For action approvals or denials, an optional message of at most 2000 characters. Shown in get_workflow_decision and the child's resume prompt.",
         },
       },
       required: ["sessionId", "occurrenceId", "outcome"],

@@ -29,6 +29,8 @@ export const OWNER_QUESTION_ANSWER_ID = "owner_question_answer";
 export const OWNER_QUESTION_NOTE_ID = "owner_question_note";
 /** The most free text one answer field takes. */
 export const OWNER_QUESTION_ANSWER_MAX_LENGTH = 4000;
+/** An answer and an optional note, separated by a blank line. */
+export const WORKFLOW_QUESTION_ANSWER_MAX_CHARS = 2 * OWNER_QUESTION_ANSWER_MAX_LENGTH + 2;
 /** The suffix that marks the root's recommended option in its label, as agent questions do. */
 export const OWNER_QUESTION_RECOMMENDED_SUFFIX = " (Recommended)";
 
@@ -126,6 +128,9 @@ export function presentOwnerQuestionRequest(request: PendingApproval): PendingAp
   const snapshot = ownerQuestionOfRequest(request);
   // A question the Decision Model could not screen is classified on its own card first (#4104).
   if (!snapshot || request.workflowDecision?.authorityEvaluation?.reason === "credential_screen_review") return request;
+  // Delegated child questions are read-only to humans. Keeping their stored form prevents
+  // Composer Answer Mode from taking over, while request metadata still labels them Question.
+  if (isChildQuestionSnapshot(snapshot) && request.workflowDecision?.authority !== "human") return request;
   return { ...request, kind: "question", title: isChildQuestionSnapshot(snapshot) ? "Question" : "Owner Question",
     ...(isOwnerQuestionSnapshot(snapshot) ? { async: true } : {}), questions: ownerQuestionAgentQuestions(snapshot) };
 }

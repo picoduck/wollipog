@@ -98,6 +98,10 @@ test("a child clarification reaches the owner as a question and returns free tex
     assert.equal(sessionAttentionStatus({ status: "running", pendingApproval: stored })?.label, "Needs Your Input");
     assert.equal(h.svc.answerQuestion("child", decision.occurrenceId, { [OWNER_QUESTION_ANSWER_ID]: "Use both approaches." },
       { kind: "agent", id: "root" }, "submit", undefined, decision.occurrenceId).status, 403);
+    assert.equal(h.svc.answerQuestion("child", decision.occurrenceId, { [OWNER_QUESTION_ANSWER_ID]: "Use both approaches." },
+      h.owner, "submit", undefined, decision.occurrenceId, undefined, (id) => id === "child").status, 404,
+    "a human who cannot access the controller cannot answer via the question route");
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "pending");
     const answered = h.svc.answerQuestion("child", decision.occurrenceId,
       { [OWNER_QUESTION_ANSWER_ID]: "Use both approaches.", [OWNER_QUESTION_NOTE_ID]: "Keep the existing API." },
       h.owner, "submit", undefined, decision.occurrenceId);
@@ -146,6 +150,12 @@ test("child questions preserve delegated ownership, choices, dismissal and legac
     assert.ok(h.svc.resolveWorkflowDecision("root", "child", dismiss.data.occurrenceId,
       { outcome: "deny" }, "orchestrator", { kind: "agent", id: "root" }, () => true).ok);
     assert.equal(h.db.workflowDecisionByOccurrence(dismiss.data.occurrenceId)!.status, "denied");
+    const withdraw = await create("withdraw");
+    assert.ok(withdraw.ok && withdraw.data);
+    const withdrawn = h.svc.withdrawWorkflowDecision("root", withdraw.data.occurrenceId,
+      { sessionId: "child", reason: "Use the new ticket instead." });
+    assert.ok(withdrawn.ok, withdrawn.error ?? "withdrawn");
+    assert.match(h.prompts("child").find((text) => text.includes(withdraw.data!.occurrenceId))!, /Use the new ticket instead\./u);
     const { kind: _kind, ...legacySnapshot } = snapshot;
     const legacy = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "legacy", resourceKey: "legacy", resourceSnapshot: legacySnapshot });
     assert.ok(legacy.ok && legacy.data);

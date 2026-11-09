@@ -643,6 +643,28 @@ test("a typed child clarification opens as a normal free-text question in the pa
   } finally { await act(async () => root.unmount()); container.remove(); }
 });
 
+test("an Orchestrator-owned child question stays read-only with a formatted summary and no raw JSON (#4359 review)", async () => {
+  const child = asDescendant(evidenceSession());
+  child.responseOwner = "orchestrator";
+  child.request = { ...child.request, title: "Question", kind: "workflow_decision", options: [],
+    context: { toolName: "Typed Workflow Decision", input: '{"category":"implementation_question","kind":"question"}' },
+    workflowDecision: { category: "implementation_question", authority: "orchestrator",
+      resourceSnapshot: { category: "implementation_question", kind: "question", question: "Which approach should the child use?",
+        options: [{ optionId: "a", label: "Approach A" }, { optionId: "b", label: "Approach B" }] } } as never };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<ChildPanel child={child} client={api} />));
+    assertNoDomNode(container.querySelector(".question-input"));
+    assert.match(container.textContent ?? "", /The Orchestrator is handling this request\./u);
+    assert.match(container.textContent ?? "", /Approach A/u);
+    assert.match(container.textContent ?? "", /Approach B/u);
+    assert.doesNotMatch(container.textContent ?? "", /"category"|Typed Workflow Decision|Implementation Decision|Do Not Proceed/u);
+    assert.equal(footButtons(container).length, 0);
+  } finally { await act(async () => root.unmount()); container.remove(); }
+});
+
 test("switching between descendant questions preserves each request's draft", async () => {
   const session = { ...evidenceSession(), pendingApproval: null } as SessionView;
   const question = (suffix: string): DescendantRequestView => ({

@@ -10,6 +10,7 @@ import {
 } from "react";
 import {
   presentOwnerQuestionRequest,
+  isOwnerQuestionRequest,
   type DescendantRequestView,
   type PendingApproval,
   type SessionView,
@@ -80,7 +81,7 @@ function itemKey(sessionId: string, occurrenceId: string): string {
 }
 
 export function requestTypeLabel(request: PendingApproval): string {
-  if (request.kind === "question") return "Question";
+  if (request.kind === "question" || isOwnerQuestionRequest(request)) return "Question";
   if (request.kind === "authentication") return "Authentication";
   if (request.kind === "workflow_decision") {
     const category = request.workflowDecision?.category;

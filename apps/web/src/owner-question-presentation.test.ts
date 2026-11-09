@@ -39,6 +39,10 @@ test("child questions share question presentation, attention and Inbox metadata 
   const legacy = ownerCard("legacy", { category: "implementation_question", question: "May I proceed?",
     options: [{ optionId: "yes", label: "Proceed" }, { optionId: "no", label: "Stop" }] });
   assert.equal(withPresentedOwnerQuestions({ pendingApproval: legacy }).pendingApproval.kind, "workflow_decision");
+  const delegated = { ...card, workflowDecision: { ...card.workflowDecision!, authority: "orchestrator" as const } };
+  const readOnly = withPresentedOwnerQuestions({ pendingApproval: delegated });
+  assert.equal(readOnly.pendingApproval.kind, "workflow_decision", "a human never enters Composer Answer Mode for a delegated child question");
+  assert.equal(requestKindMeta(readOnly.pendingApproval).label, "Question", "read-only questions still identify themselves as questions");
 });
 
 test("an Owner Question is presented as a question card the composer answers (#4270)", () => {

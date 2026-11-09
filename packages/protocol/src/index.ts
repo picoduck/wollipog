@@ -5298,7 +5298,8 @@ export interface ResolveWorkflowDecisionRequest {
   /** Audit-only: never retained, never shown to the child; only its digest reaches audit. */
   rationale?: string;
   /** v166: retained on the decision for the child to read and delivered as the prompt that resumes
-   * it. At most WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS; audit records only its digest. */
+   * it. At most WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS, or WORKFLOW_QUESTION_ANSWER_MAX_CHARS
+   * for an explicit child question's answer and note; audit records only its digest. */
   childMessage?: string;
 }
 
