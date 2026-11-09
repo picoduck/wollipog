@@ -429,7 +429,7 @@ function ProviderAccountGroup({ runner, online, provider, policy, canEdit, savin
       ) : <span className="section-note">{mode === "priority" ? "Priority Order" : mode === "unsupported" ? "Newer Policy" : fixedId ? "Default Account" : "No Default"}</span>}
     </div>
     {canEdit && !prioritySupported && mode === "fixed" && accounts.length > 1 && <p className="section-note provider-selection-note">Update this machine's runner to use Priority Order.</p>}
-    {mode === "unsupported" && <Notice compact tone="warning" title="Account Policy From a Newer Server">
+    {mode === "unsupported" && <Notice compact tone="warning" title="Account Policy from a Newer Server">
       This server can't apply the saved policy, so new sessions need an account chosen. {canEdit ? "Choose a mode to replace it." : "Ask this machine's owner to replace it."}
     </Notice>}
     {mode === "priority" && preview && <PrioritySummary runner={runner} preview={preview} />}
@@ -871,7 +871,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
       const order = policy?.priorityAccountIds ?? [];
       const ranked = order.includes(account.id);
       const saving = defaultWrites.current.has(account.provider);
-      items.push({ label: ranked ? "Remove From Priority Order" : "Add to Priority Order",
+      items.push({ label: ranked ? "Remove from Priority Order" : "Add to Priority Order",
         ...(saving ? { disabled: true, description: "Saving the account selection…" }
           : ranked && order.length === 1 ? { disabled: true, description: "Priority Order needs at least one account." }
           : !ranked && account.profile?.access === "not_granted" ? { disabled: true, description: "This control plane needs access to the account first." } : {}),
@@ -1032,7 +1032,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
                 rank={position + 1} skip={providerAccountSkipLabel({ reason: "missing" })}
                 actions={canEditDefaults && (
                   <button type="button" className="btn sm" disabled={savingPolicy || order.length === 1}
-                    aria-label={`Remove Missing Account ${position + 1} From Priority Order`}
+                    aria-label={`Remove Missing Account ${position + 1} from Priority Order`}
                     onClick={() => rankAccount(provider, account, false)}>Remove</button>
                 )} />;
             }

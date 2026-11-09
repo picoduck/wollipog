@@ -39,7 +39,7 @@ available in the account menu when needed.
 
 Under Priority Order, each ranked row shows its place, **Move Up** and **Move Down** buttons that work
 by keyboard and touch, and why it would be skipped. The group says which account new sessions are
-expected to use and why, and marks it **Next Session**. **Add to Priority Order** and **Remove From
+expected to use and why, and marks it **Next Session**. **Add to Priority Order** and **Remove from
 Priority Order** are in the account's menu. An account that isn't ranked reads **Not Ranked**, and one
 that left the machine keeps its place until removed. Turning Priority Order on starts from the saved
 default, then the listed accounts this server may use; returning to Default Account restores the

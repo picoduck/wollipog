@@ -203,13 +203,14 @@ if (Object.keys(leases).length && runner) {
 const fixtureParams = new URLSearchParams(window.location.search);
 // `machines=0` opens on the empty Machines tab (#2984).
 if (fixtureParams.get("machines") === "0") runner = null;
+const fixtureEmail = (name: string) => `${name}@example.com`;
 // Priority Order (#4353): three ranked Claude accounts, the first signed out and the second at a limit.
 if (fixtureParams.has("priority") && runner) {
   runner.providerAccounts = [
-    { id: "claude-work", label: "work@example.com", provider: "claude", authStatus: "authenticated", billing: "subscription" },
-    { id: "claude-personal", label: "personal@example.com", provider: "claude", authStatus: "unauthenticated", billing: "subscription" },
-    { id: "claude-team", label: "team@example.com", provider: "claude", authStatus: "authenticated", billing: "subscription" },
-    { id: "claude-credits", label: "credits@example.com", provider: "claude", authStatus: "authenticated", billing: "api" },
+    { id: "claude-work", label: fixtureEmail("work"), provider: "claude", authStatus: "authenticated", billing: "subscription" },
+    { id: "claude-personal", label: fixtureEmail("personal"), provider: "claude", authStatus: "unauthenticated", billing: "subscription" },
+    { id: "claude-team", label: fixtureEmail("team"), provider: "claude", authStatus: "authenticated", billing: "subscription" },
+    { id: "claude-credits", label: fixtureEmail("credits"), provider: "claude", authStatus: "authenticated", billing: "api" },
     { id: "codex-team", label: "Codex Team", provider: "codex", authStatus: "authenticated", billing: "subscription" },
     { id: "codex-solo", label: "Codex Solo", provider: "codex", authStatus: "authenticated", billing: "subscription" },
   ];
