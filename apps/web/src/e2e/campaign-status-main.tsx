@@ -37,6 +37,7 @@ import {
   CAMPAIGN_WORK_ITEM_PRIMARY_STATES,
   campaignIssueLimitsRequirement,
   campaignIssueScopeChangesRequirement,
+  pendingRequests,
   PROTOCOL_VERSION,
   worktreeRefusalAction,
   type CampaignWorkItemDetail,
@@ -44,14 +45,17 @@ import {
   type CampaignWorkItemSummary,
   type ControlPlaneToUi,
   type DescendantRequestView,
+  type ScopeProposalCheck,
   type SessionView,
 } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { RightPanel, type RightPanelState } from "../components/RightPanel.js";
+import { RequestDock, dockRequests } from "../components/requests/RequestDock.js";
 import { useCampaignStatusAvailability } from "../components/useCampaignStatus.js";
 import { applyCampaignWorkFilters, type CampaignWorkFilters } from "../campaign-status.js";
 import type { RightPanelMode } from "../right-panel.js";
+import { withPresentedOwnerQuestions } from "../owner-question-presentation.js";
 import { StoreProvider } from "../store.js";
 import type { ViewNavigation } from "../navigation.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
@@ -660,7 +664,7 @@ const projectionFor = (rev: number) => campaignProjection(
     ...(automationHold ? { recovery: { unattendedReady: false, automation: automationHold, automatic: 0, waitingHuman: 0, blocked: 0,
       records: [], truncated: false } } : {}),
     ...ownerProjection,
-    ...ownerScopeProjection,
+    ...ownerScopeProjection(rev),
     // `ownerAddition=1` (#4117): the Orchestrator's request to add a repository waits for the owner.
     ...(params.get("ownerAddition") === "1" ? { status: "waiting_human" as const, ownerDecisions: { total: 1, items: [
       { occurrenceId: "wd_addition_1", sessionId: "s_root", category: "campaign_repository_addition" as const,
@@ -699,24 +703,46 @@ const ownerProjection = ownerScenario === "after" ? { status: "waiting_human" as
     ownerRule, createdAt: NOW - 8 * MINUTE },
 ] } } : {};
 
-/** `ownerScope=1` (#4267): the Orchestrator's proposal without lineage, waiting for the owner with
- * the Maximum Issues increase its additions need. */
-const ownerScopeSnapshot = { category: "campaign_issue_scope" as const, repository: "team/repo", expectedRevision: 3,
-  before: [130, 131, 132, 133, 134], additions: [141, 142], removals: [],
-  explanation: "You asked me to start #141 and #142 after launch. Neither is an epic member or a published follow-up.",
-  affectedAssignments: [], affectedDecisions: ["occ_1"], activeChildren: [],
-  ownerReview: { cause: "lineage_missing" as const, maxIssuesIncrease: { from: 6, increase: 1 } } };
-const ownerScopeCard: import("@wollipog/protocol").PendingApproval | null = params.get("ownerScope") === "1" ? {
-  requestId: "wd_scope_141", occurrenceId: "wd_scope_141", kind: "workflow_decision", title: "Campaign Issue Scope Approval Required",
-  options: [{ optionId: "approve", name: "Approve", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }],
-  workflowDecision: { requestId: "scope-141", occurrenceId: "wd_scope_141", sessionId: "s_root", controllingSessionId: "s_root",
-    category: "campaign_issue_scope", resourceKey: "campaign_issue_scope:s_root", resourceSnapshot: ownerScopeSnapshot,
-    resourceDigest: "d".repeat(64), policyRevision: 1, authority: "human", status: "pending", createdAt: NOW - 2 * MINUTE },
-} : null;
-const ownerScopeProjection = ownerScopeCard ? { status: "waiting_human" as const, ownerDecisions: { total: 1, items: [
-  { occurrenceId: "wd_scope_141", sessionId: "s_root", category: "campaign_issue_scope" as const,
-    summary: "Add team/repo#141, team/repo#142, raising Maximum Issues from 6 to 7", handedOff: false, createdAt: NOW - 2 * MINUTE },
-] } } : {};
+/** `ownerScope` (#4267, #4334): scope approvals the server routed to the owner. `1` is the
+ * Orchestrator's proposal without lineage with the Maximum Issues increase its additions need, `grant`
+ * a failed grant's across two repositories, `proposal` a proposal check's owner route, and `routed` all
+ * three, so opening one shows it is that one. A revision bump settles them all. */
+const ownerScopeBase = { category: "campaign_issue_scope" as const, repository: "team/repo", expectedRevision: 3,
+  before: [130, 131, 132, 133, 134], removals: [], affectedAssignments: [], affectedDecisions: ["occ_1"], activeChildren: [] };
+const ownerScopeRoutes = {
+  owner: { occurrenceId: "wd_scope_141", summary: "Add team/repo#141, team/repo#142, raising Maximum Issues from 6 to 7", snapshot: { ...ownerScopeBase, additions: [141, 142],
+    explanation: "You asked me to start #141 and #142 after launch. Neither is an epic member or a published follow-up.",
+    ownerReview: { cause: "lineage_missing" as const, maxIssuesIncrease: { from: 6, increase: 1 } } } },
+  grant: { occurrenceId: "wd_scope_143", summary: "Add team/repo#143, team/docs#7, raising Maximum Issues from 6 to 9", snapshot: { ...ownerScopeBase, additions: [143],
+    otherRepositories: [{ repository: "team/docs", before: [], additions: [7], removals: [] }],
+    explanation: "Reading your first message failed, so I chose the two issues it seems to mean.",
+    grantReview: { cause: "grant_failed" as const, ownerMessage: "Fix the worst bugs in the app and its docs", messageDigest: "a".repeat(64),
+      grantOccurrenceId: "dec_grant_143", failureClass: "provider_overloaded" as const } } },
+  proposal: { occurrenceId: "wd_scope_151", summary: "Add team/repo#151, team/repo#152", snapshot: { ...ownerScopeBase, additions: [151, 152],
+    explanation: "Both are open UI bugs. I ranked them by priority label, then by age.",
+    scopeProposal: { initial: false, messageDigest: "a".repeat(64), requestedCount: 2, constraints: ["open", "UI only"], withheldOperations: [],
+      checks: ["chosen_issues", "requested_count", "constraints"] as ScopeProposalCheck[], route: "owner" as const, ownerCause: "constraint_check_failed" as const,
+      constraintCheck: { occurrenceId: "dec_scope_151", verdict: "failed" as const, failureClass: "provider_overloaded" as const },
+      ownerMessage: "Fix the two most important open UI bugs.",
+      issues: [
+        { number: 151, origin: "orchestrator_chosen" as const, rationale: "Open UI bug, priority:high, oldest.", title: "Sidebar Collapses on Resize" },
+        { number: 152, origin: "orchestrator_chosen" as const, rationale: "Open UI bug, priority:high.", title: "Badge Contrast in Light Theme" },
+      ] } } },
+};
+const ownerScopeParam = params.get("ownerScope");
+const ownerScopeChosen = ownerScopeParam === "1" ? [ownerScopeRoutes.owner] : ownerScopeParam === "grant" ? [ownerScopeRoutes.grant]
+  : ownerScopeParam === "proposal" ? [ownerScopeRoutes.proposal]
+    : ownerScopeParam === "routed" ? [ownerScopeRoutes.owner, ownerScopeRoutes.grant, ownerScopeRoutes.proposal] : [];
+const ownerScopeCards: import("@wollipog/protocol").PendingApproval[] = ownerScopeChosen.map(({ occurrenceId, snapshot }, index) => ({
+  requestId: occurrenceId, occurrenceId, kind: "workflow_decision" as const, title: "Campaign Issue Scope Approval Required", async: true,
+  options: [{ optionId: "approve", name: "Approve", kind: "allow_once" as const }, { optionId: "deny", name: "Deny", kind: "reject_once" as const }],
+  workflowDecision: { requestId: `scope-${occurrenceId}`, occurrenceId, sessionId: "s_root", controllingSessionId: "s_root",
+    category: "campaign_issue_scope" as const, resourceKey: "campaign_issue_scope:s_root", resourceSnapshot: snapshot,
+    resourceDigest: "d".repeat(64), policyRevision: 1, authority: "human" as const, status: "pending" as const, createdAt: NOW - (index + 2) * MINUTE },
+}));
+const ownerScopeProjection = (rev: number) => ownerScopeCards.length && rev === 1 ? { status: "waiting_human" as const,
+  ownerDecisions: { total: ownerScopeChosen.length, items: ownerScopeChosen.map(({ occurrenceId, summary }, index) => (
+    { occurrenceId, sessionId: "s_root", category: "campaign_issue_scope" as const, summary, handedOff: false, createdAt: NOW - (index + 2) * MINUTE })) } } : {};
 
 /** The root's own Pending Decision cards for the follow-ups past the limit (`followUps=pending`). */
 const followUpCards: import("@wollipog/protocol").PendingApproval[] = params.get("followUps") === "pending" ? ([
@@ -751,7 +777,7 @@ function sessionsFor(rev: number): SessionView[] {
     ...(followUpCards.length ? { pendingApproval: { ...followUpCards[0]!, additionalRequests: followUpCards.slice(1) } } : {}),
     ...(ownerCard ? { pendingApproval: ownerCard } : {}),
     ...(selectionCard ? { pendingApproval: selectionCard } : {}),
-    ...(ownerScopeCard ? { pendingApproval: ownerScopeCard } : {}) });
+    ...(ownerScopeCards.length && rev === 1 ? { pendingApproval: { ...ownerScopeCards[0]!, ...(ownerScopeCards.length > 1 ? { additionalRequests: ownerScopeCards.slice(1) } : {}) } } : {}) });
   const child = baseSession({
     id: "s_child", title: "#2417 Slice 7: Campaign Status Panel", parentSessionId: "s_root",
     ...(scenario === "legacy" ? {} : { campaignMembership: { campaignSessionId: "s_root", currentWorkItemId: "cwi_2", currentAttemptId: "catt_2" } }),
@@ -788,10 +814,7 @@ const ownerRequests = (owners: "before" | "after" | "rule"): DescendantRequestVi
 };
 
 /** The request the blocked item's recorded blocker names, pending on its child. */
-const ownerScopeRequests: DescendantRequestView[] = ownerScopeCard ? [{ sessionId: "s_root", sessionTitle: "Full Control Campaign",
-  runnerId: "runner-1", runnerOnline: true, eventEpoch: 1, createdAt: NOW - 2 * MINUTE, responseOwner: "human",
-  occurrenceId: "wd_scope_141", request: ownerScopeCard }] : [];
-const descendantRequests: DescendantRequestView[] = ownerScopeCard ? ownerScopeRequests : ownerScenario ? ownerRequests(ownerScenario) : scenario === "campaign" ? [{
+const descendantRequests: DescendantRequestView[] = ownerScopeCards.length ? [] : ownerScenario ? ownerRequests(ownerScenario) : scenario === "campaign" ? [{
   sessionId: "s_child_3",
   sessionTitle: "#2417 Slice 5: Read API",
   runnerId: "runner-1",
@@ -1265,6 +1288,9 @@ function Fixture() {
                   ))}
                 </div>
               </div>
+              {ownerScopeCards.length > 0 && session.pendingApproval && (
+                <RequestDock session={session} requests={dockRequests(pendingRequests(withPresentedOwnerQuestions(session).pendingApproval))} runnerOnline />
+              )}
             </div>
           </div>
           <PanelForSession state={state} session={session} onOpenSession={(id) => { openedSession = id; setSessionId(id); }} />

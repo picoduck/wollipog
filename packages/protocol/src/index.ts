@@ -2384,7 +2384,8 @@ export interface CampaignOwnerDecision {
   /** The session whose request it is: the root for an owner decision, else the requester. */
   sessionId: string;
   category: WorkflowDecisionCategory;
-  /** The owner decision's question, or what a handed-off occurrence decides ("Merge team/repo#7"). */
+  /** The owner decision's question, or what a handed-off occurrence decides ("Merge team/repo#7"). A
+   * scope request names its exact change and any Maximum Issues increase, and is never shortened (#4334). */
   summary: string;
   /** The root handed an Orchestrator-owned occurrence to the owner, rather than asking anew. */
   handedOff: boolean;

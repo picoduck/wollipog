@@ -7173,3 +7173,180 @@ test("enabling Full Control on an existing campaign builds its boundary from eve
     assert.ok(campaignBoundaryCurrent(f.db.getSession(rootId)!));
   } finally { await server.close(); f.db.close(); }
 });
+
+/* Waiting for You lists every scope approval the server routed to the owner (#4334). */
+
+const waitingForYou = (f: ReturnType<typeof fixture>, id: string) => f.db.campaignOwnerDecisions(id)?.items
+  .map(({ occurrenceId, sessionId, category, summary, handedOff, kind }) => ({ occurrenceId, sessionId, category, summary, handedOff, ...(kind ? { kind } : {}) })) ?? [];
+const scopeEntry = (id: string, occurrenceId: string, summary: string) => ({ occurrenceId, sessionId: id, category: "campaign_issue_scope", summary, handedOff: false });
+const listedOnRootCard = (f: ReturnType<typeof fixture>, id: string, occurrenceId: string) =>
+  pendingRequests(f.db.getSession(id)!.pendingApproval).some((request) => request.occurrenceId === occurrenceId);
+const maxIssuesOf = (f: ReturnType<typeof fixture>, id: string) => boundaryOf(f, id).issueAuthority!.maxIssues;
+const raising = (from: number, to: number) => to > from ? `, raising Maximum Issues from ${from} to ${to}` : "";
+
+for (const status of ["failed", "uncertain"] as const) {
+  test(`the ${status} grant's scope approval waits under Waiting for You, naming the Maximum Issues increase approving it applies (#4334)`, async () => {
+    const f = fixture();
+    const { server } = await app(f);
+    try {
+      const { id } = await firstMessageLaunch(f, server);
+      assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix the worst bug")).ok, true);
+      legacyGrant(f, id, { status, ...(status === "failed" ? { failureClass: "authentication" as const } : { reason: "The message doesn't say which bug." }), namedIssues: [] });
+      const proposed = await f.sessions.proposeCampaignIssueScope(id, { requestId: `grant-${status}`, expectedRevision: 2,
+        additions: [{ repository: "owner/repo", number: 13 }, { repository: "owner/repo", number: 14 }], removals: [], explanation: "The worst bugs" });
+      assert.equal(proposed.ok, true, proposed.error ?? "");
+      assert.equal(proposed.data!.authority, "human");
+      assert.equal((proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).grantReview!.cause, `grant_${status}`);
+      const occurrenceId = proposed.data!.occurrenceId;
+      const before = maxIssuesOf(f, id);
+      const listed = waitingForYou(f, id);
+      assert.ok(listedOnRootCard(f, id, occurrenceId), "Open Request has this exact card to open");
+      // The owner's approval sets the derived limit: what the entry says is what approving does.
+      assert.equal(f.sessions.resolveWorkflowDecision(id, id, occurrenceId, { outcome: "approve" }, "human", { kind: "human", id: f.human.userId }, () => true).ok, true);
+      const after = maxIssuesOf(f, id);
+      assert.ok(after > before, "the fixture's derived limit grows on approval");
+      assert.deepEqual(listed, [scopeEntry(id, occurrenceId, `Add owner/repo#13, owner/repo#14${raising(before, after)}`)]);
+      assert.deepEqual(waitingForYou(f, id), [], "an approved request leaves the list");
+    } finally { await server.close(); f.db.close(); }
+  });
+}
+
+for (const route of [
+  { cause: "selection_uncertain" as const, review: () => reviewVerdict("uncertain", "The owner's criteria don't say whether UI issues count.") },
+  { cause: "selection_failed" as const, review: (): ScopeGrantAnswer => ({ ok: false, errorClass: "authentication" }) },
+]) {
+  test(`a ${route.cause} selection's scope approval waits under Waiting for You until it is denied (#4334)`, async () => {
+    const f = fixture();
+    const { server } = await app(f);
+    try {
+      const c = await selectionCampaign(f, server, 3);
+      f.decision.state.review = route.review;
+      const proposed = await c.propose([30, 31]);
+      assert.equal(proposed.ok, true, proposed.error ?? "");
+      const occurrenceId = proposed.data!.occurrenceId;
+      assert.equal((proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).grantReview!.cause, route.cause);
+      assert.deepEqual(waitingForYou(f, c.id), [scopeEntry(c.id, occurrenceId, "Add owner/repo#30, owner/repo#31")]);
+      assert.ok(listedOnRootCard(f, c.id, occurrenceId));
+      assert.equal(f.sessions.resolveWorkflowDecision(c.id, c.id, occurrenceId, { outcome: "deny" }, "human", { kind: "human", id: f.human.userId }, () => true).ok, true);
+      assert.deepEqual(waitingForYou(f, c.id), [], "a denied request leaves the list");
+      assert.deepEqual(f.db.getSession(c.id)!.orchestratorPolicy!.issueScope!.issueNumbers, [], "listing it applied nothing");
+    } finally { await server.close(); f.db.close(); }
+  });
+}
+
+test("a selection_unverified selection's scope approval waits under Waiting for You (#4334)", async () => {
+  const f = fixture({ protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueFacts - 1 });
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Find the 2 highest-priority issues and fix them")).ok, true);
+    legacySelectionGrant(f, id, 2);
+    const proposed = await f.sessions.proposeCampaignIssueScope(id, { requestId: "old-runner", expectedRevision: 2,
+      additions: [{ repository: "owner/repo", number: 30 }], removals: [], explanation: "The highest-priority issue", lineage: { kind: "selection" } });
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal((proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).grantReview!.cause, "selection_unverified");
+    assert.deepEqual(waitingForYou(f, id), [scopeEntry(id, proposed.data!.occurrenceId, "Add owner/repo#30")]);
+    assert.ok(listedOnRootCard(f, id, proposed.data!.occurrenceId));
+  } finally { await server.close(); f.db.close(); }
+});
+
+for (const route of [
+  { name: "an uncertain", check: uncertainCheck },
+  { name: "a failed", check: (): ScopeGrantAnswer => ({ ok: false, errorClass: "authentication" }) },
+]) {
+  test(`${route.name} proposal check's owner route waits under Waiting for You as a scope approval, not a question, until answered (#4334)`, async () => {
+    const f = fixture();
+    const { server } = await app(f);
+    try {
+      const c = await proposalCampaign(f, server, "Find the 2 highest-priority open issues and fix them.");
+      f.decision.state.check = route.check;
+      const proposed = await c.propose([chosen(31), chosen(32)], { requestedCount: 2, constraints: ["open"] });
+      assert.equal(proposed.ok, true, proposed.error ?? "");
+      assert.equal((proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.route, "owner");
+      const occurrenceId = proposed.data!.occurrenceId;
+      const before = maxIssuesOf(f, c.id);
+      const listed = waitingForYou(f, c.id);
+      assert.ok(listedOnRootCard(f, c.id, occurrenceId));
+      // Re-proposing while it is pending returns the same request, so the list keeps one entry.
+      assert.equal((await c.propose([chosen(32), chosen(31)], { requestedCount: 2, constraints: ["open"] })).data!.occurrenceId, occurrenceId);
+      assert.equal(waitingForYou(f, c.id).length, 1);
+      assert.equal(c.answer({ scope_proposal_answer: "Approve Scope" }).ok, true);
+      assert.deepEqual(listed, [scopeEntry(c.id, occurrenceId, `Add owner/repo#31, owner/repo#32${raising(before, maxIssuesOf(f, c.id))}`)]);
+      assert.deepEqual(waitingForYou(f, c.id), [], "an approved request leaves the list");
+    } finally { await server.close(); f.db.close(); }
+  });
+}
+
+test("a declined owner-route proposal leaves Waiting for You, and an empty initial proposal says what it starts with (#4334)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const c = await proposalCampaign(f, server, "Look over the open issues, and only touch ones you are sure of.");
+    f.decision.state.check = uncertainCheck;
+    const proposed = await c.propose([], { constraints: ["only ones you are sure of"] });
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "human");
+    const summary = waitingForYou(f, c.id)[0]!.summary;
+    assert.match(summary, /^Start the campaign with no issues/u);
+    assert.doesNotMatch(summary, /^Add /u);
+    assert.equal(c.answer({ scope_proposal_answer: "Decline Scope" }).ok, true);
+    assert.deepEqual(waitingForYou(f, c.id), [], "a declined request leaves the list");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("Orchestrator-owned and admitted scope changes and the owner's own change are never listed under Waiting for You (#4334)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    // A proposal the floors admit is the Orchestrator's to apply.
+    const named = await proposalCampaign(f, server, "Fix #40 and #41.");
+    const admitted = await named.propose([40, 41].map((number) => ({ repository: "owner/repo", number, origin: "owner_named" as const, rationale: "Named." })));
+    assert.equal(admitted.ok, true, admitted.error ?? "");
+    assert.equal(admitted.data!.authority, "orchestrator");
+    assert.equal((admitted.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.route, "admitted");
+    assert.deepEqual(waitingForYou(f, named.id), []);
+
+    // A selection the Decision Model admits is too.
+    const selected = await selectionCampaign(f, server, 3);
+    f.decision.state.review = () => reviewVerdict("admit");
+    const admission = await selected.propose([30]);
+    assert.equal(admission.ok, true, admission.error ?? "");
+    assert.equal(admission.data!.authority, "orchestrator");
+    assert.deepEqual(waitingForYou(f, selected.id), []);
+
+    // The owner's own Campaign Status change carries no routing mark, whatever the grant says.
+    const { id: failed } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, failed, "Fix the worst bug")).ok, true);
+    legacyGrant(f, failed, { status: "failed", failureClass: "authentication", namedIssues: [] });
+    const own = await f.sessions.proposeCampaignIssueScope(failed, { requestId: "own-change", expectedRevision: 2,
+      additions: [{ repository: "owner/repo", number: 50 }], removals: [], explanation: "I want this one too" }, () => true, f.human);
+    assert.equal(own.ok, true, own.error ?? "");
+    assert.equal(own.data!.authority, "human");
+    assert.equal(own.data!.status, "pending");
+    assert.deepEqual(waitingForYou(f, failed), []);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a scope approval leaves Waiting for You when a newer proposal supersedes it or a stop revokes it (#4334)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const c = await proposalCampaign(f, server, "Find the 2 highest-priority open issues and fix them.");
+    f.decision.state.check = uncertainCheck;
+    const first = await c.propose([chosen(31)], { constraints: ["open"] });
+    assert.equal(first.ok, true, first.error ?? "");
+    assert.deepEqual(waitingForYou(f, c.id).map((item) => item.occurrenceId), [first.data!.occurrenceId]);
+    // A proposal of other issues replaces it: the list holds the newer one alone, opening its own card.
+    const second = await c.propose([chosen(32)], { constraints: ["open"] });
+    assert.equal(second.ok, true, second.error ?? "");
+    assert.notEqual(second.data!.occurrenceId, first.data!.occurrenceId);
+    assert.equal(f.db.workflowDecisionByOccurrence(first.data!.occurrenceId)!.status, "superseded");
+    assert.deepEqual(waitingForYou(f, c.id).map((item) => item.occurrenceId), [second.data!.occurrenceId]);
+    assert.equal(listedOnRootCard(f, c.id, first.data!.occurrenceId), false);
+    assert.ok(listedOnRootCard(f, c.id, second.data!.occurrenceId));
+
+    assert.equal(f.sessions.stop(c.id).ok, true);
+    assert.equal(f.db.workflowDecisionByOccurrence(second.data!.occurrenceId)!.status, "revoked");
+    assert.deepEqual(waitingForYou(f, c.id), [], "a revoked request leaves the list");
+  } finally { await server.close(); f.db.close(); }
+});
