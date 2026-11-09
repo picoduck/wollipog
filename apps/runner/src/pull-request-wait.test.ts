@@ -1183,7 +1183,7 @@ test("pull request references parse from numbers, short refs, and github.com URL
 
 
 function workflowJob(name: string, conclusion: string | null, id: number, workflow: number, suite = workflow) {
-  return run(name, conclusion, { databaseId: id, checkSuite: { databaseId: suite, workflowId: workflow, app: { databaseId: 1 } } });
+  return run(name, conclusion, { databaseId: id, checkSuite: { databaseId: suite, workflowId: workflow, workflowEvent: "pull_request", app: { databaseId: 1 } } });
 }
 
 for (const reverse of [false, true]) {
@@ -1244,7 +1244,7 @@ test("optional bounded workflow lookup supersedes only runs of the same workflow
     run(AGGREGATOR, "SUCCESS", { databaseId: 101, checkSuite: { databaseId: 2 } })];
   for (const same of [true, false]) {
     const fake = fakeGh([ok(pr({}, nodes))], { runs: ok({ total_count: 2, workflow_runs: [
-      { head_sha: HEAD, check_suite_id: 1, workflow_id: 10 }, { head_sha: HEAD, check_suite_id: 2, workflow_id: same ? 10 : 20 },
+      { head_sha: HEAD, check_suite_id: 1, workflow_id: 10, event: "pull_request" }, { head_sha: HEAD, check_suite_id: 2, workflow_id: same ? 10 : 20, event: "pull_request" },
     ] }) });
     const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fake.gh, ...clock() });
     assert.ok(result.ok);
@@ -1279,3 +1279,110 @@ test("a thrown optional workflow read does not fail the wait", async () => {
   assert.ok(result.ok);
   assert.equal(result.summary.outcome, "checks_passed", "both independent suites passed without needing access");
 });
+
+test("common queries pin access-neutral suite identity", () => {
+  for (const query of [PULL_REQUEST_WAIT_QUERY, PULL_REQUEST_CONTEXTS_QUERY]) {
+    assert.match(query, /checkSuite\{databaseId app\{databaseId\}/u);
+    assert.doesNotMatch(query, /workflowRun/u);
+  }
+});
+
+function suiteJob(conclusion: string | null, id: number, suite: number) {
+  return run(AGGREGATOR, conclusion, { databaseId: id, checkSuite: { databaseId: suite } });
+}
+function suiteRuns(events = ["pull_request", "pull_request"], head = HEAD) {
+  return { total_count: 2, workflow_runs: [
+    { head_sha: head, check_suite_id: 1, workflow_id: 10, event: events[0] },
+    { head_sha: head, check_suite_id: 2, workflow_id: 10, event: events[1] },
+  ] };
+}
+
+for (const events of [["pull_request", "push"], ["workflow_dispatch", "workflow_dispatch"], ["pull_request", "pull_request"]]) {
+  test(`cross-suite supersession needs a matching automatic event (${events})`, async () => {
+    const fake = fakeGh([ok(pr({}, [suiteJob("FAILURE", 100, 1), suiteJob("SUCCESS", 101, 2)]))], { runs: ok(suiteRuns(events)) });
+    const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fake.gh, ...clock() });
+    assert.ok(result.ok);
+    assert.equal(result.summary.outcome, events.every((event) => event === "pull_request") ? "checks_passed" : "checks_failed");
+  });
+}
+
+for (const reverse of [false, true]) {
+  test(`unorderable SUCCESS cannot hide an unconfirmed skip (${reverse})`, async () => {
+    const nodes = [run(AGGREGATOR, "SUCCESS"), run(AGGREGATOR, "SKIPPED")];
+    if (reverse) nodes.reverse();
+    assert.equal(evaluateCommitChecks(HEAD, rollup(nodes), [AGGREGATOR], {}, "BLOCKED").requiredState, "pending");
+    const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1 }, { gh: fakeGh([ok(pr({}, nodes))]).gh, ...clock() });
+    assert.ok(result.ok);
+    assert.equal(result.summary.outcome, "timeout");
+    assert.equal(result.summary.checks.required[0]?.state, "pending");
+  });
+}
+
+for (const response of [failed("gh: Bad Gateway (HTTP 502)"), failed("API rate limit exceeded"), { ...failed("timeout"), timedOut: true }]) {
+  test(`an unavailable optional lookup never invents supersession (${response.stderr})`, async () => {
+    const fake = fakeGh([ok(pr({}, [suiteJob("CANCELLED", 100, 1), suiteJob("SUCCESS", 101, 2)]))], { runs: response });
+    const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fake.gh, ...clock() });
+    assert.ok(result.ok, "optional provenance failure must not fail the operation");
+    assert.equal(result.summary.outcome, "checks_failed", "the observed cancelled suite remains until supersession is proved");
+  });
+}
+
+test("immutable suite identity is cached across polls without hiding new job states", async () => {
+  const fake = fakeGh([
+    ok(pr({}, [suiteJob("CANCELLED", 100, 1), suiteJob(null, 101, 2)])),
+    ok(pr({}, [suiteJob("CANCELLED", 100, 1), suiteJob("SUCCESS", 101, 2)])),
+  ], { runs: ok(suiteRuns()) });
+  const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fake.gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "checks_passed");
+  assert.equal(result.summary.polls, 2);
+  assert.equal(fake.calls.filter((args) => args.some((arg) => arg.includes("/actions/runs?"))).length, 1);
+});
+
+for (const runs of [
+  suiteRuns(["pull_request", "pull_request"], OTHER_HEAD),
+  { total_count: 1, workflow_runs: [{ head_sha: HEAD, check_suite_id: 0, workflow_id: 10, event: "pull_request" }] },
+  { total_count: 2, workflow_runs: [
+    { head_sha: HEAD, check_suite_id: 1, workflow_id: 10, event: "pull_request" },
+    { head_sha: HEAD, check_suite_id: 1, workflow_id: 20, event: "pull_request" },
+  ] },
+]) {
+  test(`malformed workflow provenance retains suites (${JSON.stringify(runs)})`, async () => {
+    const fake = fakeGh([ok(pr({}, [suiteJob("FAILURE", 100, 1), suiteJob("SUCCESS", 101, 2)]))], { runs: ok(runs) });
+    const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fake.gh, ...clock() });
+    assert.ok(result.ok);
+    assert.equal(result.summary.outcome, "checks_failed");
+  });
+}
+
+test("shared jobs across pagination are folded only after all pages are read", async () => {
+  const first = pr({ commits: { nodes: [{ commit: { oid: HEAD, statusCheckRollup: {
+    contexts: { pageInfo: { hasNextPage: true, endCursor: "next" }, nodes: [suiteJob("FAILURE", 100, 1)] },
+  } } }] } });
+  const page = ok({ data: { repository: { object: { statusCheckRollup: rollup([suiteJob("SUCCESS", 101, 2)]) } } } });
+  const fake = fakeGh([ok(first)], { pages: [page], runs: ok({ ...suiteRuns(), workflow_runs: suiteRuns().workflow_runs.map((run, index) => ({ ...run, workflow_id: 10 + index })) }) });
+  const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fake.gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "checks_failed");
+  assert.equal(result.summary.checks.failedJobs.length, 1);
+});
+
+test("queued merge-group summaries preserve shared-name workflow failures", async () => {
+  const fake = fakeGh([ok(pr({ mergeQueueEntry: {
+    position: 1, state: "UNMERGEABLE", headCommit: { oid: GROUP, statusCheckRollup: rollup([suiteJob("FAILURE", 100, 1), suiteJob("SUCCESS", 101, 2)]) },
+  } }, [run(AGGREGATOR, "SUCCESS")]))], { runs: ok({ ...suiteRuns(undefined, GROUP), workflow_runs: suiteRuns(undefined, GROUP).workflow_runs.map((run, index) => ({ ...run, workflow_id: 10 + index })) }) });
+  const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fake.gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "queue_failed");
+  assert.equal(result.summary.mergeQueue?.checks?.required[0]?.state, "failed");
+  assert.equal(result.summary.mergeQueue?.checks?.failedJobs.length, 1);
+});
+
+for (const denied of [false, true]) {
+  test(`draft-to-ready across suites remains conservative when Actions is denied (${denied})`, async () => {
+    const fake = fakeGh([ok(pr(admission(), [suiteJob("SKIPPED", 100, 1), suiteJob("SUCCESS", 101, 2)]))], { runs: denied ? failed("HTTP 403") : ok(suiteRuns()) });
+    const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1 }, { gh: fake.gh, ...clock() });
+    assert.ok(result.ok);
+    assert.equal(result.summary.outcome, denied ? "timeout" : "checks_passed");
+  });
+}
