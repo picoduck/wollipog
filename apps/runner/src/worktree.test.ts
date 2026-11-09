@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import type { RunnerToControlPlane, SessionWorktreeView } from "@wollipog/protocol";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { captureRollbackSnapshot, clearWorktreeRollbackProof, worktreeCheckoutNeverFinished, createRecoveredBranchWorktree, releaseUnchangedBranch, requestedSlot, stampWorktreeRollbackProof, worktreeRollbackProofState, worktreeRollbackWork, attachRequestedWorktree, changeRequestProvider, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, CONTAINMENT_FETCH_GIT_CONFIG, CONTAINMENT_FETCH_GIT_ENV, mergedHeadForge, mergedPullRequestContainingHead, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedGitLabMergeRequestForHead, parseMergedWorktreePullRequestForHead, parseWorktreePullRequestState, readRepositoryDefaultBranch, reclaimRetainedWorktreeRef, retainedWorktreeRefDiagnostics, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type RetainedWorktreeRefCandidate, type RetainedWorktreeRefRecord, type WorktreeCleanupRecord } from "./worktree.js";
+import { ADMIN_DIGEST_LISTING, digestAdminListing, captureRollbackSnapshot, clearWorktreeRollbackProof, worktreeCheckoutNeverFinished, createRecoveredBranchWorktree, releaseUnchangedBranch, requestedSlot, stampWorktreeRollbackProof, worktreeRollbackProofState, worktreeRollbackWork, attachRequestedWorktree, changeRequestProvider, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, CONTAINMENT_FETCH_GIT_CONFIG, CONTAINMENT_FETCH_GIT_ENV, mergedHeadForge, mergedPullRequestContainingHead, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedGitLabMergeRequestForHead, parseMergedWorktreePullRequestForHead, parseWorktreePullRequestState, readRepositoryDefaultBranch, reclaimRetainedWorktreeRef, retainedWorktreeRefDiagnostics, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type RetainedWorktreeRefCandidate, type RetainedWorktreeRefRecord, type WorktreeCleanupRecord } from "./worktree.js";
 import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { isolateFromAmbientIgnores } from "./git-test-repo.js";
@@ -927,6 +927,14 @@ test("a branch is given back only while it is where the attempt made it and no w
     execFileSync("git", ["-C", fixture.repo, "worktree", "add", join(fixture.root, "held"), "fix/held"]);
     assert.equal(await releaseUnchangedBranch(fixture.repo, "fix/held", base), false, "a worktree has it");
     assert.equal(exists("fix/held"), true);
+
+    // Back at its base, but its reflog holds a commit nothing else does, and deleting it deletes that.
+    execFileSync("git", ["-C", fixture.repo, "branch", "fix/there-and-back"]);
+    const elsewhere = execFileSync("git", ["-C", fixture.repo, "commit-tree", `${base}^{tree}`, "-p", base, "-m", "held by the reflog"], { encoding: "utf8" }).trim();
+    execFileSync("git", ["-C", fixture.repo, "update-ref", "refs/heads/fix/there-and-back", elsewhere]);
+    execFileSync("git", ["-C", fixture.repo, "update-ref", "refs/heads/fix/there-and-back", base]);
+    assert.equal(await releaseUnchangedBranch(fixture.repo, "fix/there-and-back", base), false, "its history is not only its creation");
+    assert.ok(execFileSync("git", ["-C", fixture.repo, "reflog", "show", "--format=%H", "refs/heads/fix/there-and-back"], { encoding: "utf8" }).includes(elsewhere));
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -1077,6 +1085,88 @@ test("a rollback snapshot matches only while nothing at all has changed, whateve
     assert.deepEqual(await worktreeRollbackWork(join(fixture.root, "nowhere"), "anything", options), { state: "unavailable" }, "no answer is not a change");
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a symlink in the admin directory counts: adding one, or pointing it elsewhere, is a change", { skip: !haveGit() || process.platform === "win32" }, async () => {
+  const fixture = staleMarkerFixture("rollback-symlink");
+  try {
+    const options = { dataDir: fixture.dataDir };
+    const { path } = await createRequestedWorktree(fixture.repo, "s_link", { baseRef: "HEAD", branch: "fix/link" }, options);
+    const gitDir = execFileSync("git", ["-C", path, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" }).trim();
+    const before = await captureRollbackSnapshot(path, options);
+    symlinkSync("/nowhere/one", join(gitDir, "recovery-link"));
+    assert.equal((await worktreeRollbackWork(path, before!, options)).state, "changed");
+    const linked = await captureRollbackSnapshot(path, options);
+    assert.deepEqual(await worktreeRollbackWork(path, linked!, options), { state: "unchanged" });
+    rmSync(join(gitDir, "recovery-link"));
+    symlinkSync("/nowhere/two", join(gitDir, "recovery-link"));
+    assert.equal((await worktreeRollbackWork(path, linked!, options)).state, "changed");
+    rmSync(join(gitDir, "recovery-link"));
+
+    // Something that cannot be read as a file proves nothing, so it is no snapshot and no answer.
+    execFileSync("mkfifo", [join(gitDir, "a-pipe")]);
+    await assert.rejects(captureRollbackSnapshot(path, options), /cannot be read as a file/u);
+    assert.deepEqual(await worktreeRollbackWork(path, before!, options), { state: "unavailable" });
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("an admin directory that cannot be read whole gives no snapshot and no answer, never a partial digest", { skip: !haveGit() || process.platform === "win32" || process.getuid?.() === 0 }, async () => {
+  const fixture = staleMarkerFixture("rollback-unreadable");
+  try {
+    const options = { dataDir: fixture.dataDir };
+    const { path } = await createRequestedWorktree(fixture.repo, "s_unreadable", { baseRef: "HEAD", branch: "fix/unreadable" }, options);
+    const gitDir = execFileSync("git", ["-C", path, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" }).trim();
+    const snapshot = await captureRollbackSnapshot(path, options);
+    const hidden = join(gitDir, "recovery-file");
+    writeFileSync(hidden, "recovery\n");
+    chmodSync(hidden, 0o000);
+    await assert.rejects(captureRollbackSnapshot(path, options));
+    assert.deepEqual(await worktreeRollbackWork(path, snapshot!, options), { state: "unavailable" });
+    chmodSync(hidden, 0o644);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+// The WSL form of that digest cannot run here without a distro, but the script itself is plain sh.
+test("the digest script fails when it cannot read something, covers links, and flags what it cannot read as a file", { skip: !haveGit() || process.platform === "win32" }, () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-digest-script-")));
+  const listing = () => execFileSync("sh", ["-c", ADMIN_DIGEST_LISTING, "sh", root], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  try {
+    writeFileSync(join(root, "HEAD"), "ref: refs/heads/x\n");
+    mkdirSync(join(root, "refs"));
+    writeFileSync(join(root, "refs", "saved"), "abc\n");
+    const first = digestAdminListing(listing());
+    assert.equal(digestAdminListing(listing()), first, "stable");
+
+    writeFileSync(join(root, "refs", "saved"), "changed\n");
+    const edited = digestAdminListing(listing());
+    assert.notEqual(edited, first, "contents count");
+    symlinkSync("/nowhere/one", join(root, "link"));
+    const linked = digestAdminListing(listing());
+    assert.notEqual(linked, edited, "a link counts");
+    rmSync(join(root, "link"));
+    symlinkSync("/nowhere/two", join(root, "link"));
+    assert.notEqual(digestAdminListing(listing()), linked, "and where it points");
+    rmSync(join(root, "link"));
+
+    execFileSync("mkfifo", [join(root, "pipe")]);
+    assert.throws(() => digestAdminListing(listing()), /cannot be read as a file/u, "what it cannot read is no proof");
+    rmSync(join(root, "pipe"));
+
+    if (process.getuid?.() !== 0) {
+      chmodSync(join(root, "HEAD"), 0o000);
+      assert.throws(listing, "an unreadable file fails the script, rather than leaving it out");
+      chmodSync(join(root, "HEAD"), 0o644);
+      chmodSync(join(root, "refs"), 0o000);
+      assert.throws(listing, "and so does an unreadable directory");
+      chmodSync(join(root, "refs"), 0o755);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

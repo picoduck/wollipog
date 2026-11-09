@@ -2206,6 +2206,31 @@ test("a request that succeeds leaves no spent proof in its worktree, and neither
   });
 });
 
+test("a branch moved and put back from another worktree keeps its reflog: the branch stays though its worktree goes", async () => {
+  if (process.platform === "win32") return;
+  await withSession("branch-reflog", async (h) => {
+    writeFileSync(join(h.docs, ".wollipog.json"), JSON.stringify({ version: 1, ...FAILING_STEP }));
+    git(h.docs, "add", ".wollipog.json");
+    git(h.docs, "commit", "--quiet", "-m", "setup on the default branch");
+    serveOriginLocally(h);
+    const branch = `agent/${h.sessionId}`;
+    const removal = stickRemoval(h);
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message({ recoverBranch: undefined })), { ok: true });
+    await answerTrust(h, "trust");
+    await waitFor(() => failure(h) !== undefined, "the failed setup did not fail the switch");
+    const base = git(h.docs, "rev-parse", `refs/heads/${branch}`);
+    const held = git(h.docs, "commit-tree", `${base}^{tree}`, "-p", base, "-m", "held only by the branch's reflog");
+    git(h.docs, "update-ref", `refs/heads/${branch}`, held);
+    git(h.docs, "update-ref", `refs/heads/${branch}`, base);
+    removal.free();
+    dueLater(h);
+    await internalsOf(h).replayDeferredWorktreeRetirements();
+    assert.deepEqual(journal(h), []);
+    assert.ok(git(h.docs, "reflog", "show", "--format=%H", `refs/heads/${branch}`).includes(held), "that commit is still reachable");
+    assert.ok(errorText(h).some((text) => text.includes(branch) && /kept/u.test(text)), "and the session is told the branch stays");
+  });
+});
+
 test("a forced removal of an unchanged worktree still happens, and reports itself", async () => {
   await withSession("removal-reported", async (h) => {
     const { record, removal } = await stuckProvedRollback(h, { setup: [

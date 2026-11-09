@@ -15,6 +15,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readlinkSync,
   readdirSync,
   realpathSync,
   renameSync,
@@ -3021,23 +3022,33 @@ export async function worktreeCheckoutNeverFinished(path: string, options: Workt
     (await command(context, path, ["ls-tree", "--name-only", "HEAD"])).trim() !== "";
 }
 
-/** A digest of every file in a worktree's own Git admin directory, by path and content. */
+/** For a context with no Node of its own. Each `find` exits non-zero if it cannot read a directory or
+ * a file, so nothing is ever left out of the listing unnoticed. Exported for tests. */
+export const ADMIN_DIGEST_LISTING = 'cd "$1" && find . -type f -exec sha256sum -- {} + && ' +
+  'find . -type l -printf "link %p %l\\n" && find . ! -type f ! -type d ! -type l -printf "other %p\\n"';
+
+/** Exported for tests. */
+export function digestAdminListing(listing: string): string {
+  const lines = listing.split("\n").filter(Boolean).sort();
+  if (lines.some((line) => line.startsWith("other "))) throw new Error("the admin directory holds something that cannot be read as a file");
+  return createHash("sha256").update(lines.join("\n")).digest("hex");
+}
+
+/** A digest of everything in a worktree's own Git admin directory, by path and content, or target for
+ * a link. Throws if any of it cannot be read: part of a directory proves nothing about the whole. */
 async function adminDirectoryDigest(context: AgentContext, gitDir: string): Promise<string> {
   if (context.kind === "wsl") {
-    const digest = await runContextCommand(context, "sh", ["-c",
-      'cd "$1" && find . -type f | LC_ALL=C sort | while IFS= read -r file; do printf "%s\\0" "$file"; cat -- "$file"; done | sha256sum',
-      "sh", gitDir], { cwd: "/", timeoutMs: 30_000 });
-    return digest.stdout.trim();
+    return digestAdminListing((await runContextCommand(context, "sh", ["-c", ADMIN_DIGEST_LISTING, "sh", gitDir], { cwd: "/", timeoutMs: 30_000 })).stdout);
   }
   const hash = createHash("sha256");
   const walk = (directory: string, prefix: string): void => {
     for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
       const relative = `${prefix}${entry.name}`;
-      if (entry.isDirectory()) {
-        walk(join(directory, entry.name), `${relative}/`);
-      } else if (entry.isFile()) {
-        hash.update(relative).update("\0").update(readFileSync(join(directory, entry.name))).update("\0");
-      }
+      const full = join(directory, entry.name);
+      if (entry.isDirectory()) walk(full, `${relative}/`);
+      else if (entry.isFile()) hash.update(`file ${relative}\0`).update(readFileSync(full)).update("\0");
+      else if (entry.isSymbolicLink()) hash.update(`link ${relative}\0${readlinkSync(full)}\0`);
+      else throw new Error("the admin directory holds something that cannot be read as a file");
     }
   };
   walk(gitDir, "");
@@ -3085,9 +3096,10 @@ export async function worktreeRollbackWork(
   }
 }
 
-/** Give back a branch an attempt made, only while it is still exactly where the attempt made it and
- * no worktree has it: the delete itself compares the tip, so a commit landing first keeps the branch.
- * Returns whether the branch is gone. */
+/** Give back a branch an attempt made, only while it is still exactly where the attempt made it, no
+ * worktree has it, and its reflog holds nothing beyond its creation, since deleting a branch deletes
+ * that too. The delete itself compares the tip, so a commit landing first keeps the branch. Returns
+ * whether the branch is gone. */
 export async function releaseUnchangedBranch(
   repoPath: string,
   branch: string,
@@ -3099,6 +3111,8 @@ export async function releaseUnchangedBranch(
     await command(context, repoPath, ["worktree", "prune"]);
     const listed = parseWorktreePorcelain(await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]));
     if (listed.some((entry) => entry.branch === branch)) return false;
+    const history = (await command(context, repoPath, ["reflog", "show", "--format=%H", `refs/heads/${branch}`])).split("\n").filter(Boolean);
+    if (history.length > 1) return false;
     await command(context, repoPath, ["update-ref", "-d", `refs/heads/${branch}`, expectedCommit]);
     return true;
   } catch {
