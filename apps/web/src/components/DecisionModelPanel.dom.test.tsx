@@ -74,7 +74,7 @@ const TEST_RESULT: DecisionModelTestResult = {
   latencyMs: 3_200,
   occurrence: {
     occurrenceId: "dec_1", kind: "probe", promptVersion: "probe.v1", state: "decided", verdict: "confirm",
-    reason: "Listed.", inputDigests: {}, attempts: [{ attempt: 1, latencyMs: 3_100 }],
+    reason: "Listed.", inputDigests: {}, attempts: [{ attempt: 1, model: "claude-haiku-5-5", latencyMs: 3_100 }],
     usage: { inputTokens: 1, outputTokens: 2, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUsd: null },
     createdAt: 1,
     target: {
@@ -228,7 +228,7 @@ test("Test Decision Model reports the verdict, latency and attempts", async () =
     assert.ok(calls.some((call) => call.method === "POST" && call.path === "/api/decision-model/test"));
     const text = mounted.container.textContent ?? "";
     assert.ok(text.includes("Verdict: Confirm."), text);
-    assert.ok(text.includes("3.2 s, 1 attempt on Claude Code (haiku, Low effort)."), text);
+    assert.ok(text.includes("3.2 s, 1 attempt on Claude Code (haiku, Low effort), answered by claude-haiku-5-5."), text);
   } finally {
     await cleanup(mounted);
   }

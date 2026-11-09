@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
+import { agentAvailableForImplicitLaunch, claudeModelDependsOnPlanMode } from "@wollipog/protocol";
 import type {
   AgentDefinition,
   AgentContext,
@@ -150,7 +150,7 @@ function harnessModelsForAgent(agent: AgentDefinition): SessionNamingHarnessMach
   const capabilities = agent.capabilities;
   if (!capabilities) return [];
   return capabilities.models.flatMap((model) => {
-    if (model.hidden || model.id === "default") return [];
+    if (model.hidden || model.id === "default" || claudeModelDependsOnPlanMode(agent.driver, model.id)) return [];
     const efforts = model.efforts?.length ? model.efforts : capabilities.effortLevels;
     return efforts.length ? [{
       id: model.id,
@@ -369,7 +369,8 @@ export class SessionNamingSettings {
       ? namingHarnesses(runnerInOrganization.agents).find((candidate) =>
           candidate.agentId === saved.agentId && candidate.driver === saved.driver)
       : undefined;
-    const model = agent?.capabilities?.models.find((candidate) => candidate.id === saved.model);
+    const model = agent?.capabilities?.models.find((candidate) => candidate.id === saved.model &&
+      !claudeModelDependsOnPlanMode(agent.driver, candidate.id));
     const efforts = model?.efforts?.length ? model.efforts : agent?.capabilities?.effortLevels ?? [];
     const account = accountForAgent(agent);
     const agentFailureCode = sessionNamingAgentFailureCode(agent);

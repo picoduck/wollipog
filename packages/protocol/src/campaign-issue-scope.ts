@@ -153,9 +153,17 @@ export function normalizeCampaignIssueScopeSnapshot(input: Record<string, unknow
   const proposal = input.scopeProposal as CampaignScopeProposal | undefined;
   if (proposal && (input.grantReview !== undefined || input.selectionReview !== undefined || input.ownerReview !== undefined ||
       input.lineage !== undefined || (proposal.route === "admitted") !== (input.issueAdmission !== undefined))) return null;
-  // An owner review is the owner's decision (#4267): it never carries an admission, a grant review or lineage.
+  // An owner review never carries admission or grant review. Its cause constrains retained lineage (#4333).
   if (input.ownerReview !== undefined && (input.issueAdmission !== undefined || input.grantReview !== undefined ||
-      input.selectionReview !== undefined || input.lineage !== undefined)) return null;
+      input.selectionReview !== undefined)) return null;
+  if (input.ownerReview !== undefined) {
+    const cause = (input.ownerReview as CampaignIssueScopeSnapshot["ownerReview"])!.cause;
+    const kind = (input.lineage as CampaignIssueScopeSnapshot["lineage"])?.kind;
+    if (cause === "lineage_missing" ? kind !== undefined
+      : cause === "epic_not_authorized" ? kind !== "epic"
+      : cause === "selection_not_granted" ? kind !== "selection"
+      : kind !== "follow_up") return null;
+  }
   if (input.verifiedPublications !== undefined && (!Array.isArray(input.verifiedPublications) || input.verifiedPublications.length > 100 ||
       input.verifiedPublications.some((p) => !p || typeof p !== "object" || Object.keys(p).length !== 2 || typeof p.publicationOccurrenceId !== "string" ||
         !p.publicationOccurrenceId || p.publicationOccurrenceId.length > 256 || !Number.isSafeInteger(p.issue) || p.issue < 1 ||
@@ -279,7 +287,8 @@ export function validScopeOwnerReview(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const v = value as Record<string, unknown>;
   const m = v.maxIssuesIncrease as Record<string, unknown> | undefined;
-  return Object.keys(v).every((key) => key === "cause" || key === "maxIssuesIncrease") && v.cause === "lineage_missing" &&
+  return Object.keys(v).every((key) => key === "cause" || key === "maxIssuesIncrease") && ["lineage_missing", "epic_not_authorized", "follow_ups_not_authorized", "publication_unapproved",
+      "publication_authority_changed", "publication_approved_under_earlier_boundary", "publication_approver_not_owner", "selection_not_granted"].includes(v.cause as string) &&
     (m === undefined || Boolean(m && typeof m === "object" && !Array.isArray(m) && Object.keys(m).length === 2 &&
       Number.isSafeInteger(m.from) && (m.from as number) >= 1 && Number.isSafeInteger(m.increase) && (m.increase as number) >= 1 &&
       (m.from as number) + (m.increase as number) <= 100));

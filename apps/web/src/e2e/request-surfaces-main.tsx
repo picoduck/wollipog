@@ -273,10 +273,17 @@ function issueScopeSession(): SessionView {
   const base=evidenceSession();
   // `ownerReview=1` (#4267): the Orchestrator's proposal without lineage, with the Maximum Issues increase it needs.
   const snapshot = query.get("ownerReview") === "1" ? { category: "campaign_issue_scope" as const, repository: "team/repo", expectedRevision: 3,
-    before: [130, 131, 132, 133, 134], additions: [141, 142], removals: [],
-    explanation: "You asked me to start #141 and #142 after launch. Neither is an epic member or a published follow-up.",
+    before: [130, 131, 132, 133, 134], removals: [],
     affectedAssignments: [], affectedDecisions: ["merge-4141"], activeChildren: [],
-    ownerReview: { cause: "lineage_missing" as const, maxIssuesIncrease: { from: 6, increase: 1 } } }
+    ...(new URLSearchParams(window.location.search).get("lineageReview") === "1" ? {
+      additions: [141],
+      explanation: "Adopt the verified published follow-up under the current campaign boundary.",
+      lineage: { kind: "follow_up" as const, publicationOccurrenceId: "published-repair" },
+      verifiedPublications: [{ publicationOccurrenceId: "published-repair", issue: 141 }],
+      ownerReview: { cause: "publication_authority_changed" as const },
+    } : { additions: [141, 142],
+      explanation: "You asked me to start #141 and #142 after launch. Neither is an epic member or a published follow-up.",
+      ownerReview: { cause: "lineage_missing" as const, maxIssuesIncrease: { from: 6, increase: 1 } } }) }
     : {category:"campaign_issue_scope" as const,repository:"team/repo",expectedRevision:1,before:[123,124],additions:[125],removals:[124],
     explanation: tallBody ? Array.from({ length: 12 }, (_, index) =>
       `Review scope item ${index + 1}: confirm the requested work, dependencies, and affected assignments before approving this campaign change.`).join("\n\n")

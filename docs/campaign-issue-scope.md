@@ -422,16 +422,16 @@ after the current boundary's `authorizedAt`, or the boundary the server recorded
 (its author and objective digest, written into the resolving audit, never taken from a request)
 matches the current boundary's, so a Human scope approval that re-mints the boundary with the same
 author and objective keeps it valid. A changed objective or author, or an approval from before this
-record existed that precedes the current authorization, is refused as
-`publication_approved_under_earlier_boundary` and leaves the change to fresh human scope review.
+record existed that precedes the current authorization, becomes the owner’s one Scope Approval with
+`publication_approved_under_earlier_boundary`.
 Such a publication carries no recommendation claim, so the server binds
 it to the one accepted, non-duplicate recommendation in this campaign that records the published
 issue as its result and has the payload's title subject. Every other check applies to both kinds:
 consumed, controlled by the root, in its repository, never used to admit an issue before, origins
 still in scope, published payload matching exactly, and scope plus reservations within `maxIssues`.
-The admission evidence names which kind it was. Each Orchestrator refusal returns a fixed sentence
-and a bounded `code`, such as `publication_approver_not_owner`, `origin_outside_scope` or
-`epic_not_authorized`. A campaign owner can still propose any change from Campaign Status.
+The admission evidence names which kind it was. Fixable Orchestrator refusals return a fixed sentence and a bounded `code`, such as
+`origin_outside_scope`. The seven causes requiring a person instead create one owner Scope Approval
+with the cause and any verified publication, as described below.
 
 ### Owner Approval of Additions Without Lineage (#4267)
 
@@ -448,7 +448,7 @@ Approval (below), instead of retyping it.
   Approving it applies the additions and re-mints the boundary with Maximum Issues raised from
   `from` by exactly `increase`; denying applies neither. The Follow-Up Limit does not change. A
   proposal that would need more than the 100-issue ceiling is still refused as `capacity_exhausted`,
-  and so is a lineage-bearing proposal over the limit. Pending and approved publications are not
+  and so is an automatically admitted lineage-bearing proposal over the limit. Pending and approved publications are not
   counted, because the owner's approval revokes them, exactly as its resolution counts the limit.
 - Proposing the same additions and removals at the same scope revision while the request is pending
   returns that same occurrence, whatever the explanation now says.
@@ -458,7 +458,7 @@ Approval (below), instead of retyping it.
   the request (any boundary change revokes it anyway), approving it is refused as stale and applies
   nothing.
 
-Epic, follow-up and selection lineage, the selection review below and Custom campaigns are unchanged.
+Valid epic, follow-up and selection admissions, the selection review below and Custom campaigns are unchanged. Lineage requiring a person uses the owner-review route described below.
 
 ### Scope Approvals Under Waiting for You (#4334)
 
@@ -466,7 +466,7 @@ Campaign Status's **Waiting for You** lists every pending, person-owned `campaig
 request on the campaign root that the server created from an Orchestrator's proposal, wherever the
 proposal was routed to the owner:
 
-- `ownerReview`: additions without lineage (above);
+- `ownerReview`: additions without lineage or with lineage requiring a person (above and below);
 - `grantReview`, any cause: a failed or uncertain first-message grant (#4102), or a selection review
   that was uncertain, failed or unverified (#4103);
 - `scopeProposal.route: "owner"`: an uncertain or failed constraint check, or anything else that makes
@@ -492,7 +492,8 @@ Model Checks and Scope Proposal sections keep their own displays.
 When the owner's first message asked the campaign to choose issues (a scope grant with a selection,
 #4102), the Orchestrator proposes the issues it chose with `lineage: {kind: "selection"}` and its
 ranking as the `explanation` (#4103); under such a grant a proposal without lineage takes the same
-route, and selection lineage under a grant without a selection is refused as `selection_not_granted`.
+route, and selection lineage under a grant without a selection becomes an owner Scope Approval
+with `selection_not_granted`.
 A selection proposal adds issues only (`selection_additions_only`). Deterministic floors then run in
 order, and the first that fails refuses the proposal with its code and no Decision Model call:
 
@@ -798,3 +799,15 @@ The `campaign_issue_scope_refused` log includes the same reason alongside its
 operation (`entryPoint`), request and session correlation fields. No placement values
 or command output are added. These diagnostics do not modify saved placement,
 runner isolation, scope authority or closure approval requirements.
+
+### Owner Review of Lineage Requiring a Person (#4333)
+
+Lineage that needs a person becomes the same single, person-owned Scope Approval: epic_not_authorized,
+follow_ups_not_authorized, publication_unapproved, publication_authority_changed,
+publication_approved_under_earlier_boundary, publication_approver_not_owner and selection_not_granted.
+The server derives the cause, explains it in plain words and states any Maximum Issues increase.
+Keep published follow-up lineage: only server-verified consumed payloads settle their reserved slots
+on approval, so Maximum Issues counts the issue once. Denial changes nothing. Fixable errors
+(for example follow_up_not_single, publication_not_consumed, publication_already_admitted,
+payload_mismatch and epic_members_unverified) remain refusals; correct them and retry.
+Never supply an owner-review cause or a settled publication yourself.

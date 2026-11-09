@@ -9,6 +9,7 @@ import type {
   DecisionModelTarget,
 } from "@wollipog/protocol";
 import {
+  claudeModelDependsOnPlanMode,
   DECISION_MODEL_AUTOMATIC_EFFORTS,
   DECISION_MODEL_AUTOMATIC_PREFERENCE,
   decisionAgentFailureClass,
@@ -44,7 +45,8 @@ function machineName(runner: Runner | undefined, runnerId: string): string {
 }
 
 function advertisedModels(agent: AgentDefinition): AgentModel[] {
-  return (agent.capabilities?.models ?? []).filter((model) => !model.hidden && model.id !== "default");
+  return (agent.capabilities?.models ?? []).filter((model) => !model.hidden && model.id !== "default" &&
+    !claudeModelDependsOnPlanMode(agent.driver, model.id));
 }
 
 function modelEfforts(agent: AgentDefinition, model: AgentModel): string[] {

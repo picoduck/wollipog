@@ -4669,12 +4669,25 @@ export interface CampaignIssueScopeSnapshot {
  * its additions need. Approving applies the change and raises Maximum Issues by exactly `increase`;
  * denying applies neither. */
 export interface CampaignScopeOwnerReview {
-  /** The proposal named no epic, published follow-up or selection lineage. */
-  cause: "lineage_missing";
+  /** Server-derived reason lineage requires the campaign owner. Older readers reject unknown causes. */
+  cause: "lineage_missing" | "epic_not_authorized" | "follow_ups_not_authorized" | "publication_unapproved"
+    | "publication_authority_changed" | "publication_approved_under_earlier_boundary" | "publication_approver_not_owner" | "selection_not_granted";
   /** Present when the scope plus publication reservations would exceed the campaign's issue limit:
    * the Maximum Issues the boundary held when it was requested, and how many more the additions need. */
   maxIssuesIncrease?: { from: number; increase: number };
 }
+
+/** Plain words for server-derived scope review causes, shared by request and status surfaces. */
+export const CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS: Record<CampaignScopeOwnerReview["cause"], string> = {
+  lineage_missing: "No authorized epic, published follow-up or issue selection admits it, so it needs your approval.",
+  epic_not_authorized: "The named epic is outside the authorized epics, so it needs your approval.",
+  follow_ups_not_authorized: "Related follow-ups are not authorized, so it needs your approval.",
+  publication_unapproved: "The publication has no recorded person approval, so it needs your approval.",
+  publication_authority_changed: "The publication's authority differs from the current boundary, so it needs your approval.",
+  publication_approved_under_earlier_boundary: "The publication was approved under an earlier objective, so it needs your approval.",
+  publication_approver_not_owner: "The publication's approver is not a campaign owner, so it needs your approval.",
+  selection_not_granted: "No issue selection is authorized, so it needs your approval.",
+};
 
 export interface CampaignSelectionReview {
   /** The `scope_review` Decision occurrence. One occurrence admits at most one scope change. */
@@ -6894,6 +6907,13 @@ export const DECISION_MODEL_AUTOMATIC_PREFERENCE: readonly string[] = ["haiku", 
 /** Fixed effort order for Automatic, first advertised wins. */
 export const DECISION_MODEL_AUTOMATIC_EFFORTS: readonly string[] = ["low", "minimal", "medium"];
 
+/** A Claude Code picker alias whose model depends on plan mode, such as `opusplan`. One-shot naming
+ * and Decision calls never run in plan mode (#4367), so it would answer on a model other than the
+ * one it names; neither kind of target offers it. */
+export function claudeModelDependsOnPlanMode(driver: string | undefined, modelId: string): boolean {
+  return driver === "claude-code" && /plan$/iu.test(modelId);
+}
+
 /** Persisted explicit target, recomputed against the runner's current advertisement on every read. */
 export type DecisionModelTarget = SessionNamingHarnessTarget;
 export type DecisionModelMachine = SessionNamingHarnessMachine;
@@ -6937,6 +6957,9 @@ export interface DecisionAttemptView {
   attempt: number;
   /** Absent for the attempt that produced the recorded verdict. */
   errorClass?: DecisionErrorClass;
+  /** The model the provider reported answering, which can differ from the target's (#4367). Absent
+   * when the attempt reported none. */
+  model?: string;
   latencyMs: number;
 }
 
@@ -7161,7 +7184,7 @@ export interface SubscriptionUsageBucket {
   windowDurationMinutes?: number;
   /** Unix epoch milliseconds. */
   resetsAt?: number;
-  /** Protocol v339, Unix epoch milliseconds: when this window's percentage was reported. The
+  /** Protocol v341, Unix epoch milliseconds: when this window's percentage was reported. The
    * snapshot's `fetchedAt` moves on with any update, so only this dates a retained reading. Absent
    * on a window with no percentage, or from an older runner. */
   observedAt?: number;
@@ -7204,7 +7227,7 @@ export interface SubscriptionUsageSnapshot {
   accountLabel?: string;
   /** Opaque runner account coordinate; absent preserves the legacy per-agent source. */
   providerAccountId?: string;
-  /** Protocol v339: 64 hex digits, a one-way fingerprint of the provider's own account identity, so
+  /** Protocol v341: 64 hex digits, a one-way fingerprint of the provider's own account identity, so
    * the same subscription hashes alike on every machine. Display grouping only, never an
    * authorization key. Absent when the identity is unknown or incomplete, which never groups. */
   subscriptionIdentity?: string;
@@ -7218,7 +7241,7 @@ export interface SubscriptionUsageSourceView extends Omit<SubscriptionUsageSnaps
   agentName: string;
   runnerStatus: RunnerStatus;
   freshness: SubscriptionUsageFreshness;
-  /** Protocol v339: sources sharing this opaque, organization-scoped key are one subscription. The
+  /** Protocol v341: sources sharing this opaque, organization-scoped key are one subscription. The
    * runner's fingerprint itself is never projected. Absent means this source stands alone. */
   subscriptionKey?: string;
 }

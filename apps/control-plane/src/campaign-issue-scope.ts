@@ -1,6 +1,6 @@
 import { boundedIssueNumbers, campaignIssueLimitsRequirement, campaignIssueScopeChangesRequirement, campaignRepositoryLocation,
   campaignScopeChangeGroups, campaignScopeForRepository, campaignScopeIssues, canonicalCampaignIssues,
-  gitlabCampaignIssuesRequirement, normalizeCampaignIssueScopeSnapshot, RUNNER_CAPABILITY_MIN_PROTOCOL, runnerCapabilityRequirementError, runnerSupportsProtocol,
+  gitlabCampaignIssuesRequirement, normalizeCampaignIssueScopeSnapshot, validIssueLineage, RUNNER_CAPABILITY_MIN_PROTOCOL, runnerCapabilityRequirementError, runnerSupportsProtocol,
   type CampaignIssueRef, type CampaignIssueScope, type CampaignIssueScopeRepositoryView, type RunnerCapabilityRequirementDetails,
   type CampaignIssueScopeRequest, type CampaignIssueScopeSnapshot, type CampaignIssueScopeView, type CampaignScopeProposalView, type SessionView,
   type WorkflowDecisionView, isTerminal } from "@wollipog/protocol";
@@ -157,9 +157,10 @@ export function scopeRequestOutsideBoundary(root: SessionView, request: Campaign
 
 /** An epic's lineage names its repository in lower case, and only outside the launch repository. */
 function canonicalLineage(lineage: NonNullable<CampaignIssueScopeRequest["lineage"]>, launch: string): NonNullable<CampaignIssueScopeRequest["lineage"]> {
-  if (lineage.kind !== "epic" || typeof lineage.repository !== "string") return lineage;
-  const { repository, ...rest } = lineage;
-  return repository.toLowerCase() === launch ? rest : { ...rest, repository: repository.toLowerCase() };
+  if (lineage.kind === "selection") return { kind: "selection" };
+  if (lineage.kind === "follow_up") return { kind: "follow_up", publicationOccurrenceId: lineage.publicationOccurrenceId };
+  const repository = lineage.repository?.toLowerCase();
+  return { kind: "epic", epic: lineage.epic, ...(repository && repository !== launch ? { repository } : {}) };
 }
 
 /** The exact change, grouped by repository (#4118): `repository` is the launch repository, whose
@@ -171,7 +172,8 @@ export function scopeSnapshot(db: ControlPlaneDb, root: SessionView, repository:
   proposal: Pick<CampaignIssueScopeSnapshot, "scopeProposal" | "issueAdmission"> = {}): CampaignIssueScopeSnapshot | null {
   const launch = repository.toLowerCase();
   const allowed = new Set([launch, ...campaignScopeRepositories(root).map((entry) => entry.repository)]);
-  if (!request || typeof request.requestId !== "string" || !request.requestId || request.requestId.length > 256 ||
+  // Validate the untrusted shape before canonicalization can rebuild keys or read repository text.
+  if (!request || !validIssueLineage(request.lineage) || typeof request.requestId !== "string" || !request.requestId || request.requestId.length > 256 ||
       !Array.isArray(request.additions) || !Array.isArray(request.removals) ||
       [...request.additions, ...request.removals].some((r) => !r || typeof r.repository !== "string" || !allowed.has(r.repository.toLowerCase()))) return null;
   const additions = canonicalCampaignIssues(request.additions);

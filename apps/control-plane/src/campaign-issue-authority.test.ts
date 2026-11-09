@@ -62,7 +62,8 @@ function harness(full = true, maximum = 5, issues = [100]) {
     }
     throw new Error("Unexpected runner command");
   };
-  const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
+  const logs: string[] = [];
+  const svc = new SessionsService(db, hub, { info(message) { logs.push(message); }, warn() {}, error() {} });
   // A healthy Decision Model (#4104) on a fake harness: relatedness and closure-reason checks confirm.
   svc.setDecisionRuntime(healthyDecisionRuntime(db).runtime);
   if (full) assert.ok(svc.setCampaignControl("root", { mode: "full_control", objective: "Implement epic 100", operations: ["campaign_issue_scope", "issue_closure", "follow_up_issue_publication", "implementation_question"],
@@ -74,7 +75,7 @@ function harness(full = true, maximum = 5, issues = [100]) {
   assert.ok(svc.recordCampaignPlan("root", {items:[{key:"issue:100",issue:{repository:"team/repo",number:100}}],planComplete:true}).ok);
   const page = db.campaignWorkLedger.page("root", {state:"all",limit:100},Date.now()); assert.ok(page.ok);
   const item = page.data.items[0]!;
-  return { db, svc, hub, metadata, principal, state, approve, proposal, item };
+  return { db, svc, hub, metadata, principal, state, approve, proposal, item, logs };
 }
 
 test("#4164 real runner inspection admits a merge-queue squash delivery and rejects invalid merges", async () => {
@@ -499,7 +500,7 @@ test("scope rejects incidental references, unapproved epics, foreign repositorie
   const h = harness();
   try {
     assert.equal((await h.proposal("dependency",999)).ok,false);
-    for (const change of [{lineage:{kind:"epic" as const,epic:999}},{additions:[{repository:"other/repo",number:101}]}]) {
+    for (const change of [{additions:[{repository:"other/repo",number:101}]}] as Partial<import("@wollipog/protocol").CampaignIssueScopeRequest>[]) {
       assert.equal((await h.svc.proposeCampaignIssueScope("root", {requestId:JSON.stringify(change),expectedRevision:1,additions:[{repository:"team/repo",number:101}],removals:[],explanation:"Claim",lineage:{kind:"epic",epic:100},...change})).ok,false);
     }
     // Without lineage nothing is admitted: the addition waits for the owner (#4267).
@@ -740,7 +741,7 @@ test("a changed objective cannot inherit old publication authority automatically
       issueAuthority:{epics:[100],relatedFollowUps:true,maxIssues:2,closureReasons:[]}},2,h.principal).ok);
     const scope=await h.svc.proposeCampaignIssueScope("root",{requestId:"changed-objective",expectedRevision:1,additions:[{repository:"team/repo",number:101}],removals:[],explanation:"Old authority cannot grant the new objective",
       lineage:{kind:"follow_up",publicationOccurrenceId:p.decision.occurrenceId}});
-    assert.equal(scope.ok,false); assert.match(scope.error ?? "",/human\/objective/);
+    assert.equal(ownerCause(scope), "publication_authority_changed");
   } finally {h.db.close();}
 });
 
@@ -2242,6 +2243,13 @@ const followUpScope = (h: ScopeHarness, requestId: string, publicationOccurrence
   h.svc.proposeCampaignIssueScope("root",{requestId,expectedRevision,additions:[{repository:"team/repo",number:issue}],removals:[],
     explanation:"Published follow-up of an accepted recommendation",lineage:{kind:"follow_up",publicationOccurrenceId}});
 
+const ownerCause = (result: { ok: boolean; data?: WorkflowDecisionView; error?: string }) => {
+  assert.ok(result.ok, result.error ?? "owner request");
+  assert.equal(result.data!.authority, "human");
+  assert.equal(result.data!.status, "pending");
+  return (result.data!.resourceSnapshot as ScopeSnapshot).ownerReview?.cause;
+};
+
 const refusalCode = (result: { ok: boolean; errorDetails?: Record<string, string | number> }) => result.ok ? "admitted" : result.errorDetails?.code;
 
 const approvedAt = (h: ScopeHarness, decision: WorkflowDecisionView) =>
@@ -2281,8 +2289,8 @@ test("#2940 a person-approved publication grants scope only when its approver is
     member(h, "usr_operator", "operator");
     const p = await humanApprovedPublication(h, { approver: "usr_operator" });
     const refused = await followUpScope(h, "other-person", p.decision.occurrenceId);
-    assert.equal(refusalCode(refused), "publication_approver_not_owner"); assert.equal(refused.status, 403);
-    assert.match(refused.error!, /neither the Full Control boundary's author nor an owner of this campaign/);
+    assert.equal(ownerCause(refused), "publication_approver_not_owner");
+
     assert.equal(JSON.stringify(refused).includes("usr_operator"), false, "the refusal names no person");
     assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100]);
   } finally { h.db.close(); }
@@ -2293,9 +2301,9 @@ test("#2940 a person-approved publication grants scope only when its approver is
     member(shared, "usr_viewer", "viewer"); member(shared, "usr_suspended", "admin"); member(shared, "usr_admin", "admin");
     shared.db.raw().prepare("UPDATE identity_users SET status='suspended' WHERE user_id='usr_suspended'").run();
     const viewer = await humanApprovedPublication(shared, { approver: "usr_viewer", title: "Viewer repair", issue: 101 });
-    assert.equal(refusalCode(await followUpScope(shared, "viewer", viewer.decision.occurrenceId, 101)), "publication_approver_not_owner");
+    assert.equal(ownerCause(await followUpScope(shared, "viewer", viewer.decision.occurrenceId, 101)), "publication_approver_not_owner");
     const suspended = await humanApprovedPublication(shared, { approver: "usr_suspended", title: "Suspended repair", issue: 102 });
-    assert.equal(refusalCode(await followUpScope(shared, "suspended", suspended.decision.occurrenceId, 102)), "publication_approver_not_owner");
+    assert.equal(ownerCause(await followUpScope(shared, "suspended", suspended.decision.occurrenceId, 102)), "publication_approver_not_owner");
     const owner = await humanApprovedPublication(shared, { approver: "usr_admin", title: "Owner repair", issue: 103 });
     const admitted = await followUpScope(shared, "owner", owner.decision.occurrenceId, 103);
     assert.ok(admitted.ok, admitted.error ?? "owner scope");
@@ -2308,7 +2316,7 @@ test("#2940 a person-approved publication grants scope only when its approver is
     member(personal, "usr_owner", "operator"); member(personal, "usr_admin", "admin");
     personal.db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='usr_owner' WHERE session_id='root'").run();
     const other = await humanApprovedPublication(personal, { approver: "usr_admin", title: "Administrator repair", issue: 101 });
-    assert.equal(refusalCode(await followUpScope(personal, "administrator", other.decision.occurrenceId, 101)), "publication_approver_not_owner");
+    assert.equal(ownerCause(await followUpScope(personal, "administrator", other.decision.occurrenceId, 101)), "publication_approver_not_owner");
     const owned = await humanApprovedPublication(personal, { approver: "usr_owner", title: "Owner repair", issue: 102 });
     const admitted = await followUpScope(personal, "user-owner", owned.decision.occurrenceId, 102);
     assert.ok(admitted.ok, admitted.error ?? "user owner scope");
@@ -2321,6 +2329,7 @@ test("#2940 a person-approved publication cannot exceed the human-set issue limi
     const p = await humanApprovedPublication(h);
     const refused = await followUpScope(h, "over-limit", p.decision.occurrenceId);
     assert.equal(refusalCode(refused), "capacity_exhausted"); assert.equal(refused.status, 409);
+    assert.equal(h.logs.some((line) => { const event = JSON.parse(line); return event.requestId === "over-limit" && event.outcome === "admitted"; }), false);
     assert.equal(h.db.admittedCampaignPublicationIssue("root", p.decision.occurrenceId), null);
     assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100]);
     // The limit is the campaign's, not the raw Maximum Issues: once the person admits a follow-up
@@ -2356,8 +2365,8 @@ test("#2940 a person-approved publication carries its approval only across a sam
     await tick();
     assert.ok(reauthorize(changed, "A different objective").ok);
     const refused = await followUpScope(changed, "changed-objective", p.decision.occurrenceId);
-    assert.equal(refusalCode(refused), "publication_approved_under_earlier_boundary"); assert.equal(refused.status, 403);
-    assert.match(refused.error!, /approved before the current Full Control authorization.*Campaign Status/);
+    assert.equal(ownerCause(refused), "publication_approved_under_earlier_boundary");
+
     assert.deepEqual(changed.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100]);
     assert.equal(changed.db.admittedCampaignPublicationIssue("root", p.decision.occurrenceId), null);
     // A publication the person approves under the new authorization is admitted.
@@ -2388,7 +2397,7 @@ test("#2940 a person-approved publication carries its approval only across a sam
     unrecorded.db.raw().prepare(`UPDATE governance_audit SET workflow_decision=json_remove(workflow_decision, '$.publicationAuthority')
       WHERE request_id=? AND stage='resolution' AND outcome='allowed'`).run(p.decision.occurrenceId);
     await remint(unrecorded);
-    assert.equal(refusalCode(await followUpScope(unrecorded, "unrecorded-remint", p.decision.occurrenceId, 101, 2)), "publication_approved_under_earlier_boundary");
+    assert.equal(ownerCause(await followUpScope(unrecorded, "unrecorded-remint", p.decision.occurrenceId, 101, 2)), "publication_approved_under_earlier_boundary");
     assert.deepEqual(unrecorded.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100, 150]);
   } finally { unrecorded.db.close(); }
 });
@@ -2458,9 +2467,8 @@ test("#2940 Orchestrator scope refusals name their condition with a bounded code
     const propose = (requestId: string, change: Partial<import("@wollipog/protocol").CampaignIssueScopeRequest>) => h.svc.proposeCampaignIssueScope("root",
       { requestId, expectedRevision: 1, additions: [{ repository: "team/repo", number: 101 }], removals: [], explanation: "Secret-looking explanation text", ...change });
     const otherEpic = await propose("other-epic", { lineage: { kind: "epic", epic: 999 } });
-    assert.equal(refusalCode(otherEpic), "epic_not_authorized"); assert.equal(otherEpic.status, 403);
-    assert.match(otherEpic.error!, /Campaign Status/);
-    assert.equal(JSON.stringify(otherEpic).includes("Secret-looking"), false);
+    assert.equal(ownerCause(otherEpic), "epic_not_authorized");
+
     assert.equal(refusalCode(await propose("unknown-publication", { lineage: { kind: "follow_up", publicationOccurrenceId: "missing" } })), "publication_not_found");
     assert.equal(refusalCode(await propose("two-follow-ups", { additions: [{ repository: "team/repo", number: 101 }, { repository: "team/repo", number: 102 }],
       lineage: { kind: "follow_up", publicationOccurrenceId: "missing" } })), "follow_up_not_single");
@@ -2473,7 +2481,7 @@ test("#2940 Orchestrator scope refusals name their condition with a bounded code
   try {
     assert.ok(noFollowUps.svc.setCampaignControl("root",{mode:"full_control",objective:"Implement epic 100",operations:["campaign_issue_scope"],delegatablePolicyIds:[],
       issueAuthority:{epics:[100],relatedFollowUps:false,maxIssues:5,closureReasons:[]}},2,noFollowUps.principal).ok);
-    assert.equal(refusalCode(await followUpScope(noFollowUps, "no-follow-ups", "missing")), "follow_ups_not_authorized");
+    assert.equal(refusalCode(await followUpScope(noFollowUps, "no-follow-ups", "missing")), "publication_not_found");
   } finally { noFollowUps.db.close(); }
 });
 
@@ -2628,7 +2636,7 @@ test("#4267 lineage admissions and Custom proposals keep their routes", async ()
     // Selection lineage under a grant without a selection is still refused (#4103).
     const selection = await full.svc.proposeCampaignIssueScope("root", { requestId: "selection", expectedRevision: 1,
       additions: [{ repository: "team/repo", number: 102 }], removals: [], explanation: "Chosen", lineage: { kind: "selection" } });
-    assert.equal(refusalCode(selection), "selection_not_granted");
+    assert.equal(ownerCause(selection), "selection_not_granted");
   } finally { full.db.close(); }
   const custom = harness(false, 5);
   try {
@@ -4691,4 +4699,109 @@ test("a follow-up in another boundary repository is inspected through its Locati
     assert.equal(older.data!.authorityEvaluation?.admissionFailure, "inspection_failed");
     assert.equal(inspections.length, askedBefore, "an older runner is never asked");
   } finally { h.db.close(); }
+});
+
+test("#4333 every person-only lineage cause creates one owner request; only the owner applies it and settles verified publication slots", async () => {
+  for (const cause of ["epic_not_authorized", "follow_ups_not_authorized", "publication_unapproved", "publication_authority_changed",
+    "publication_approved_under_earlier_boundary", "publication_approver_not_owner", "selection_not_granted"] as const) {
+    for (const outcome of ["approve", "deny"] as const) {
+      const h = harness(true, 2);
+      try {
+        let publicationOccurrenceId: string | undefined;
+        if (cause.startsWith("publication_") || cause === "follow_ups_not_authorized") {
+          if (cause === "publication_approver_not_owner") member(h, "usr_operator", "operator");
+          const p = cause === "publication_authority_changed" ? await consumedPublication(h)
+            : await humanApprovedPublication(h, cause === "publication_approver_not_owner" ? { approver: "usr_operator" } : {});
+          publicationOccurrenceId = p.decision.occurrenceId;
+          if (cause === "publication_unapproved") h.db.workflowDecisionHumanApprover = () => null;
+          if (["publication_authority_changed", "publication_approved_under_earlier_boundary", "follow_ups_not_authorized"].includes(cause)) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            assert.ok(h.svc.setCampaignControl("root", { mode: "full_control", objective: "New objective",
+              operations: ["campaign_issue_scope", "follow_up_issue_publication"], delegatablePolicyIds: [],
+              issueAuthority: { epics: [100], relatedFollowUps: cause !== "follow_ups_not_authorized", maxIssues: 2, closureReasons: [] } }, 2, h.principal).ok);
+          }
+        }
+        const lineage = publicationOccurrenceId ? { kind: "follow_up" as const, publicationOccurrenceId }
+          : cause === "epic_not_authorized" ? { kind: "epic" as const, epic: 999 } : { kind: "selection" as const };
+        const request = { requestId: "routed", expectedRevision: 1, additions: [{ repository: "team/repo", number: 101 }],
+          removals: [], explanation: "Exact proposed addition", lineage };
+        const proposed = await h.svc.proposeCampaignIssueScope("root", request);
+        assert.equal(ownerCause(proposed), cause);
+        const snapshot = proposed.data!.resourceSnapshot as ScopeSnapshot;
+        assert.deepEqual(snapshot.lineage, lineage);
+        assert.equal(snapshot.ownerReview!.maxIssuesIncrease, undefined, "verified publication does not count twice");
+        assert.deepEqual(snapshot.additions, [101]);
+        if (publicationOccurrenceId) assert.deepEqual(snapshot.verifiedPublications, [{ publicationOccurrenceId, issue: 101 }]);
+        const reorderedLineage = Object.fromEntries(Object.entries(lineage).reverse()) as typeof lineage;
+        const repeated = await h.svc.proposeCampaignIssueScope("root", { ...request, lineage: reorderedLineage, requestId: "repeat" });
+        assert.equal(repeated.data!.occurrenceId, proposed.data!.occurrenceId);
+        assert.equal(pendingScopeRequests(h).length, 1);
+        assert.equal(h.svc.resolveWorkflowDecision("root", "root", proposed.data!.occurrenceId, { outcome: "approve" },
+          "orchestrator", { kind: "agent", id: "root" }, () => true).ok, false);
+        assert.equal((await h.svc.consumeWorkflowDecision("root", proposed.data!.occurrenceId, { resourceSnapshot: snapshot })).ok, false);
+        const slotsBefore = h.db.unsettledPublicationSlots("root");
+        const resolved = h.svc.resolveWorkflowDecision("root", "root", proposed.data!.occurrenceId, { outcome }, "human",
+          { kind: "human", id: h.principal.userId }, () => true);
+        assert.ok(resolved.ok, resolved.error ?? "resolution");
+        assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, outcome === "approve" ? [100, 101] : [100]);
+        if (publicationOccurrenceId) {
+          assert.equal(h.db.admittedCampaignPublicationIssue("root", publicationOccurrenceId), outcome === "approve" ? 101 : null);
+          assert.equal(h.db.unsettledPublicationSlots("root"), outcome === "approve" ? 0 : slotsBefore);
+        }
+      } finally { h.db.close(); }
+    }
+  }
+});
+
+test("#4333 owner routing states a required increase and refuses a mismatched publication", async () => {
+  const h = harness(true, 1);
+  try {
+    const proposal = await h.svc.proposeCampaignIssueScope("root", { requestId: "over-limit-owner", expectedRevision: 1,
+      additions: [{ repository: "team/repo", number: 101 }], removals: [], explanation: "New epic",
+      lineage: { kind: "epic", epic: 999 } });
+    assert.equal(ownerCause(proposal), "epic_not_authorized");
+    assert.deepEqual((proposal.data!.resourceSnapshot as ScopeSnapshot).ownerReview!.maxIssuesIncrease, { from: 1, increase: 1 });
+    assert.match(h.db.campaignOwnerDecisions("root")!.items[0]!.summary, /epic is outside.*epic_not_authorized/);
+    assert.ok(h.approve(proposal.data!).ok);
+    assert.equal(boundaryMaxIssues(h), 2);
+  } finally { h.db.close(); }
+  const mismatch = harness(true, 3);
+  try {
+    member(mismatch, "usr_operator", "operator");
+    const p = await humanApprovedPublication(mismatch, { approver: "usr_operator" });
+    const runner = mismatch.hub.requestFromRunner.bind(mismatch.hub);
+    mismatch.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+      const result = await runner(runnerId, requestId, message, timeout);
+      return message.type === "campaign_issue_scope" && message.operation === "inspect" && message.publication && result.type === "campaign_issue_scope_result"
+        ? { ...result, candidates: [] } : result;
+    };
+    assert.equal(refusalCode(await followUpScope(mismatch, "routed-mismatch", p.decision.occurrenceId)), "payload_mismatch");
+    assert.equal(pendingScopeRequests(mismatch).length, 0);
+    assert.equal(mismatch.db.admittedCampaignPublicationIssue("root", p.decision.occurrenceId), null);
+  } finally { mismatch.db.close(); }
+});
+
+test("#4333 malformed lineage is refused before canonicalization without creating owner work", async (t) => {
+  for (const lineage of [
+    { kind: "bogus", epic: 999 },
+    { kind: "selection", epic: 1 },
+    { kind: "follow_up", publicationOccurrenceId: "x", extra: 1 },
+    { kind: "epic", epic: 100, extra: 1 },
+    { kind: "epic", epic: 999, repository: "" },
+    { kind: "epic", epic: 100, repository: 123 },
+    null, [], "epic",
+  ]) {
+    await t.test(JSON.stringify(lineage), async () => {
+      const h = harness();
+      try {
+        const request = { requestId: "invalid-lineage", expectedRevision: 1, additions: [{ repository: "team/repo", number: 101 }],
+          removals: [], explanation: "Malformed lineage must remain a refusal", lineage } as unknown as import("@wollipog/protocol").CampaignIssueScopeRequest;
+        const result = await h.svc.proposeCampaignIssueScope("root", request);
+        assert.equal(result.ok, false);
+        assert.equal(result.status, 400);
+        assert.equal(pendingScopeRequests(h).length, 0);
+        assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100]);
+      } finally { h.db.close(); }
+    });
+  }
 });

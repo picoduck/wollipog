@@ -1,3 +1,4 @@
+import { CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS } from "@wollipog/protocol";
 import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
 import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, agentAvailableForRunnerDefault, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
 import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, PROJECT_LOCATION_INSPECTION_FAILURES, validCampaignRepositoryList,
@@ -35801,7 +35802,9 @@ function campaignScopeChangeSummary(snapshot: CampaignIssueScopeSnapshot, raise:
   const additions = refs((group) => group.additions), removals = refs((group) => group.removals);
   const change = additions && removals ? `Add ${additions} and remove ${removals}`
     : additions ? `Add ${additions}` : removals ? `Remove ${removals}` : "Start the campaign with no issues";
-  return change + (raise ? `, raising Maximum Issues from ${raise.from} to ${raise.from + raise.increase}` : "");
+  const cause = snapshot.ownerReview?.cause;
+  const reason = cause && cause !== "lineage_missing" ? `. ${CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS[cause]} (${cause})` : "";
+  return change + (raise ? `, raising Maximum Issues from ${raise.from} to ${raise.from + raise.increase}` : "") + reason;
 }
 
 /** What a decision the owner kept decides, in a line Campaign Status can list (#4064). */

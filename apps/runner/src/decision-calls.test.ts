@@ -14,7 +14,7 @@ import {
   DecisionExecutor,
   interpretClaudeDecisionEnvelope,
 } from "./decision-calls.js";
-import { codexSessionNamingArgs } from "./session-naming.js";
+import { claudeSessionNamingArgs, codexSessionNamingArgs } from "./session-naming.js";
 import type { AgentProcess, SpawnAgentOptions } from "./spawn.js";
 
 const SCHEMA = {
@@ -47,7 +47,7 @@ function claudeAgent(overrides: Partial<NonNullable<AgentDefinition["claudeCode"
     claudeCode: {
       status: "ready",
       effortLevels: ["low", "medium"],
-      permissionModes: ["plan"],
+      permissionModes: ["dontAsk"],
       streamJsonInput: true,
       streamJsonImages: true,
       controlProtocol: true,
@@ -94,7 +94,7 @@ test("Claude Decision calls run with no tools, no MCP servers, no settings and n
   assert.ok(args.includes("--no-session-persistence"));
   assert.ok(args.includes("--safe-mode"));
   assert.ok(args.includes("--disable-slash-commands"));
-  assert.equal(value("--permission-mode"), "plan");
+  assert.equal(value("--permission-mode"), "dontAsk");
   assert.equal(value("--output-format"), "json");
   assert.equal(value("--system-prompt"), "fixed instructions");
   assert.deepEqual(JSON.parse(value("--json-schema")!), SCHEMA);
@@ -415,4 +415,152 @@ test("a typed schema beyond the v307 bound is refused before any provider runs",
   const oversized = { ...TYPED_SCHEMA, description: "x".repeat(32_000) };
   assert.equal((await run.execute(message({ outputSchema: oversized }), claudeAgent(), {})).errorClass, "configuration");
   assert.equal(ran, 0);
+});
+
+/**
+ * The model a real Claude Code 2.1.318 answers on, as measured for #4367 with the Decision flags:
+ * `haiku` becomes Sonnet in plan mode, `opusplan` is Opus only there, and exact ids never move.
+ */
+const CLAUDE_ANSWERS: Record<string, { model: string; inPlanMode?: string }> = {
+  haiku: { model: "claude-haiku-5-5", inPlanMode: "claude-sonnet-5-5" },
+  sonnet: { model: "claude-sonnet-5-5" },
+  opus: { model: "claude-opus-5-5" },
+  fable: { model: "claude-fable-5-1" },
+  opusplan: { model: "claude-sonnet-5-5", inPlanMode: "claude-opus-5-5" },
+  "claude-haiku-5-5": { model: "claude-haiku-5-5" },
+  "claude-sonnet-5-5": { model: "claude-sonnet-5-5" },
+};
+
+/** A fake Claude Code that answers as the real one measured, from the arguments it was given. */
+function fakeClaudeSpawn(spawned: SpawnAgentOptions[] = []) {
+  return (options: SpawnAgentOptions): AgentProcess => {
+    spawned.push(options);
+    const value = (flag: string) => options.args[options.args.lastIndexOf(flag) + 1];
+    const answers = CLAUDE_ANSWERS[value("--model") ?? ""];
+    assert.ok(answers, `the fake has no measurement for --model ${String(value("--model"))}`);
+    const answeredBy = value("--permission-mode") === "plan" ? answers.inPlanMode ?? answers.model : answers.model;
+    return fakeProcess(({ child, stdout }) => {
+      stdout.end(JSON.stringify({
+        type: "result", subtype: "success", is_error: false, result: "free text",
+        structured_output: { verdict: "confirm", reason: "ok" },
+        usage: { input_tokens: 2, output_tokens: 53 }, modelUsage: { [answeredBy]: {} },
+      }));
+      child.emit("close", 0);
+    }, false);
+  };
+}
+
+function claudeTarget(model: string): RunDecisionMessage["target"] {
+  return { agentId: "claude-code", driver: "claude-code", model, effort: "low" };
+}
+
+/** Claude Code advertising what `CLAUDE_ANSWERS` measures, as Automatic and explicit targets see it. */
+function agentAdvertisingEveryAlias(): AgentDefinition {
+  return {
+    ...claudeAgent(),
+    capabilities: {
+      ...models,
+      models: Object.keys(CLAUDE_ANSWERS).map((id) => ({ id, displayName: id, efforts: ["low", "medium"] })),
+    },
+  };
+}
+
+function decisionRun(spawned: SpawnAgentOptions[] = []): DecisionExecutor {
+  return new DecisionExecutor({
+    prepareDirectory: async () => ({ cwd: "/neutral", cleanup: async () => {} }),
+    spawn: fakeClaudeSpawn(spawned),
+  });
+}
+
+test("the Haiku alias Automatic targets is answered by a Haiku model (#4367)", async () => {
+  const result = await decisionRun().execute(message({ target: claudeTarget("haiku") }), agentAdvertisingEveryAlias(), {});
+  assert.equal(result.ok, true);
+  assert.equal(result.model, "claude-haiku-5-5");
+});
+
+test("every explicit Claude target is answered by the model it names (#4367)", async () => {
+  for (const [target, expected] of [
+    ["haiku", "claude-haiku-5-5"],
+    ["sonnet", "claude-sonnet-5-5"],
+    ["opus", "claude-opus-5-5"],
+    ["fable", "claude-fable-5-1"],
+    ["claude-haiku-5-5", "claude-haiku-5-5"],
+    ["claude-sonnet-5-5", "claude-sonnet-5-5"],
+  ] as const) {
+    const result = await decisionRun().execute(message({ target: claudeTarget(target) }), agentAdvertisingEveryAlias(), {});
+    assert.equal(result.ok, true, target);
+    assert.equal(result.model, expected, target);
+  }
+});
+
+test("a one-shot Claude call never combines a model alias with a flag that changes it (#4367)", () => {
+  for (const alias of Object.keys(CLAUDE_ANSWERS)) {
+    for (const [surface, args] of [
+      ["decision", claudeDecisionArgs([], claudeTarget(alias), "fixed", SCHEMA)],
+      ["naming", claudeSessionNamingArgs([], claudeTarget(alias))],
+    ] as const) {
+      assert.equal(args[args.indexOf("--model") + 1], alias, surface);
+      assert.equal(args.filter((arg) => arg === "--permission-mode").length, 1, surface);
+      assert.equal(args[args.indexOf("--permission-mode") + 1], "dontAsk", `${surface} on ${alias}`);
+      assert.equal(args.includes("plan"), false, `${surface} on ${alias}`);
+    }
+  }
+});
+
+test("the fake harness reproduces the defect, so these tests would catch plan mode coming back (#4367)", async () => {
+  const child = fakeClaudeSpawn()({
+    command: "claude", args: ["--model", "haiku", "--permission-mode", "plan"], cwd: "/neutral", env: {},
+  } as SpawnAgentOptions);
+  let output = "";
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => { output += chunk; });
+  const closed = new Promise((resolve) => child.once("close", resolve));
+  child.stdin.end("input");
+  await closed;
+  assert.equal(interpretClaudeDecisionEnvelope(output, 0).model, "claude-sonnet-5-5");
+});
+
+test("an alias that means another model outside plan mode is refused, never run (#4367)", async () => {
+  const spawned: SpawnAgentOptions[] = [];
+  const result = await decisionRun(spawned).execute(message({ target: claudeTarget("opusplan") }), agentAdvertisingEveryAlias(), {});
+  assert.equal(result.ok, false);
+  assert.equal(result.errorClass, "model_unavailable");
+  assert.equal(spawned.length, 0, "no provider process starts");
+});
+
+test("a Claude answer with no reported model records none instead of claiming the target (#4367)", async () => {
+  const result = await new DecisionExecutor({
+    prepareDirectory: async () => ({ cwd: "/neutral", cleanup: async () => {} }),
+    spawn: () => fakeProcess(({ child, stdout }) => {
+      stdout.end(JSON.stringify({
+        type: "result", subtype: "success", is_error: false, structured_output: { verdict: "confirm", reason: "ok" },
+      }));
+      child.emit("close", 0);
+    }, false),
+  }).execute(message(), claudeAgent(), {});
+  assert.equal(result.ok, true);
+  assert.equal("model" in result, false);
+});
+
+test("a Codex turn the server reroutes reports the model it rerouted to (#4367)", async () => {
+  const run = new DecisionExecutor({
+    prepareDirectory: async () => ({ cwd: "/neutral", cleanup: async () => {} }),
+    spawn: () => fakeProcess(({ stdout }, line) => {
+      const request = JSON.parse(line) as { id?: number; method?: string };
+      const send = (value: unknown) => stdout.write(`${JSON.stringify(value)}\n`);
+      if (request.method === "thread/start") {
+        send({ id: request.id, result: { thread: { id: "thread-1" } } });
+      } else if (request.method === "turn/start") {
+        send({ id: request.id, result: {} });
+        send({ method: "model/rerouted", params: { threadId: "thread-1", turnId: "t", fromModel: "haiku", toModel: "rerouted-model", reason: "highRiskCyberActivity" } });
+        send({ method: "item/agentMessage/delta", params: { delta: "{\"verdict\":\"confirm\",\"reason\":\"ok\"}" } });
+        send({ method: "turn/completed", params: { turn: { status: "completed" } } });
+      } else if (request.id !== undefined) {
+        send({ id: request.id, result: {} });
+      }
+    }, true),
+  });
+  const result = await run.execute(message({ target: { agentId: "codex", driver: "codex-app-server", model: "haiku", effort: "low" } }), codexAgent(), {});
+  assert.equal(result.ok, true);
+  assert.equal(result.model, "rerouted-model");
 });

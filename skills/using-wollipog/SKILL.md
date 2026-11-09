@@ -999,9 +999,15 @@ same request. For any other addition,
 such as an issue the owner asks for mid-run, propose it without lineage: it becomes the owner's one
 typed approval, stating any Maximum Issues increase it needs, and the returned occurrence tells you
 what to ask the owner to approve in their Inbox or Campaign Status; proposing the same issues again
-returns that same request. The server refuses incidental references, foreign repositories and
-lineage changes beyond human-set limits, naming the failed condition in a bounded `code`; a campaign
-owner can still propose the change from Campaign Status.
+returns that same request. Lineage that needs a person becomes the same single, person-owned Scope Approval: epic_not_authorized,
+follow_ups_not_authorized, publication_unapproved, publication_authority_changed,
+publication_approved_under_earlier_boundary, publication_approver_not_owner and selection_not_granted.
+The server derives the cause, explains it in plain words and states any Maximum Issues increase.
+Keep published follow-up lineage: only server-verified consumed payloads settle their reserved slots
+on approval, so Maximum Issues counts the issue once. Denial changes nothing. Fixable errors
+(for example follow_up_not_single, publication_not_consumed, publication_already_admitted,
+payload_mismatch and epic_members_unverified) remain refusals; correct them and retry.
+Never supply an owner-review cause or a settled publication yourself.
 Resolution applies and consumes scope atomically; do not separately consume it. A root can resolve
 only an eligible occurrence backed by its standing human authorization: when the effective owner is
 `orchestrator`, resolve it with `resolve_descendant_workflow_decision` and its own session ID as

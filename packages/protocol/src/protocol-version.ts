@@ -1378,14 +1378,16 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   //      control plane would ignore it.
   338,
   // v339 slot
-  // 339: subscription-usage snapshots may carry `subscriptionIdentity`, a one-way fingerprint of the
+  // v340 slot
+  // 340: Server-derived owner scope review causes retain verified publication lineage (#4333).
+  340,
+  // v341 slot
+  // 341: subscription-usage snapshots may carry `subscriptionIdentity`, a one-way fingerprint of the
   //      provider account, and source views an opaque `subscriptionKey` derived from it, so one
   //      subscription on several machines shows once. Each usage window may carry `observedAt`, so
   //      machines' readings compare by when each was reported. Additive: an older runner sends
   //      neither and its sources stay separate; an older control plane drops both fields.
-  339,
-  // v340 slot
-  // v341 slot
+  341,
   // v342 slot
   // v343 slot
   // v344 slot

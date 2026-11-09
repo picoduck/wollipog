@@ -125,6 +125,26 @@ test("Automatic picks the first preferred small model and effort a harness adver
   assert.equal(automaticDecisionModel(large), null, "no preferred family means no Automatic model");
 });
 
+test("a Claude alias that needs plan mode to mean its model is not offered, and a saved one is unavailable (#4367)", () => {
+  const { settings, state } = fixture();
+  const saved = settings.configure(ORG, {
+    runnerId: "runner-1", agentId: "claude-code", driver: "claude-code", model: "opus", effort: "medium",
+  });
+  assert.equal(saved.target?.available, true);
+  const planAlias = { id: "opusplan", displayName: "Opus Plan", efforts: ["low", "medium"] };
+  const withPlanAlias = claude({ capabilities: { ...claude().capabilities!, models: [planAlias, ...claude().capabilities!.models] } });
+  state.agents = [withPlanAlias, codex()];
+  const offered = settings.view(ORG, true).machines[0]!.harnesses.find((harness) => harness.agentId === "claude-code")!.models;
+  assert.deepEqual(offered.map((model) => model.id), ["opus", "haiku"]);
+  // The alias's family can't win Automatic, and neither can one that names a preferred family.
+  const haikuPlan = claude({ capabilities: { ...claude().capabilities!, models: [{ id: "haikuplan", efforts: ["low"] }] } });
+  assert.equal(automaticDecisionModel(haikuPlan), null);
+  // It can't be chosen. A target saved earlier meets the same filter, so it reads as unavailable.
+  assert.throws(() => settings.configure(ORG, {
+    runnerId: "runner-1", agentId: "claude-code", driver: "claude-code", model: "opusplan", effort: "medium",
+  }), DecisionModelUnavailableError);
+});
+
 test("the setting lists only harnesses that can host Decision calls, on current runners", () => {
   const { settings, state } = fixture();
   const view = settings.view(ORG, false);

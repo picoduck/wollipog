@@ -23,7 +23,7 @@ test("parseClaudeHelp gates flags and enumerated values from the resolved CLI", 
   --effort <level>  Effort (low, medium, high)
   --input-format <format>  text or stream-json
   --output-format <format> text, json, stream-json
-  --permission-mode <mode> (choices: "acceptEdits", "auto", "plan")
+  --permission-mode <mode> (choices: "acceptEdits", "auto", "dontAsk", "plan")
   --tools <tools>
   --safe-mode
   --strict-mcp-config
@@ -37,7 +37,7 @@ test("parseClaudeHelp gates flags and enumerated values from the resolved CLI", 
   --replay-user-messages replay
 `);
   assert.deepEqual(parsed.effortLevels, ["low", "medium", "high"]);
-  assert.deepEqual(parsed.permissionModes, ["acceptEdits", "auto", "plan"]);
+  assert.deepEqual(parsed.permissionModes, ["acceptEdits", "auto", "dontAsk", "plan"]);
   assert.equal(parsed.streamJsonInput, true);
   assert.equal(parsed.forkSession, true);
   assert.equal(parsed.replayUserMessages, true);
@@ -50,13 +50,17 @@ test("parseClaudeHelp gates flags and enumerated values from the resolved CLI", 
 test("parseClaudeHelp advertises Decision calls only with the naming lockdown and --json-schema", () => {
   const naming = [
     "  --output-format <format> text, json, stream-json",
-    "  --permission-mode <mode> (choices: \"plan\")",
+    "  --permission-mode <mode> (choices: \"dontAsk\")",
     "  --tools <tools>", "  --safe-mode", "  --strict-mcp-config", "  --mcp-config <config>",
     "  --setting-sources <sources>", "  --no-session-persistence", "  --disable-slash-commands",
     "  --no-chrome", "  --system-prompt <prompt>",
   ];
   assert.equal(parseClaudeHelp([...naming, "  --json-schema <schema>  JSON Schema"].join("\n")).decisionCalls, true);
   assert.equal(parseClaudeHelp(naming.join("\n")).decisionCalls, false);
+  // #4367: a one-shot call runs in dontAsk, so a release without it qualifies for neither, even with plan.
+  const planOnly = [...naming.map((line) => line.replace("dontAsk", "plan")), "  --json-schema <schema>"].join("\n");
+  assert.equal(parseClaudeHelp(planOnly).sessionNaming, false);
+  assert.equal(parseClaudeHelp(planOnly).decisionCalls, false);
   assert.equal(parseClaudeHelp([...naming.filter((line) => !line.includes("--tools")), "  --json-schema <schema>"]
     .join("\n")).decisionCalls, false);
 });
