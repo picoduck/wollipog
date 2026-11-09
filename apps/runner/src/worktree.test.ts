@@ -1056,7 +1056,8 @@ test("a rollback snapshot matches only while nothing at all has changed, whateve
     }
 
     const { path } = await createRequestedWorktree(fixture.repo, "s_work", { baseRef: "HEAD", branch: "fix/work-other" }, options);
-    assert.equal((await worktreeRollbackWork(path, undefined, options)).state, "changed", "with nothing recorded, nothing is proved");
+    assert.deepEqual(await worktreeRollbackWork(path, undefined, options),
+      { state: "changed", reason: "nothing proves what is in it is only what the runner left" }, "with nothing recorded, nothing is proved");
 
     // What the rule leaves out, on purpose.
     const snapshot = await captureRollbackSnapshot(path, options);
