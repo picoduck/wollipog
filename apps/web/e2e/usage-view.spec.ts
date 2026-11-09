@@ -839,6 +839,7 @@ test("each account is one surface with a row per window, in the provider's order
   await expect(current.locator(".subscription-plan-account")).not.toContainText("primary@example.com");
   await current.getByRole("button", { name: "Show Account Email" }).click();
   await expect(current.locator(".subscription-plan-account .pid-value")).toHaveText("primary@example.com");
+  // This fixture speaks as a control plane older than protocol 342, where only Codex could refresh.
   await expect(current.getByRole("button", { name: "Refresh Account" })).toHaveCount(0);
   const windows = current.locator(".subscription-window");
   await expect(windows).toHaveCount(3);
@@ -921,6 +922,29 @@ for (const { width, height, name } of [
     const overflow = await account.evaluate((element) => element.scrollWidth - element.clientWidth);
     expect(overflow).toBeLessThanOrEqual(0);
     await page.screenshot({ path: `${SHOT}/${name}-dark-shared-subscription.png`, fullPage: true });
+  });
+}
+
+for (const { width, height, name } of [
+  { width: 1280, height: 900, name: "desktop-1280" },
+  { width: 390, height: 844, name: "phone-390" },
+]) {
+  test(`a Claude account its machine can read on request has Refresh Account at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    await page.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1&claudeRefreshable=1");
+    const claude = page.locator(".subscription-plan").filter({ hasText: "Claude Code on build-box" }).first();
+    await expect(claude.locator(".subscription-plan-title")).toHaveText("Claude Max");
+    const refresh = claude.getByRole("button", { name: "Refresh Account" });
+    await expect(refresh).toBeVisible();
+    // The same control as Codex's, at the same size.
+    const codex = page.locator(".subscription-plan").filter({ hasText: "Codex App Server on build-box" })
+      .getByRole("button", { name: "Refresh Account" });
+    const [claudeBox, codexBox] = await Promise.all([refresh.boundingBox(), codex.boundingBox()]);
+    expect(claudeBox?.width).toBe(codexBox?.width);
+    expect(claudeBox?.height).toBe(codexBox?.height);
+    await page.screenshot({ path: `playwright-report/claude-refresh/${name}-dark-claude-refresh-account.png`, fullPage: true });
+    await refresh.click();
+    await expect(page.locator(".toast")).toContainText("Account refreshed.");
   });
 }
 

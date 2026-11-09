@@ -1389,6 +1389,11 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   //      neither and its sources stay separate; an older control plane drops both fields.
   341,
   // v342 slot
+  // 342: A refresh also reads Claude subscription usage, through Claude Code's `get_usage` control
+  //      request, and source views say which can be refreshed one at a time. A runner reads Claude
+  //      only for a control plane at v342, whose refresh deadline counts those sources; an older
+  //      runner keeps reporting Claude usage from session responses alone.
+  342,
   // v343 slot
   // v344 slot
   // v345 slot

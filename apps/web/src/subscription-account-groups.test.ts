@@ -181,6 +181,17 @@ test("every machine's Codex account is a refresh target, and a Claude source is 
   assert.deepEqual(claude!.refreshTargets, []);
 });
 
+test("a control plane's refreshable flag decides the targets, for Claude and Codex alike", () => {
+  const [claude, codex] = subscriptionAccountGroups([
+    source({ subscriptionKey: "claude", runnerId: "laptop", providerAccountId: "personal", refreshable: true, buckets: [bucket("five_hour", 50)] }),
+    source({ subscriptionKey: "claude", runnerId: "old-box", providerAccountId: "personal", refreshable: false, buckets: [bucket("five_hour", 50)] }),
+    source({ subscriptionKey: "codex", provider: "codex", runnerId: "box", providerAccountId: "work", refreshable: false, buckets: [bucket("codex:primary", 50)] }),
+  ]);
+  assert.deepEqual(claude!.refreshTargets, [{ runnerId: "laptop", providerAccountId: "personal" }],
+    "the machine that can't read Claude on request is left out");
+  assert.deepEqual(codex!.refreshTargets, []);
+});
+
 test("two sources of one subscription on the same machine count as one machine", () => {
   const [group] = subscriptionAccountGroups([
     source({ subscriptionKey: "shared", runnerId: "box", buckets: [bucket("five_hour", 40)] }),

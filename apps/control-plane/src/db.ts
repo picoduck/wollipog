@@ -53,6 +53,7 @@ import { grantReviewMaxIssues, ownerReviewMaxIssues, proposalMaxIssues, scopeApp
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
 import { validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
+import { claudeUsageProbeable } from "./subscription-usage.js";
 import { ACCRUED_USAGE_SQL, claudeTurnRunningTotal } from "./claude-running-total.js";
 import { lookupRate, priceUsage, resolveCostSource, sameRequestInputTier, type RateTable } from "./usage-pricing.js";
 import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
@@ -17332,6 +17333,10 @@ export class ControlPlaneDb {
           agentName: displayAgent.name,
           runnerStatus: runner.status,
           freshness: runner.status === "offline" || now - fetchedAt > staleAfterMs ? "stale" : "fresh",
+          // Refresh Account names a provider account; a source without one refreshes with Refresh All.
+          refreshable: Boolean(account) && (provider === "codex" ||
+            (runnerSupportsProtocol(runner.protocolVersion, "claudeSubscriptionUsageRefresh") &&
+              claudeUsageProbeable(displayAgent))),
         });
       }
     }

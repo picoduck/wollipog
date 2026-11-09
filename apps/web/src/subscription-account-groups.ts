@@ -14,7 +14,8 @@ export interface SubscriptionAccountGroup {
   members: readonly SubscriptionUsageSourceView[];
   machineCount: number;
   hasWindows: boolean;
-  /** Only a Codex account can be asked for its usage; Claude's arrives with session responses. */
+  /** The accounts the control plane says can be read on request. An older control plane says
+   * nothing, and there only a Codex account could be. */
   refreshTargets: ReadonlyArray<{ runnerId: string; providerAccountId: string }>;
 }
 
@@ -101,8 +102,9 @@ export function subscriptionAccountGroups(sources: readonly SubscriptionUsageSou
     members,
     machineCount: new Set(members.map((member) => member.runnerId)).size,
     hasWindows: members.some((member) => member.buckets.length > 0),
-    refreshTargets: members.flatMap((member) => member.provider === "codex" && member.providerAccountId
-      ? [{ runnerId: member.runnerId, providerAccountId: member.providerAccountId }]
-      : []),
+    refreshTargets: members.flatMap((member) =>
+      member.providerAccountId && (member.refreshable ?? member.provider === "codex")
+        ? [{ runnerId: member.runnerId, providerAccountId: member.providerAccountId }]
+        : []),
   }));
 }
