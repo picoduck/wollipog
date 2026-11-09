@@ -14879,6 +14879,11 @@ export class SessionManager {
               `continue in: ${refusal}; move that worktree (git worktree move) or switch it to another branch, then ask again`);
           }
         }
+      } else {
+        // Setup can run for minutes while no record names this worktree. Another session's switch
+        // to the same branch must not find it free and continue in it half set up (#4209).
+        this.reusedWorktreeClaims.set(created.path, sessionId);
+        claim.path = created.path;
       }
       const defaultBranch = await readRepositoryDefaultBranch(repoPath, options);
       worktree = reused

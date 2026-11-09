@@ -86,7 +86,7 @@ async function withSession(name: string, body: (h: Harness) => Promise<void>): P
   const dataDir = join(root, "data");
   const store = new SessionStore(join(dataDir, "sessions"));
   const manager = new SessionManager((message) => { sent.push(message); }, () => {}, store, "runner", undefined,
-    fake.factory as never, dataDir, 1);
+    fake.factory as never, dataDir, 2);
   try {
     const app = repository(root, "app", "git@github.com:acme/app.git");
     const docs = repository(root, "docs", "git@github.com:acme/docs.git");
@@ -385,6 +385,33 @@ test("a Stop that cancels setup fails the switch visibly, and the worktree goes 
     await waitFor(() => docsWorktrees(h).length === 1, "the worktree was not released");
     assert.ok(git(h.docs, "rev-parse", "--verify", "refs/heads/fix/install-link"));
     assert.equal(h.providers.length, 1, "no provider was launched for a stopped session");
+  });
+});
+
+test("while setup runs, another session's switch to the same branch is refused rather than taking the half-set-up worktree", async () => {
+  await withSession("claimed", async (h) => {
+    commitSetup(h, { setup: [{ name: "Long Step", command: sleep, timeoutSeconds: 300 }] });
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await answerTrust(h, "trust");
+    await waitFor(() => stderrText(h).some((text) => text.startsWith("Running worktree setup")), "setup did not start");
+    const [, target] = docsWorktrees(h);
+    assert.ok(target);
+
+    const other = "s_switch_setup_other";
+    await h.manager.start({ sessionId: other, workspaceId: "app", workspacePath: h.app, agentId: "claude-code", command: "claude-code",
+      args: [], env: {}, useWorktree: false, driver: "claude-code", context: { kind: "native" } });
+    h.manager.prompt(other, "start the other task");
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(other)?.status === "idle" &&
+      !!h.store.readMeta(other)?.agentSessionId, "the other session did not finish a turn");
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message({ sessionId: other, occurrenceId: "occurrence-other" })), { ok: true });
+    await waitFor(() => h.store.readMeta(other)?.locationSwitchFailure !== undefined || h.store.readMeta(other)?.repoPath === h.docs,
+      "the other switch did not settle");
+
+    const meta = h.store.readMeta(other)!;
+    assert.equal(meta.repoPath, h.app, "the other session stays where it was");
+    assert.match(meta.locationSwitchFailure!.reason!, new RegExp(h.sessionId, "u"), "the refusal names the session setting it up");
+    assert.equal(h.store.readMeta(h.sessionId)?.pendingLocationSwitch?.occurrenceId, "occurrence-1", "the first switch is unaffected");
+    assert.deepEqual(docsWorktrees(h), [h.docs, target]);
   });
 });
 
