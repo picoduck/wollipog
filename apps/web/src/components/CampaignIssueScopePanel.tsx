@@ -37,14 +37,12 @@ export function CampaignIssueScopeSummary({ snapshot, derivedIncrease }: {
   return <>
     {snapshot.grantReview && <ScopeGrantReviewFacts review={snapshot.grantReview} />}
     {snapshot.ownerReview && <ScopeOwnerReviewFacts review={snapshot.ownerReview} />}
-    {snapshot.ownerReview && snapshot.ownerReview.cause !== "lineage_missing" && <dl className="facts">
-      <div><dt>Owner Review Cause</dt><dd>{snapshot.ownerReview.cause}</dd></div>
-    </dl>}
     {snapshot.ownerReview && snapshot.verifiedPublications?.length ? <p>Approving also settles the verified published follow-up's reserved slot. Maximum Issues counts it once.</p> : null}
     {snapshot.scopeProposal ? <ScopeProposalFacts repository={snapshot.repository} proposal={snapshot.scopeProposal} explanation={snapshot.explanation} />
       : <p>{snapshot.explanation}</p>}
     {raise && !snapshot.ownerReview && <p>Approving also raises Maximum Issues from {raise.from} to {raise.from + raise.increase}; denying leaves it unchanged.</p>}
     <dl className="facts">
+      {snapshot.ownerReview && snapshot.ownerReview.cause !== "lineage_missing" && <div><dt>Owner Review Cause</dt><dd>{snapshot.ownerReview.cause}</dd></div>}
       <div><dt>Scope Revision</dt><dd>{snapshot.expectedRevision} to {snapshot.expectedRevision + 1}</dd></div>
       {raise && <div><dt>Maximum Issues</dt><dd>{raise.from} to {raise.from + raise.increase}</dd></div>}
       <div><dt>Additions</dt><dd>{refs((group) => group.additions)}</dd></div>

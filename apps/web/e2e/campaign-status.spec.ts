@@ -495,6 +495,7 @@ test("decisions the owner kept wait for them in Campaign Status, and each opens 
 
 for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "phone", width: 390, height: 844 }]) {
   for (const route of [
+    { name: "lineage requiring an increase (#4333)", scope: "1&lineageReview=1&lineageIncrease=1", request: "wd_scope_141", summary: "Add team/repo#141, team/repo#142, raising Maximum Issues from 6 to 7. The named epic is outside the authorized epics, so it needs your approval. (epic_not_authorized)", limit: "6 to 7" },
     { name: "lineage requiring a person (#4333)", scope: "1&lineageReview=1", request: "wd_scope_141", summary: "Add team/repo#141. The publication's authority differs from the current boundary, so it needs your approval. (publication_authority_changed)", limit: "6 to 7" },
     { name: "a proposal without lineage (#4267)", scope: "1", request: "wd_scope_141", summary: "Add team/repo#141, team/repo#142, raising Maximum Issues from 6 to 7", limit: "6 to 7" },
     { name: "a failed grant's proposal (#4334)", scope: "grant", request: "wd_scope_143", summary: "Add team/repo#143, team/docs#7, raising Maximum Issues from 6 to 9", limit: "6 to 9" },
@@ -509,17 +510,27 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
       await expect(waiting).toContainText("Proposed by the Orchestrator");
       await expect(waiting).toContainText("Only you can make this decision.");
       await assertNoHorizontalOverflow(page, ".campaign-status");
-      if (route.name.includes("#4333")) await page.screenshot({ path: `/tmp/s4333-evidence/campaign-${viewport.name}.png`, fullPage: true });
-      await waiting.getByRole("button", { name: `Open Request: ${route.summary}`, exact: true }).click();
+      const openRequest = waiting.getByRole("button", { name: `Open Request: ${route.summary}`, exact: true });
+      await openRequest.scrollIntoViewIfNeeded();
+      const increase = route.scope.includes("lineageIncrease");
+      const capture = `${increase ? "increase" : "publication"}-${viewport.name}`;
+      if (route.name.includes("#4333")) {
+        if (viewport.name === "phone") {
+          const buttonBox = await openRequest.boundingBox();
+          const barBox = await page.getByRole("navigation", { name: "App Navigation" }).boundingBox();
+          expect(buttonBox!.y + buttonBox!.height).toBeLessThanOrEqual(barBox!.y);
+        }
+        await page.screenshot({ path: `/tmp/s4333-evidence/campaign-${capture}.png`, fullPage: true });
+      }
+      await openRequest.click();
       const card = page.locator(`[data-session-request-id="${route.request}"]`);
       await expect(card).toBeVisible();
       if (route.name.includes("#4333")) {
-        await expect(card).toContainText("publication_authority_changed");
-        await expect(card).toContainText("authority differs from the current boundary");
-        await expect(card).toContainText("counts it once");
+        await expect(card).toContainText(increase ? "epic_not_authorized" : "publication_authority_changed");
+        await expect(card).toContainText(increase ? "raises Maximum Issues from 6 to 7" : "counts it once");
         await assertNoHorizontalOverflow(page, ".request-card");
         await card.getByRole("button", { name: "Expand Decision", exact: true }).click();
-        await page.screenshot({ path: `/tmp/s4333-evidence/expanded-${viewport.name}.png`, fullPage: true });
+        await page.screenshot({ path: `/tmp/s4333-evidence/expanded-${capture}.png`, fullPage: true });
 
       }
       await expect(card.locator(":focus")).toHaveCount(1);

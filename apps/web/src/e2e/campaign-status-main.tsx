@@ -714,18 +714,29 @@ const ownerProjection = ownerScenario === "after" ? { status: "waiting_human" as
  * three, so opening one shows it is that one. A revision bump settles them all. */
 const ownerScopeBase = { category: "campaign_issue_scope" as const, repository: "team/repo", expectedRevision: 0,
   before: [], removals: [], affectedAssignments: [], affectedDecisions: ["occ_1"], activeChildren: [] };
+const lineageIncrease = new URLSearchParams(window.location.search).get("lineageIncrease") === "1";
 const ownerScopeRoutes = {
   owner: { occurrenceId: "wd_scope_141", summary: new URLSearchParams(window.location.search).get("lineageReview") === "1"
-    ? "Add team/repo#141. The publication's authority differs from the current boundary, so it needs your approval. (publication_authority_changed)"
-    : "Add team/repo#141, team/repo#142, raising Maximum Issues from 6 to 7", snapshot: { ...ownerScopeBase, additions: [141, 142],
-    explanation: "You asked me to start #141 and #142 after launch. Neither is an epic member or a published follow-up.",
+    ? lineageIncrease
+      ? "Add team/repo#141, team/repo#142, raising Maximum Issues from 6 to 7. The named epic is outside the authorized epics, so it needs your approval. (epic_not_authorized)"
+      : "Add team/repo#141. The publication's authority differs from the current boundary, so it needs your approval. (publication_authority_changed)"
+    : "Add team/repo#141, team/repo#142, raising Maximum Issues from 6 to 7", snapshot: { ...ownerScopeBase,
     ...(new URLSearchParams(window.location.search).get("lineageReview") === "1" ? {
-      additions: [141],
-      explanation: "Adopt the verified published follow-up under the current campaign boundary.",
-      lineage: { kind: "follow_up" as const, publicationOccurrenceId: "published-repair" },
-      verifiedPublications: [{ publicationOccurrenceId: "published-repair", issue: 141 }],
-      ownerReview: { cause: "publication_authority_changed" as const },
-    } : { ownerReview: { cause: "lineage_missing" as const, maxIssuesIncrease: { from: 6, increase: 1 } } }) } },
+      ...(lineageIncrease ? {
+        before: [130, 131, 132, 133, 134], additions: [141, 142],
+        explanation: "Add two members of another epic through owner scope approval.",
+        lineage: { kind: "epic" as const, epic: 140 },
+        ownerReview: { cause: "epic_not_authorized" as const, maxIssuesIncrease: { from: 6, increase: 1 } },
+      } : {
+        additions: [141],
+        explanation: "Adopt the verified published follow-up under the current campaign boundary.",
+        lineage: { kind: "follow_up" as const, publicationOccurrenceId: "published-repair" },
+        verifiedPublications: [{ publicationOccurrenceId: "published-repair", issue: 141 }],
+        ownerReview: { cause: "publication_authority_changed" as const },
+      }),
+    } : { additions: [141, 142],
+      explanation: "You asked me to start #141 and #142 after launch. Neither is an epic member or a published follow-up.",
+      ownerReview: { cause: "lineage_missing" as const, maxIssuesIncrease: { from: 6, increase: 1 } } }) } },
   grant: { occurrenceId: "wd_scope_143", summary: "Add team/repo#143, team/docs#7, raising Maximum Issues from 6 to 9", derivedIncrease: { from: 6, increase: 3 }, snapshot: { ...ownerScopeBase, additions: [143],
     otherRepositories: [{ repository: "team/docs", before: [], additions: [7], removals: [] }],
     explanation: "Reading your first message failed, so I chose the two issues it seems to mean.",
