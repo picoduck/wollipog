@@ -506,7 +506,9 @@ test("a request over a rate threshold is priced at that rate, and a range across
   const cases: Array<[string, RunDecisionResultMessage["pricing"], number | null]> = [
     ["one request over the threshold", { serviceTier: "standard", requestInputTokens: { min: 150_000, max: 150_000 } }, 150_000 * 5e-7 + 20 * 0.0000025],
     ["two requests under it", { serviceTier: "standard", requestInputTokens: { min: 70_000, max: 80_000 } }, 150_000 * 1e-7 + 20 * 5e-7],
+    // Two requests the provider didn't list separately: one could be over the threshold, or neither.
     ["a range that spans it", { serviceTier: "standard", requestInputTokens: { min: 0, max: 150_000 } }, null],
+    ["a bound wholly under it", { serviceTier: "standard", requestInputTokens: { min: 0, max: 99_000 } }, 150_000 * 1e-7 + 20 * 5e-7],
   ];
   for (const [label, pricing, expected] of cases) {
     const run = harness([pricedVerdict({ usage: large, pricing })], { rateTable: LIVE_SHAPED_RATES });

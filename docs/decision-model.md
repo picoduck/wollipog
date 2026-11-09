@@ -363,10 +363,11 @@ none. An unpriced attempt has a null cost, never $0, and makes its occurrence's 
 unknown.
 
 A rate can depend on the service tier and each request's input size, so the runner reports what the
-provider said (#4368): Claude Code's `usage.service_tier` and per-request `usage.iterations`, and
-Codex App Server's `thread/start` `serviceTier` and token usage. Nothing is assumed. A model that has
-a rate for the missing value stays unpriced, as does one whose request sizes span a threshold. The
-table is the only source: Claude Code's `total_cost_usd` is not used, so a model the table can't
+provider said (#4368): Claude Code's `usage.service_tier` and `usage.iterations`, and Codex App
+Server's `thread/start` `serviceTier` and token usage. `iterations` counts only when it adds up to
+`usage`, because it can list just the latest request; otherwise the total only bounds each request.
+Nothing is assumed. A model that has a rate for the missing value stays unpriced, as does one whose
+request sizes span a threshold. The table is the only source: Claude Code's `total_cost_usd` is not used, so a model the table can't
 price stays unpriced. The table has one cache-write rate, so a call whose cache writes last an hour
 records less than Claude Code reports: $0.000255 against $0.000339 on a measured Haiku call.
 

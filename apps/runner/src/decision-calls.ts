@@ -154,7 +154,19 @@ function claudeRequestInput(value: Record<string, unknown>): number {
   return count(value.input_tokens) + count(value.cache_read_input_tokens) + count(value.cache_creation_input_tokens);
 }
 
-/** The tier and request size Claude's envelope reports. `usage` totals the call, so without a usable
+/** Each request's input, when `iterations` accounts for every input token in `usage`. It can list
+ * only a later request: a recorded two-request turn totals 70,767 and lists one of 37,370 (#4368). */
+function claudeRequestInputs(usage: Record<string, unknown>): number[] | null {
+  const iterations = Array.isArray(usage.iterations) ? usage.iterations as unknown[] : [];
+  const fields = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"];
+  const entries = iterations.filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object");
+  const complete = iterations.length > 0 && entries.length === iterations.length && fields.every((field) =>
+    entries.every((entry) => Number.isSafeInteger(entry[field]) && (entry[field] as number) >= 0) &&
+    entries.reduce((total, entry) => total + (entry[field] as number), 0) === usage[field]);
+  return complete ? entries.map(claudeRequestInput) : null;
+}
+
+/** The tier and request size Claude's envelope reports. `usage` totals the call, so without a complete
  * `iterations` list the total only bounds each request. Fast mode reads as the session driver does. */
 function claudePricing(envelope: Record<string, unknown>): DecisionPricingContext | undefined {
   const usage = envelope.usage;
@@ -163,10 +175,7 @@ function claudePricing(envelope: Record<string, unknown>): DecisionPricingContex
   const serviceTier = value.speed === "fast"
     ? "fast"
     : typeof value.service_tier === "string" && value.service_tier ? value.service_tier : undefined;
-  const iterations = Array.isArray(value.iterations) ? value.iterations as unknown[] : [];
-  const requests = iterations.length && iterations.every((entry) => entry && typeof entry === "object")
-    ? iterations.map((entry) => claudeRequestInput(entry as Record<string, unknown>))
-    : null;
+  const requests = claudeRequestInputs(value);
   return {
     ...(serviceTier ? { serviceTier } : {}),
     requestInputTokens: requests

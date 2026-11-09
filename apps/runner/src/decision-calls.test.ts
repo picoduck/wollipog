@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import type { AgentDefinition, RunDecisionMessage } from "@wollipog/protocol";
@@ -576,15 +577,23 @@ test("Claude's envelope reports the tier and each request's size, on an answer a
   assert.deepEqual(read(answer).pricing, { serviceTier: "standard", requestInputTokens: { min: 1133, max: 1133 } });
   const withUsage = (changes: Record<string, unknown>) => read({ ...answer, usage: { ...usage, ...changes } }).pricing;
   assert.deepEqual(withUsage({
+    input_tokens: 11, cache_read_input_tokens: 105, cache_creation_input_tokens: 20,
     iterations: [
       { input_tokens: 10, cache_read_input_tokens: 5, cache_creation_input_tokens: 0 },
       { input_tokens: 1, cache_read_input_tokens: 100, cache_creation_input_tokens: 20 },
     ],
   }), { serviceTier: "standard", requestInputTokens: { min: 15, max: 121 } });
   // Without each request's size, the total only bounds them.
-  assert.deepEqual(withUsage({ iterations: undefined }), { serviceTier: "standard", requestInputTokens: { min: 0, max: 1133 } });
-  assert.deepEqual(withUsage({ iterations: [] }), { serviceTier: "standard", requestInputTokens: { min: 0, max: 1133 } });
-  assert.deepEqual(withUsage({ iterations: ["bad"] }), { serviceTier: "standard", requestInputTokens: { min: 0, max: 1133 } });
+  const bounded = { serviceTier: "standard", requestInputTokens: { min: 0, max: 1133 } };
+  for (const [label, iterations] of [
+    ["absent", undefined],
+    ["empty", []],
+    ["not objects", ["bad"]],
+    ["a missing bucket", [{ input_tokens: 2, cache_creation_input_tokens: 1131 }]],
+    ["a non-numeric bucket", [{ input_tokens: "2", cache_read_input_tokens: 0, cache_creation_input_tokens: 1131 }]],
+    ["a negative bucket", [{ input_tokens: 3, cache_read_input_tokens: -1, cache_creation_input_tokens: 1131 }]],
+    ["only a later request", [{ input_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 31 }]],
+  ] as const) assert.deepEqual(withUsage({ iterations }), bounded, label);
   // Fast mode is what the session driver reads it as, and a missing tier stays missing.
   assert.equal(withUsage({ speed: "fast" })?.serviceTier, "fast");
   assert.equal("serviceTier" in withUsage({ service_tier: undefined })!, false);
@@ -691,4 +700,15 @@ test("a Codex attempt counts its whole thread, and several responses only bound 
   assert.equal(failed.model, CODEX_TARGET.model);
   assert.deepEqual(failed.usage, { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 });
   assert.deepEqual(failed.pricing, { serviceTier: "default", requestInputTokens: { min: 100, max: 100 } });
+});
+
+test("a recorded turn whose iterations list only its later request yields a bound, not that request's size (#4368)", () => {
+  // One real Claude Code 2.1.296 turn of two requests: usage totals 70,767 input tokens, and
+  // `iterations` lists only the second, of 37,370.
+  const recorded = JSON.parse(readFileSync(new URL("./drivers/fixtures/claude-live-usage-stream.json", import.meta.url), "utf8")) as Array<Record<string, unknown>>;
+  const envelope = { ...recorded.find((record) => record.type === "result"), structured_output: { verdict: "confirm", reason: "ok" } };
+  assert.deepEqual(interpretClaudeDecisionEnvelope(JSON.stringify(envelope), 0).pricing, {
+    serviceTier: "standard",
+    requestInputTokens: { min: 0, max: 70_767 },
+  });
 });
