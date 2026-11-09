@@ -337,8 +337,10 @@ export async function boundedFileDiffs(read: (paths: string[]) => Promise<string
 } = {}): Promise<{ patch: string; omitted: string[] }> {
   const { limit = REVIEW_PATCH_LIMIT_BYTES, maxFiles = REVIEW_INDIVIDUAL_DIFFS_LIMIT, budgetMs = REVIEW_INDIVIDUAL_DIFFS_BUDGET_MS, now = Date.now } = options;
   const whole = await read(paths).catch(() => null);
-  // A hunk's lines all start with a marker, so only Git's own notice can start with these words.
-  const binary = (text: string) => /^Binary files .* differ$/mu.test(text);
+  // A hunk's lines all start with a marker, so only Git's own notice can start a line with these
+  // words. Lines end only at \n: the m flag would also split at \r and the Unicode line separators,
+  // which a pull request's author could use to get a text file's diff left out.
+  const binary = (text: string) => /(?:^|\n)Binary files [^\n]* differ(?:\n|$)/u.test(text);
   if (whole !== null && Buffer.byteLength(whole) <= limit && !binary(whole)) return { patch: whole, omitted: [] };
   const kept = new Map<string, { text: string; bytes: number }>();
   let used = 0;

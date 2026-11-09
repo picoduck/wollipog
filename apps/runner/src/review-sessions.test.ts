@@ -1059,6 +1059,12 @@ test("a binary diff shows the reviewer nothing, so it is named as left out and i
   const read = async (paths: string[]) => paths.map((path) => path === "x.png" ? notice : text).join("");
   assert.deepEqual(await boundedFileDiffs(read, ["x.png", "y.ts"]), { patch: text, omitted: ["x.png"] });
   assert.deepEqual(await boundedFileDiffs(read, ["y.ts"]), { patch: text, omitted: [] }, "those words in a hunk are not the notice");
+  // An author cannot get a text file's diff left out by starting a false line inside a hunk line.
+  for (const code of [0x0d, 0x85, 0x2028, 0x2029]) {
+    const separator = String.fromCodePoint(code);
+    const spoof = `diff --git a/z.ts b/z.ts\n@@ -1 +1 @@\n-old\n+new${separator}Binary files a and b differ${separator}more\n`;
+    assert.deepEqual(await boundedFileDiffs(async () => spoof, ["z.ts"]), { patch: spoof, omitted: [] }, `U+${code.toString(16)}`);
+  }
 
   // Both sides add the same binary file: a clean merge the proof accepts, with nothing to show.
   const f = fixture(t);
