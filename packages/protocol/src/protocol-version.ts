@@ -1364,6 +1364,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   //      its explicit account choices keep working. Older clients cannot overwrite a non-fixed policy.
   334,
   // v335 slot
+  // 335: Review any owned worktree without selecting it; concurrent admission per pull request (#4329).
+  335,
   // v336 slot
   // v337 slot
   // v338 slot

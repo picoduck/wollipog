@@ -477,7 +477,10 @@ reserves allowance before launch and records actual Session usage against the ca
 when present. Exhausted, stopped or unavailable allowances refuse admission with a reason;
 admission failures cannot be bypassed through the bridge. A worker's campaign allocation does
 not cap its reviews, which reserve allowance separately.
-A requester has one active review session at a time. A review session runs one turn: it takes no
+On protocol 335+, a requester can review any of its own linked managed worktrees without selecting
+it and can run one active review per pull request concurrently. Each new review reserves half the
+unreserved original human cost ceiling, when set; campaign allowance reservations still apply.
+Older runners require selecting the worktree and serializing review requests. A review session runs one turn: it takes no
 further messages, steering, configuration or commands, cannot be restarted, relaunched, forked or
 converted to another role, and has no worktree, terminal, Native TUI, side chat or children. It is never
 parked. Every MCP server Codex would load, from user or project configuration, is disabled by name.
@@ -2485,3 +2488,11 @@ withhold the Orchestrator capability unless both peers negotiate v124 and fresh 
 complete target-local launcher contract.
 
 See [Using Wollipog](../skills/using-wollipog/SKILL.md) for the compact agent-facing skill.
+
+### Protocol 335 Rollback Constraint
+
+Concurrent reviews replace the requester-wide unique index with a per-pull-request index. Before
+rolling back to a control plane below protocol 335 against the same database, let all active reviews
+settle (or cancel them and wait for terminal states). An older binary cannot recreate its unique
+index while multiple reviews of one requester remain active. Restoring the pre-upgrade database
+backup is the alternative; do not restart the hosting stack from a hosted agent session.

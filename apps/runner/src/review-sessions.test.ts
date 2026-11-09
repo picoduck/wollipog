@@ -492,6 +492,36 @@ test("prepare checks out the exact pushed head privately and pins the patch in t
   assert.equal(existsSync(prepared.checkout), false);
 });
 
+test("prepare reviews an unselected owned worktree without changing selection, and refuses stale registration", async (t) => {
+  const f = fixture(t);
+  const other = join(f.root, "other");
+  git(f.repo, "worktree", "add", "--quiet", "-b", "fix/other", other);
+  f.requester.worktrees!.push({ id: "other", path: other, branch: "fix/other", source: "created" });
+  f.requester.worktreePath = other;
+  f.requester.worktreeBranch = "fix/other";
+  const before = JSON.stringify(f.requester);
+  const prepared = await f.launcher.prepare("s_review", f.policy(), CODEX, "b");
+  assert.equal(git(prepared.checkout, "rev-parse", "HEAD"), f.head);
+  assert.equal(JSON.stringify(f.requester), before);
+  assert.equal(git(other, "branch", "--show-current"), "fix/other");
+  f.launcher.release("s_review");
+  git(f.worktree, "switch", "--quiet", "-c", "fix/switched");
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy(), CODEX, "b")),
+    "the automatic worktree is no longer registered on this session's expected branch; restore it before requesting a review");
+});
+
+test("prepare refuses attached and ambiguous branch matches even when unselected", async (t) => {
+  for (const duplicate of [false, true]) {
+    const f = fixture(t);
+    if (duplicate) f.requester.worktrees!.push({ ...f.requester.worktrees![0]!, id: "duplicate" });
+    else f.requester.worktrees![0]!.source = "attached";
+    f.requester.worktreePath = "/other/selected";
+    assert.equal(await refusal(f.launcher.prepare("s_review", f.policy(), CODEX, "b")), duplicate
+      ? "the pull request is not this session's open, same-repository pull request"
+      : "the review must cover the session's own native managed worktree");
+  }
+});
+
 test("prepare refuses every request outside the requester's own pull request at its pushed head", async (t) => {
   const f = fixture(t);
   assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ pullRequest: { repository: "acme/other", number: 7 } }), CODEX, "b")),
@@ -520,6 +550,9 @@ test("prepare refuses every request outside the requester's own pull request at 
   const attached = fixture(t, { requester: { worktrees: undefined } });
   assert.equal(await refusal(attached.launcher.prepare("s_review", attached.policy(), CODEX, "b")),
     "resume this session once so the runner can verify its automatic worktree before requesting a review");
+  const noWorktree = fixture(t, { requester: { worktreePath: undefined, worktrees: undefined } });
+  assert.equal(await refusal(noWorktree.launcher.prepare("s_review", noWorktree.policy(), CODEX, "b")),
+    "the review must cover the session's own native managed worktree");
   // A review session never requests a review of its own.
   const review = fixture(t, { requester: { review: { requesterSessionId: "s_x" } as SessionMeta["review"] } });
   assert.equal(await refusal(review.launcher.prepare("s_review", review.policy(), CODEX, "b")),

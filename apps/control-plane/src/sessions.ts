@@ -11298,7 +11298,7 @@ export class SessionsService {
    * reviewer is the other model family, launched by the session's runner outside the session's
    * sandbox, read-only, against the runner's own checkout of that head. The runner proves the scope
    * again against the session's worktree. A review session takes no session slot or child
-   * capacity; a requester has at most one active review.
+   * capacity; a requester has at most one active review per pull request.
    */
   requestReviewSession(callerSessionId: string, request: ReviewSessionRequest,
     canAccess: (id: string) => boolean = () => true): ServiceResult<ReviewSessionView> {
@@ -11365,7 +11365,8 @@ export class SessionsService {
       return fail(`The ${label} reviewer is unavailable on this session's runner${why ? `: ${why}` : ""}.`, 409);
     }
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("this session's runner is offline; request the review again once it reconnects", 409);
-    const active = this.db.reviewSessions.activeFor(session.id);
+    const concurrentReviews = runnerSupportsProtocol(runner?.protocolVersion, "parallelWorktreeReviews");
+    const active = this.db.reviewSessions.activeFor(session.id, concurrentReviews ? pullRequest : undefined);
     if (active) return fail(`This session already has an active review session (${active}); wait for it, or cancel it with cancel_review_session.`, 409);
     // The requester's guardrails: a review spends from what remains of its cost budget after its own
     // spending and everything its earlier reviews spent, so repeated reviews cannot exceed it.
@@ -11374,7 +11375,12 @@ export class SessionsService {
     // an original human session ceiling also limits its reviews, never the worker allocation.
     const requesterCeiling = budgetRoot ? this.db.campaignBudgets.userLimits(session.id)?.costBudgetUsd : session.costBudgetUsd;
     if (requesterCeiling != null && requesterCeiling > 0) {
-      costBudgetUsd = requesterCeiling - (session.costUsd ?? 0) - this.db.reviewSessions.spentFor(session.id);
+      costBudgetUsd = requesterCeiling - (session.costUsd ?? 0) - this.db.reviewSessions.spentFor(session.id)
+        - this.db.reviewSessions.reservedFor(session.id);
+      if (!(costBudgetUsd > 0)) return fail("this session has no cost budget left for a review", 409);
+      // Leave a share of the original human ceiling for another pull request. Campaign admission
+      // still reserves each review's allowance share, capped by this requester remainder.
+      if (concurrentReviews) costBudgetUsd /= 2;
       if (!(costBudgetUsd > 0)) return fail("this session has no cost budget left for a review", 409);
     }
     const policy: ReviewLaunchPolicy = {
