@@ -584,7 +584,13 @@ const projectionFor = (rev: number) => campaignProjection(
           reason: "The Location's machine is offline." },
       ],
       ...(params.get("limited") === "1" ? { limitedLocations: [{ locationId: "loc_laptop", name: "Wollipog on Laptop", reason: CAMPAIGN_LIMITED_LOCATION_REASON }] } : {}),
-      pendingLocations: included ? [] : [{ locationId: "loc_shared", name: "Shared Docs", reason: "added_by_other" as const }],
+      // `waiting=causes`: one waiting Location for each recorded cause, and one stored before causes were (#4312).
+      pendingLocations: included ? [] : params.get("waiting") === "causes" ? [
+        { locationId: "loc_shared", name: "Shared Docs", reason: "added_by_other" as const, cause: "added_by_other" as const },
+        { locationId: "loc_unrecorded", name: "Old Scripts Folder", reason: "added_by_other" as const, cause: "no_recorded_adder" as const },
+        { locationId: "loc_second", name: "Wollipog Second Checkout", reason: "added_by_other" as const, cause: "repository_added" as const },
+        { locationId: "loc_stored", name: "Archive Checkout", reason: "added_by_other" as const },
+      ] : [{ locationId: "loc_shared", name: "Shared Docs", reason: "added_by_other" as const }],
       joins: [
         { locationId: "loc_setup", name: "Dev Box Setup", repository: "picoduck/dev-box-setup", revision: 6, at: NOW - 60_000, source: "owner_added" as const },
         ...(included ? [{ locationId: "loc_shared", name: "Shared Docs", repository: "picoduck/shared-docs", revision: 7, at: NOW, source: "owner_included" as const }] : []),

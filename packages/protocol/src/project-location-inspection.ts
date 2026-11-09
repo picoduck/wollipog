@@ -73,12 +73,31 @@ export interface CampaignLimitedLocation {
 
 export const CAMPAIGN_LIMITED_LOCATION_REASON = `Follow-ups from this campaign's other repositories can't be created in this Location's repository until its runner is on protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer.`;
 
-/** A Project Location someone other than the campaign's owner added mid-campaign (#4117). It joins
- * only when the owner uses Include in Campaign. */
+/** Why a Project Location waits for the owner's Include in Campaign (#4312):
+ * - `added_by_other`: someone other than the campaign's owner added it to the Project;
+ * - `no_recorded_adder`: nobody is recorded as having added it, as for one added before adders were
+ *   recorded, or by no person;
+ * - `owner_added`: the owner added it, but it couldn't join on its own;
+ * - `repository_added`: the owner approved adding another Location of its repository, and this one
+ *   wasn't part of that approval. */
+export type CampaignPendingCause = "added_by_other" | "no_recorded_adder" | "owner_added" | "repository_added";
+
+export const CAMPAIGN_PENDING_CAUSES: readonly CampaignPendingCause[] = ["added_by_other", "no_recorded_adder", "owner_added", "repository_added"];
+
+/** A Project Location that waits for the owner's Include in Campaign (#4117). It joins only then. */
 export interface CampaignPendingLocation {
   locationId: string;
   name: string;
+  /** Kept as stored for older readers: it never said why, despite its name. `cause` does. */
   reason: "added_by_other";
+  /** Why it waits (#4312). An entry stored before has none, and Campaign Status claims nothing then. */
+  cause?: CampaignPendingCause;
+}
+
+/** Why a Location waits, from who is recorded as having added it and who owns the campaign (#4312). */
+export function campaignPendingCause(addedBy: string | null | undefined, owner: string | null | undefined): CampaignPendingCause {
+  if (!addedBy) return "no_recorded_adder";
+  return owner && addedBy === owner ? "owner_added" : "added_by_other";
 }
 
 /** A Project Location of a repository the owner's first message left out of the campaign (#4117).

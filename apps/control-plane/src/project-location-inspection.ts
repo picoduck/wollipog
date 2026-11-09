@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
-  PROJECT_LOCATION_INSPECTION_FAILURES, campaignRepositoryLocation, runnerSupportsProtocol, validCampaignIssueFacts,
+  PROJECT_LOCATION_INSPECTION_FAILURES, campaignPendingCause, campaignRepositoryLocation, runnerSupportsProtocol, validCampaignIssueFacts,
   type CampaignIssueFacts, type CampaignIssueRef, type CampaignLaunchInspectionFailure, type CampaignLaunchInspectionMessage, type CampaignLaunchInspectionResult, type ProjectLocationInspection, type ProjectLocationView,
   type ProjectLocationInspectionFailure, type RunnerProtocolCapability, type RunnerView,
 } from "@wollipog/protocol";
@@ -269,7 +269,9 @@ export function projectLocationSurvey(db: ControlPlaneDb, hub: Hub, principal: A
         }
       }
       return { launchLocationId, locations: now.map((location) => ({ id: location.id, name: location.name })), inspections,
-        waiting: waiting.map((location) => ({ id: location.id, name: location.name })),
+        // Why each waits, from its recorded adder: someone else, or nobody on record (#4312).
+        waiting: waiting.map((location) => ({ id: location.id, name: location.name,
+          cause: campaignPendingCause(db.projectLocationAddedBy(location.id), input.onlyAddedBy) })),
         publishes: (id) => runnerSupportsProtocol(db.getRunner(db.getProjectLocation(id)?.runnerId ?? "")?.protocolVersion, "locationIssuePublication") };
     },
   };

@@ -1,6 +1,6 @@
 import {
   CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_BOUNDARY_REPOSITORIES_MAX, CAMPAIGN_LIMITED_LOCATION_REASON, PROJECT_LOCATION_INSPECTION_FAILURES, campaignBoundaryRepositories,
-  runnerSupportsProtocol, type CampaignLimitedLocation, type CampaignAvailableLocation, type CampaignBoundaryRepository, type CampaignPendingLocation, type CampaignExcludedLocation, type ProjectLocationInspection, type ProjectLocationView, type SessionView,
+  runnerSupportsProtocol, type CampaignLimitedLocation, type CampaignAvailableLocation, type CampaignBoundaryRepository, type CampaignPendingCause, type CampaignPendingLocation, type CampaignExcludedLocation, type ProjectLocationInspection, type ProjectLocationView, type SessionView,
 } from "@wollipog/protocol";
 
 /** One place a gate of a campaign repository can run (#4119). */
@@ -84,7 +84,12 @@ export function limitedLaunchLocations(input: {
 }
 
 /** One Location of the campaign's Project, in Project order (its default Location first). */
-export interface CampaignProjectLocation { id: string; name: string }
+export interface CampaignProjectLocation {
+  id: string;
+  name: string;
+  /** For a Location the survey leaves waiting: why (#4312). */
+  cause?: CampaignPendingCause;
+}
 
 /** The boundary's repositories from one launch (#4117). The launch Location's repository is the
  * first entry; every other verified Location joins the entry for its repository, and entries
@@ -169,5 +174,5 @@ export function launchBoundaryRepositories(input: {
   return { repositories: [...entries.values()], excluded: excluded.filter((item) => !placed.has(item.locationId)),
     available: available.filter((item) => !placed.has(item.locationId)),
     pending: (input.waiting ?? []).filter((location) => !placed.has(location.id))
-      .map((location) => ({ locationId: location.id, name: location.name, reason: "added_by_other" as const })) };
+      .map((location) => ({ locationId: location.id, name: location.name, reason: "added_by_other" as const, ...(location.cause ? { cause: location.cause } : {}) })) };
 }
