@@ -3104,6 +3104,8 @@ export class SessionsService {
           "decision for the same pull request with the request_workflow_decision tool (the CLI needs the shell), which replaces " +
           "the armed one and lifts this." });
       }
+      const excludedArmed = this.withdrawExcludedArmedMerge(session);
+      if (excludedArmed) return ok({ decision: "deny", reason: excludedArmed });
     }
     if (!parsed.value.toolUseId) {
       if (parsed.value.approvalRequestId) {
@@ -11685,6 +11687,26 @@ export class SessionsService {
     return null;
   }
 
+  /** #4319: why an armed merge can't run, once its repository was left out for its runner's version
+   * after arming, with the approval withdrawn. Pass `approval` for a request whose command is known;
+   * without one (Claude's policy hook never carries a command) any armed merge of the session counts,
+   * and that one call is denied. Unlike a hold there is no replacement to wait for, since a new request
+   * is refused too, so withdrawing it is what keeps the session's other commands from staying blocked. */
+  private withdrawExcludedArmedMerge(session: SessionView, approval?: PendingApproval): string | null {
+    if (approval && (approval.kind === "authentication" || approval.kind === "question")) return null;
+    const command = session.driver === "codex-app-server" ? approval?.context?.commandIdentity?.input : approval?.context?.input;
+    if (approval && (typeof command !== "string" || !command)) return null;
+    for (const decision of this.db.unconsumedWorkflowDecisionsForSession(session.id)) {
+      if (decision.status !== "approved" || decision.resourceSnapshot.category !== "pr_merge" || decision.actionAdmission?.kind !== "pr_merge_enqueue" ||
+          (approval && decision.actionAdmission.command !== command)) continue;
+      const refusal = this.excludedRepositoryRefusal(session, null, decision.resourceSnapshot);
+      if (!refusal) continue;
+      this.revokeWorkflowDecision(decision, { reason: "action_admission_refused", systemId: "workflow-decision-action-admission" });
+      return `${refusal} This merge's approval was withdrawn, so don't run it.`;
+    }
+    return null;
+  }
+
   /** #4120: refuse a held merge with its fixed reason, leaving the approval as it is. A prerequisite
    * still to merge parks the requester on it (#4071's wake, kept by the control plane, since the
    * requester's runner may not read that repository), so its turn can end and it is woken once the
@@ -15731,6 +15753,9 @@ export class SessionsService {
       this.hub.sessionChangedById(parent.id);
       return ok(this.withMergeReviewEvidence(armed));
     }
+    // Even a read that returns at once yields, so an exclusion can be recorded since the check above.
+    const excludedWhileConsuming = this.excludedRepositoryRefusal(child, parent, normalized.data);
+    if (excludedWhileConsuming) return fail(excludedWhileConsuming, 409);
     const originalVideoApproval = decision.authority === "orchestrator" &&
       decision.resourceSnapshot.category === "ui_evidence_approval" && !decision.resourceSnapshot.videoReview &&
       decision.resourceSnapshot.evidence.some((item) => item.mediaType?.startsWith("video/"));
@@ -18887,6 +18912,8 @@ export class SessionsService {
       // #4120: as at evaluation, a held armed merge blocks allowing any of the session's shell commands.
       const heldArmed = optionId === "allow" && CLAUDE_COMMAND_TOOLS.has(pending.context?.toolName ?? "") ? this.heldArmedMergeOfSession(session) : null;
       if (heldArmed) return this.mergeHeld(session, heldArmed.decision.occurrenceId, heldArmed.held);
+      const excludedArmed = optionId === "allow" && CLAUDE_COMMAND_TOOLS.has(pending.context?.toolName ?? "") ? this.withdrawExcludedArmedMerge(session) : null;
+      if (excludedArmed) return fail(excludedArmed, 409);
       const resolved = this.db.resolvePolicyHookApproval(
         sessionId,
         requestId,
@@ -19100,6 +19127,8 @@ export class SessionsService {
     if (pending.kind !== "question" && chosen && chosen.kind !== "cancel" && !chosen.kind?.startsWith("reject")) {
       const heldArmed = this.heldArmedMerge(session, pending);
       if (heldArmed) return this.mergeHeld(session, heldArmed.decision.occurrenceId, heldArmed.held);
+      const excludedArmed = this.withdrawExcludedArmedMerge(session, pending);
+      if (excludedArmed) return fail(excludedArmed, 409);
     }
     // Who decided (#2628): the runner records it on this exact resolution, so the Decision Record
     // names the member per occurrence. Parent Control decisions name their parent session instead.
@@ -22710,6 +22739,17 @@ export class SessionsService {
           ...(policyDecision.policy ? { governancePolicyId: policyDecision.policy.policyId } : {}),
         });
         this.mergeHeld(session(), heldArmed.decision.occurrenceId, heldArmed.held);
+        this.hub.sessionChangedById(sessionId);
+        return;
+      }
+      // #4319: an armed merge whose repository was left out after arming, the same way, before anyone can allow it.
+      if (this.withdrawExcludedArmedMerge(session(), approval)) {
+        const optionId = approval.options.find((option) => option.kind === "reject_once")?.optionId ?? null;
+        this.hub.sendToRunner(head.runnerId, { type: "resolve_permission", sessionId, requestId: approval.requestId, optionId });
+        this.recordGovernanceAudit(session(), approval, "resolution", "denied", { kind: "system", id: "workflow-decision-action-admission" }, now, {
+          optionId,
+          ...(policyDecision.policy ? { governancePolicyId: policyDecision.policy.policyId } : {}),
+        });
         this.hub.sessionChangedById(sessionId);
         return;
       }

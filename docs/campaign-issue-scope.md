@@ -204,8 +204,9 @@ owner's own Location. An offline runner reads as offline, whatever version it la
 A repository whose only Location is excluded has no entry until that Location joins, and it is not treated
 like a repository the campaign never knew of. A follow-up, merge, branch deletion or closure naming it is
 refused by the Location's name and version, at request and again at consume and execute, and a forge read
-goes through that Location or not at all, so no other login stands in. A requester running in that very
-Location still acts in its own repository. An unknown repository keeps its rule: a person's approval lets
+goes through that Location or not at all, so no other login stands in. An exclusion recorded mid-action
+stops it too: an armed merge is refused where its command can be seen and its approval withdrawn, since no
+new request could replace it. A requester running in that very Location still acts in its own repository. An unknown repository keeps its rule: a person's approval lets
 the requester act with its own login. A runner too old to read a Location names no repository, so its
 repository can't be told apart from an unknown one.
 
