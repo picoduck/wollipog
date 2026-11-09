@@ -1358,7 +1358,7 @@ test("a crash before the proof was written leaves an empty tree: a restart remov
   });
 });
 
-test("a crash during the checkout leaves a partial tree: a restart removes it, and the next attempt checks out whole", async () => {
+test("a runner crash during the checkout leaves a partial tree no snapshot covers: it is kept, the next attempt refuses it and says what to do, and following that works", async () => {
   if (process.platform === "win32") return;
   await withSession("crash-mid-checkout", async (h) => {
     writeFileSync(join(h.docs, "a.txt"), "first\n");
@@ -1371,35 +1371,27 @@ test("a crash during the checkout leaves a partial tree: a restart removes it, a
     plantInterruptedRollback(h, slot, branch, { proof: "crashed", files: { "a.txt": "first\n" } });
     // A killed checkout also leaves its lock behind.
     writeFileSync(join(git(slot, "rev-parse", "--absolute-git-dir"), "index.lock"), "");
+    const before = files(slot);
 
     h.restart();
     await waitFor(() => journal(h).length === 0, "the rollback was not settled");
-    assert.deepEqual(docsWorktrees(h), [h.docs]);
-    assert.throws(() => git(h.docs, "rev-parse", "--verify", `refs/heads/${branch}`));
+    assert.deepEqual(files(slot), before, "nothing proves it is only the runner's, so it stays");
 
     await relaunch(h, "app", h.app);
     const providers = h.providers.length;
     assert.deepEqual(await h.manager.requestLocationSwitch(h.message({ recoverBranch: undefined, occurrenceId: "occurrence-next" })), { ok: true });
-    await waitFor(() => h.providers[providers]?.prompts.length === 1, "the next attempt did not finish");
-    assert.deepEqual(files(slot), { "a.txt": "first\n", "b.txt": "second\n" }, "whole");
-    assert.equal(git(slot, "status", "--porcelain"), "");
-  });
-});
-
-test("a partial tree with anything in it that the checkout cannot explain is kept, whoever put it there", async () => {
-  if (process.platform === "win32") return;
-  await withSession("partial-with-work", async (h) => {
-    writeFileSync(join(h.docs, "a.txt"), "first\n");
-    git(h.docs, "add", "a.txt");
-    git(h.docs, "commit", "--quiet", "-m", "a file");
-    const branch = `agent/${h.sessionId}`;
-    const slot = await docsSlot(h, branch);
-    plantInterruptedRollback(h, slot, branch, { proof: "crashed", files: { "a.txt": "edited by someone\n" } });
-    const before = files(slot);
-    h.restart();
-    await waitFor(() => journal(h).length === 0, "the rollback was not settled");
+    await waitFor(() => failure(h) !== undefined || h.providers[providers] !== undefined, "the next attempt did not settle");
+    assert.equal(h.providers.length, providers, "no session is put in a partial tree");
+    assert.match(failure(h)!.reason!, /never finished its checkout/u);
+    assert.match(failure(h)!.reason!, /git worktree remove --force/u);
     assert.deepEqual(files(slot), before);
-    assert.ok(git(h.docs, "rev-parse", "--verify", `refs/heads/${branch}`));
+
+    rmSync(join(git(slot, "rev-parse", "--absolute-git-dir"), "index.lock"));
+    git(h.docs, "worktree", "remove", "--force", slot);
+    git(h.docs, "branch", "-D", branch);
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message({ recoverBranch: undefined, occurrenceId: "occurrence-after" })), { ok: true });
+    await waitFor(() => h.providers[providers]?.prompts.length === 1, "the attempt after following that did not finish");
+    assert.deepEqual(files(slot), { "a.txt": "first\n", "b.txt": "second\n" }, "whole");
   });
 });
 
@@ -1849,6 +1841,26 @@ for (const { kind, work } of [
     git(slot, "add", "staged.txt");
   } },
   { kind: "a move to another branch", work: (slot: string) => git(slot, "checkout", "--quiet", "-b", "fix/somewhere-else") },
+  { kind: "a commit held only by a private ref", work: (slot: string) => {
+    writeFileSync(join(slot, "saved.txt"), "saved work\n");
+    git(slot, "add", "saved.txt");
+    const commit = git(slot, "commit-tree", git(slot, "write-tree"), "-p", "HEAD", "-m", "saved");
+    git(slot, "update-ref", "refs/worktree/saved-work", commit);
+    git(slot, "rm", "--quiet", "--cached", "saved.txt");
+    rmSync(join(slot, "saved.txt"));
+  } },
+  { kind: "a commit held only by the reflog", work: (slot: string) => {
+    git(slot, "commit", "--quiet", "--allow-empty", "-m", "a commit then reset away");
+    git(slot, "reset", "--quiet", "--hard", "HEAD~1");
+  } },
+  { kind: "an edit hidden by assume-unchanged", work: (slot: string) => {
+    git(slot, "update-index", "--assume-unchanged", ".wollipog.json");
+    writeFileSync(join(slot, ".wollipog.json"), "{\"hidden\":true}\n");
+  } },
+  { kind: "an edit hidden by skip-worktree", work: (slot: string) => {
+    git(slot, "update-index", "--skip-worktree", ".wollipog.json");
+    writeFileSync(join(slot, ".wollipog.json"), "{\"hidden\":true}\n");
+  } },
 ]) {
   test(`a proved rollback keeps ${kind} made in its worktree: nothing is removed, the record ends, and the session is told`, async () => {
     await withSession(`keeps-${kind}`.replaceAll(" ", "-"), async (h) => {
@@ -1860,12 +1872,15 @@ for (const { kind, work } of [
       const checkedOut = git(slot, "rev-parse", "--abbrev-ref", "HEAD");
       const before = workState(slot, checkedOut);
       const tip = git(h.docs, "rev-parse", "refs/heads/fix/install-link");
+      const history = () => ({ reflog: git(slot, "reflog", "--format=%H"), saved: git(slot, "for-each-ref", "refs/worktree/saved-work") });
+      const heldBefore = history();
       removal.free();
       dueLater(h);
       await internalsOf(h).replayDeferredWorktreeRetirements();
 
       assert.deepEqual(journal(h), [], "the record ends rather than waiting to remove it");
       assert.deepEqual(workState(slot, checkedOut), before, "byte for byte");
+      assert.deepEqual(history(), heldBefore, "with what only the worktree's own Git state holds");
       assert.equal(git(h.docs, "rev-parse", "refs/heads/fix/install-link"), tip, "the branch too");
       assert.equal(existsSync(teardownLog), false, "no teardown runs over someone's work");
       assert.ok(errorText(h).some((text) => text.includes(slot) && /kept/iu.test(text)), "and the session is told where it is");
@@ -1938,13 +1953,20 @@ test("a teardown that changes nothing Git tracks still ends in a removal, and a 
     const teardownLog = join(h.root, "teardown-log");
     const { record, removal } = await stuckProvedRollback(h, { ...FAILING_STEP, teardown: [{ name: "Tear Down", command: [process.execPath, "-e",
       `require('fs').appendFileSync(${JSON.stringify(teardownLog)},'x')`], timeoutSeconds: 30 }] });
-    git(h.docs, "worktree", "lock", record.worktreePath);
     removal.free();
+    // Something stops the removal right after teardown, and the tree is as it was.
+    const internals = internalsOf(h) as unknown as Internals & { assertRollbackUntouched: (...args: unknown[]) => Promise<void> };
+    const check = internals.assertRollbackUntouched.bind(h.manager);
+    let checks = 0;
+    internals.assertRollbackUntouched = async (...args) => {
+      checks++;
+      if (checks === 2) throw new Error("the removal could not go on");
+      return check(...args);
+    };
     dueLater(h);
-    await internalsOf(h).replayDeferredWorktreeRetirements();
+    await internals.replayDeferredWorktreeRetirements();
     assert.equal(readFileSync(teardownLog, "utf8"), "x", "teardown ran");
-    assert.equal(journal(h).length, 1, "a lock still stops the removal");
-    git(h.docs, "worktree", "unlock", record.worktreePath);
+    assert.equal(journal(h).length, 1, "unchanged, so it stays on record to try again rather than being kept");
     const later = Date.now() + 365 * 24 * 60 * 60 * 1000;
     internalsOf(h).worktreePullRequestDiscoveryNow = () => later;
     await internalsOf(h).replayDeferredWorktreeRetirements();
@@ -2050,12 +2072,17 @@ test("a worktree a person remade on a path in the session's history gets no old 
 
 test("a registered worktree on the slot that was never checked out is refused, not landed in, and says what to do", async () => {
   await withSession("slot-empty", async (h) => {
+    git(h.docs, "checkout", "--quiet", "fix/install-link");
+    writeFileSync(join(h.docs, "a.txt"), "content\n");
+    git(h.docs, "add", "a.txt");
+    git(h.docs, "commit", "--quiet", "-m", "a file");
+    git(h.docs, "checkout", "--quiet", "main");
     const slot = await docsSlot(h, "fix/install-link");
     git(h.docs, "worktree", "add", "--quiet", "--no-checkout", slot, "fix/install-link");
     assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
     await waitFor(() => failure(h) !== undefined || h.providers[1]?.prompts.length === 1, "the switch did not settle");
     assert.equal(h.providers.length, 1, "no provider started in an empty tree");
-    assert.match(failure(h)!.reason!, /never checked out/u);
+    assert.match(failure(h)!.reason!, /never finished its checkout/u);
     assert.ok(failure(h)!.reason!.includes(slot), "it names the worktree");
     assert.match(failure(h)!.reason!, /git worktree remove --force/u);
     assert.equal(h.store.readMeta(h.sessionId)?.repoPath, h.app);
@@ -2063,6 +2090,27 @@ test("a registered worktree on the slot that was never checked out is refused, n
     git(h.docs, "worktree", "remove", "--force", slot);
     assert.deepEqual(await h.manager.requestLocationSwitch(h.message({ occurrenceId: "occurrence-2" })), { ok: true });
     await waitFor(() => h.providers[1]?.prompts.length === 1, "the attempt after following that did not finish");
+  });
+});
+
+test("a request's crash during its checkout leaves a tree that neither the retry nor an attach puts the session in", async () => {
+  if (process.platform === "win32") return;
+  await withSession("request-partial", async (h) => {
+    writeFileSync(join(h.docs, "a.txt"), "first\n");
+    git(h.docs, "add", "a.txt");
+    git(h.docs, "commit", "--quiet", "-m", "a file");
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    const first = h.store.readMeta(h.sessionId)!.worktreePath!;
+    const slot = await docsSlot(h, "fix/other");
+    plantInterruptedRollback(h, slot, "fix/other", { proof: "crashed" });
+    await internalsOf(h).replayDeferredWorktreeRetirements();
+    assert.deepEqual(journal(h), [], "it is kept, since no snapshot covers it");
+    assert.equal(existsSync(slot), true);
+
+    await assert.rejects(h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/other" }), /without ownership/u);
+    await assert.rejects(h.manager.attachWorktree(h.sessionId, slot), /never finished its checkout/u);
+    assert.equal(h.store.readMeta(h.sessionId)?.worktreePath, first, "the session is still where it was");
   });
 });
 
@@ -2175,14 +2223,11 @@ test("a forced removal of an unchanged worktree still happens, and reports itsel
   });
 });
 
-test("when nothing on record can explain a dirty tree, it is kept", async () => {
+test("with no snapshot on record, even an untouched worktree is kept, since nothing proves it is untouched", async () => {
   await withSession("no-baseline", async (h) => {
     const { record, removal } = await stuckProvedRollback(h);
     const slot = record.worktreePath;
-    // A crash during setup: its output is there, and the runner never got to record what it left.
-    writeFileSync(join(slot, "output-or-work.txt"), "cannot tell which\n");
-    delete record.rollbackTree;
-    delete record.rollbackIndexTree;
+    delete record.rollbackSnapshot;
     internalsOf(h).cleanupJournal.add(record);
     const before = files(slot);
     removal.free();
@@ -2193,13 +2238,22 @@ test("when nothing on record can explain a dirty tree, it is kept", async () => 
   });
 });
 
-test("a given-up rollback stays given up through a real restart, says so only once, and finishes when asked after the blocker clears", async () => {
+test("a given-up rollback stays given up through a real restart, says so only once, and finishes when asked after the blocker clears", async (t) => {
+  // On the prototype, so the blocker outlives the runner the way a stuck process would.
+  const prototype = SessionManager.prototype as unknown as Internals;
+  const retire = prototype.retireWorktreeProcesses;
+  let blocked = true;
+  prototype.retireWorktreeProcesses = async function (this: unknown, ...args: unknown[]) {
+    if (blocked) throw new Error("worktree descendant process retirement is unconfirmed");
+    return retire.apply(this, args);
+  };
+  t.after(() => { prototype.retireWorktreeProcesses = retire; });
   await withSession("give-up-restart", async (h) => {
-    const { record, removal } = await stuckProvedRollback(h);
-    const slot = record.worktreePath;
-    // A lock is a real blocker, and unlike a stub it survives the restart.
-    git(h.docs, "worktree", "lock", slot);
-    removal.free();
+    commitSetup(h, FAILING_STEP);
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await answerTrust(h, "trust");
+    await waitFor(() => failure(h) !== undefined, "the failed setup did not fail the switch");
+    const slot = journal(h)[0]!.worktreePath;
 
     let now = Date.now();
     internalsOf(h).worktreePullRequestDiscoveryNow = () => now;
@@ -2223,7 +2277,7 @@ test("a given-up rollback stays given up through a real restart, says so only on
     await internalsOf(h).replayDeferredWorktreeRetirements();
     assert.equal(journal(h)[0]!.rollbackAttempts, settled, "the schedule does not restart");
 
-    git(h.docs, "worktree", "unlock", slot);
+    blocked = false;
     await relaunch(h, "app", h.app);
     assert.deepEqual(await h.manager.requestLocationSwitch(h.message({ occurrenceId: "occurrence-after" })), { ok: true });
     await waitFor(() => !journal(h).some((item) => item.worktreePath === slot && item.rollbackGaveUpAt), "asking again did not finish it");

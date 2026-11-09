@@ -5,7 +5,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync,
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { captureRollbackBaseline, clearWorktreeRollbackProof, createRecoveredBranchWorktree, releaseUnchangedBranch, requestedSlot, stampWorktreeRollbackProof, worktreeRollbackProofState, worktreeRollbackWork, attachRequestedWorktree, changeRequestProvider, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, CONTAINMENT_FETCH_GIT_CONFIG, CONTAINMENT_FETCH_GIT_ENV, mergedHeadForge, mergedPullRequestContainingHead, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedGitLabMergeRequestForHead, parseMergedWorktreePullRequestForHead, parseWorktreePullRequestState, readRepositoryDefaultBranch, reclaimRetainedWorktreeRef, retainedWorktreeRefDiagnostics, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type RetainedWorktreeRefCandidate, type RetainedWorktreeRefRecord, type WorktreeCleanupRecord } from "./worktree.js";
+import { captureRollbackSnapshot, clearWorktreeRollbackProof, worktreeCheckoutNeverFinished, createRecoveredBranchWorktree, releaseUnchangedBranch, requestedSlot, stampWorktreeRollbackProof, worktreeRollbackProofState, worktreeRollbackWork, attachRequestedWorktree, changeRequestProvider, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, CONTAINMENT_FETCH_GIT_CONFIG, CONTAINMENT_FETCH_GIT_ENV, mergedHeadForge, mergedPullRequestContainingHead, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedGitLabMergeRequestForHead, parseMergedWorktreePullRequestForHead, parseWorktreePullRequestState, readRepositoryDefaultBranch, reclaimRetainedWorktreeRef, retainedWorktreeRefDiagnostics, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type RetainedWorktreeRefCandidate, type RetainedWorktreeRefRecord, type WorktreeCleanupRecord } from "./worktree.js";
 import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { isolateFromAmbientIgnores } from "./git-test-repo.js";
@@ -1004,71 +1004,96 @@ test("a requested worktree registers before it holds a file, so its proof exists
   }
 });
 
-test("what a proved worktree holds is judged against what the runner left, not against who might have written it", { skip: !haveGit() }, async () => {
+test("a rollback snapshot matches only while nothing at all has changed, whatever kind of change it is", { skip: !haveGit() }, async () => {
   const fixture = staleMarkerFixture("rollback-work");
   try {
     const options = { dataDir: fixture.dataDir };
     writeFileSync(join(fixture.repo, "a.txt"), "first\n");
-    writeFileSync(join(fixture.repo, "b.txt"), "second\n");
     writeFileSync(join(fixture.repo, ".gitignore"), "ignored.txt\n");
-    execFileSync("git", ["-C", fixture.repo, "add", "a.txt", "b.txt", ".gitignore"]);
+    execFileSync("git", ["-C", fixture.repo, "add", "a.txt", ".gitignore"]);
     execFileSync("git", ["-C", fixture.repo, "commit", "--quiet", "-m", "files"]);
-    const handle = await createRequestedWorktree(fixture.repo, "s_work", { baseRef: "HEAD", branch: "fix/work" }, options);
-    const path = handle.path;
-    await stampWorktreeRollbackProof(path, "t", options);
-    const finished = { branch: "fix/work", checkoutFinished: true };
-    const state = () => worktreeRollbackWork(path, "t", finished, options);
-    assert.deepEqual(await state(), { state: "unchanged" });
+    const run = (path: string, ...args: string[]) => execFileSync("git", ["-c", "user.name=T", "-c", "user.email=t@e.invalid", "-C", path, ...args],
+      { encoding: "utf8", input: "" }).trim();
+    const changes: Array<[string, (path: string) => void]> = [
+      ["a commit", (path) => run(path, "commit", "--quiet", "--allow-empty", "-m", "a commit")],
+      ["a commit then reset away, held only by the reflog", (path) => {
+        run(path, "commit", "--quiet", "--allow-empty", "-m", "a commit");
+        run(path, "reset", "--quiet", "--hard", "HEAD~1");
+      }],
+      ["a commit held only by a private ref", (path) => {
+        writeFileSync(join(path, "a.txt"), "saved\n");
+        run(path, "add", "a.txt");
+        const commit = run(path, "commit-tree", run(path, "write-tree"), "-p", "HEAD", "-m", "saved");
+        run(path, "update-ref", "refs/worktree/saved-work", commit);
+        run(path, "reset", "--quiet", "--hard", "HEAD");
+      }],
+      ["an edit to a tracked file", (path) => writeFileSync(join(path, "a.txt"), "edited\n")],
+      ["a new untracked file", (path) => writeFileSync(join(path, "notes.txt"), "notes\n")],
+      ["a version only the index holds", (path) => {
+        writeFileSync(join(path, "a.txt"), "staged only\n");
+        run(path, "add", "a.txt");
+        writeFileSync(join(path, "a.txt"), "first\n");
+      }],
+      ["an edit hidden by assume-unchanged", (path) => {
+        run(path, "update-index", "--assume-unchanged", "a.txt");
+        writeFileSync(join(path, "a.txt"), "hidden edit\n");
+      }],
+      ["an edit hidden by skip-worktree", (path) => {
+        run(path, "update-index", "--skip-worktree", "a.txt");
+        writeFileSync(join(path, "a.txt"), "hidden edit\n");
+      }],
+      ["a detached HEAD", (path) => run(path, "switch", "--quiet", "--detach")],
+      ["another branch", (path) => run(path, "switch", "--quiet", "-c", `fix/another-${path.slice(-8)}`)],
+      ["a lock", (path) => run(path, "worktree", "lock", path)],
+    ];
+    for (const [index, [kind, change]] of changes.entries()) {
+      const { path } = await createRequestedWorktree(fixture.repo, "s_work", { baseRef: "HEAD", branch: `fix/work-${index}` }, options);
+      const snapshot = await captureRollbackSnapshot(path, options);
+      assert.ok(snapshot, kind);
+      assert.deepEqual(await worktreeRollbackWork(path, snapshot!, options), { state: "unchanged" }, `${kind}: stable until then`);
+      change(path);
+      assert.equal((await worktreeRollbackWork(path, snapshot!, options)).state, "changed", kind);
+    }
 
+    const { path } = await createRequestedWorktree(fixture.repo, "s_work", { baseRef: "HEAD", branch: "fix/work-other" }, options);
+    assert.equal((await worktreeRollbackWork(path, undefined, options)).state, "changed", "with nothing recorded, nothing is proved");
+
+    // What the rule leaves out, on purpose.
+    const snapshot = await captureRollbackSnapshot(path, options);
     writeFileSync(join(path, "ignored.txt"), "ignored\n");
-    assert.deepEqual(await state(), { state: "unchanged" }, "what Git ignores is not protected, as the rule says");
+    assert.deepEqual(await worktreeRollbackWork(path, snapshot!, options), { state: "unchanged" }, "what Git ignores is not protected");
+    rmSync(join(path, "ignored.txt"));
 
-    // Setup's own output is the runner's once recorded, and nothing beyond it is.
+    // Setup's own output is what the snapshot records, so it is the runner's.
     writeFileSync(join(path, "output.txt"), "from setup\n");
-    assert.equal((await state()).state, "changed", "with nothing recorded it looks like anyone's");
-    const baseline = await captureRollbackBaseline(path, options);
-    assert.deepEqual(await worktreeRollbackWork(path, "t", { ...finished, baseline }, options), { state: "unchanged" });
-    writeFileSync(join(path, "a.txt"), "edited\n");
-    assert.equal((await worktreeRollbackWork(path, "t", { ...finished, baseline }, options)).state, "changed");
-    writeFileSync(join(path, "a.txt"), "first\n");
-    rmSync(join(path, "output.txt"));
+    const afterSetup = await captureRollbackSnapshot(path, options);
+    assert.deepEqual(await worktreeRollbackWork(path, afterSetup!, options), { state: "unchanged" });
 
-    // A version only the index holds, with the file itself back as it was.
-    writeFileSync(join(path, "a.txt"), "staged only\n");
-    execFileSync("git", ["-C", path, "add", "a.txt"]);
-    writeFileSync(join(path, "a.txt"), "first\n");
-    assert.equal((await state()).state, "changed", "the index holds something the commit does not");
-    assert.equal((await worktreeRollbackWork(path, "t", { branch: "fix/work" }, options)).state, "changed", "nor does a checkout that never finished explain it");
-    execFileSync("git", ["-C", path, "reset", "--quiet", "--mixed"]);
-    assert.deepEqual(await state(), { state: "unchanged" });
+    // A flag that hides a file's contents proves nothing, even if it was there when the snapshot was taken.
+    run(path, "update-index", "--assume-unchanged", "a.txt");
+    assert.equal(await captureRollbackSnapshot(path, options), null);
 
-    // Setup may stage things too: then that index is the baseline, and only a different one counts.
-    writeFileSync(join(path, "output.txt"), "staged by setup\n");
-    execFileSync("git", ["-C", path, "add", "output.txt"]);
-    const stagedBaseline = await captureRollbackBaseline(path, options);
-    assert.deepEqual(await worktreeRollbackWork(path, "t", { ...finished, baseline: stagedBaseline }, options), { state: "unchanged" });
-    writeFileSync(join(path, "output.txt"), "staged by someone else\n");
-    execFileSync("git", ["-C", path, "add", "output.txt"]);
-    writeFileSync(join(path, "output.txt"), "staged by setup\n");
-    assert.equal((await worktreeRollbackWork(path, "t", { ...finished, baseline: stagedBaseline }, options)).state, "changed");
-    execFileSync("git", ["-C", path, "rm", "--quiet", "--force", "--cached", "output.txt"]);
-    rmSync(join(path, "output.txt"));
+    assert.deepEqual(await worktreeRollbackWork(join(fixture.root, "nowhere"), "anything", options), { state: "unavailable" }, "no answer is not a change");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
 
-    // A checkout that never finished explains missing files, and nothing else.
-    rmSync(join(path, "b.txt"));
-    assert.equal((await state()).state, "changed", "a finished checkout does not explain a missing file");
-    assert.deepEqual(await worktreeRollbackWork(path, "t", { branch: "fix/work" }, options), { state: "unchanged" });
-    writeFileSync(join(path, "a.txt"), "edited\n");
-    assert.equal((await worktreeRollbackWork(path, "t", { branch: "fix/work" }, options)).state, "changed");
-    writeFileSync(join(path, "a.txt"), "first\n");
-    writeFileSync(join(path, "b.txt"), "second\n");
-
-    execFileSync("git", ["-C", path, "commit", "--quiet", "--allow-empty", "-m", "a commit"]);
-    assert.match(JSON.stringify(await state()), /commits/u);
-    execFileSync("git", ["-C", path, "reset", "--quiet", "--hard", "HEAD~1"]);
-    execFileSync("git", ["-C", path, "switch", "--quiet", "--detach"]);
-    assert.match(JSON.stringify(await state()), /detached/u);
-    assert.deepEqual(await worktreeRollbackWork(join(fixture.root, "nowhere"), "t", finished, options), { state: "unavailable" });
+test("a registered worktree whose index was never written, with files to check out, reads as never finished", { skip: !haveGit() }, async () => {
+  const fixture = staleMarkerFixture("never-finished");
+  try {
+    const options = { dataDir: fixture.dataDir };
+    const empty = join(fixture.root, "empty-commit");
+    execFileSync("git", ["-C", fixture.repo, "worktree", "add", "--no-checkout", "-b", "fix/empty-commit", empty]);
+    assert.equal(await worktreeCheckoutNeverFinished(empty, options), false, "an empty commit has nothing to check out");
+    writeFileSync(join(fixture.repo, "a.txt"), "first\n");
+    execFileSync("git", ["-C", fixture.repo, "add", "a.txt"]);
+    execFileSync("git", ["-C", fixture.repo, "commit", "--quiet", "-m", "a file"]);
+    const unfinished = join(fixture.root, "unfinished");
+    execFileSync("git", ["-C", fixture.repo, "worktree", "add", "--no-checkout", "-b", "fix/unfinished", unfinished]);
+    assert.equal(await worktreeCheckoutNeverFinished(unfinished, options), true);
+    execFileSync("git", ["-C", unfinished, "checkout", "--force", "HEAD"]);
+    assert.equal(await worktreeCheckoutNeverFinished(unfinished, options), false);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }

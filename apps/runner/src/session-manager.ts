@@ -299,11 +299,11 @@ import {
   createWorktree,
   createRequestedWorktree,
   createRecoveredBranchWorktree,
-  captureRollbackBaseline,
+  captureRollbackSnapshot,
   clearWorktreeRollbackProof,
   releaseUnchangedBranch,
   stampWorktreeRollbackProof,
-  worktreeHoldsNoFiles,
+  worktreeCheckoutNeverFinished,
   worktreeRollbackProofState,
   worktreeRollbackWork,
   worktreeUncommittedChanges,
@@ -3758,10 +3758,8 @@ export class SessionManager {
             );
             cleanup.auxiliaryWorktreeRollback = true;
             if (requestProof) cleanup.rollbackProof = requestProof;
-            cleanup.rollbackCheckedOut = true;
             cleanup.rollbackBranchBase = created.baseCommit;
-            await this.recordRollbackBaseline(cleanup, worktree.path);
-            this.cleanupJournal.add(cleanup);
+            await this.recordRollbackSnapshot(cleanup);
             await this.reapCreationRollback(cleanup, cleanupMeta);
             // Only a worktree that really went takes its row with it. One kept or still stuck stays
             // listed, holding its ports, so the session can find it and a retry can use it.
@@ -3870,6 +3868,10 @@ export class SessionManager {
         // at the next launch instead of refusing a worktree the repository legitimately registers.
         allowedProjectPaths: this.configuredProjectPaths,
       });
+      if (await worktreeCheckoutNeverFinished(attached.path, { context: meta.context })) {
+        throw new Error(`the worktree at ${attached.path} never finished its checkout, so no session is put in it. Keep anything you ` +
+          "need from it, remove it (git worktree remove --force), delete its branch if nothing needs it, then ask again");
+      }
       // Re-attaching an already-attributed runner-owned tree must never launder it into an
       // operator-owned record that session deletion would deliberately retain.
       const existing = this.attributedWorktrees(meta)
@@ -15130,6 +15132,9 @@ export class SessionManager {
       const { record, view } = reservation;
       if (!record || !view) return undefined;
       const released = () => !this.cleanupJournal.list().includes(record);
+      // This attempt is still here and failed before it recorded anything, a checkout that failed say.
+      // What is there is what it left, and only now, while nothing else can have been there, can it say so.
+      if (record.rollbackProof && !record.rollbackSnapshot) await this.recordRollbackSnapshot(record);
       try {
         await this.reapCreationRollback(record, targetOf(view));
       } catch (error) {
@@ -15176,8 +15181,9 @@ export class SessionManager {
       // and stays theirs, like any other existing worktree, with no setup and with the notice. A tree
       // with no file in it never got its checkout, and no session is put there.
       if (!reused && !reservation.record && !recorded) {
-        if (await worktreeHoldsNoFiles(created.path, options)) {
-          throw new Error(`the worktree at ${created.path} was never checked out; remove it (git worktree remove --force), then ask again`);
+        if (await worktreeCheckoutNeverFinished(created.path, options)) {
+          throw new Error(`the worktree at ${created.path} never finished its checkout, so no session is put in it. Keep anything you ` +
+            "need from it, remove it (git worktree remove --force), delete its branch if nothing needs it, then ask again");
         }
         reused = { uncommittedChanges: await worktreeUncommittedChanges(created.path, options) };
       }
@@ -15209,8 +15215,7 @@ export class SessionManager {
       const defaultBranch = await readRepositoryDefaultBranch(repoPath, options);
       if (reservation.record) {
         reservation.record.baseRef = created.baseRef;
-        reservation.record.rollbackCheckedOut = true;
-        this.cleanupJournal.add(reservation.record);
+        await this.recordRollbackSnapshot(reservation.record);
       }
       // This session's own worktree from when it last worked in this Location keeps what it had.
       let earlier: SessionWorktreeView | undefined;
@@ -15245,8 +15250,7 @@ export class SessionManager {
     // there would have no safe meaning, since nothing may be removed. Either is continued as it is.
     if (reservation.record) {
       const setupFailure = await this.prepareLocationSwitchSetup(targetOf(worktree), worktree, pending.locationName, reservation.record);
-      await this.recordRollbackBaseline(reservation.record, worktree.path);
-      this.cleanupJournal.add(reservation.record);
+      await this.recordRollbackSnapshot(reservation.record);
       if (setupFailure) {
         const kept = await release();
         // A runner going down cancels setup too. That is no decision about the switch, which stays
@@ -18614,26 +18618,20 @@ export class SessionManager {
     return worktreeRollbackProofState(record.repoPath, record.worktreePath, record.rollbackProof, this.rollbackGitOptions(record), record.branch);
   }
 
-  private rollbackExpectation(record: WorktreeCleanupRecord) {
-    return {
-      ...(record.branch ? { branch: record.branch } : {}),
-      checkoutFinished: record.rollbackCheckedOut === true,
-      ...(record.rollbackTree ? { baseline: {
-        tree: record.rollbackTree, ...(record.rollbackIndexTree ? { indexTree: record.rollbackIndexTree } : {}),
-      } } : {}),
-    };
-  }
-
-  /** Record what setup left, however it ended. A rollback removes this and nothing else. With no
-   * record of it, only a tree matching its commit is known to be the runner's alone. */
-  private async recordRollbackBaseline(record: WorktreeCleanupRecord, path: string): Promise<void> {
+  /** Record what the runner is leaving in a rollback's worktree: once the checkout finishes, so a
+   * crash during setup still has something to compare, again when setup ends, however it ended, and
+   * when an attempt that failed before either gives its worktree back. With nothing recorded the
+   * worktree is kept. A failure here only ever costs that. */
+  private async recordRollbackSnapshot(record: WorktreeCleanupRecord): Promise<void> {
     try {
-      const baseline = await captureRollbackBaseline(path, this.rollbackGitOptions(record));
-      record.rollbackTree = baseline.tree;
-      if (baseline.indexTree) record.rollbackIndexTree = baseline.indexTree;
+      const snapshot = await captureRollbackSnapshot(record.worktreePath, this.rollbackGitOptions(record));
+      if (snapshot) record.rollbackSnapshot = snapshot;
+      else delete record.rollbackSnapshot;
     } catch (error) {
-      this.log(`worktree rollback for ${boundedSessionIdForLog(record.sessionId)} has no baseline: ${errText(error)}`);
+      delete record.rollbackSnapshot;
+      this.log(`worktree rollback for ${boundedSessionIdForLog(record.sessionId)} has no snapshot: ${errText(error)}`);
     }
+    this.cleanupJournal.add(record);
   }
 
   /** Throws unless what is at a rollback's path may still be force-removed. A throw ends this attempt
@@ -18645,7 +18643,7 @@ export class SessionManager {
       throw new Error("the worktree is no longer the one this rollback made");
     }
     if (state !== "proved") return;
-    const work = await worktreeRollbackWork(record.worktreePath, record.rollbackProof!, this.rollbackExpectation(record), this.rollbackGitOptions(record));
+    const work = await worktreeRollbackWork(record.worktreePath, record.rollbackSnapshot, this.rollbackGitOptions(record));
     if (work.state !== "unchanged") throw new Error("the worktree changed while this rollback was retiring it");
   }
 
@@ -18668,7 +18666,7 @@ export class SessionManager {
       return this.endRollbackUnremoved(record);
     }
     if (state === "proved") {
-      const work = await worktreeRollbackWork(record.worktreePath, record.rollbackProof!, this.rollbackExpectation(record), this.rollbackGitOptions(record));
+      const work = await worktreeRollbackWork(record.worktreePath, record.rollbackSnapshot, this.rollbackGitOptions(record));
       if (work.state === "unavailable") return this.waitForRollbackAnswer(record);
       if (work.state === "changed") return this.keepRollbackWorktree(record, work.reason);
     }
