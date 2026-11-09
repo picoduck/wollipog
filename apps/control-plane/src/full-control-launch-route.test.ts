@@ -8185,8 +8185,8 @@ test("a person can't allow a parked policy hook's shell command while that armed
   const m = await mergeHeldAtPreflight(f);
   try {
     assert.equal((await armMerge(f, m)).ok, true);
-    f.db.upsertGovernancePolicy({ policyId: "protected", name: "Protected", effect: "ask", priority: 1, enabled: true, scope: { toolName: "Bash" }, conditions: { humanRequired: true } }, Date.now());
-    const parked = f.sessions.evaluatePolicyHook(m.child, { hookEventName: "PreToolUse", providerSessionId: "provider-child", permissionMode: "default",
+    f.db.upsertGovernancePolicy({ policyId: "protected", name: "Protected", effect: "ask", priority: 100, enabled: true, scope: { toolName: "Bash" }, conditions: { humanRequired: true } }, Date.now());
+    const parked = f.sessions.evaluatePolicyHook(m.child, { hookEventName: "PreToolUse", providerSessionId: "provider-child", permissionMode: "plan",
       toolUseId: "parked", context: { toolName: "Bash" } }, true);
     assert.ok(parked.data?.approvalRequestId, parked.error ?? "the hook parks on a person");
     await armedThenExcluded(f, m);
