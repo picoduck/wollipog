@@ -167,6 +167,9 @@ test("protected Claude namespace runs its worker with rerere off, in every gener
   } finally {
     if (previous === undefined) delete process.env.GIT_CONFIG_PARAMETERS;
     else process.env.GIT_CONFIG_PARAMETERS = previous;
+    // The namespace outlives its workers; end it, as every other test here does, even on failure.
+    terminateDescendantBoundaries(owner);
+    assert.equal(await waitForPendingKills(6_000), true);
   }
 });
 
