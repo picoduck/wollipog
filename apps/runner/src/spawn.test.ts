@@ -31,10 +31,10 @@ const windowsJobIsolation = {
   network: "inherit" as const,
 };
 
-// taskkill /T terminates children first. A root that exits as soon as its child dies, as a tsx
-// process does when its esbuild service stops, can be gone by the time taskkill reaches it. taskkill
-// then exits nonzero about a process that is no longer running.
-test("Windows tree kill proves a root that exits as its child is terminated", {
+// taskkill lists the tree and only then terminates each member, so a member that exits in between
+// makes it exit nonzero about a process that is no longer running. Sweep the moment the tree exits
+// across taskkill's own runtime, since that window can't be aimed at directly.
+test("Windows tree kill proves a tree that exits while taskkill is working", {
   skip: process.platform !== "win32",
   timeout: 180_000,
 }, async () => {
@@ -43,20 +43,22 @@ test("Windows tree kill proves a root that exits as its child is terminated", {
   writeFileSync(root, `
     const { spawn } = require("node:child_process");
     const worker = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
-    worker.once("exit", () => process.exit(7));
-    worker.once("spawn", () => console.log("READY"));
+    worker.once("spawn", () => {
+      console.log("READY");
+      setTimeout(() => { worker.kill(); process.exit(7); }, Number(process.argv[2]));
+    });
   `);
   const unproven: number[] = [];
   try {
-    for (let round = 0; round < 40; round += 1) {
-      const child = spawnAgent({ command: process.execPath, args: [root], cwd: dir, windowsShell: false });
+    for (let exitAfterMs = 0; exitAfterMs < 400; exitAfterMs += 10) {
+      const child = spawnAgent({ command: process.execPath, args: [root, String(exitAfterMs)], cwd: dir, windowsShell: false });
       child.stdin.end();
       child.stdout.setEncoding("utf8");
       await new Promise<void>((resolve, reject) => {
         child.once("error", reject);
         child.stdout.on("data", (text: string) => { if (text.includes("READY")) resolve(); });
       });
-      if (!await killTreeAndWait(child)) unproven.push(round);
+      if (!await killTreeAndWait(child)) unproven.push(exitAfterMs);
     }
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
