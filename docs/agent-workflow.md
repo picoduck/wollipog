@@ -95,7 +95,9 @@ support everything up to N. Before choosing a number, check main and every open 
 claim. Before requesting a merge and again before enqueueing, run `pnpm check:protocol-version`
 against freshly fetched main. CI runs the same check on the pull request's merge commit and on
 each merge-group commit. If the claim is no longer greater than the commit it lands on, renumber
-to the version the check names. A pull request that claims no version is never affected.
+to the version the check names. A pull request that claims no version is never affected. A renumber
+changes the pull request's own diff, so its next review round counts against the epoch's budget,
+even when it arrives inside a merge of main. A merge that keeps a claim above main needs no renumber.
 
 ## Decisions and Delivery
 
@@ -158,9 +160,15 @@ Use `wollipog review session run` (MCP `request_review_session`) for your own pu
 cross-model review, including from an isolated campaign child. Follow the shipped `using-wollipog`
 skill: provide the brief, let the completion continuation arrive when idle, read the full verdict
 and report, adjudicate findings, and push fixes before delta rounds. A rewritten head starts a new
-review epoch. A head that only merges the moved base branch gets a round that does not use the
-epoch's budget, or none at all when the pull request's own diff is unchanged since an upvote
-(protocol 277, #4075). Exhausted rounds require the exact `review_round_extension` decision; its
+review epoch. One plain merge of the moved base branch directly on the last valid head, changing
+nothing outside its conflict blocks, gets a reviewed round that does not use the epoch's budget. If
+that head was upvoted and the merge leaves the pull request's own diff byte-identical, the run records
+an equivalence and no reviewer runs (protocol 277, #4075; the proof is in `docs/agent-control.md`).
+Anything the runner cannot prove counts against the budget: a second merge before the first one's
+review, any commit after the merge, and any edit outside a conflict block, including a protocol
+renumber's changes to the ledger, capability floors, comments or docs. Those change the pull
+request's own diff, so a review has to cover them. Exhausted rounds require the exact
+`review_round_extension` decision; its
 default owner is human. Full Control owns it only within a server-enforced cap per pull request of
 the run's configured round budget once more (the owner approved this change to the #3369 decision);
 past the cap it is the person's. With protocol 232 or later, campaign review

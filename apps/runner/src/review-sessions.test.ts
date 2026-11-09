@@ -12,7 +12,7 @@ import {
 import { repositoryKey, ReviewScopeRefusal, ReviewSnapshotter, type PullRequestFacts } from "./review-snapshot.js";
 import {
   defaultReviewSessionDependencies, gitlabHostConfigured, gitlabMergeRequestFacts, prepareCodexReviewWorkingDirectory, reviewLaunchArgs, reviewPrompt, ReviewSessionLauncher, verifySpawnedCommand,
-  reviewSessionDiscoveryReason, type ReviewSessionDependencies,
+  REVIEW_PATCH_LIMIT_BYTES, reviewSessionDiscoveryReason, type ReviewSessionDependencies,
 } from "./review-sessions.js";
 import { configuredSessionWritableGrants, explainSessionWritableRefusal, SessionWritableRootError } from "./review-trust.js";
 import type { SessionMeta } from "./session-store.js";
@@ -859,8 +859,8 @@ test("a follow-up round over a merge keeps a conflict resolution in a file both 
 });
 
 /** A run whose epoch used all four rounds, its last one at the fixture's head. v277 control plane. */
-function exhausted(f: Fixture, vote: "UPVOTE" | "DOWNVOTE"): ReviewRunHistory {
-  const run = reviewed(f, vote);
+function exhausted(f: Fixture, vote: "UPVOTE" | "DOWNVOTE", headSha = f.head): ReviewRunHistory {
+  const run = reviewed(f, vote, headSha);
   return { ...run, lastValid: { ...run.lastValid!, round: 4 }, lastAttempt: { ...run.lastAttempt!, round: 4 }, validRounds: 4, baseMergeRounds: true };
 }
 
@@ -902,6 +902,174 @@ test("a non-merge fix after the budget is used still needs an extension (#4075)"
   git(f.worktree, "add", "notes.md");
   push(f, "-m", "a fix after the merge");
   assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ history: exhausted(f, "DOWNVOTE") }), CODEX, "b")),
+    REVIEW_ROUND_REFUSALS.roundLimit);
+});
+
+test("a clean base merge that moves the pull request's own diff keeps a reviewer on an upvoted head (#4075)", async (t) => {
+  const f = fixture(t);
+  const lines = ["1", "2", "3", "4", "5", "6", "7", "8"];
+  moveBase(f, { "long.txt": `${lines.join("\n")}\n` });
+  git(f.worktree, "merge", "--quiet", "--no-edit", "main");
+  writeFileSync(join(f.worktree, "long.txt"), `${lines.map((line) => line === "1" ? "1-pr" : line).join("\n")}\n`);
+  git(f.worktree, "add", "long.txt");
+  const upvoted = push(f, "-m", "the pull request edits the top of a file");
+  const base = moveBase(f, { "long.txt": `${lines.map((line) => line === "8" ? "8-main" : line).join("\n")}\n` });
+  git(f.worktree, "merge", "--quiet", "--no-edit", "main");
+  f.facts.headSha = git(f.worktree, "rev-parse", "HEAD");
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: exhausted(f, "UPVOTE", upvoted) }), CODEX, "b");
+  assert.deepEqual(prepared.round, {
+    epoch: 1, round: 5, attempt: 1, mode: "delta", baseSha: base, scopeFiles: ["long.txt"], since: upvoted, baseMerge: true,
+  });
+  assert.match(prepared.prompt, /\+1-pr/u);
+  assert.doesNotMatch(prepared.prompt, /\+8-main/u, "the pull request's own diff, without the base's change");
+  f.launcher.release("s_review");
+});
+
+test("a conflict resolution on an upvoted head always reaches a reviewer, with the resolution in scope (#4075)", async (t) => {
+  const cases: Array<[string, string, RegExp | null]> = [
+    ["rewriting the line", "export const answer = 42; // was 40 on main\n", /\+export const answer = 42; \/\/ was 40 on main/u],
+    ["keeping the reviewed content", "export const answer = 42;\n", /-export const answer = 40;\n\+export const answer = 42;/u],
+    ["dropping the pull request's change", "export const answer = 40;\n", null],
+    ["adding code inside the conflict block", "export const answer = 42;\nexport const added = process.env.SECRET;\n", /\+export const added = process\.env\.SECRET;/u],
+  ];
+  for (const [name, resolved, patch] of cases) {
+    const f = fixture(t);
+    const base = moveBase(f, { "app.ts": "export const answer = 40;\n" });
+    assert.throws(() => git(f.worktree, "merge", "--quiet", "--no-edit", "main"));
+    writeFileSync(join(f.worktree, "app.ts"), resolved);
+    git(f.worktree, "add", "app.ts");
+    push(f, "--no-edit");
+    const prepared = await f.launcher.prepare("s_review", f.policy({ history: exhausted(f, "UPVOTE") }), CODEX, "b");
+    assert.equal("equivalent" in prepared, false, name);
+    assert.deepEqual(prepared.round, {
+      epoch: 1, round: 5, attempt: 1, mode: "delta", baseSha: base, scopeFiles: ["app.ts"], since: f.head, baseMerge: true,
+    }, name);
+    assert.ok(prepared.checkout && existsSync(join(prepared.checkout, "app.ts")), `${name}: the reviewer has a checkout`);
+    if (patch) assert.match(prepared.prompt, patch, name);
+    f.launcher.release("s_review");
+  }
+});
+
+test("a resolution that drops the pull request's own change shows the reviewer what it dropped", async (t) => {
+  const f = fixture(t);
+  moveBase(f, { "app.ts": "export const answer = 40;\n" });
+  assert.throws(() => git(f.worktree, "merge", "--quiet", "--no-edit", "main"));
+  writeFileSync(join(f.worktree, "app.ts"), "export const answer = 40;\n");
+  git(f.worktree, "add", "app.ts");
+  push(f, "--no-edit");
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: exhausted(f, "UPVOTE") }), CODEX, "b");
+  assert.deepEqual(prepared.round.scopeFiles, ["app.ts"]);
+  // The merge leaves app.ts out of the pull request's own diff, so its patch alone shows nothing.
+  const [pinned, reviewedPatch] = prepared.prompt.split("## Pull Request's Diff at the Reviewed Head");
+  assert.doesNotMatch(pinned!, /answer = 42/u);
+  assert.match(reviewedPatch ?? "", /-export const answer = 41;\n\+export const answer = 42;/u, "the change the merge dropped");
+  assert.doesNotMatch(reviewedPatch!, /lib\/module-|notes\.md/u, "only the files in scope");
+  f.launcher.release("s_review");
+});
+
+test("the diff at the reviewed head says so when it cannot be shown, and is fenced on its own", async (t) => {
+  // Too large to inline: the reviewer is told this round cannot show what the merge dropped.
+  const large = fixture(t);
+  writeFileSync(join(large.worktree, "big.txt"), `${"x".repeat(REVIEW_PATCH_LIMIT_BYTES + 1024)}\n`);
+  git(large.worktree, "add", "big.txt");
+  const upvoted = push(large, "-m", "a very large file");
+  moveBase(large, { "big.txt": "main's\n" });
+  assert.throws(() => git(large.worktree, "merge", "--quiet", "--no-edit", "main"));
+  writeFileSync(join(large.worktree, "big.txt"), "main's\n");
+  git(large.worktree, "add", "big.txt");
+  push(large, "--no-edit");
+  const tooLarge = await large.launcher.prepare("s_review", large.policy({ history: exhausted(large, "UPVOTE", upvoted) }), CODEX, "b");
+  assert.deepEqual(tooLarge.round.scopeFiles, ["big.txt"]);
+  assert.match(tooLarge.prompt, /too large to inline and the checkout does not hold it, so this round cannot show what the merge dropped/u);
+  large.launcher.release("s_review");
+
+  // A file of the head's own diff that the reviewed head did not change.
+  const added = fixture(t);
+  moveBase(added);
+  git(added.worktree, "merge", "--quiet", "--no-commit", "--no-ff", "main");
+  writeFileSync(join(added.worktree, "lib/module-1.ts"), "export const value1 = 'hidden';\n");
+  git(added.worktree, "add", "lib/module-1.ts");
+  push(added, "--no-edit");
+  const none = await added.launcher.prepare("s_review", added.policy({ history: { ...reviewed(added, "UPVOTE"), baseMergeRounds: true } }), CODEX, "b");
+  assert.match(none.prompt, /The pull request changed none of these files at /u);
+  added.launcher.release("s_review");
+
+  // A diff holding a code fence cannot close its own section.
+  const fences = fixture(t);
+  moveBase(fences, { "notes.md": "On main.\n" });
+  assert.throws(() => git(fences.worktree, "merge", "--quiet", "--no-edit", "main"));
+  writeFileSync(join(fences.worktree, "notes.md"), "Merged.\n");
+  git(fences.worktree, "add", "notes.md");
+  push(fences, "--no-edit");
+  const fenced = await fences.launcher.prepare("s_review", fences.policy({ history: exhausted(fences, "UPVOTE") }), CODEX, "b");
+  const section = fenced.prompt.split("## Pull Request's Diff at the Reviewed Head")[1]!;
+  assert.match(section, /````diff\n[^]*\+Uses ``` fences\.\n````/u);
+  fences.launcher.release("s_review");
+});
+
+/** The pull request's merges that change more than a conflict block, or are more than one merge. */
+const NOT_BASE_ONLY: Array<[string, (f: Fixture) => void, string]> = [
+  ["a renumber in the merge, beside a conflict on the version line (#4214)", (f) => {
+    moveBase(f, { "app.ts": "export const answer = 40;\n" });
+    assert.throws(() => git(f.worktree, "merge", "--quiet", "--no-edit", "main"));
+    writeFileSync(join(f.worktree, "app.ts"), "export const answer = 42; // v309\n");
+    writeFileSync(join(f.worktree, "notes.md"), "Needs a v309 runner.\n");
+    git(f.worktree, "add", "app.ts", "notes.md");
+    push(f, "--no-edit");
+  }, "notes.md"],
+  ["an edit to a file only the base changed, in a clean merge", (f) => {
+    moveBase(f);
+    git(f.worktree, "merge", "--quiet", "--no-commit", "--no-ff", "main");
+    writeFileSync(join(f.worktree, "lib/module-1.ts"), "export const value1 = 'hidden';\n");
+    git(f.worktree, "add", "lib/module-1.ts");
+    push(f, "--no-edit");
+  }, "lib/module-1.ts"],
+  ["a new file in a clean merge", (f) => {
+    moveBase(f);
+    git(f.worktree, "merge", "--quiet", "--no-commit", "--no-ff", "main");
+    writeFileSync(join(f.worktree, "added.ts"), "export const hidden = true;\n");
+    git(f.worktree, "add", "added.ts");
+    push(f, "--no-edit");
+  }, "added.ts"],
+  ["reverting the pull request's own change in a clean merge", (f) => {
+    moveBase(f);
+    git(f.worktree, "merge", "--quiet", "--no-commit", "--no-ff", "main");
+    writeFileSync(join(f.worktree, "app.ts"), "export const answer = 41;\n");
+    git(f.worktree, "add", "app.ts");
+    push(f, "--no-edit");
+  }, "app.ts"],
+];
+
+test("a merge carrying the pull request's own change is charged, and refused once the budget is used (#4075)", async (t) => {
+  for (const [name, merge] of NOT_BASE_ONLY) {
+    const f = fixture(t);
+    merge(f);
+    assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ history: exhausted(f, "UPVOTE") }), CODEX, "b")),
+      REVIEW_ROUND_REFUSALS.roundLimit, name);
+    assert.equal(existsSync(join(f.root, "snapshots", "checkouts", "s_review")), false, name);
+  }
+});
+
+test("a merge carrying the pull request's own change is reviewed in full view of it while budget remains (#4075)", async (t) => {
+  for (const [name, merge, path] of NOT_BASE_ONLY) {
+    const f = fixture(t);
+    merge(f);
+    const prepared = await f.launcher.prepare("s_review", f.policy({ history: { ...reviewed(f, "UPVOTE"), baseMergeRounds: true } }), CODEX, "b");
+    assert.equal(prepared.round.mode, "delta", name);
+    assert.equal(prepared.round.baseMerge, undefined, `${name}: it is charged`);
+    assert.ok(prepared.round.scopeFiles.includes(path), `${name}: ${path} is in scope of ${prepared.round.scopeFiles.join(", ")}`);
+    f.launcher.release("s_review");
+  }
+});
+
+test("a second merge before the first one's review is an ordinary commit (#4075)", async (t) => {
+  const f = fixture(t);
+  moveBase(f);
+  git(f.worktree, "merge", "--quiet", "--no-edit", "main");
+  moveBase(f, { "lib/later.ts": "export const later = true;\n" });
+  git(f.worktree, "merge", "--quiet", "--no-edit", "main");
+  f.facts.headSha = git(f.worktree, "rev-parse", "HEAD");
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ history: exhausted(f, "UPVOTE") }), CODEX, "b")),
     REVIEW_ROUND_REFUSALS.roundLimit);
 });
 

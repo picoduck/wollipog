@@ -309,6 +309,9 @@ export interface ReviewPromptInput {
   /** A delta over a merge of the moved base branch: the patch is the pull request's own diff of
    * the scoped files, not every change since `since`. */
   mergedBase?: boolean;
+  /** With `mergedBase`: the same files' diff at `since`, before the merge, so the reviewer can see a
+   * change the merge dropped. Null when it is too large to inline or could not be read. */
+  reviewedPatch?: string | null;
   rebasedFrom?: { baseSha: string; headSha: string };
   fullReason?: string;
   /** Other files the pull request changes, for context only. */
@@ -366,13 +369,27 @@ export function reviewPrompt(input: ReviewPromptInput): string {
   if (input.openFindings?.length) {
     lines.push("Open findings from earlier rounds:", ...input.openFindings.map(compactReviewFinding), "");
   }
+  const fenced = (patch: string, language: string) => {
+    const longest = Math.max(2, ...[...patch.matchAll(/`+/gu)].map((match) => match[0].length));
+    const fence = "`".repeat(longest + 1);
+    return [`${fence}${language}`, patch.replace(/\n$/u, ""), fence, ""];
+  };
   const title = input.mode === "rebase" ? "Range-Diff" : "Pinned Patch";
   if (input.patch === null) {
     lines.push(`## ${title}`, "", "The patch is too large to inline; read the changed files from the checkout.", "");
   } else {
-    const longest = Math.max(2, ...[...input.patch.matchAll(/`+/gu)].map((match) => match[0].length));
-    const fence = "`".repeat(longest + 1);
-    lines.push(`## ${title}`, "", `${fence}${input.mode === "rebase" ? "text" : "diff"}`, input.patch.replace(/\n$/u, ""), fence, "");
+    lines.push(`## ${title}`, "", ...fenced(input.patch, input.mode === "rebase" ? "text" : "diff"));
+  }
+  if (input.mergedBase) {
+    lines.push("## Pull Request's Diff at the Reviewed Head", "");
+    if (input.reviewedPatch === null || input.reviewedPatch === undefined) {
+      lines.push(`The diff of these files at ${input.since} is too large to inline and the checkout does not hold it, so this round cannot show what the merge dropped from them. Say so in your report.`, "");
+    } else if (input.reviewedPatch === "") {
+      lines.push(`The pull request changed none of these files at ${input.since}.`, "");
+    } else {
+      lines.push(`The diff of these files at ${input.since}, before the merge. A change here that the pinned patch no longer has was dropped by the merge: check that dropping it was intended, and report it if it was not.`, "",
+        ...fenced(input.reviewedPatch, "diff"));
+    }
   }
   return lines.join("\n");
 }
@@ -640,6 +657,7 @@ export class ReviewSessionLauncher {
       const prFiles = await names(`${baseSha}...${policy.headSha}`);
       let scopeFiles = prFiles;
       let patch: string | null;
+      let reviewedPatch: string | null | undefined;
       let mergedBase = false;
       if (mode === "delta") {
         const since = planned.since!;
@@ -669,6 +687,10 @@ export class ReviewSessionLauncher {
           // The pull request's own diff of those files, without the base branch's changes.
           patch = await git(["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--no-textconv",
             "--end-of-options", headBase, policy.headSha, "--", ...scopeFiles]).catch(() => null);
+          // The same files' diff before the merge. A change a conflict resolution dropped is missing
+          // from the patch above and has no other trace, because the checkout holds only the head.
+          reviewedPatch = await git(["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--no-textconv",
+            "--end-of-options", sinceBase, since, "--", ...scopeFiles]).catch(() => null);
         }
       } else if (mode === "rebase") {
         const touched = new Set(await names(planned.rebasedFrom!.headSha, policy.headSha));
@@ -680,6 +702,7 @@ export class ReviewSessionLauncher {
         patch = await diff([], `${baseSha}...${policy.headSha}`).catch(() => null);
       }
       if (patch !== null && Buffer.byteLength(patch) > REVIEW_PATCH_LIMIT_BYTES) patch = null;
+      if (typeof reviewedPatch === "string" && Buffer.byteLength(reviewedPatch) > REVIEW_PATCH_LIMIT_BYTES) reviewedPatch = null;
       const tracked = new Set((await git(["ls-tree", "-r", "--name-only", "-z", "--end-of-options", policy.headSha])).split("\0").filter(Boolean));
       const round: ReviewAttemptRound = {
         epoch: planned.epoch, round: planned.round, attempt: planned.attempt, mode, baseSha, scopeFiles,
@@ -695,7 +718,7 @@ export class ReviewSessionLauncher {
         brief, repository: policy.pullRequest.repository, number: policy.pullRequest.number,
         baseSha, headSha: policy.headSha, changedFiles: scopeFiles, patch, mode,
         ...(round.since ? { since: round.since } : {}),
-        ...(mergedBase ? { mergedBase } : {}),
+        ...(mergedBase ? { mergedBase, reviewedPatch: reviewedPatch ?? null } : {}),
         ...(round.rebasedFrom ? { rebasedFrom: round.rebasedFrom } : {}),
         ...(mode === "full" && policy.fullReason ? { fullReason: policy.fullReason } : {}),
         contextFiles,

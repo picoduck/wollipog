@@ -525,8 +525,13 @@ attempt, mode, base and the files in scope):
   upvote and its findings, and a `pr_merge` decision may cite it. The control plane checks the
   claim against the run's current epoch and last valid head before recording it. An octopus
   merge, a merged parent outside the base branch, a path-level conflict, a change outside a
-  conflict block, any commit after the merge, or a requested full review is an ordinary commit and
-  counts as before. Older peers keep counting every round.
+  conflict block, a second merge before the first one's review, any commit after the merge, or a
+  requested full review is an ordinary commit and counts as before. That includes a protocol
+  renumber made inside the merge, which rewrites text outside any conflict block: the slotted ledger
+  (#975) removes the version-line conflict, but not the renumber when main passes a claim. A
+  conflict block's resolution is never equivalent; its round always has a reviewer, who gets the
+  pull request's diff of the scoped files both before and after the merge, so a change the
+  resolution dropped is visible. Older peers keep counting every round.
 - An epoch that used its rounds takes more only through a typed
   `review_round_extension` workflow decision (`request_workflow_decision`).
   - **Snapshot:** the repository, pull request, epoch, head, rounds used, the open blocking findings
