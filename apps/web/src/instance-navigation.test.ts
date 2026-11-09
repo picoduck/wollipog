@@ -155,6 +155,21 @@ test("an instance's replace takes the current entry's place, so Back skips the r
   ]);
 });
 
+test("an instance's saved Subscriptions link opens Subscriptions and replaces its own entry", () => {
+  const encoded = instanceViewPath("remote-a", { name: "inbox" }).replace(/\/$/, "");
+  const usage = { name: "usage" } as const;
+  assert.deepEqual(instanceRouteFromPath(`${encoded}/usage/subscriptions`), { instanceId: "remote-a", view: usage });
+  // Only the alias itself: a query or a noncanonical instance encoding is still refused.
+  assert.equal(instanceRouteFromPath(`${encoded}/usage/subscriptions`, "?x=1"), null);
+  assert.equal(instanceRouteFromPath(`${encoded}=/usage/subscriptions`), null);
+
+  const browser = new TestBrowserHistory(`${encoded}/usage/subscriptions`);
+  const navigation = new DesktopInstanceNavigation("remote-a", browser.window);
+  assert.deepEqual(navigation.current(), usage);
+  assert.equal(browser.path, instanceViewPath("remote-a", usage), "the entry now holds the canonical route");
+  assert.equal(browser.paths().length, 1, "no new history entry");
+});
+
 test("an instance's own Back is offered for holding, and its return to the editor is not delivered (#3218)", () => {
   const browser = new TestBrowserHistory(instanceViewPath("remote-a", { name: "usage" }));
   const navigation = new DesktopInstanceNavigation("remote-a", browser.window);
