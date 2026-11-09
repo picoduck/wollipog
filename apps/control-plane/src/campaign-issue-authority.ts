@@ -135,6 +135,8 @@ export type CampaignScopeAdmissionFailure =
 
 const HUMAN_SCOPE_ROUTE = "ask the campaign owner to propose this change from Campaign Status";
 
+// The seven owner-review causes retain their legacy refusal catalog for compatibility. The current
+// proposal route uses them as server-derived review causes, never as refusals (#4333).
 export const CAMPAIGN_SCOPE_ADMISSION_REFUSALS: Readonly<Record<CampaignScopeAdmissionFailure, { status: number; message: string }>> = {
   // Names the limit and the owner's route to raise it (#4061); no agent can raise it.
   capacity_exhausted: { status: 409, message: "Scope and publication reservations exceed this campaign's Maximum Issues, the issue limit " +

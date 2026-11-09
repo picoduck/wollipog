@@ -4669,12 +4669,25 @@ export interface CampaignIssueScopeSnapshot {
  * its additions need. Approving applies the change and raises Maximum Issues by exactly `increase`;
  * denying applies neither. */
 export interface CampaignScopeOwnerReview {
-  /** The proposal named no epic, published follow-up or selection lineage. */
-  cause: "lineage_missing";
+  /** Server-derived reason lineage requires the campaign owner. Older readers reject unknown causes. */
+  cause: "lineage_missing" | "epic_not_authorized" | "follow_ups_not_authorized" | "publication_unapproved"
+    | "publication_authority_changed" | "publication_approved_under_earlier_boundary" | "publication_approver_not_owner" | "selection_not_granted";
   /** Present when the scope plus publication reservations would exceed the campaign's issue limit:
    * the Maximum Issues the boundary held when it was requested, and how many more the additions need. */
   maxIssuesIncrease?: { from: number; increase: number };
 }
+
+/** Plain words for server-derived scope review causes, shared by request and status surfaces. */
+export const CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS: Record<CampaignScopeOwnerReview["cause"], string> = {
+  lineage_missing: "No authorized epic, published follow-up or issue selection admits it, so it needs your approval.",
+  epic_not_authorized: "The named epic is outside the authorized epics, so it needs your approval.",
+  follow_ups_not_authorized: "Related follow-ups are not authorized, so it needs your approval.",
+  publication_unapproved: "The publication has no recorded person approval, so it needs your approval.",
+  publication_authority_changed: "The publication's authority differs from the current boundary, so it needs your approval.",
+  publication_approved_under_earlier_boundary: "The publication was approved under an earlier objective, so it needs your approval.",
+  publication_approver_not_owner: "The publication's approver is not a campaign owner, so it needs your approval.",
+  selection_not_granted: "No issue selection is authorized, so it needs your approval.",
+};
 
 export interface CampaignSelectionReview {
   /** The `scope_review` Decision occurrence. One occurrence admits at most one scope change. */

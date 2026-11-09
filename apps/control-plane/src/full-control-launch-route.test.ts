@@ -858,7 +858,7 @@ test("Project child-session ceilings route review to the regular workflow, and a
   } finally { await server.close(); f.db.close(); }
 });
 
-test("an empty launch scope delegates no issue writes: additions are refused and closure or publication get no bounded admission", async () => {
+test("an empty launch scope delegates no issue writes: additions need the owner and closure or publication get no bounded admission", async () => {
   const f = fixture();
   const { server } = await app(f);
   const send = f.hub.sendToRunner;
@@ -895,8 +895,13 @@ test("an empty launch scope delegates no issue writes: additions are refused and
     assert.equal(addition.data!.status, "pending");
     const epic = await f.sessions.proposeCampaignIssueScope(root.id, { requestId: "add-epic", expectedRevision: 1,
       additions: [{ repository: "owner/repo", number: 5 }], removals: [], explanation: "Fixture epic addition", lineage: { kind: "epic", epic: 5 } });
-    assert.equal(epic.ok, false);
-    assert.equal(epic.status, 403, "an epic outside the empty authorized epic list grants nothing");
+    assert.ok(epic.ok, epic.error ?? "owner review");
+    assert.equal(epic.data!.authority, "human");
+    assert.equal(epic.data!.status, "pending");
+    const epicSnapshot = epic.data!.resourceSnapshot as CampaignIssueScopeSnapshot;
+    assert.equal(epicSnapshot.ownerReview?.cause, "epic_not_authorized");
+    assert.equal(epicSnapshot.issueAdmission, undefined, "an epic outside the empty authorized epic list grants nothing");
+    assert.deepEqual(f.db.getSession(root.id)!.orchestratorPolicy!.issueScope!.issueNumbers, []);
     assert.equal(f.db.getSession(root.id)!.orchestratorPolicy!.issueScope!.revision, 1);
 
     // Closure and publication have no bounded admission, so the typed gate stays with the Human.
@@ -2648,17 +2653,22 @@ test("a selection proposal's deterministic floors refuse in order, each with its
   } finally { await server.close(); f.db.close(); }
 });
 
-test("selection lineage without a selection to fill: refused under a healthy grant, the owner's under a failed one (#4103)", async () => {
+test("selection lineage without a selection to fill needs the owner under healthy and failed grants (#4333)", async () => {
   const f = fixture();
   const { server } = await app(f);
   try {
     const { id: named } = await firstMessageLaunch(f, server);
     assert.equal((await f.sessions.promptFromHuman(f.human, named, "Fix #12")).ok, true);
     legacyGrant(f, named, { status: "granted", namedIssues: [12] });
-    const refused = await f.sessions.proposeCampaignIssueScope(named, { requestId: "selection", expectedRevision: 2,
+    const proposed = await f.sessions.proposeCampaignIssueScope(named, { requestId: "selection", expectedRevision: 2,
       additions: [{ repository: "owner/repo", number: 13 }], removals: [], explanation: "One more", lineage: { kind: "selection" } });
-    assert.equal(refused.ok, false);
-    assert.equal(refused.errorDetails?.code, "selection_not_granted");
+    assert.ok(proposed.ok, proposed.error ?? "owner review");
+    assert.equal(proposed.data!.authority, "human");
+    assert.equal(proposed.data!.status, "pending");
+    const snapshot = proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot;
+    assert.equal(snapshot.ownerReview?.cause, "selection_not_granted");
+    assert.equal(snapshot.issueAdmission, undefined);
+    assert.deepEqual(f.db.getSession(named)!.orchestratorPolicy!.issueScope!.issueNumbers, [12]);
 
     const { id: failed } = await firstMessageLaunch(f, server);
     assert.equal((await f.sessions.promptFromHuman(f.human, failed, "Fix the worst bug")).ok, true);
@@ -4140,7 +4150,10 @@ test("a person's launch authorizes an epic in another repository, whose members 
       f.sessions.proposeCampaignIssueScope(id, { requestId: randomUUID(), expectedRevision: policy().issueScope!.revision, additions, removals: [], explanation: "An epic's member.", lineage });
     const member = { repository: "other/repo", number: 41 };
     // The same number in the launch repository is another issue, with no authority.
-    assert.equal((await propose([{ repository: "owner/repo", number: 41 }], { kind: "epic", epic: 40 })).errorDetails?.code, "epic_not_authorized");
+    const ownerReview = await propose([{ repository: "owner/repo", number: 41 }], { kind: "epic", epic: 40 });
+    assert.ok(ownerReview.ok);
+    assert.equal(ownerReview.data!.authority, "human");
+    assert.equal((ownerReview.data!.resourceSnapshot as import("@wollipog/protocol").CampaignIssueScopeSnapshot).ownerReview?.cause, "epic_not_authorized");
     assert.equal((await propose([{ repository: "owner/repo", number: 41 }], { kind: "epic", epic: 40, repository: "other/repo" })).errorDetails?.code, "epic_members_unverified",
       "an epic's lineage admits only its own repository's members");
     assert.equal((await propose([{ repository: "other/repo", number: 99 }], { kind: "epic", epic: 40, repository: "other/repo" })).errorDetails?.code, "epic_members_unverified");

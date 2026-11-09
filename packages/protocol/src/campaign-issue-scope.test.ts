@@ -193,3 +193,18 @@ test("an owner review keeps its exact shape and never rides with an admission, a
     assert.equal(normalizeCampaignIssueScopeSnapshot({ ...base, ownerReview: plain, ...companion }), null, JSON.stringify(companion));
   }
 });
+
+test("#4333 owner review causes retain only matching lineage and reject agent-shaped extensions", () => {
+  const base = { category: "campaign_issue_scope", repository: "team/repo", expectedRevision: 1, before: [1], additions: [2],
+    removals: [], explanation: "Owner review", affectedAssignments: [], affectedDecisions: [] };
+  for (const cause of ["epic_not_authorized", "follow_ups_not_authorized", "publication_unapproved", "publication_authority_changed",
+    "publication_approved_under_earlier_boundary", "publication_approver_not_owner", "selection_not_granted"]) {
+    const lineage = cause === "epic_not_authorized" ? { kind: "epic", epic: 99 }
+      : cause === "selection_not_granted" ? { kind: "selection" } : { kind: "follow_up", publicationOccurrenceId: "published" };
+    const snapshot = { ...base, lineage, ownerReview: { cause } };
+    assert.deepEqual(normalizeCampaignIssueScopeSnapshot(snapshot)?.ownerReview, { cause });
+    assert.equal(normalizeCampaignIssueScopeSnapshot({ ...snapshot, lineage: undefined }), null);
+    assert.equal(normalizeCampaignIssueScopeSnapshot({ ...snapshot, ownerReview: { cause, settledPublication: "forged" } }), null);
+    assert.equal(normalizeCampaignIssueScopeSnapshot({ ...snapshot, issueAdmission: { boundaryRevision: 1, evidenceDigest: "a".repeat(64) } }), null);
+  }
+});

@@ -12768,7 +12768,7 @@ export class SessionsService {
       const additionCount = groups.reduce((total, group) => total + group.additions.length, 0);
       const otherAdditions = additionCount - snapshot.additions.length;
       // Selection lineage without a selection to fill is read as no lineage: a failed or uncertain
-      // grant's proposal still goes to the owner, and a healthy grant without one is refused.
+      // grant's proposal still goes to the owner; a healthy grant without a selection now needs owner review too.
       const lineageless = !snapshot.lineage || snapshot.lineage.kind === "selection";
       const grantReview = !human && additionCount && lineageless ? this.scopeGrantReview(latest) : undefined;
       // Additions without any lineage that no grant review takes go to the owner as one typed request
@@ -12789,38 +12789,31 @@ export class SessionsService {
         // The owner's approval revokes every outstanding decision (#3915), pending and approved
         // publications included, so only the slots consumed publications still hold count against
         // it, exactly as its resolution counts them; an Orchestrator's own admission counts them all.
-        const requested = scopeSize + (toOwner ? this.db.unsettledPublicationSlots(sessionId) : reservedPublicationSlots(this.db, latest, excludedReservation));
-        // The owner's approval of a failed or uncertain grant's proposal sets the derived limit that
-        // grant could not, so only the limit it may reach applies here.
         const limit = this.db.campaignIssueLimit(sessionId,
           (grantReview ? grantReviewMaxIssues(latest.orchestratorPolicy, { grantReview }, boundary, scopeSize) : undefined) ?? boundary.issueAuthority!.maxIssues);
-        if (toOwner) {
-          ownerReview = { cause: "lineage_missing" };
-          // The owner's approval raises Maximum Issues by exactly what the additions need, never past
-          // the 100-issue ceiling no authorization can raise.
-          if (requested > limit) {
-            if (requested > 100) return refuse("capacity_exhausted", { limit, requested });
-            ownerReview.maxIssuesIncrease = { from: boundary.issueAuthority!.maxIssues, increase: requested - limit };
-          }
-        } else if (requested > limit) return refuse("capacity_exhausted", { limit, requested });
+        if (toOwner) ownerReview = { cause: "lineage_missing" };
+        let followUpAdmissionLog: Record<string, unknown> | undefined;
         let evidence: unknown = { removals: snapshot.removals, ...(snapshot.otherRepositories ? { otherRepositories: snapshot.otherRepositories } : {}) };
         if (grantReview || ownerReview) {
           // No admission: the decision is the owner's.
         } else if (additionCount && snapshot.lineage) {
-          if (snapshot.lineage.kind === "selection") return refuse("selection_not_granted");
-          if (snapshot.lineage.kind === "epic") {
+          if (snapshot.lineage.kind === "selection") ownerReview = { cause: "selection_not_granted" };
+          else if (snapshot.lineage.kind === "epic") {
             // The epic and its members are one repository's: its lineage names it, or it is the launch one (#4118).
             const { epic, repository: named } = snapshot.lineage;
             const epicRepository = named ?? snapshot.repository;
-            if (!campaignBoundaryEpics(boundary).some((held) => held.repository === epicRepository && held.number === epic)) return refuse("epic_not_authorized");
-            const added = groups.filter((group) => group.additions.length);
-            if (added.some((group) => group.repository !== epicRepository)) return refuse("epic_members_unverified");
-            const members = await this.campaignIssueScope(sessionId, epic, canAccess, false, named);
-            if (!members.ok || members.data?.candidateMessage || !added.every((group) => group.additions.every((n) => members.data?.candidates?.some((c) =>
-              c.issue.number === n && c.issue.repository.toLowerCase() === epicRepository && ["umbrella", "sub_issue", "member_checklist"].includes(c.source))))) return refuse("epic_members_unverified");
-            evidence = { epic, ...(named ? { repository: named } : {}), members: members.data?.candidates };
+            if (!campaignBoundaryEpics(boundary).some((held) => held.repository === epicRepository && held.number === epic)) {
+              ownerReview = { cause: "epic_not_authorized" };
+            } else {
+              const added = groups.filter((group) => group.additions.length);
+              if (added.some((group) => group.repository !== epicRepository)) return refuse("epic_members_unverified");
+              const members = await this.campaignIssueScope(sessionId, epic, canAccess, false, named);
+              if (!members.ok || members.data?.candidateMessage || !added.every((group) => group.additions.every((n) => members.data?.candidates?.some((c) =>
+                c.issue.number === n && c.issue.repository.toLowerCase() === epicRepository && ["umbrella", "sub_issue", "member_checklist"].includes(c.source))))) return refuse("epic_members_unverified");
+              evidence = { epic, ...(named ? { repository: named } : {}), members: members.data?.candidates };
+            }
           } else {
-            if (!boundary.issueAuthority!.relatedFollowUps) return refuse("follow_ups_not_authorized");
+            if (!boundary.issueAuthority!.relatedFollowUps) ownerReview = { cause: "follow_ups_not_authorized" };
             if (additionCount !== 1) return refuse("follow_up_not_single");
             // The one addition is in the repository its publication names, any of the boundary's (#4119).
             const otherGroup = otherAdditions ? snapshot.otherRepositories?.find((group) => group.additions.length) : undefined;
@@ -12844,17 +12837,19 @@ export class SessionsService {
             if (publication.issueAdmission) {
               const authority = publication.issueAdmission.publicationAuthority;
               if (publication.issueAdmission.boundaryRevision !== boundary.revision && (!authority || authority.authorizedByUserId !== boundary.authorizedByUserId ||
-                  authority.objectiveDigest !== issueEvidenceDigest(boundary.objective))) return refuse("publication_authority_changed");
+                  authority.objectiveDigest !== issueEvidenceDigest(boundary.objective))) ownerReview ??= { cause: "publication_authority_changed" };
             } else {
               const approver = this.db.workflowDecisionHumanApprover(grant);
-              if (!approver) return refuse("publication_unapproved");
-              const recorded = approver.publicationAuthority;
-              const objective = approver.approvedAt >= boundary.authorizedAt ? "current_authorization"
-                : recorded?.authorizedByUserId === boundary.authorizedByUserId && recorded.objectiveDigest === issueEvidenceDigest(boundary.objective) ? "recorded_boundary" : null;
-              if (!objective) return refuse("publication_approved_under_earlier_boundary");
-              const basis = approver.userId === boundary.authorizedByUserId ? "boundary_author" : this.db.campaignOwnerUser(sessionId, approver.userId) ? "campaign_owner" : null;
-              if (!basis) return refuse("publication_approver_not_owner");
-              approval = { kind: "human", approvedByUserId: approver.userId, approvedAt: approver.approvedAt, basis, objective };
+              if (!approver) ownerReview ??= { cause: "publication_unapproved" };
+              else {
+                const recorded = approver.publicationAuthority;
+                const objective = approver.approvedAt >= boundary.authorizedAt ? "current_authorization"
+                  : recorded?.authorizedByUserId === boundary.authorizedByUserId && recorded.objectiveDigest === issueEvidenceDigest(boundary.objective) ? "recorded_boundary" : null;
+                if (!objective) ownerReview ??= { cause: "publication_approved_under_earlier_boundary" };
+                const basis = approver.userId === boundary.authorizedByUserId ? "boundary_author" : this.db.campaignOwnerUser(sessionId, approver.userId) ? "campaign_owner" : null;
+                if (!basis) ownerReview ??= { cause: "publication_approver_not_owner" };
+                if (basis && objective) approval = { kind: "human", approvedByUserId: approver.userId, approvedAt: approver.approvedAt, basis, objective };
+              }
             }
             const bound = scopePublicationRecommendation(this.db, sessionId, publication, addedIssue);
             if ("failure" in bound) return refuse(bound.failure);
@@ -12865,16 +12860,27 @@ export class SessionsService {
               const origin = this.db.campaignWorkLedger.detail(sessionId, id, Date.now())?.issue;
               return !origin || !heldScope || !campaignScopeHolds(heldScope, origin);
             })) return refuse("origin_outside_scope");
-            if (!await this.inspectPublishedScopeIssue(sessionId, grant, addedIssue, Boolean(approval))) return refuse("payload_mismatch");
+            if (!await this.inspectPublishedScopeIssue(sessionId, grant, addedIssue, Boolean(approval) || Boolean(ownerReview))) return refuse("payload_mismatch");
             snapshot.verifiedPublications = [{ publicationOccurrenceId: grant.occurrenceId, issue: addedIssue }];
             evidence = { occurrenceId: grant.occurrenceId, payloadDigest: grant.resourceDigest, issue: addedIssue,
               ...(otherGroup ? { repository: otherGroup.repository } : {}), ...(approval ? { approval } : {}) };
-            this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "scope_proposal", sessionId, requestId: request.requestId,
+            if (!ownerReview) followUpAdmissionLog = { event: "campaign_issue_admission", entryPoint: "scope_proposal", sessionId, requestId: request.requestId,
               boundaryRevision: boundary.revision, scopeRevision: snapshot.expectedRevision, lineage: "follow_up", publicationOccurrenceId: grant.occurrenceId,
-              publicationAuthority: approval ? "human_approval" : "bounded_admission", ...(approval ? { approvalBasis: approval.basis, approvalObjective: approval.objective } : {}), outcome: "admitted" }));
+              publicationAuthority: approval ? "human_approval" : "bounded_admission", ...(approval ? { approvalBasis: approval.basis, approvalObjective: approval.objective } : {}), outcome: "admitted" };
           }
         }
-        if (!grantReview && !ownerReview) snapshot.issueAdmission = { boundaryRevision: boundary.revision, evidenceDigest: issueEvidenceDigest(evidence) };
+        // Only consumed slots survive owner approval; a verified publication settles its own slot.
+        const requested = scopeSize + (ownerReview
+          ? this.db.unsettledPublicationSlots(sessionId, snapshot.verifiedPublications?.map((p) => p.publicationOccurrenceId))
+          : reservedPublicationSlots(this.db, latest, excludedReservation));
+        if (requested > limit) {
+          if (!ownerReview || requested > 100) return refuse("capacity_exhausted", { limit, requested });
+          ownerReview.maxIssuesIncrease = { from: boundary.issueAuthority!.maxIssues, increase: requested - limit };
+        }
+        if (!grantReview && !ownerReview) {
+          snapshot.issueAdmission = { boundaryRevision: boundary.revision, evidenceDigest: issueEvidenceDigest(evidence) };
+          if (followUpAdmissionLog) this.log.info(JSON.stringify(followUpAdmissionLog));
+        }
       }
       if (grantReview) snapshot.grantReview = grantReview;
       if (ownerReview) snapshot.ownerReview = ownerReview;
@@ -12889,13 +12895,14 @@ export class SessionsService {
           const s = d.resourceSnapshot;
           return d.sessionId === sessionId && d.authority === "human" && s.category === "campaign_issue_scope" && s.ownerReview !== undefined &&
             s.expectedRevision === snapshot.expectedRevision && JSON.stringify(s.additions) === JSON.stringify(snapshot.additions) &&
-            JSON.stringify(s.removals) === JSON.stringify(snapshot.removals) && JSON.stringify(s.ownerReview) === JSON.stringify(ownerReview) &&
+            JSON.stringify(s.removals) === JSON.stringify(snapshot.removals) &&
+            JSON.stringify(s.lineage) === JSON.stringify(snapshot.lineage) && JSON.stringify(s.verifiedPublications) === JSON.stringify(snapshot.verifiedPublications) && JSON.stringify(s.ownerReview) === JSON.stringify(ownerReview) &&
             // Other repositories' parts are part of the exact change too (#4118).
             JSON.stringify(s.otherRepositories ?? []) === JSON.stringify(snapshot.otherRepositories ?? []);
         });
         if (pending) return ok(pending);
         this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "scope_proposal", sessionId, requestId: request.requestId,
-          boundaryRevision: boundary!.revision, scopeRevision: snapshot.expectedRevision, lineage: "none", outcome: "owner_review", cause: ownerReview.cause,
+          boundaryRevision: boundary!.revision, scopeRevision: snapshot.expectedRevision, lineage: snapshot.lineage?.kind ?? "none", outcome: "owner_review", cause: ownerReview.cause,
           ...(ownerReview.maxIssuesIncrease ? { maxIssuesIncrease: ownerReview.maxIssuesIncrease.increase } : {}) }));
       }
       const controller = this.workflowDecisionController(current, "campaign_issue_scope");

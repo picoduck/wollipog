@@ -1379,6 +1379,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   338,
   // v339 slot
   // v340 slot
+  // 340: Server-derived owner scope review causes retain verified publication lineage (#4333).
+  340,
   // v341 slot
   // v342 slot
   // v343 slot

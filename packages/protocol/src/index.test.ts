@@ -122,7 +122,6 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 338);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -360,8 +359,8 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 338", () => {
-  assert.equal(PROTOCOL_VERSION, 338);
+test("public runner capability floors retain their recorded version boundaries", () => {
+  // The ledger tests verify the current version; these historical floors do not move with it.
   assert.equal(runnerSupportsProtocol(333, "providerAccountSelectionPolicy"), false);
   assert.equal(runnerSupportsProtocol(334, "providerAccountSelectionPolicy"), true);
   assert.equal(runnerSupportsProtocol(331, "childQuestions"), false);
