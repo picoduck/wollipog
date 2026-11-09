@@ -90,7 +90,7 @@ for (const theme of ["dark", "light"] as const) {
         await page.goto(`/automations-e2e.html?theme=${theme}&capabilities`);
         await page.getByRole("button", { name: "New Automation" }).click();
         await expectLabelStyle(page, page.locator(EDITOR_LABELS), [
-          "Name", "Action", "Machine", "Folder", "Agent", "Model", "Reasoning Effort", "Permission Mode",
+          "Name", "Action", "Machine", "Folder", "Agent", "Session Role", "Model", "Reasoning Effort", "Permission Mode",
           "Workspace Strategy", "Prompt", "Schedule", "Time Zone", "If a Run Is Missed", "If the Machine Is Offline",
           "If the Last Run Is Still Going", "Cost Limit", "Tool Call Limit", "Web Push",
         ]);
