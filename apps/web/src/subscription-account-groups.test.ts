@@ -86,6 +86,47 @@ test("reset times that differ by provider jitter are one window, so recency stil
   assert.equal(group!.account.buckets[0]!.remainingPercent, 35);
 });
 
+test("a sparse update on one machine does not promote that machine's older reading of another window", () => {
+  const T1 = NOW - 2 * HOUR;
+  const T2 = NOW - HOUR;
+  const [group] = subscriptionAccountGroups([
+    // Machine A read the weekly window first; a later five-hour update moved its snapshot time on.
+    source({ subscriptionKey: "shared", fetchedAt: NOW, buckets: [
+      bucket("seven_day", 80, { observedAt: T1 }),
+      bucket("five_hour", 60, { observedAt: NOW }),
+    ] }),
+    source({ subscriptionKey: "shared", fetchedAt: T2, buckets: [bucket("seven_day", 10, { observedAt: T2 })] }),
+  ]);
+  const left = (id: string) => group!.account.buckets.find((item) => item.id === id)?.remainingPercent;
+  assert.equal(left("seven_day"), 10);
+  assert.equal(left("five_hour"), 60);
+});
+
+test("a window from an older runner falls back to its snapshot's time", () => {
+  const [group] = subscriptionAccountGroups([
+    source({ subscriptionKey: "shared", fetchedAt: NOW, buckets: [bucket("seven_day", 30)] }),
+    source({ subscriptionKey: "shared", fetchedAt: NOW - HOUR, buckets: [bucket("seven_day", 80, { observedAt: NOW - HOUR })] }),
+  ]);
+  assert.equal(group!.account.buckets[0]!.remainingPercent, 30);
+});
+
+test("a machine's limit status is not hidden by another machine's fresher percentage of that window", () => {
+  const [group] = subscriptionAccountGroups([
+    source({ subscriptionKey: "shared", fetchedAt: NOW, buckets: [bucket("seven_day", 40, { observedAt: NOW - 2 * HOUR, status: "exhausted" })] }),
+    source({ subscriptionKey: "shared", fetchedAt: NOW - HOUR, buckets: [bucket("seven_day", 10, { observedAt: NOW - HOUR, status: "available" })] }),
+  ]);
+  assert.equal(group!.account.buckets[0]!.remainingPercent, 10);
+  assert.equal(group!.account.buckets[0]!.status, "exhausted");
+});
+
+test("an earlier window's limit status does not carry into a newer window", () => {
+  const [group] = subscriptionAccountGroups([
+    source({ subscriptionKey: "shared", buckets: [bucket("five_hour", 0, { resetsAt: NOW - HOUR, status: "exhausted" })] }),
+    source({ subscriptionKey: "shared", fetchedAt: NOW - HOUR, buckets: [bucket("five_hour", 90, { resetsAt: NOW + 4 * HOUR, status: "available" })] }),
+  ]);
+  assert.equal(group!.account.buckets[0]!.status, "available");
+});
+
 test("each machine contributes the windows the others have not reported", () => {
   const [group] = subscriptionAccountGroups([
     source({ subscriptionKey: "shared", fetchedAt: NOW, buckets: [bucket("five_hour", 35)] }),

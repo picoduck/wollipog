@@ -410,6 +410,20 @@ export function normalizeClaudeRateLimits(
   };
 }
 
+/** Dates each percentage this update reports. A window it leaves out, or reports without a
+ * percentage, then keeps its earlier time through the merge, because `fetchedAt` moves on regardless
+ * and would make a retained reading look current. Applied after the event signature is taken, since
+ * a receipt time would make every repeated event look new. */
+function withReadingTimes(snapshot: SubscriptionUsageSnapshot): SubscriptionUsageSnapshot {
+  return {
+    ...snapshot,
+    buckets: snapshot.buckets.map((bucket) =>
+      bucket.usedPercent === undefined && bucket.remainingPercent === undefined
+        ? bucket
+        : { ...bucket, observedAt: snapshot.fetchedAt }),
+  };
+}
+
 /** True when a source has usable allowance numbers, as opposed to reset times alone. */
 export function hasSubscriptionUtilization(snapshot: SubscriptionUsageSnapshot): boolean {
   return snapshot.buckets.some((bucket) =>
@@ -836,6 +850,8 @@ export class SubscriptionUsageManager {
     const kill = this.options.killProbe ?? killTree;
     let authorization: SubscriptionUsageProbeAuthorization | undefined;
     const children: AgentProcess[] = [];
+    const isCurrent = () => !this.shuttingDown && selectionGeneration === this.selectionGeneration &&
+      this.isCurrentSource(source);
     try {
       const env = this.options.resolveEnv(
         source.agent.id,
@@ -850,6 +866,9 @@ export class SubscriptionUsageManager {
         authorize: async () => {
           authorization = await this.options.authorizeProbe?.(source.agent, env, source.sourceId);
           if (!authorization) throw new Error("subscription usage probe authorization is unavailable");
+          // The wait can outlast the selection, and the caller starts the harness as soon as this
+          // returns. Refusing here keeps the old one from running; `finally` releases the grant.
+          if (!isCurrent()) throw new Error("subscription identity read was superseded");
           return authorization;
         },
         processes: {
@@ -862,11 +881,9 @@ export class SubscriptionUsageManager {
           onFinish: (child) => this.activeProbeChildren.delete(child),
         },
       });
-      if (this.shuttingDown || selectionGeneration !== this.selectionGeneration ||
-          !this.sources().some((current) => current.sourceId === source.sourceId)) return;
-      this.applyIdentity(source, subscriptionIdentityFingerprint(identity));
+      if (isCurrent()) this.applyIdentity(source, subscriptionIdentityFingerprint(identity));
     } catch (error) {
-      if (!this.shuttingDown) {
+      if (isCurrent()) {
         this.options.log?.(`subscription identity read failed for ${source.agent.id}: ${errorText(error)}`);
       }
     } finally {
@@ -883,8 +900,9 @@ export class SubscriptionUsageManager {
     if (prior === identity) return;
     if (identity) this.identities.set(source.sourceId, identity);
     else this.identities.delete(source.sourceId);
-    // Another subscription now fills this home: the windows on record describe the old one.
-    if (prior && identity) {
+    // The windows on record belong to the identity just lost. Clearing them now, not only when the
+    // next one arrives, is what stops a later sign-in from inheriting them across a gap with none.
+    if (prior) {
       this.pendingDecreases.delete(source.sourceId);
       this.lastEvent.delete(source.sourceId);
       this.lastProbeAt.delete(source.sourceId);
@@ -1148,7 +1166,7 @@ export class SubscriptionUsageManager {
     const heldBefore = new Map(pendingDecreases);
     const explained = this.explainMissingUtilization(mergeSnapshot(
       prior,
-      normalized,
+      withReadingTimes(normalized),
       provider === "claude" ? "claude-notification" : "plain",
       pendingDecreases,
     ));
@@ -1315,7 +1333,7 @@ export class SubscriptionUsageManager {
         if (!normalized) throw new Error("Codex returned no recognizable rate-limit fields");
         const prior = this.snapshots.get(source.sourceId);
         const update = {
-          ...normalized,
+          ...withReadingTimes(normalized),
           ...(result.plan && !normalized.plan ? { plan: result.plan } : {}),
           ...(source.accountLabel ? { accountLabel: source.accountLabel } :
             result.accountLabel ? { accountLabel: result.accountLabel } : {}),

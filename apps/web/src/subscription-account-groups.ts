@@ -18,6 +18,23 @@ export interface SubscriptionAccountGroup {
   refreshTargets: ReadonlyArray<{ runnerId: string; providerAccountId: string }>;
 }
 
+const STATUS_SEVERITY: Readonly<Record<NonNullable<SubscriptionUsageBucket["status"]>, number>> = {
+  available: 0,
+  warning: 1,
+  exhausted: 2,
+};
+
+/** The worse of two statuses of one window. A status arrives apart from the percentage it sits
+ * beside, so a machine with an older percentage can hold the latest word that a limit was reached.
+ * Showing that for the rest of the window is the safe error; hiding it is not. */
+function worseStatus(
+  left: SubscriptionUsageBucket["status"],
+  right: SubscriptionUsageBucket["status"],
+): SubscriptionUsageBucket["status"] {
+  if (!left || !right) return left ?? right;
+  return STATUS_SEVERITY[left] >= STATUS_SEVERITY[right] ? left : right;
+}
+
 /** `newer` was read later. A later window beats it anyway; within one window its fields win, and
  * the fields it did not report (a status-only event's percentage) stay as last known. */
 function mergeWindow(newer: SubscriptionUsageBucket, older: SubscriptionUsageBucket): SubscriptionUsageBucket {
@@ -25,7 +42,8 @@ function mergeWindow(newer: SubscriptionUsageBucket, older: SubscriptionUsageBuc
       Math.abs(newer.resetsAt - older.resetsAt) > SAME_WINDOW_TOLERANCE_MS) {
     return newer.resetsAt > older.resetsAt ? newer : older;
   }
-  return { ...older, ...newer };
+  const status = worseStatus(newer.status, older.status);
+  return { ...older, ...newer, ...(status ? { status } : {}) };
 }
 
 function mergedAccount(members: readonly SubscriptionUsageSourceView[]): SubscriptionUsageSourceView {
@@ -33,20 +51,28 @@ function mergedAccount(members: readonly SubscriptionUsageSourceView[]): Subscri
   // Newest first. Machines report at different times, and a Claude machine only when it is in use.
   const ranked = [...(reporting.length > 0 ? reporting : members)].sort((left, right) => right.fetchedAt - left.fetchedAt);
   const newest = ranked[0]!;
-  const buckets = new Map<string, SubscriptionUsageBucket>();
+  // A snapshot's time moves on with any update, so each window compares by when it was itself
+  // reported. An older runner dates nothing, and its snapshot's time is the best evidence left.
+  const readings = new Map<string, Array<{ bucket: SubscriptionUsageBucket; at: number }>>();
   for (const member of ranked) {
     for (const bucket of member.buckets) {
-      const newer = buckets.get(bucket.id);
-      buckets.set(bucket.id, newer ? mergeWindow(newer, bucket) : bucket);
+      const reading = { bucket, at: bucket.observedAt ?? member.fetchedAt };
+      const known = readings.get(bucket.id);
+      if (known) known.push(reading);
+      else readings.set(bucket.id, [reading]);
     }
   }
+  const buckets = [...readings.values()].map((known) => known
+    .sort((left, right) => right.at - left.at)
+    .map((reading) => reading.bucket)
+    .reduce(mergeWindow));
   const plan = ranked.find((member) => member.plan)?.plan;
   const accountLabel = ranked.find((member) => member.accountLabel)?.accountLabel;
   const credits = ranked.find((member) => member.credits)?.credits;
   const spendControls = ranked.find((member) => member.spendControls?.length)?.spendControls;
   return {
     ...newest,
-    buckets: [...buckets.values()],
+    buckets,
     freshness: ranked.some((member) => member.freshness === "fresh") ? "fresh" : "stale",
     runnerStatus: ranked.find((member) => member.runnerStatus !== "offline")?.runnerStatus ?? newest.runnerStatus,
     ...(plan ? { plan } : {}),

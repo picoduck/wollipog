@@ -1033,6 +1033,7 @@ test("a quota reset inside one window applies once a second event confirms it", 
     usedPercent: 29,
     remainingPercent: 71,
     resetsAt: WEEK_RESET * 1000,
+    observedAt: OBSERVED_AT + 61_000,
     status: "available",
   });
   assert.equal(usageWindowRejection(manager.inventory()[0], now), null,
@@ -1390,6 +1391,7 @@ function identityManager(options: {
   published?: SubscriptionUsageSnapshot[];
   now?: () => number;
   authStatus?: "authenticated" | "unauthenticated";
+  probeFails?: () => boolean;
 }) {
   return new SubscriptionUsageManager({
     runnerId: "runner-1",
@@ -1402,12 +1404,138 @@ function identityManager(options: {
     publish: (snapshot) => options.published?.push(snapshot),
     now: options.now ?? (() => 20_000),
     resolveSubscriptionIdentity: options.resolve,
-    probeCodex: async () => ({
-      state: "available",
-      rateLimits: { rateLimits: { limitId: "codex", primary: { usedPercent: 25 } } },
-    }),
+    probeCodex: async () => {
+      if (options.probeFails?.()) throw new Error("provider is unavailable");
+      return {
+        state: "available",
+        rateLimits: { rateLimits: { limitId: "codex", primary: { usedPercent: 25 } } },
+      };
+    },
   });
 }
+
+test("an old account's windows never carry a new identity, even with no identity in between", async () => {
+  const published: SubscriptionUsageSnapshot[] = [];
+  let now = 20_000;
+  let probeFails = false;
+  let identity: string | undefined = JSON.stringify(["codex", "user-1", "workspace-1"]);
+  const manager = identityManager({ resolve: async () => identity, published, now: () => now, probeFails: () => probeFails });
+  manager.syncSources();
+  await manager.refreshAccount("work");
+  assert.equal(manager.inventory()[0]?.buckets.length, 1);
+
+  now += SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS;
+  identity = undefined;
+  await manager.refreshIdentities();
+  assert.equal(manager.inventory()[0]?.subscriptionIdentity, undefined);
+  assert.equal(manager.inventory()[0]?.buckets.length, 0, "the windows have no known owner once the identity is gone");
+
+  now += SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS;
+  identity = JSON.stringify(["codex", "user-2", "workspace-2"]);
+  probeFails = true;
+  const seen = published.length;
+  await manager.refreshAccount("work");
+  const carryingNew = published.slice(seen).filter((snapshot) => snapshot.subscriptionIdentity !== undefined);
+  assert.ok(carryingNew.length > 0);
+  assert.ok(carryingNew.every((snapshot) => snapshot.buckets.length === 0), "a failed probe leaves nothing of the old account");
+});
+
+test("a selection change during Claude's authorization stops the old harness from starting", async () => {
+  let grant: (authorization: { cwd: string; settle: (children: readonly AgentProcess[]) => Promise<void> }) => void = () => {};
+  const settled: Array<readonly AgentProcess[]> = [];
+  let started = false;
+  let authorizing = false;
+  const logs: string[] = [];
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent()],
+    resolveEnv: () => ({}),
+    publish: () => {},
+    now: () => 20_000,
+    log: (message) => logs.push(message),
+    authorizeProbe: () => new Promise((resolve) => {
+      authorizing = true;
+      grant = resolve;
+    }),
+    resolveSubscriptionIdentity: async (request) => {
+      await request.authorize();
+      started = true;
+      return JSON.stringify(["claude", "person@example.test", "org-1"]);
+    },
+  });
+  manager.syncSources();
+  const pending = manager.refreshIdentities();
+  while (!authorizing) await new Promise((resolve) => setImmediate(resolve));
+  manager.selectionChanged();
+  grant({ cwd: "/safe/subscription-probe", settle: async (children) => { settled.push(children); } });
+  await pending;
+  assert.equal(started, false, "the old harness never runs");
+  assert.deepEqual(settled, [[]], "the authorization it took is released with no process");
+  assert.equal(manager.inventory()[0]?.subscriptionIdentity, undefined);
+  assert.deepEqual(logs, [], "a superseded read is not a failure");
+});
+
+test("each window records when its percentage was reported, through sparse and status-only updates", () => {
+  let now = OBSERVED_AT;
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent()],
+    resolveEnv: () => ({}),
+    publish: () => {},
+    now: () => now,
+  });
+  const observe = (info: Record<string, unknown>) => manager.observe("claude", "claude-code", { kind: "native" }, {
+    provider: "claude",
+    kind: "sparse",
+    payload: rateLimitEvent(info),
+  });
+  const window = (id: string) => manager.inventory()[0]?.buckets.find((bucket) => bucket.id === id);
+
+  observe({ unifiedWindows: { seven_day: { utilization: 0.2, resetsAt: WEEK_RESET } } });
+  assert.equal(window("seven_day")?.observedAt, OBSERVED_AT);
+
+  now = OBSERVED_AT + 1_000;
+  observe({ unifiedWindows: { five_hour: { utilization: 0.1, resetsAt: FIVE_HOUR_RESET } } });
+  assert.equal(window("five_hour")?.observedAt, OBSERVED_AT + 1_000);
+  assert.equal(window("seven_day")?.observedAt, OBSERVED_AT, "a window the update did not report keeps its own time");
+
+  now = OBSERVED_AT + 2_000;
+  observe({ status: "allowed_warning", rateLimitType: "seven_day", resetsAt: WEEK_RESET });
+  assert.equal(window("seven_day")?.status, "warning");
+  assert.equal(window("seven_day")?.observedAt, OBSERVED_AT, "a status-only event reports no percentage");
+
+  now = OBSERVED_AT + 3_000;
+  observe({ unifiedWindows: { seven_day: { utilization: 0.5, resetsAt: WEEK_RESET } } });
+  assert.equal(window("seven_day")?.observedAt, OBSERVED_AT + 3_000);
+});
+
+test("a Codex refresh records when each window was read", async () => {
+  const manager = identityManager({ resolve: async () => undefined, now: () => 50_000 });
+  manager.syncSources();
+  await manager.refreshAccount("work");
+  assert.equal(manager.inventory()[0]?.buckets[0]?.observedAt, 50_000);
+});
+
+test("a repeated event is still deduplicated although its receipt time differs", () => {
+  let now = OBSERVED_AT;
+  const published: SubscriptionUsageSnapshot[] = [];
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent()],
+    resolveEnv: () => ({}),
+    publish: (snapshot) => published.push(snapshot),
+    now: () => now,
+  });
+  const event = () => manager.observe("claude", "claude-code", { kind: "native" }, {
+    provider: "claude",
+    kind: "sparse",
+    payload: rateLimitEvent({ unifiedWindows: { seven_day: { utilization: 0.2, resetsAt: WEEK_RESET } } }),
+  });
+  event();
+  now += 1_000;
+  event();
+  assert.equal(published.length, 1);
+});
 
 test("a resolved subscription identity is published as a one-way fingerprint and survives refreshes", async () => {
   const published: SubscriptionUsageSnapshot[] = [];

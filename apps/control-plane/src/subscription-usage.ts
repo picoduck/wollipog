@@ -77,6 +77,7 @@ function bucket(value: unknown, now: number): SubscriptionUsageBucket {
   const remainingPercent = number(input.remainingPercent, "bucket remainingPercent", 0, 100, true);
   const windowDurationMinutes = number(input.windowDurationMinutes, "bucket duration", 1, 2 * 365 * 24 * 60, true);
   const resetsAt = number(input.resetsAt, "bucket reset", 1, now + 2 * 365 * 24 * 60 * 60_000, true);
+  const observedAt = number(input.observedAt, "bucket observedAt", 1, now + 5 * 60_000, true);
   const status = input.status;
   if (status !== undefined && status !== "available" && status !== "warning" && status !== "exhausted") {
     throw new Error("bucket status is invalid");
@@ -88,6 +89,7 @@ function bucket(value: unknown, now: number): SubscriptionUsageBucket {
     ...(remainingPercent === undefined ? {} : { remainingPercent }),
     ...(windowDurationMinutes === undefined ? {} : { windowDurationMinutes }),
     ...(resetsAt === undefined ? {} : { resetsAt }),
+    ...(observedAt === undefined ? {} : { observedAt }),
     ...(status === undefined ? {} : { status }),
   };
 }

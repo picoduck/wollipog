@@ -130,6 +130,20 @@ test("snapshot validation keeps a well-formed subscription identity and refuses 
   db.close();
 });
 
+test("snapshot validation keeps a window's reading time and refuses an impossible one", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const now = 1_000_000;
+  db.registerRunner(meta("runner-1"), now, PROTOCOL_VERSION);
+  const base = snapshot("runner-1", now);
+  const withTime = (observedAt: unknown) => ({ ...base, buckets: [{ ...base.buckets[0], observedAt }] });
+  assert.equal(validateSubscriptionUsageSnapshot(withTime(now - 5), "runner-1", db, now).buckets[0]?.observedAt, now - 5);
+  assert.equal(validateSubscriptionUsageSnapshot(base, "runner-1", db, now).buckets[0]?.observedAt, undefined);
+  for (const observedAt of [0, now + 24 * 3_600_000, "soon"]) {
+    assert.throws(() => validateSubscriptionUsageSnapshot(withTime(observedAt), "runner-1", db, now), /observedAt/);
+  }
+  db.close();
+});
+
 test("runners sharing a subscription identity get one opaque key, and the identity itself never reaches a viewer", () => {
   const db = ControlPlaneDb.open(":memory:");
   const now = 1_000_000;
@@ -186,6 +200,25 @@ test("an unavailable refresh keeps last-known windows only while the subscriptio
   db.upsertSubscriptionUsageSnapshot({ ...unavailable, subscriptionIdentity: "d".repeat(64) }, now);
   assert.equal(read().buckets.length, 0, "another subscription's windows never carry over");
   assert.notEqual(read().subscriptionKey, key);
+  db.close();
+});
+
+test("across a gap with no identity, last-known windows stay with their own subscription and never pass to the next", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const now = 1_000_000;
+  db.registerRunner(meta("runner-1"), now, PROTOCOL_VERSION, OWNED_BY_ALICE);
+  const read = () => db.subscriptionUsageForPrincipal(human(), now).sources[0]!;
+  const unavailable = { ...snapshot("runner-1", now), state: "unavailable" as const, buckets: [] };
+  db.upsertSubscriptionUsageSnapshot({ ...snapshot("runner-1", now), subscriptionIdentity: IDENTITY }, now);
+  const first = read().subscriptionKey;
+
+  db.upsertSubscriptionUsageSnapshot(unavailable, now);
+  assert.equal(read().buckets.length, 1);
+  assert.equal(read().subscriptionKey, first, "the kept windows still name the subscription they came from");
+
+  db.upsertSubscriptionUsageSnapshot({ ...unavailable, subscriptionIdentity: "d".repeat(64) }, now);
+  assert.equal(read().buckets.length, 0);
+  assert.notEqual(read().subscriptionKey, first);
   db.close();
 });
 
