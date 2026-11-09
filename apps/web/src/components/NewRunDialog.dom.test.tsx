@@ -151,7 +151,7 @@ let fixtureSequence = 0;
 
 async function mountFixture(
   snapshotOverrides: Partial<UiSnapshotMessage> = {},
-  options: { failCreate?: Error } = {},
+  options: { failCreate?: Error; preview?: (agentId: string) => unknown } = {},
 ): Promise<Fixture> {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
@@ -178,6 +178,7 @@ async function mountFixture(
   const client = {
     ...api,
     workflowDefinitions: async () => [workflow],
+    ...(options.preview ? { providerAccountSelection: async (_runnerId: string, target: { agentId?: string }) => options.preview!(target.agentId ?? "") } : {}),
     createRun: async (request: CreateRunRequest) => {
       parallelRequests.push(structuredClone(request));
       if (options.failCreate) throw options.failCreate;
@@ -669,6 +670,159 @@ test("No Project submission sends explicit null Project identities", async () =>
     assert.equal(fixture.parallelRequests[0]?.projectLocationId, null);
     assert.equal(fixture.parallelRequests[0]?.runnerId, runner.runnerId);
     assert.equal(fixture.parallelRequests[0]?.workspaceId, "workspace-1");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+const accountRunner: RunnerView = {
+  ...runner,
+  providerAccountDefaults: [{ provider: "claude", accountId: null, revision: 2, mode: "priority", schemaVersion: 1, fixedAccountId: null, priorityAccountIds: ["work", "home"] }],
+  providerAccounts: [
+    { id: "work", label: "work@example.com", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+    { id: "home", label: "home@example.com", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+    { id: "out", label: "out@example.com", provider: "claude", authStatus: "unauthenticated", billing: "subscription" },
+    { id: "codex-one", label: "codex@example.com", provider: "codex", authStatus: "authenticated", billing: "subscription" },
+  ],
+  agents: [
+    { ...claude, authStatus: "authenticated", providerAccountReadiness: { defaultAuthStatus: "authenticated", defaultAccountId: "work", readyAccountIds: ["work", "home"] } },
+    codex,
+  ],
+};
+const noEligible = (agentId: string) => agentId === "claude"
+  ? { provider: "claude", mode: "priority", policyRevision: 2, status: "choice_required", source: "none", refusal: "no_eligible_account", enforcement: "enforced", generatedAt: 1,
+      candidates: [
+        { accountId: "work", position: 1, eligible: false, reason: "usage_exhausted", limitLabel: "Weekly" },
+        { accountId: "home", position: null, eligible: false, reason: "not_ranked" },
+      ] }
+  : { provider: "codex", mode: "fixed", policyRevision: 0, status: "selected", source: "first_available", accountId: "codex-one", enforcement: "enforced", generatedAt: 1, candidates: [] };
+
+async function settlePreviews(): Promise<void> {
+  await act(async () => { for (let index = 0; index < 5; index += 1) await Promise.resolve(); });
+}
+
+test("a member that needs an account asks for it, blocks the run until chosen, and sends it (#4353)", async () => {
+  const fixture = await mountFixture({ runners: [accountRunner] }, { preview: noEligible });
+  try {
+    await choose(fixture.container, "Project", "No Project");
+    await settlePreviews();
+    await enterTask(fixture.container);
+    assert.equal(footerReason(fixture.container), "Choose an account for Claude to continue.");
+    assert.equal(button(fixture.container, /^Run 2 Agents$/u).disabled, true);
+    assert.match(dialog(fixture.container).textContent ?? "", /No Claude account in this machine's Priority Order can start this session/u);
+    assert.ok(!(dialog(fixture.container).textContent ?? "").includes("Account for Codex"), "a member whose account is fine asks nothing");
+
+    await openSelect(fixture.container, "Account for Claude");
+    const options = openOptions(fixture.container);
+    assert.deepEqual(options.map((option) => option.disabled), [false, false, true], "an account that can't start isn't offered");
+    assert.ok(options.some((option) => /Weekly/u.test(option.text)), "and one past a limit says so, because overriding it is the choice");
+    await act(async () => { fixture.container.querySelector<HTMLButtonElement>('[role="option"]:not([aria-disabled="true"])')?.click(); });
+    await settle();
+
+    assert.equal(footerReason(fixture.container), null);
+    await clickPrimary(fixture.container, "Run 2 Agents");
+    assert.deepEqual(fixture.parallelRequests[0]?.providerAccountIds, { claude: "work" });
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a chosen account that stops being usable asks again rather than launching (#4353)", async () => {
+  const fixture = await mountFixture({ runners: [accountRunner] }, { preview: noEligible });
+  try {
+    await choose(fixture.container, "Project", "No Project");
+    await settlePreviews();
+    await enterTask(fixture.container);
+    await openSelect(fixture.container, "Account for Claude");
+    await act(async () => { fixture.container.querySelector<HTMLButtonElement>('[role="option"]:not([aria-disabled="true"])')?.click(); });
+    await settle();
+    assert.equal(footerReason(fixture.container), null);
+
+    // The account it chose signs out while the dialog is open, with another still ready.
+    const signedOut: RunnerView = {
+      ...accountRunner,
+      providerAccounts: accountRunner.providerAccounts!.map((account) => account.id === "work" ? { ...account, authStatus: "unauthenticated" as const } : account),
+      agents: accountRunner.agents.map((agent) => agent.id === "claude" ? { ...agent, providerAccountReadiness: { defaultAuthStatus: "unknown" as const, readyAccountIds: ["home"] } } : agent),
+    };
+    await act(async () => { fixture.socket.push(snapshot({ runners: [signedOut] })); });
+    await settlePreviews();
+    assert.equal(footerReason(fixture.container), "Choose an account for Claude to continue.");
+    assert.equal(button(fixture.container, /^Run 2 Agents$/u).disabled, true);
+    await act(async () => { button(fixture.container, /^Run 2 Agents$/u).click(); });
+    assert.equal(fixture.parallelRequests.length, 0, "nothing starts on the account that stopped working");
+
+    await openSelect(fixture.container, "Account for Claude");
+    await act(async () => { fixture.container.querySelector<HTMLButtonElement>('[role="option"]:not([aria-disabled="true"])')?.click(); });
+    await settle();
+    assert.equal(footerReason(fixture.container), null);
+    await clickPrimary(fixture.container, "Run 2 Agents");
+    assert.deepEqual(fixture.parallelRequests[0]?.providerAccountIds, { claude: "home" });
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a member the policy can place again drops a choice that stopped working (#4353)", async () => {
+  let required = true;
+  const placed = { provider: "claude", mode: "priority", policyRevision: 2, status: "selected", source: "priority", accountId: "home", enforcement: "enforced", generatedAt: 1,
+    candidates: [{ accountId: "home", position: 1, eligible: true, selected: true }] };
+  const fixture = await mountFixture({ runners: [accountRunner] }, { preview: (agentId) => agentId === "claude" && !required ? placed : noEligible(agentId) });
+  try {
+    await choose(fixture.container, "Project", "No Project");
+    await settlePreviews();
+    await enterTask(fixture.container);
+    await openSelect(fixture.container, "Account for Claude");
+    await act(async () => { fixture.container.querySelector<HTMLButtonElement>('[role="option"]:not([aria-disabled="true"])')?.click(); });
+    await settle();
+
+    required = false;
+    const signedOut: RunnerView = {
+      ...accountRunner,
+      providerAccounts: accountRunner.providerAccounts!.map((account) => account.id === "work" ? { ...account, authStatus: "unauthenticated" as const } : account),
+      agents: accountRunner.agents.map((agent) => agent.id === "claude" ? { ...agent, providerAccountReadiness: { defaultAuthStatus: "unknown" as const, readyAccountIds: ["home"] } } : agent),
+    };
+    await act(async () => { fixture.socket.push(snapshot({ runners: [signedOut] })); });
+    await settlePreviews();
+    assert.equal(footerReason(fixture.container), null);
+    await clickPrimary(fixture.container, "Run 2 Agents");
+    assert.equal(fixture.parallelRequests[0]?.providerAccountIds, undefined, "the policy places it, so nothing names the signed-out account");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a member the policy can place names no account and shows what it expects (#4353)", async () => {
+  const expected = { provider: "claude", mode: "priority", policyRevision: 2, status: "selected", source: "priority", accountId: "work", enforcement: "enforced", generatedAt: 1,
+    candidates: [{ accountId: "work", position: 1, eligible: true, selected: true }] };
+  const fixture = await mountFixture({ runners: [accountRunner] }, { preview: (agentId) => agentId === "claude" ? expected : noEligible("codex") });
+  try {
+    await choose(fixture.container, "Project", "No Project");
+    await settlePreviews();
+    await enterTask(fixture.container);
+    assert.equal(footerReason(fixture.container), null);
+    assert.ok(!(dialog(fixture.container).textContent ?? "").includes("Account for"));
+    assert.match(dialog(fixture.container).textContent ?? "", /first account in the machine's Priority Order/u);
+    await clickPrimary(fixture.container, "Run 2 Agents");
+    assert.equal(fixture.parallelRequests[0]?.providerAccountIds, undefined, "the expected account isn't an explicit override");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a workflow role asks for its account by role, and rebinding the role forgets it (#4353)", async () => {
+  const fixture = await mountFixture({ runners: [accountRunner] }, { preview: noEligible });
+  try {
+    await choose(fixture.container, "Project", "No Project");
+    await chooseType(fixture.container, "Run a Workflow");
+    await settlePreviews();
+    await enterTask(fixture.container);
+    assert.equal(footerReason(fixture.container), "Choose an account for Builder Agent to continue.");
+    await openSelect(fixture.container, "Account for Builder Agent");
+    await act(async () => { fixture.container.querySelector<HTMLButtonElement>('[role="option"]:not([aria-disabled="true"])')?.click(); });
+    await settle();
+    assert.equal(footerReason(fixture.container), null);
+    await clickPrimary(fixture.container, "Start Workflow");
+    assert.deepEqual(fixture.workflowRequests[0]?.providerAccountBindings, { claude: "work" });
   } finally {
     await unmountFixture(fixture);
   }

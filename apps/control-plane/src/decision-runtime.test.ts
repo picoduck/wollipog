@@ -124,7 +124,7 @@ test("a transient failure that succeeds on retry records one verdict and creates
   assert.ok(Object.values(view.inputDigests).every((digest) => /^[0-9a-f]{64}$/u.test(digest)));
   assert.deepEqual(view.attempts, [
     { attempt: 1, errorClass: "provider_overloaded", latencyMs: 1_500 },
-    { attempt: 2, latencyMs: 1_500 },
+    { attempt: 2, model: "claude-haiku-4-5", latencyMs: 1_500 },
   ]);
   // The stored audit never holds the inputs themselves.
   const stored = JSON.stringify(run.db.raw().prepare("SELECT * FROM decision_occurrences").all());
@@ -401,6 +401,22 @@ test("runner results are sanitized to the Decision boundary", () => {
   }, []);
   assert.equal(view.usage.costUsd, 0);
   assert.equal("typedAnswers" in view, false, "a single-verdict occurrence keeps its form");
+});
+
+test("a Decision record carries the model each attempt reported, and none for an attempt that reported none (#4367)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.createDecisionOccurrence({
+    occurrenceId: "dec_models", organizationId: ORG, campaignSessionId: null, occurrenceKey: null, kind: "probe",
+    promptVersion: "probe.v1", inputDigests: {}, inputDigest: "d", now: 1,
+  });
+  db.startDecisionAttempt("dec_models", 1, "req_1", 1);
+  db.finishDecisionAttempt("dec_models", 1, { latencyMs: 5, errorClass: "transport", costUsd: null });
+  db.startDecisionAttempt("dec_models", 2, "req_2", 2);
+  db.finishDecisionAttempt("dec_models", 2, { latencyMs: 7, errorClass: null, provider: "claude", model: "claude-haiku-5-5", costUsd: null });
+  assert.deepEqual(decisionOccurrenceView(db.getDecisionOccurrence("dec_models")!, db.listDecisionAttempts("dec_models")).attempts, [
+    { attempt: 1, errorClass: "transport", latencyMs: 5 },
+    { attempt: 2, model: "claude-haiku-5-5", latencyMs: 7 },
+  ]);
 });
 
 test("a routing claim interrupted by a restart is routed again and links the one existing request", async () => {

@@ -17,6 +17,14 @@ const SAFE_LABEL = /^[a-zA-Z0-9._ -]{1,40}$/;
 const MAX_ACCOUNT_LABEL_LENGTH = 160;
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const PERMISSION_MODES = ["acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan"];
+/**
+ * The permission mode of a one-shot, tool-less call: session naming and Decision calls. It refuses
+ * anything not pre-approved, and with no settings nothing is. Never `plan` (#4367). Measured on
+ * 2.1.318 with otherwise identical flags: `--model haiku` under `plan` answers on Sonnet at about 20
+ * times the cost, while `opusplan` needs `plan` to mean Opus; and `plan` adds about 2,500 tokens of
+ * planning instructions that a call answers instead of its own prompt, even on an exact model id.
+ */
+export const CLAUDE_TOOLLESS_CALL_PERMISSION_MODE = "dontAsk";
 /** Earliest release regression-verified for the stream-json stdio control and image-block contract. */
 export const CLAUDE_CONTROL_CONTRACT_MIN_VERSION = "2.1.205";
 export const CLAUDE_STEERING_MIN_VERSION = "2.1.241";
@@ -148,7 +156,7 @@ export function parseClaudeHelp(help: string): Pick<ClaudeCodeCapabilities,
     "--setting-sources", "--no-session-persistence", "--disable-slash-commands", "--no-chrome",
     "--system-prompt",
   ];
-  const sessionNaming = permissionModes.includes("plan") && namingFlags.every((flag) => help.includes(flag));
+  const sessionNaming = permissionModes.includes(CLAUDE_TOOLLESS_CALL_PERMISSION_MODE) && namingFlags.every((flag) => help.includes(flag));
   return {
     effortLevels: effortBlock ? EFFORTS.filter((value) => new RegExp(`\\b${value}\\b`).test(effortBlock)) : [],
     permissionModes,

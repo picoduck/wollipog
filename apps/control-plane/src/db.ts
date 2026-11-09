@@ -699,8 +699,8 @@ CREATE TABLE IF NOT EXISTS machine_provider_account_defaults (
   revision INTEGER NOT NULL CHECK (revision > 0),
   updated_at INTEGER NOT NULL,
   -- Versioned selection policy (#4353). account_id stays the fixed default under every mode. mode is
-  -- deliberately unconstrained, with mode_settings beside it, so a later mode needs no table rebuild;
-  -- a value this release doesn't know reads as unsupported and fails closed.
+  -- unconstrained text and mode_settings is unused; a value this release doesn't know reads as
+  -- unsupported and fails closed.
   mode TEXT NOT NULL DEFAULT 'fixed',
   priority_account_ids TEXT NOT NULL DEFAULT '[]',
   mode_settings TEXT NOT NULL DEFAULT '{}',

@@ -294,13 +294,13 @@ function providerAccountChoiceSuffix(data: Json): string {
   const retryAt = typeof selection.retryAt === "number" ? ` retryAt=${new Date(selection.retryAt).toISOString()}` : "";
   return ` [${PROVIDER_ACCOUNT_CHOICE_REQUIRED} refusal=${String(selection.refusal)} actions=${actions}${retryAt}] ` +
     "choose_account: read get_provider_account_selection (wollipog session accounts) and pass an accountRef whose canName is true " +
-    "as create_session providerAccountId (wollipog session create --provider-account). Runs and workflows can't name an account.";
+    "as create_session providerAccountId (wollipog session create --provider-account), create_run providerAccountIds or create_workflow_run providerAccountBindings.";
 }
 
 /** A control plane below v337 can't read an account reference. Sending one would be refused as an
  * unknown account at best, so say what actually stands in the way. */
-async function providerAccountChoiceCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
-  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccountAgentChoice;
+async function providerAccountChoiceCompatibilityError(deps: McpDeps, capability: "providerAccountAgentChoice" | "memberProviderAccountChoice" = "providerAccountAgentChoice"): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL[capability];
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
     const result = await cpFetch(deps, "GET", "/api/compatibility");
@@ -3618,6 +3618,7 @@ export const TOOLS: McpTool[] = [
         title: { type: "string" },
         useWorktree: { type: "boolean" },
         agentBindings: { type: "object", additionalProperties: { type: "string" } },
+        providerAccountBindings: { type: "object", additionalProperties: { type: "string" }, description: "An accountRef from get_provider_account_selection whose canName is true, by the role's key in agentBindings. Overrides the Machine's account policy for that role; omit a role to let the policy choose" },
         costBudgetUsd: { type: "number", minimum: 0 },
         maxToolCalls: { type: "number", minimum: 0 },
       },
@@ -3635,8 +3636,12 @@ export const TOOLS: McpTool[] = [
         workflowId: args.workflowId,
         task: args.task,
       };
-      for (const key of ["workflowVersion", "title", "useWorktree", "agentBindings", "costBudgetUsd", "maxToolCalls"]) {
+      for (const key of ["workflowVersion", "title", "useWorktree", "agentBindings", "providerAccountBindings", "costBudgetUsd", "maxToolCalls"]) {
         if (args[key] !== undefined) body[key] = args[key];
+      }
+      if (args.providerAccountBindings !== undefined) {
+        const compatibilityError = await providerAccountChoiceCompatibilityError(deps, "memberProviderAccountChoice");
+        if (compatibilityError) return compatibilityError;
       }
       const r = await createWithSpawnApproval(deps, "the same create_workflow_run call", "/api/workflow-runs", body);
       if (!r.ok) return errorResult(r.message);
@@ -4349,6 +4354,7 @@ export const TOOLS: McpTool[] = [
         title: { type: "string" },
         costBudgetUsd: { type: "number" },
         maxToolCalls: { type: "number" },
+        providerAccountIds: { type: "object", additionalProperties: { type: "string" }, description: "An accountRef from get_provider_account_selection whose canName is true, by agent id. Overrides the Machine's account policy for that member; omit a member to let the policy choose" },
       },
       required: ["runnerId", "workspaceId", "agentIds", "task"],
       additionalProperties: false,
@@ -4373,6 +4379,11 @@ export const TOOLS: McpTool[] = [
       if (typeof args.title === "string") body.title = args.title;
       if (typeof args.costBudgetUsd === "number") body.costBudgetUsd = args.costBudgetUsd;
       if (typeof args.maxToolCalls === "number") body.maxToolCalls = args.maxToolCalls;
+      if (args.providerAccountIds !== undefined) {
+        const compatibilityError = await providerAccountChoiceCompatibilityError(deps, "memberProviderAccountChoice");
+        if (compatibilityError) return compatibilityError;
+        body.providerAccountIds = args.providerAccountIds;
+      }
       const r = await createWithSpawnApproval(deps, "the same create_run call", "/api/runs", body);
       if (!r.ok) return errorResult(r.message);
       return textResult({

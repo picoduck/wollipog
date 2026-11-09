@@ -24,6 +24,10 @@ A harness qualifies when its runner speaks protocol v285 and discovery advertise
 Claude Code with the session-naming lockdown flags plus `--json-schema`, or Codex App Server at the
 session-naming floor.
 
+A Claude Code alias that only means one model in plan mode, such as `opusplan`, is not offered as a
+target and a saved one is refused as unavailable, because these calls never run in plan mode (see
+Calls).
+
 ## Calls
 
 A call runs on the runner, with credentials that stay on the runner, through `run_decision`. The
@@ -31,6 +35,24 @@ runner runs the harness in a neutral directory with no tools, no MCP servers, no
 access and no persistence, and returns only the structured output and usage. Claude Code's
 `structured_output` and Codex's schema-constrained final message are the only answers; free text is
 never parsed.
+
+Claude Code calls and session naming use `--permission-mode dontAsk`, never `plan` (#4367). Both
+refuse every tool here, and `--tools ""` already leaves none but the schema's own. Measured on
+2.1.318 with otherwise identical flags, `plan` also does two things a call must not get:
+
+- It changes the model behind an alias. `--model haiku` answers on `claude-sonnet-5-5` at about 20
+  times the cost, while `--model opusplan` means Opus only in plan mode.
+- It adds about 2,500 tokens of planning instructions, which a call can answer instead of its own
+  prompt. An exact model id under `plan` stayed on Haiku and still replied that plan mode was active.
+
+Discovery advertises `sessionNaming` and `decisionCalls` only for a release whose help lists
+`dontAsk`. The `discovery` probe in `pnpm probe:claude-assumptions` re-measures the model a real
+`claude` asks for on these flags, so a release that changes it is reported.
+
+A Decision record shows both models: **Target Model**, which the setting chose, and **Answered By**,
+the exact id the provider reported for its attempts: Claude Code's `modelUsage`, and for Codex App
+Server the turn's model, or the `model/rerouted` target when the server reports one. A record whose
+attempts reported none, such as a call that never reached a provider, shows no answering model.
 
 Each kind lives in `apps/control-plane/src/decision-kinds.ts`: a fixed `promptVersion`, fixed
 instructions, its verdicts (always including `uncertain`) and any extra fields. Untrusted inputs

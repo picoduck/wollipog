@@ -47,7 +47,8 @@ that left the machine keeps its place until removed. Turning Priority Order on s
 default, then the listed accounts this server may use; returning to Default Account restores the
 default. New Session and New Multi-Agent Run show the expected account and its reason. Choosing a
 different account in New Session overrides the policy for that session. When no account is eligible,
-New Session asks for one before it can start.
+New Session asks for one before it can start, and New Multi-Agent Run asks for each member that needs
+one, under either Run Type. A member whose account is fine stays with its expected account.
 
 ## Selection Policy
 
@@ -77,9 +78,11 @@ Missing or old usage readings don't disqualify an account: only a reading that s
 Selection never crosses providers.
 
 Explicit choices win. A session or child that names an account uses it, whatever the policy says or
-would skip. Runs and workflows can't name one yet. All of them resolve through one function
-(`launchProviderAccount`), and multi-agent runs and workflows now bind the same account a session
-would, including a fixed default. WSL agents keep their context-local account, because a POSIX path
+would skip. A run or workflow names one per member (`providerAccountIds` by agent id,
+`providerAccountBindings` by role, `orchestratorProviderAccountId`), and a member it doesn't name
+follows the policy. All of them resolve through one function (`launchProviderAccount`), and multi-agent
+runs and workflows bind the same account a session would, including a fixed default. Automations can't
+name one: they resolve at each launch. WSL agents keep their context-local account, because a POSIX path
 doesn't identify its owning distribution, so a machine policy doesn't apply to them.
 
 Resolution happens at dispatch and again at launch. The runner rechecks a Priority Order choice
@@ -128,7 +131,7 @@ mean using other accounts' credential HOMEs:
 
 Either of these would change the decision: a captured real refusal, which could support skipping an
 account after it refuses a model, or proof that catalogs differ by plan, which could justify probing
-each account. Automatic Balance must count compatibility as unknown and never score on it.
+each account. Until then, nothing here can support choosing an account by model.
 
 ### When No Account Is Eligible
 
@@ -144,7 +147,10 @@ of them. Unattended callers can act on this result; interactive ones offer the s
 `create_session` and `wollipog session create --provider-account` accept an optional account, and
 `get_provider_account_selection` and `wollipog session accounts` list what can be named. An agent's
 refusal text names this route. Both need protocol 337 on the control plane; the tools refuse before
-sending anything to an older one, so a choice is never silently dropped.
+sending anything to an older one, so a choice is never silently dropped. `create_run`
+(`providerAccountIds`) and `create_workflow_run` (`providerAccountBindings`) do the same per member
+and need protocol 338, for the same reason. A key that is no member is refused rather than ignored, and
+a refusal of a named account starts no member and names the member it was for.
 
 Agents see accounts only as opaque `accountRef` values, stable for one account on one Machine, because
 an account's id contains its label. The server enforces this on the selection route and on a launch's
@@ -186,16 +192,99 @@ Account labels are personal data and account ids are derived from them. Refusal 
 the runner's launch refusal and the reason stored on a session (`providerAccountSelection`: source,
 mode, policy revision and skip counts by reason) name no account. Only `candidates` and a saved
 default's `accountId`, returned to a person who can read the machine's account inventory, carry
-account ids. An agent's credential gets references and reason codes instead, so no id or label reaches
-a model's context through the agent tools. `GET /api/runners` still returns the inventory to that
-credential, though no tool passes it on.
+account ids. An agent's credential gets references and reason codes instead, on the selection route, on
+a launch's refusal and on `GET /api/runners`, which omits the Machine's accounts, saved policies and sign-in
+operations for that credential, along with each agent's default account and readiness. Each agent's
+`available` and `authStatus` stay. People read the same route as before.
 
-## Remaining Work in #4353
+## Stored Policy Shape
 
-Reset-aware **Automatic Balance** is not implemented, and neither the API nor the stored policy offers
-it. It needs fresh usage for idle accounts and a rule validated across multiple windows and unequal
-plans. The stored policy already has room for it: `mode` is unconstrained text with a `mode_settings`
-column beside it, so adding a mode needs no migration, and until then a value this release doesn't
-know fails closed. Candidates pass the shared eligibility checks in `providerAccountIneligibility`
-first; a mode only chooses among what remains, in `chooseEligibleCandidate`. Neither mode may spend
-API credits implicitly.
+`machine_provider_account_defaults` holds `mode`, `priority_account_ids`, `schema_version` and an unused
+`mode_settings` column. `mode` is unconstrained text, and a value this release doesn't recognize reads as
+`unsupported` and fails closed. Every candidate passes `providerAccountIneligibility` before a mode chooses,
+in `chooseEligibleCandidate`, and no mode spends API credits implicitly.
+
+## Automatic Balance Was Not Built
+
+#4353 proposed a third mode that would prefer an account whose allowance is about to reset. On 2026-11-09 the
+owner decided not to build it. The API, stored policy and interface have no such mode, no refresh was added for
+it, and the issue's reset-aware criterion is not delivered. Default Account and Priority Order are unaffected.
+This section records why, and what would justify looking again.
+
+### What Wollipog Can Observe
+
+These come from reading the code. No probe ran against a real account, and no real usage was read.
+
+- **Claude.** Readings arrive only from provider responses in a session. No read without a turn exists, so an
+  idle account has an old reading or none.
+- **Codex.** A no-turn probe spawns `codex app-server`, up to 8 seconds per account and one at a time, holding a
+  reference to the account's provider HOME. It runs at runner start, sign-in, a harness change or a person's
+  Refresh. The 5-minute discovery timer explicitly skips it.
+- **Windows.** A reading has one `fetchedAt`, so a sparse event can make an older window look fresh.
+
+A reading counts as fresh for 10 minutes, so in practice only an account in active use has one. Those are the
+accounts a comparison needs least.
+
+### The Rule That Was Tested
+
+Use the account that would lose the most to its next reset: the remaining percentage of its longest window,
+discounted by the time to that window's reset, so 40% resetting in 3 hours beats 80% resetting in 5 days. A
+shorter window about to reset adds a small nudge, and an account whose tightest limit is under 10% goes last.
+Everything `providerAccountIneligibility` refuses still comes first. When any eligible account is unknown there
+is no safe choice, because the accounts with numbers are the busy ones. Equal percentages on unequal plans tie:
+percentage ranking is a heuristic, not capacity.
+
+### What the Simulation Showed
+
+Read these for direction, not precision. They come from a model with invented workloads, not from measurement.
+
+| Rule | Launches Where It Could Compare Every Eligible Account | Work Not Served | Allowance Lost at Resets |
+| --- | --- | --- | --- |
+| Priority Order | Doesn't compare | About 12% | About 25% |
+| Fresh readings only, idle accounts unknown | 0% for one person working alone; 1–43% with parallel or campaign work | About 11% | About 24% |
+| Compare only the accounts with fresh numbers | Almost none | About 12% | About 24% |
+| Last-known reading of any age | 93–99.6% | About 7% | About 18% |
+| Perfect information | All, or about all with a Codex-only probe at each launch | About 5% | About 16% |
+| Round robin, reading no usage | Doesn't compare | About 5% | About 16% |
+| Highest remaining percentage, ignoring resets | Doesn't compare | About 4% | About 17% |
+
+These are at 95% load, across all workloads and account sets. Three things follow:
+
+- Balance on fresh readings matches Priority Order, while finding no safe choice on 85–100% of contested
+  launches. That means a question at nearly every launch, and unattended launches refused.
+- Most of the gain comes from spreading work, not from reset timing: round robin ties perfect information.
+- Reset timing helped only when the weekly limit alone was what ran out. There, earliest reset first with perfect
+  information lost about 12% of allowance against round robin's 13% at 95% load, and 7% against 9% at 120%. When
+  five-hour limits bound it did worse, with about 9% of work unserved, because it concentrates work. Other urgency
+  curves didn't change this.
+
+### Assumptions
+
+- Workloads are invented: one person's sessions in turn, three sessions at a time through a working day, and
+  48-hour campaign bursts, over 2 to 4 accounts for 4 weeks, with one account set holding a plan 5 times larger.
+- A five-hour window holds 20% of a week's allowance and starts at first use. At 10% and 40% every number moved,
+  but Priority Order stayed worst and round robin stayed level with or ahead of perfect information.
+- Weekly windows have fixed, unrelated reset times.
+- 5% of each account's capacity is spent outside Wollipog, unseen until its next reading. At higher shares,
+  last-known scoring more often chose an account that was really used up.
+- A session cut off by a limit loses its remaining work, which overstates what any rule saves.
+
+### What Wasn't Verified
+
+Real workloads, how long accounts really sit idle, real window ratios, how Claude windows start, whether Codex's
+rate-limit read counts against allowance, and the real shape of every provider's windows beyond existing fixtures.
+
+### Provider Terms
+
+**Switch Accounts at a Usage Limit** warns that automatically rotating between your own subscriptions can be a
+gray area under provider terms. Every Balance rule considered here rotates accounts between new sessions. The
+terms themselves weren't assessed.
+
+### What Would Justify Reopening It
+
+Both of these, together:
+
+- Real measurements of how old each account's reading is at launch, in place of the assumed workloads.
+- Per-window observation times, proposed in #4363, so a sparse event can't make an older window look fresh.
+
+Even then, the evidence has to show that reset timing beats simply spreading work.

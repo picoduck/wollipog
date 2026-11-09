@@ -23,6 +23,7 @@ import { CLAUDE_MEDIA_REVIEWER_CLI_VERSION, CLAUDE_MEDIA_REVIEWER_ENV, CLAUDE_ME
 import { CLAUDE_CONTROL_CONTRACT_MIN_VERSION, CLAUDE_IMAGE_TOOL_RESULT_MIN_VERSION, CLAUDE_STEERING_MIN_VERSION,
   claudeCapabilitiesFromProbe, claudeVersionAtLeast, probeClaudeCode } from "../src/discovery/claude-code.js";
 import type { ExecResult } from "../src/discovery/resolve.js";
+import { claudeDecisionArgs } from "../src/decision-calls.js";
 import { buildClaudeUserMessage, claudePermissionArgs } from "../src/drivers/claude-code.js";
 import { MANAGED_WORKTREE_GUARD_MATCHER } from "../src/managed-worktree-guard.js";
 import { MEDIA_MCP_SERVER_NAME } from "../src/media-review-relay.js";
@@ -170,6 +171,8 @@ interface SessionSpec {
   allowUnfinished?: boolean;
   args: (paths: IsolatedHome) => string[];
   stdin?: (paths: IsolatedHome) => string[];
+  /** A one-shot `-p` call reads to end of input, so its stdin ends after those lines. */
+  closeStdin?: boolean;
   onEvent?: Parameters<typeof runClaude>[0]["onEvent"];
   prepare?: (paths: IsolatedHome) => void;
   /** Run in an earlier session's homes (resume) instead of fresh ones. */
@@ -198,7 +201,7 @@ async function session(context: Context, spec: SessionSpec): Promise<Session> {
     const env = { ...isolatedClaudeEnv(paths, stub.url, proxy.url), ...spec.env };
     const run = await runClaude({
       bin: context.bin, args: spec.args(paths), cwd: paths.work, env, timeoutMs: TURN_TIMEOUT_MS,
-      traceFile: context.detector.ok ? join(paths.root, `trace-${randomUUID()}.log`) : undefined, stdin: spec.stdin?.(paths), onEvent: spec.onEvent,
+      traceFile: context.detector.ok ? join(paths.root, `trace-${randomUUID()}.log`) : undefined, stdin: spec.stdin?.(paths), closeStdinAfterWrite: spec.closeStdin, onEvent: spec.onEvent,
     });
     // Record what the run contacted before judging it: a failed case still counts against silence.
     for (const request of stub.requests) context.routes.add(`${request.method} ${request.path.split("?")[0]}`);
@@ -652,7 +655,7 @@ async function probeDiscovery(context: Context): Promise<void> {
     if (discovery.failure?.code === "probe_timeout" || discovery.failure?.code === "version_unverified") throw new CouldNotRun(`discovery failed: ${discovery.failure.code}`);
     expect(discovery.installedVersion === context.version, `discovery read ${String(discovery.installedVersion)}`);
     expect(discovery.streamJsonInput, "help no longer advertises --input-format stream-json");
-    for (const mode of ["acceptEdits", "auto", "bypassPermissions", "plan"]) expect(discovery.permissionModes.includes(mode), `help no longer lists permission mode ${mode}`);
+    for (const mode of ["acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan"]) expect(discovery.permissionModes.includes(mode), `help no longer lists permission mode ${mode}`);
     expect(discovery.status !== "unsupported", `discovery classified this release unsupported (${discovery.failure?.message ?? ""})`);
     return `status ${discovery.status}; modes ${discovery.permissionModes.join(",")}; replay ${discovery.replayUserMessages}; fork ${discovery.forkSession}`;
   });
@@ -671,6 +674,29 @@ async function probeDiscovery(context: Context): Promise<void> {
       return `${context.version} ${at ? "meets" : "is below"} ${floor}; attested=${attested}`;
     });
   }
+  await measure("a Decision call on the `haiku` alias asks for Haiku, in dontAsk, with no tools but its schema and no MCP servers", DISCOVERY, async () => {
+    const marker = "DECISION-CALL-PROBE";
+    const schema = { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false };
+    const result = await session(context, {
+      conversations: [{ marker, steps: [() => tool("structured-1", "StructuredOutput", { answer: "ok" })] }],
+      // The structured answer ends the call, so the scripted conversation has no later final turn.
+      allowUnfinished: true,
+      args: () => [...claudeDecisionArgs([], { agentId: "claude-code", driver: "claude-code", model: "haiku", effort: "low" }, "Answer with the schema.", schema),
+        // The call itself reads one JSON envelope; the startup init is only in the stream.
+        "--output-format", "stream-json", "--verbose"],
+      stdin: () => [marker],
+      closeStdin: true,
+    });
+    const final = completed(result);
+    expect(JSON.stringify(final.structured_output) === '{"answer":"ok"}', `the call answered ${JSON.stringify(final.structured_output)}`);
+    requireMode(result, "dontAsk");
+    const tools = result.init?.tools as string[] | undefined;
+    expect(JSON.stringify(tools) === '["StructuredOutput"]', `the call offered tools ${JSON.stringify(tools)}`);
+    expect(Array.isArray(result.init?.mcp_servers) && !(result.init.mcp_servers as unknown[]).length, "the call loaded MCP servers");
+    const requested = [...new Set(result.requests.flatMap((request) => typeof request.body?.model === "string" ? [request.body.model] : []))];
+    expect(requested.length > 0 && requested.every((model) => /haiku/iu.test(model)), `the call asked for ${requested.join(", ")}`);
+    return `init mode dontAsk; tools ${JSON.stringify(tools)}; asked for ${requested.join(", ")}`;
+  });
 }
 
 // ---------------------------------------------------------------------------------------------

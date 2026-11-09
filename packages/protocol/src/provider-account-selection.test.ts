@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  memberProviderAccountsError,
+  runnerViewForAgent,
   agentAvailableForRunnerDefault,
   parseProviderAccountPolicyWrite,
   providerAccountChoiceRequired,
@@ -239,8 +241,7 @@ test("a policy write is checked for shape and keeps what it doesn't name", () =>
   const keep = parseProviderAccountPolicyWrite({ mode: "fixed", expectedRevision: 3 }, current);
   assert.deepEqual(keep, { ok: true, mode: "fixed", fixedAccountId: "a", priorityAccountIds: ["a", "b"], expectedRevision: 3 });
   const bad = (body: unknown) => assert.equal(parseProviderAccountPolicyWrite(body, null).ok, false, JSON.stringify(body));
-  bad({ mode: "automatic_balance", expectedRevision: 0 });
-  bad({ mode: "balance", expectedRevision: 0 });
+  bad({ mode: "unrecognized_mode", expectedRevision: 0 });
   bad({ mode: "priority", priorityAccountIds: ["a"] });
   bad({ mode: "priority", expectedRevision: -1, priorityAccountIds: ["a"] });
   bad({ mode: "priority", expectedRevision: 0, priorityAccountIds: [] });
@@ -262,4 +263,30 @@ test("harness availability under Priority Order counts only ranked accounts that
   assert.equal(agentAvailableForRunnerDefault({ ...agent([]), context: { kind: "wsl", distro: "Ubuntu" },
     providerAccountReadiness: { defaultAuthStatus: "authenticated", defaultAccountId: "w", readyAccountIds: ["w"] } }, defaults), true,
   "WSL keeps its own default");
+});
+
+test("an agent's view of a Machine holds no account id, and keeps what its tools read (#4353)", () => {
+  const runner = {
+    runnerId: "r1",
+    providerAccounts: [{ id: "person-example-com-1", label: "person@example.com", provider: "claude" }],
+    providerAccountDefaults: [{ provider: "claude", accountId: "person-example-com-1", fixedAccountId: "person-example-com-1", priorityAccountIds: ["person-example-com-1"], revision: 1 }],
+    providerLogins: [{ operationId: "o", accountId: "person-example-com-1" }],
+    agents: [{ id: "claude", available: true, authStatus: "authenticated", defaultProviderAccountId: "person-example-com-1",
+      providerAccountReadiness: { defaultAccountId: "person-example-com-1", defaultAuthStatus: "authenticated", readyAccountIds: ["person-example-com-1"] },
+      capabilities: { models: [] } }],
+  } as unknown as Parameters<typeof runnerViewForAgent>[0];
+  const narrowed = runnerViewForAgent(runner);
+  assert.ok(!JSON.stringify(narrowed).includes("person"), JSON.stringify(narrowed));
+  assert.deepEqual(narrowed, { runnerId: "r1", agents: [{ id: "claude", available: true, authStatus: "authenticated", capabilities: { models: [] } }] });
+});
+
+test("named member accounts refuse a stranger instead of dropping it (#4353)", () => {
+  assert.equal(memberProviderAccountsError(undefined, ["a"], "field"), null);
+  assert.equal(memberProviderAccountsError({}, ["a"], "field"), null);
+  assert.equal(memberProviderAccountsError({ a: "work" }, ["a"], "field"), null);
+  assert.equal(memberProviderAccountsError({ a: "acct:0123456789abcdef" }, ["a"], "field"), null);
+  assert.match(memberProviderAccountsError({ b: "work" }, ["a"], "field") ?? "", /names 'b'/u);
+  for (const bad of [[], null, "work", { a: "" }, { a: 7 }, { a: "acct:short" }, { a: "../work" }]) {
+    assert.equal(memberProviderAccountsError(bad, ["a"], "field"), "field is invalid", JSON.stringify(bad));
+  }
 });
