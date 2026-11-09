@@ -329,24 +329,25 @@ export interface ReviewPromptInput {
 /**
  * A diff of `paths` within the patch limit. When the whole diff does not fit or cannot be read, each
  * file is read alone and the smallest are kept, so one oversized file cannot hide the others. The
- * fallback holds at most `limit` bytes and stops at `maxFiles` reads or `budgetMs`; `omitted` names
- * every file left out, for any of those reasons.
+ * fallback holds at most `limit` bytes and stops at `maxFiles` reads or `budgetMs`. A binary diff
+ * shows nothing, so it counts as left out too. `omitted` names every file left out, for any reason.
  */
 export async function boundedFileDiffs(read: (paths: string[]) => Promise<string>, paths: string[], options: {
   limit?: number; maxFiles?: number; budgetMs?: number; now?: () => number;
 } = {}): Promise<{ patch: string; omitted: string[] }> {
   const { limit = REVIEW_PATCH_LIMIT_BYTES, maxFiles = REVIEW_INDIVIDUAL_DIFFS_LIMIT, budgetMs = REVIEW_INDIVIDUAL_DIFFS_BUDGET_MS, now = Date.now } = options;
   const whole = await read(paths).catch(() => null);
-  if (whole !== null && Buffer.byteLength(whole) <= limit) return { patch: whole, omitted: [] };
+  // A hunk's lines all start with a marker, so only Git's own notice can start with these words.
+  const binary = (text: string) => /^Binary files .* differ$/mu.test(text);
+  if (whole !== null && Buffer.byteLength(whole) <= limit && !binary(whole)) return { patch: whole, omitted: [] };
   const kept = new Map<string, { text: string; bytes: number }>();
   let used = 0;
   const deadline = now() + budgetMs;
   for (const path of paths.slice(0, maxFiles)) {
     if (now() >= deadline) break;
     const text = await read([path]).catch(() => null);
-    if (text === null) continue;
+    if (text === null || binary(text)) continue;
     const bytes = Buffer.byteLength(text);
-    if (bytes > limit) continue;
     kept.set(path, { text, bytes });
     used += bytes;
     // Past the limit, the largest diff held so far goes, so what is held never grows past it.
@@ -429,7 +430,7 @@ export function reviewPrompt(input: ReviewPromptInput): string {
   }
   if (input.mergedBase) {
     if (input.patchOmitted?.length) {
-      lines.push("These files' diff is too large to inline or could not be read, so the patch above leaves them out. Read them from the checkout:",
+      lines.push("These files' diff is binary, too large to inline or could not be read, so the patch above leaves them out. Read them from the checkout:",
         ...input.patchOmitted.map(reviewPromptPath), "");
     }
     const omitted = input.reviewedOmitted ?? [];
@@ -441,7 +442,7 @@ export function reviewPrompt(input: ReviewPromptInput): string {
       lines.push(`The pull request changed none of these files at ${input.since}.`, "");
     }
     if (omitted.length) {
-      lines.push(`These files' diff at ${input.since} is too large to inline or could not be read, and the checkout does not hold it, so this round cannot show what the merge dropped from them. Say so in your report:`,
+      lines.push(`These files' diff at ${input.since} is binary, too large to inline or could not be read, and the checkout does not hold it, so this round cannot show what the merge dropped from them. Say so in your report:`,
         ...omitted.map(reviewPromptPath), "");
     }
   }
@@ -752,10 +753,7 @@ export class ReviewSessionLauncher {
           const before = await boundedFileDiffs(ownDiff(sinceBase, since), scopeFiles);
           reviewedPatch = before.patch;
           reviewedOmitted = before.omitted;
-          // A round that cannot show its whole effect is not a proven base-merge round: it is charged,
-          // so it needs budget like any other. A retry of a charged attempt still has its budget.
           evidenceComplete = !after.omitted.length && !before.omitted.length;
-          if (planned.baseMerge && !evidenceComplete && history.validRounds >= history.roundBudget) refuseReview(REVIEW_ROUND_REFUSALS.roundLimit);
         }
       } else if (mode === "rebase") {
         const touched = new Set(await names(planned.rebasedFrom!.headSha, policy.headSha));
@@ -767,13 +765,18 @@ export class ReviewSessionLauncher {
         patch = await diff([], `${baseSha}...${policy.headSha}`).catch(() => null);
       }
       if (patch !== null && Buffer.byteLength(patch) > REVIEW_PATCH_LIMIT_BYTES) patch = null;
+      // The planner admitted a base merge without budget. A round that cannot show its whole effect,
+      // or turned out not to be scoped as one, is charged, so it needs budget like any other. A retry
+      // of a charged attempt still has its budget: an invalid attempt uses none.
+      const uncharged = planned.baseMerge === true && mergedBase && evidenceComplete;
+      if (planned.baseMerge && !uncharged && history.validRounds >= history.roundBudget) refuseReview(REVIEW_ROUND_REFUSALS.roundLimit);
       const tracked = new Set((await git(["ls-tree", "-r", "--name-only", "-z", "--end-of-options", policy.headSha])).split("\0").filter(Boolean));
       const round: ReviewAttemptRound = {
         epoch: planned.epoch, round: planned.round, attempt: planned.attempt, mode, baseSha, scopeFiles,
         ...(mode === "delta" ? { since: planned.since! } : {}),
         ...(mode === "rebase" ? { rebasedFrom: planned.rebasedFrom! } : {}),
         // A base-merge round reviews only the merge's effect on the pull request's own diff.
-        ...(planned.baseMerge && mergedBase && evidenceComplete ? { baseMerge: true as const } : {}),
+        ...(uncharged ? { baseMerge: true as const } : {}),
       };
       const inScope = new Set(scopeFiles);
       const contextFiles = mode === "full" ? [] : prFiles.filter((path) => !inScope.has(path));

@@ -1053,6 +1053,77 @@ test("bounded file diffs keep what fits, and name a file that was too large or c
   assert.deepEqual(await boundedFileDiffs(read, ["b.txt", "a.txt"], { limit: 50 }), { patch: sizes["b.txt"], omitted: ["a.txt"] }, "in either order");
 });
 
+test("a binary diff shows the reviewer nothing, so it is named as left out and its round is charged", async (t) => {
+  const notice = "diff --git a/x.png b/x.png\nindex 1..2 100644\nBinary files a/x.png and b/x.png differ\n";
+  const text = "diff --git a/y.ts b/y.ts\n@@ -1 +1 @@\n-Binary files a and b differ\n+Binary files c and d differ\n";
+  const read = async (paths: string[]) => paths.map((path) => path === "x.png" ? notice : text).join("");
+  assert.deepEqual(await boundedFileDiffs(read, ["x.png", "y.ts"]), { patch: text, omitted: ["x.png"] });
+  assert.deepEqual(await boundedFileDiffs(read, ["y.ts"]), { patch: text, omitted: [] }, "those words in a hunk are not the notice");
+
+  // Both sides add the same binary file: a clean merge the proof accepts, with nothing to show.
+  const f = fixture(t);
+  const content = "binary\0content\n";
+  writeFileSync(join(f.worktree, "bin.dat"), content);
+  git(f.worktree, "add", "bin.dat");
+  const upvoted = push(f, "-m", "a binary file");
+  moveBase(f, { "bin.dat": content });
+  git(f.worktree, "merge", "--quiet", "--no-edit", "main");
+  f.facts.headSha = git(f.worktree, "rev-parse", "HEAD");
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: { ...reviewed(f, "UPVOTE", upvoted), baseMergeRounds: true } }), CODEX, "b");
+  assert.deepEqual(prepared.round.scopeFiles, ["bin.dat"]);
+  assert.equal(prepared.round.baseMerge, undefined, "charged");
+  assert.match(prepared.prompt, /is binary, too large to inline or could not be read, and the checkout does not hold it[^]*- `bin\.dat`/u);
+  f.launcher.release("s_review");
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ history: exhausted(f, "UPVOTE", upvoted) }), CODEX, "b")),
+    REVIEW_ROUND_REFUSALS.roundLimit);
+});
+
+test("a proven base merge whose merge base did not move is charged, and needs budget", async (t) => {
+  // Criss-cross: main merges two lines, the reviewed head holds one and the merge brings the other,
+  // and the newer common ancestor is the one the reviewed head already had.
+  const f = fixture(t);
+  const at = (date: string, action: () => void) => {
+    process.env.GIT_COMMITTER_DATE = date;
+    try { action(); } finally { delete process.env.GIT_COMMITTER_DATE; }
+  };
+  const onMain = (file: string, date: string) => at(date, () => {
+    writeFileSync(join(f.repo, file), `${file}\n`);
+    git(f.repo, "add", file);
+    git(f.repo, "commit", "--quiet", "-m", file);
+  });
+  git(f.repo, "checkout", "--quiet", "-b", "side");
+  onMain("side.txt", "2026-01-01T00:00:00Z");
+  const merged = git(f.repo, "rev-parse", "HEAD");
+  git(f.repo, "checkout", "--quiet", "main");
+  onMain("later.txt", "2026-01-02T00:00:00Z");
+  const held = git(f.repo, "rev-parse", "HEAD");
+  at("2026-01-03T00:00:00Z", () => git(f.worktree, "merge", "--quiet", "--no-edit", held));
+  const upvoted = git(f.worktree, "rev-parse", "HEAD");
+  f.facts.headSha = upvoted;
+  at("2026-01-04T00:00:00Z", () => git(f.repo, "merge", "--quiet", "--no-edit", "side"));
+  const base = git(f.repo, "rev-parse", "HEAD");
+  f.facts.baseSha = base;
+  at("2026-01-05T00:00:00Z", () => git(f.worktree, "merge", "--quiet", "--no-edit", merged));
+  f.facts.headSha = git(f.worktree, "rev-parse", "HEAD");
+  assert.equal(git(f.repo, "merge-base", base, upvoted), git(f.repo, "merge-base", base, f.facts.headSha), "the merge base did not move");
+
+  // The base isn't on the session's branch here, and this fixture has no forge to fetch it from, so
+  // one prepare at a commit holding it fills the mirror, and the branch goes back.
+  const head = f.facts.headSha;
+  at("2026-01-06T00:00:00Z", () => git(f.worktree, "merge", "--quiet", "--no-edit", base));
+  f.facts.headSha = git(f.worktree, "rev-parse", "HEAD");
+  await f.launcher.prepare("s_review", f.policy(), CODEX, "b");
+  f.launcher.release("s_review");
+  git(f.worktree, "reset", "--quiet", "--hard", head);
+  f.facts.headSha = head;
+
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: { ...reviewed(f, "DOWNVOTE", upvoted), baseMergeRounds: true } }), CODEX, "b");
+  assert.equal(prepared.round.baseMerge, undefined, "scoped as an ordinary delta, so charged");
+  f.launcher.release("s_review");
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ history: exhausted(f, "DOWNVOTE", upvoted) }), CODEX, "b")),
+    REVIEW_ROUND_REFUSALS.roundLimit);
+});
+
 test("the file-by-file fallback is bounded in what it holds, how many it reads and how long it runs", async () => {
   const files = Array.from({ length: 6 }, (_, index) => `f${index}.txt`);
   const sizeOf = (path: string) => 10 + Number(path[1]) * 10;
