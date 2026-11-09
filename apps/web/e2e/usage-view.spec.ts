@@ -766,19 +766,27 @@ test("against a plane without weekly support Group By has no Week and the Range 
 
 test("the tabs are the URL: switching pushes it and Back returns to the previous tab", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
-  await page.goto("/command-inbox-projects-e2e.html?fullShell=1&history=1&path=%2Fusage%2Fsubscriptions");
+  await page.goto("/command-inbox-projects-e2e.html?fullShell=1&history=1&path=%2Fusage");
   const tabs = page.getByRole("tablist", { name: "Usage and Cost" });
+  await expect(tabs.getByRole("tab")).toHaveText([/^Subscriptions/, "API Usage"]);
   await expect(tabs.getByRole("tab", { name: /^Subscriptions/ })).toHaveAttribute("aria-selected", "true");
   await expect(page.locator(".usage-toolbar")).toHaveCount(0);
 
   await tabs.getByRole("tab", { name: "API Usage" }).click();
   await expect(tabs.getByRole("tab", { name: "API Usage" })).toHaveAttribute("aria-selected", "true");
-  await expect(page).toHaveURL(/path=%2Fusage(&|$)/);
+  await expect(page).toHaveURL(/path=%2Fusage%2Fapi/);
   await expect(page.locator(".usage-toolbar")).toBeVisible();
 
   await page.goBack();
-  await expect(page).toHaveURL(/path=%2Fusage%2Fsubscriptions/);
+  await expect(page).toHaveURL(/path=%2Fusage(&|$)/);
   await expect(tabs.getByRole("tab", { name: /^Subscriptions/ })).toHaveAttribute("aria-selected", "true");
+});
+
+test("a link saved from Subscriptions' old path still opens Subscriptions", async ({ page }) => {
+  await page.goto("/command-inbox-projects-e2e.html?fullShell=1&history=1&path=%2Fusage%2Fsubscriptions");
+  const tabs = page.getByRole("tablist", { name: "Usage and Cost" });
+  await expect(tabs.getByRole("tab", { name: /^Subscriptions/ })).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator(".usage-toolbar")).toHaveCount(0);
 });
 
 test("the Subscriptions tab counts its Approaching Limit and Exhausted badges", async ({ page }) => {

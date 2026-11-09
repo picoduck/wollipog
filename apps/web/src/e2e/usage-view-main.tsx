@@ -382,7 +382,7 @@ const client = {
 
 /** The tab is `?tab=subscriptions`, pushed like the shell's route so Back returns to the last tab. */
 function currentTab(): UsageTab | undefined {
-  return new URLSearchParams(window.location.search).get("tab") === "subscriptions" ? "subscriptions" : undefined;
+  return new URLSearchParams(window.location.search).get("tab") === "subscriptions" ? undefined : "api";
 }
 
 function UsageRoute() {
@@ -397,8 +397,8 @@ function UsageRoute() {
       tab={tab}
       onSelectTab={(next) => {
         const url = new URL(window.location.href);
-        if (next) url.searchParams.set("tab", next);
-        else url.searchParams.delete("tab");
+        if (next === "api") url.searchParams.delete("tab");
+        else url.searchParams.set("tab", "subscriptions");
         window.history.pushState(null, "", url);
         setTab(next);
       }}
@@ -453,7 +453,7 @@ const connection: UiConnectionRuntime = {
   instanceId: "usage-view-e2e", runtimeKey: "usage-view-e2e", createSocket: () => new FixtureSocket(), close() {},
 };
 // The harness owns its URL (`?tab=`); the store reads a fixed view and never navigates.
-const navigation: ViewNavigation = { current: () => ({ name: "usage" }), push() {}, listen: () => () => {} };
+const navigation: ViewNavigation = { current: () => ({ name: "usage", tab: "api" }), push() {}, listen: () => () => {} };
 
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

@@ -321,7 +321,7 @@ test("a crashed route reserves a tab row exactly where its working header draws 
     assert.equal(viewHasHeaderTabs({ name: "automations" }, layout), true);
     assert.equal(viewHasHeaderTabs({ name: "automations", tab: "outbound" }, layout), true);
     assert.equal(viewHasHeaderTabs({ name: "automations", editor: { kind: "new" } }, layout), false, "the editor has no tabs");
-    assert.equal(viewHasHeaderTabs({ name: "usage", tab: "subscriptions" }, layout), true);
+    assert.equal(viewHasHeaderTabs({ name: "usage", tab: "api" }, layout), true);
     assert.equal(viewHasHeaderTabs({ name: "runners", section: "people" }, layout), true);
     for (const name of ["projects", "runs", "pods", "skills", "archived"] as const) {
       assert.equal(viewHasHeaderTabs({ name }, layout), false, `${name} has no tabs`);

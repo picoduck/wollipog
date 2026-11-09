@@ -168,10 +168,10 @@ export type AutomationEditorRoute = { kind: "new" } | { kind: "edit"; automation
 export type AutomationsTab = "outbound";
 
 /**
- * Usage and Cost's tabs (#3010): API Usage at `/usage`, and Subscriptions at `/usage/subscriptions`.
- * Absent is API Usage.
+ * Usage and Cost's tabs (#3010): Subscriptions at `/usage`, and API Usage at `/usage/api`. Absent is
+ * Subscriptions, what's left on each plan being the usual reason to open the page.
  */
-export type UsageTab = "subscriptions";
+export type UsageTab = "api";
 
 /**
  * Agent Skills panes that are not a skill (docs/design-system.md §6): the Orphaned Copies pane and
@@ -537,7 +537,7 @@ export function viewPath(view: View): string {
         : view.tab === "outbound" ? "/automations/outbound" : "/automations";
     case "automation": return `/automations/~${encodeResourceId(view.id)}`;
     case "skills": return view.id ? `/skills/~${encodeResourceId(view.id)}` : view.pane ? `/skills/${view.pane}` : "/skills";
-    case "usage": return view.tab === "subscriptions" ? "/usage/subscriptions" : "/usage";
+    case "usage": return view.tab === "api" ? "/usage/api" : "/usage";
     case "archived": return "/archived";
     case "projects": return view.id ? `/projects/~${encodeResourceId(view.id)}` : view.pane ? `/projects/${view.pane}` : "/projects";
     case "session": return view.location
@@ -667,7 +667,9 @@ export function viewFromPath(pathname: string, search = ""): View | null {
     return id === null ? null : { name: "skills", id };
   }
   if (path === "/usage") return { name: "usage" };
-  if (path === "/usage/subscriptions") return { name: "usage", tab: "subscriptions" };
+  if (path === "/usage/api") return { name: "usage", tab: "api" };
+  // Subscriptions had this path while API Usage opened first, so saved links keep working.
+  if (path === "/usage/subscriptions") return { name: "usage" };
   if (path === "/archived") return { name: "archived" };
   // No section: a phone shows the section index, and wider layouts open the first section (§6.1, §6.2).
   if (path === "/settings") return { name: "settings" };

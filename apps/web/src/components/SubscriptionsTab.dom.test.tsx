@@ -77,7 +77,7 @@ const THREE_WINDOWS = [
 
 interface Toast { message: string; tone?: string }
 
-async function renderTab(client: Partial<ApiClient>, tab: "subscriptions" | undefined = "subscriptions") {
+async function renderTab(client: Partial<ApiClient>, tab?: "api") {
   const toasts: Toast[] = [];
   const feedback = {
     confirm: async () => false,
@@ -115,6 +115,27 @@ async function renderTab(client: Partial<ApiClient>, tab: "subscriptions" | unde
     unmount: async () => { await act(async () => root.unmount()); container.remove(); },
   };
 }
+
+test("Subscriptions is the first tab and Usage opens on it", async () => {
+  const view = await renderTab({ subscriptionUsage: async () => response([source({ buckets: THREE_WINDOWS })]) });
+  try {
+    assert.deepEqual(
+      [...view.container.querySelectorAll('[role="tab"]')].map((tab) => tab.id),
+      ["usage-subscriptions-tab", "usage-api-tab"],
+    );
+    assert.equal(view.tab("subscriptions").getAttribute("aria-selected"), "true");
+    assert.equal(view.tab("subscriptions").tabIndex, 0);
+    assert.equal(view.tab("api").getAttribute("aria-selected"), "false");
+    assert.ok(view.panel()?.querySelector(".subscription-plan"));
+    assert.equal(view.button("Budget and History…"), undefined, "API Usage's action stays on its tab");
+
+    await act(async () => { view.tab("api").click(); });
+    assert.equal(view.tab("api").getAttribute("aria-selected"), "true");
+    assertNoDomNode(view.panel());
+  } finally {
+    await view.unmount();
+  }
+});
 
 test("an account with three windows is one surface with a meter, \"N% left\" and a reset per window", async () => {
   const view = await renderTab({ subscriptionUsage: async () => response([source({ buckets: THREE_WINDOWS })]) });
@@ -413,7 +434,7 @@ test("with no sources the tab is No Subscriptions Connected with Open Connection
     usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }), usageUsers: async () => ({ users: [] }) } as unknown as ApiClient;
   try {
     await act(async () => {
-      root.render(<ApiProvider client={client}><UsageView tab="subscriptions" onOpenConnections={() => opened++} /></ApiProvider>);
+      root.render(<ApiProvider client={client}><UsageView onOpenConnections={() => opened++} /></ApiProvider>);
     });
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     const panel = container.querySelector("#usage-subscriptions-panel")!;
