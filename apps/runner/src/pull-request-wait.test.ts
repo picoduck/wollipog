@@ -28,7 +28,7 @@ function run(name: string, conclusion: string | null, extra: Record<string, unkn
   return {
     __typename: "CheckRun", name, status: conclusion ? "COMPLETED" : "IN_PROGRESS", conclusion,
     startedAt: "2026-10-12T10:00:00Z", detailsUrl: `https://github.com/o/r/actions/runs/1/job/${encodeURIComponent(name)}`,
-    isRequired: false, ...extra,
+    checkSuite: { databaseId: 100 }, isRequired: false, ...extra,
   };
 }
 
@@ -63,7 +63,7 @@ function admission(readyAt = READY_AT) {
   return { createdAt: "2026-10-11T10:00:00Z", timelineItems: { nodes: [{ createdAt: readyAt }] } };
 }
 function provenance(checkId = 200) {
-  return { databaseId: checkId, checkSuite: { app: { databaseId: 15368 } } };
+  return { databaseId: checkId, checkSuite: { databaseId: 100, app: { databaseId: 15368 } } };
 }
 function actionRuns(overrides: Record<string, unknown> = {}, additional: Record<string, unknown>[] = []) {
   return { total_count: 1 + additional.length, workflow_runs: [{
@@ -500,7 +500,7 @@ test("of several runs sharing a name, the newest wins", () => {
     run(AGGREGATOR, "SUCCESS", { startedAt: "2026-10-12T11:00:00Z" }),
     run(AGGREGATOR, "CANCELLED", { startedAt: null }),
   ]), [AGGREGATOR]);
-  assert.equal(untimed.requiredState, "passed", "an unknown time never displaces a known one");
+  assert.equal(untimed.requiredState, "failed", "a known time cannot supersede an unknown time");
 });
 
 test("a required check restricted to an app counts only that app's runs", async () => {
@@ -1179,4 +1179,100 @@ test("pull request references parse from numbers, short refs, and github.com URL
   assert.match((parsePullRequestRef("https://example.com/a/b/merge_requests/1", undefined) as { error: string }).error, /must be/u);
   assert.match((parsePullRequestRef("0", "o/r") as { error: string }).error, /positive/u);
   assert.match((parsePullRequestRef("1", "../etc") as { error: string }).error, /invalid repository/u);
+});
+
+
+function workflowJob(name: string, conclusion: string | null, id: number, workflow: number, suite = workflow) {
+  return run(name, conclusion, { databaseId: id, checkSuite: { databaseId: suite, workflowId: workflow, app: { databaseId: 1 } } });
+}
+
+for (const reverse of [false, true]) {
+  for (const conclusion of ["FAILURE", null]) {
+    test(`shared required name retains ${conclusion ?? "running"} workflow in either id order (${reverse})`, async () => {
+      const bad = workflowJob(AGGREGATOR, conclusion, reverse ? 101 : 100, 1);
+      const good = workflowJob(AGGREGATOR, "SUCCESS", reverse ? 100 : 101, 2);
+      const nodes = reverse ? [good, bad] : [bad, good];
+      const verdict = evaluateCommitChecks(HEAD, rollup(nodes), [AGGREGATOR]);
+      assert.equal(verdict.requiredState, conclusion ? "failed" : "pending");
+      assert.equal(verdict.summary.failedJobs.length, conclusion ? 1 : 0);
+      const fake = fakeGh([ok(pr({}, nodes)), ok(pr({}, [good, workflowJob(AGGREGATOR, "SUCCESS", bad.databaseId, 1)]))]);
+      const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fake.gh, ...clock() });
+      assert.ok(result.ok);
+      assert.equal(result.summary.outcome, conclusion ? "checks_failed" : "checks_passed");
+      assert.equal(result.summary.polls, conclusion ? 1 : 2);
+    });
+  }
+}
+
+test("optional shared-name failure counts and returns on any failure", async () => {
+  const nodes = [run(AGGREGATOR, "SUCCESS"), workflowJob("Lint", "FAILURE", 100, 1), workflowJob("Lint", "SUCCESS", 101, 2)];
+  const verdict = evaluateCommitChecks(HEAD, rollup(nodes), [AGGREGATOR]);
+  assert.deepEqual(verdict.summary.other, { passed: 1, failed: 1, pending: 0 });
+  assert.equal(verdict.summary.failedJobs[0]?.required, false);
+  const result = await waitForPullRequest({ repository: "o/r", number: 7, returnOnAnyFailure: true }, { gh: fakeGh([ok(pr({}, nodes))]).gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "checks_failed");
+});
+
+for (const times of [[null, RUN_AT], [RUN_AT, RUN_AT]]) {
+  for (const reverse of [false, true]) {
+    test(`unorderable workflow runs retain the worse result (${times}, ${reverse})`, () => {
+      const nodes = [run(AGGREGATOR, "FAILURE", { startedAt: times[0] }), run(AGGREGATOR, "SUCCESS", { startedAt: times[1] })];
+      assert.equal(evaluateCommitChecks(HEAD, rollup(reverse ? nodes.reverse() : nodes), [AGGREGATOR]).requiredState, "failed");
+    });
+  }
+}
+
+for (const response of [failed("HTTP 403"), ok({ total_count: 101, workflow_runs: [] }), ok({ total_count: 0, workflow_runs: [] })]) {
+  test(`unavailable workflow identity retains distinct suites (${response.stdout || response.stderr})`, async () => {
+    const nodes = [run(AGGREGATOR, "FAILURE", { databaseId: 100, checkSuite: { databaseId: 1 } }),
+      run(AGGREGATOR, "SUCCESS", { databaseId: 101, checkSuite: { databaseId: 2 } })];
+    assert.equal(evaluateCommitChecks(HEAD, rollup(nodes), [AGGREGATOR]).requiredState, "failed");
+    const fake = fakeGh([ok(pr({ mergeStateStatus: "CLEAN" }, nodes))], { runs: response });
+    const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fake.gh, ...clock() });
+    assert.ok(result.ok);
+    assert.equal(result.summary.outcome, "checks_failed");
+    assert.equal(fake.calls.filter((args) => args.some((arg) => arg.includes("/actions/runs?"))).length, 1);
+  });
+}
+
+test("optional bounded workflow lookup supersedes only runs of the same workflow", async () => {
+  const nodes = [run(AGGREGATOR, "CANCELLED", { databaseId: 100, checkSuite: { databaseId: 1 } }),
+    run(AGGREGATOR, "SUCCESS", { databaseId: 101, checkSuite: { databaseId: 2 } })];
+  for (const same of [true, false]) {
+    const fake = fakeGh([ok(pr({}, nodes))], { runs: ok({ total_count: 2, workflow_runs: [
+      { head_sha: HEAD, check_suite_id: 1, workflow_id: 10 }, { head_sha: HEAD, check_suite_id: 2, workflow_id: same ? 10 : 20 },
+    ] }) });
+    const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fake.gh, ...clock() });
+    assert.ok(result.ok);
+    assert.equal(result.summary.outcome, same ? "checks_passed" : "checks_failed");
+    assert.equal(fake.calls.filter((args) => args.some((arg) => arg.includes("/actions/runs?"))).length, 1);
+  }
+});
+
+test("absent suite identity cannot silently hide a failed or pending run", () => {
+  for (const conclusion of ["FAILURE", null]) {
+    const nodes = [run(AGGREGATOR, conclusion, { databaseId: 100, checkSuite: null }),
+      run(AGGREGATOR, "SUCCESS", { databaseId: 101, checkSuite: null })];
+    assert.equal(evaluateCommitChecks(HEAD, rollup(nodes), [AGGREGATOR]).requiredState, conclusion ? "failed" : "pending");
+  }
+});
+
+
+test("all workflows of an app-restricted requirement must pass", () => {
+  const nodes = [workflowJob("CI", "SUCCESS", 101, 1), workflowJob("CI", "FAILURE", 100, 2)];
+  assert.equal(evaluateCommitChecks(HEAD, rollup(nodes), ["CI"], { CI: [1] }).requiredState, "failed");
+});
+
+test("a thrown optional workflow read does not fail the wait", async () => {
+  const nodes = [run(AGGREGATOR, "SUCCESS", { databaseId: 100, checkSuite: { databaseId: 1 } }),
+    run(AGGREGATOR, "SUCCESS", { databaseId: 101, checkSuite: { databaseId: 2 } })];
+  const fake = fakeGh([ok(pr({}, nodes))]);
+  const gh: GhRunner = async (args) => {
+    if (args.some((arg) => arg.includes("/actions/runs?"))) throw new Error("denied");
+    return fake.gh(args);
+  };
+  const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "checks_passed", "both independent suites passed without needing access");
 });
