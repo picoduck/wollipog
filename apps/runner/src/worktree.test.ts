@@ -1135,7 +1135,7 @@ test("a file's name and contents cannot be traded for another's without changing
     const options = { dataDir: fixture.dataDir };
     const { path } = await createRequestedWorktree(fixture.repo, "s_collide", { baseRef: "HEAD", branch: "fix/collide" }, options);
     const gitDir = execFileSync("git", ["-C", path, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" }).trim();
-    writeFileSync(join(gitDir, "a"), "1\u0000file b\u00002");
+    writeFileSync(join(gitDir, "a"), "1\u0000b\u00002");
     const first = await captureRollbackSnapshot(path, options);
     // The same bytes in a row, if a digest ran names and contents together: one file, or two.
     writeFileSync(join(gitDir, "a"), "1");
