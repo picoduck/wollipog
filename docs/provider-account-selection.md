@@ -215,12 +215,14 @@ This section records why, and what would justify looking again.
 
 These come from reading the code. No probe ran against a real account, and no real usage was read.
 
-- **Claude.** Readings arrive only from provider responses in a session. No read without a turn exists, so an
-  idle account has an old reading or none.
+- **Claude.** Readings arrived only from provider responses in a session, so an idle account had an old reading
+  or none. Since protocol 342 a refresh also reads Claude without a turn, through Claude Code's experimental
+  `get_usage` control request, where the installation supports it, at the same times as Codex.
 - **Codex.** A no-turn probe spawns `codex app-server`, up to 8 seconds per account and one at a time, holding a
   reference to the account's provider HOME. It runs at runner start, sign-in, a harness change or a person's
   Refresh. The 5-minute discovery timer explicitly skips it.
-- **Windows.** A reading has one `fetchedAt`, so a sparse event can make an older window look fresh.
+- **Windows.** A reading had one `fetchedAt`, so a sparse event could make an older window look fresh. Since
+  protocol 341 each window carries its own `observedAt`.
 
 A reading counts as fresh for 10 minutes, so in practice only an account in active use has one. Those are the
 accounts a comparison needs least.

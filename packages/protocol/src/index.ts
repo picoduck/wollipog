@@ -415,6 +415,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   durablePromptQueueIdentity: 78,
   providerAuthenticationReceipts: 79,
   subscriptionUsage: 80,
+  /** A refresh reads Claude usage too, for a control plane whose deadline counts those sources. */
+  claudeSubscriptionUsageRefresh: 342,
   managedBackgroundDelivery: 82,
   backgroundFollowUp: 240,
   managedBackgroundInventory: 82,
@@ -7244,6 +7246,10 @@ export interface SubscriptionUsageSourceView extends Omit<SubscriptionUsageSnaps
   /** Protocol v341: sources sharing this opaque, organization-scoped key are one subscription. The
    * runner's fingerprint itself is never projected. Absent means this source stands alone. */
   subscriptionKey?: string;
+  /** Protocol v342: Refresh Account can read this source on its own: a provider account whose
+   * runner can read its provider on request. Absent from an older control plane, where only a Codex
+   * account could be. */
+  refreshable?: boolean;
 }
 
 export interface SubscriptionUsageResponse {

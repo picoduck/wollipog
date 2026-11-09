@@ -289,6 +289,46 @@ test("refresh deadlines include configured and unmapped legacy Codex sources", a
   db.close();
 });
 
+test("refresh deadlines count Claude sources only for runners that read Claude usage on request", async () => {
+  const claudeAgent = {
+    id: "claude", name: "Claude Code", command: "claude", args: [], env: {},
+    driver: "claude-code" as const, context: { kind: "native" as const }, available: true,
+    claudeCode: {
+      status: "ready" as const, effortLevels: [], permissionModes: [], streamJsonInput: true, streamJsonImages: true,
+      controlProtocol: true, forkSession: true, replayUserMessages: true, sessionNaming: true,
+      auth: { status: "authenticated" as const, billingSource: "subscription" as const },
+    },
+  };
+  const deadline = async (protocolVersion: number) => {
+    const db = ControlPlaneDb.open(":memory:");
+    db.registerRunner({
+      runnerId: "claude-box", hostname: "claude-box", os: "linux", version: "1",
+      agents: [claudeAgent], workspaces: [],
+      providerAccounts: [
+        { id: "personal", label: "Personal", provider: "claude", authStatus: "authenticated" },
+        { id: "team", label: "Team", provider: "claude", authStatus: "authenticated" },
+      ],
+    }, Date.now(), protocolVersion, {
+      organizationId: "org_personal", owner: { kind: "user", userId: "operator-user" },
+    });
+    let timeoutMs = 0;
+    const app = Fastify();
+    registerUsageRoutes(app, db, () => human("operator"), {
+      requestFromRunner: async (_runnerId, requestId, _message, timeout) => {
+        timeoutMs = timeout;
+        return { type: "subscription_usage_refresh_result", requestId, ok: true, snapshots: [] };
+      },
+    });
+    const response = await app.inject({ method: "POST", url: "/api/usage/subscriptions/refresh" });
+    assert.equal(response.statusCode, 200);
+    await app.close();
+    db.close();
+    return timeoutMs;
+  };
+  assert.equal(await deadline(PROTOCOL_VERSION), 18_000, "two Claude accounts read in turn get two probe budgets");
+  assert.equal(await deadline(341), 10_000, "an older runner reads no Claude usage on request");
+});
+
 test("usage responses carry rate-table status and members can force a bounded pricing refresh", async () => {
   const db = ControlPlaneDb.open(":memory:");
   const principals = new Map<string, AuthPrincipal>([["viewer", human("viewer")]]);

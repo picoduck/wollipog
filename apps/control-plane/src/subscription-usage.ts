@@ -17,6 +17,13 @@ export const MAX_SUBSCRIPTION_USAGE_SNAPSHOTS = 32;
 const MAX_BUCKETS = 64;
 const MAX_SPEND_CONTROLS = 64;
 
+/** A Claude Code installation its runner starts locked down to answer `get_usage`, as the runner
+ * decides it: discovery saw stream-json input, the control protocol and every lockdown flag. */
+export function claudeUsageProbeable(agent: AgentDefinition): boolean {
+  const claude = agent.driver === "claude-code" ? agent.claudeCode : undefined;
+  return claude?.streamJsonInput === true && claude.controlProtocol === true && claude.sessionNaming === true;
+}
+
 export function subscriptionUsageRefreshTimeoutMs(codexSourceCount: number): number {
   return Math.min(
     MAX_SUBSCRIPTION_USAGE_REFRESH_TIMEOUT_MS,

@@ -256,6 +256,41 @@ test("Refresh Account asks every machine on the subscription, and shows the last
   }
 });
 
+test("a Claude account its machine can read on request has Refresh Account", async () => {
+  const requests: unknown[] = [];
+  const claude = source({
+    provider: "claude", agentId: "claude", agentName: "Claude Code", plan: "max", providerAccountId: "personal",
+    refreshable: true, buckets: [window_("seven_day", "Weekly — All Models", 40)],
+  });
+  const view = await renderTab({
+    subscriptionUsage: async () => response([claude]),
+    refreshSubscriptionUsage: async (target: unknown) => {
+      requests.push(target);
+      return response([claude], { attempted: 1, failed: 0 });
+    },
+  });
+  try {
+    await act(async () => { view.button("Refresh Account")!.click(); });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    assert.deepEqual(requests, [{ runnerId: "runner-1", providerAccountId: "personal" }]);
+    assert.equal(view.toasts.at(-1)?.message, "Account refreshed.");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a Claude account its machine can't read on request has no Refresh Account", async () => {
+  const view = await renderTab({ subscriptionUsage: async () => response([source({
+    provider: "claude", agentId: "claude", agentName: "Claude Code", providerAccountId: "personal",
+    refreshable: false, buckets: [window_("seven_day", "Weekly — All Models", 40)],
+  })]) });
+  try {
+    assert.equal(view.button("Refresh Account"), undefined);
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("one machine failing a shared refresh is reported, and the others still count", async () => {
   const sources = [
     shared("laptop", "Laptop", { providerAccountId: "work", buckets: [window_("weekly", "Weekly", 90)] }),

@@ -1219,7 +1219,7 @@ test("Claude execution contexts stay separate sources and a manual refresh start
 
   const before = JSON.stringify(manager.inventory());
   await manager.refreshAll();
-  assert.equal(probes, 0, "Claude sources are never probed; a refresh cannot start a turn");
+  assert.equal(probes, 0, "an installation without the lockdown flags is never probed, so a refresh cannot start a turn");
   assert.equal(JSON.stringify(manager.inventory()), before, "a refresh leaves Claude sources untouched");
 });
 

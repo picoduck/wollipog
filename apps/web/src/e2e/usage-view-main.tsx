@@ -286,6 +286,12 @@ const subscription: SubscriptionUsageResponse = {
   generatedAt: END,
 };
 // `?sharedSubscription=1`: one Claude subscription on three machines, one offline and one waiting.
+// `?claudeRefreshable=1`: a control plane at protocol 342 says the Claude Work account can be read on
+// request. Without it the fixture speaks as an older one, which says nothing about refresh.
+if (params.get("claudeRefreshable") === "1") {
+  subscription.sources = subscription.sources.map((source) =>
+    source.providerAccountId === "claude-work" ? { ...source, refreshable: true } : source);
+}
 if (params.get("sharedSubscription") === "1") {
   const shared = { provider: "claude" as const, agentId: "claude", agentName: "Claude Code", plan: "max",
     accountLabel: "primary@example.com", subscriptionKey: "shared-claude-max" };

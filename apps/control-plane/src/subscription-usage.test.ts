@@ -237,6 +237,44 @@ test("an identity learned during an unavailable refresh is kept alongside last-k
   db.close();
 });
 
+test("a source says it can be refreshed alone only when its runner can read that provider on request", () => {
+  const lockedDown: AgentDefinition = {
+    ...claudeAgent(),
+    claudeCode: {
+      status: "ready", effortLevels: [], permissionModes: [], streamJsonInput: true, streamJsonImages: true,
+      controlProtocol: true, forkSession: true, replayUserMessages: true, sessionNaming: true,
+      auth: { status: "authenticated", billingSource: "subscription" },
+    },
+  };
+  const owner = { organizationId: "org_personal", owner: { kind: "user" as const, userId: "alice" } };
+  const refreshable = (protocolVersion: number, agents: AgentDefinition[]) => {
+    const db = ControlPlaneDb.open(":memory:");
+    db.registerRunner({
+      ...meta("runner-1", agents),
+      providerAccounts: [
+        { id: "claude-personal", label: "Personal", provider: "claude", authStatus: "authenticated" },
+        { id: "codex-work", label: "Work", provider: "codex", authStatus: "authenticated" },
+      ],
+    }, 1_000_000, protocolVersion, owner);
+    const result = Object.fromEntries(db.subscriptionUsageForPrincipal(human(), 1_000_000).sources
+      .map((source) => [source.providerAccountId ?? `${source.provider}:${source.agentId}`, source.refreshable]));
+    db.close();
+    return result;
+  };
+  assert.deepEqual(refreshable(PROTOCOL_VERSION, [lockedDown, codexAgent()]),
+    { "claude-personal": true, "codex-work": true });
+  assert.deepEqual(refreshable(341, [lockedDown, codexAgent()]),
+    { "claude-personal": false, "codex-work": true }, "an older runner reads Claude only from sessions");
+  assert.deepEqual(refreshable(PROTOCOL_VERSION, [claudeAgent(), codexAgent()]),
+    { "claude-personal": false, "codex-work": true }, "a Claude Code that can't be locked down is not probed");
+
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(meta("runner-1", [lockedDown]), 1_000_000, PROTOCOL_VERSION, owner);
+  assert.equal(db.subscriptionUsageForPrincipal(human(), 1_000_000).sources[0]?.refreshable, false,
+    "a source with no provider account is refreshed only by Refresh All");
+  db.close();
+});
+
 test("a stale unselected usage result cannot repopulate a cleared selected source", () => {
   const db = ControlPlaneDb.open(":memory:");
   const system = { ...codexAgent("system"), available: true,

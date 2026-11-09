@@ -819,6 +819,7 @@ const subscriptionUsage = new SubscriptionUsageManager({
     return authorizeSubscriptionUsageProbe(agent, env, sourceId);
   },
   resolveSubscriptionIdentity: readSubscriptionIdentity,
+  claudeRefreshEnabled: () => runnerSupportsProtocol(controlPlaneProtocolVersion, "claudeSubscriptionUsageRefresh"),
   onTargetChanged: () => {
     void runDiscovery(false, false).catch((error) =>
       log(`harness rediscovery after usage target change failed: ${errText(error)}`));
@@ -2170,14 +2171,14 @@ let discoveryTimer: ReturnType<typeof setInterval> | null = null;
 const discoveryCoordinator = new DiscoveryCoordinator(discoverAndPublish, log,
   (error) => log(`discovery failed: ${(error as Error).message}`));
 
-function publishSubscriptionUsageInventory(refreshCodex: boolean): void {
+function publishSubscriptionUsageInventory(refresh: boolean): void {
   if (!shouldPublishSubscriptionUsageInventory(discoveryDone, controlPlaneProtocolVersion)) return;
   sendUp({
     type: "subscription_usage_inventory",
     runnerId: config.runnerId,
     snapshots: subscriptionUsage.syncSources(),
   });
-  if (!refreshCodex) return;
+  if (!refresh) return;
   void subscriptionUsage.refreshAll()
     .then((snapshots) => {
       if (!shouldPublishSubscriptionUsageInventory(discoveryDone, controlPlaneProtocolVersion)) return;

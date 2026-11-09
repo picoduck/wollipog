@@ -1371,6 +1371,8 @@ test("runner command capability gates fail closed for unknown/old protocols", ()
   assert.equal(runnerSupportsProtocol(78, "subscriptionUsage"), false);
   assert.equal(runnerSupportsProtocol(79, "subscriptionUsage"), false);
   assert.equal(runnerSupportsProtocol(80, "subscriptionUsage"), true);
+  assert.equal(runnerSupportsProtocol(341, "claudeSubscriptionUsageRefresh"), false);
+  assert.equal(runnerSupportsProtocol(342, "claudeSubscriptionUsageRefresh"), true);
   assert.equal(runnerSupportsProtocol(80, "managedBackgroundDelivery"), false);
   assert.equal(runnerSupportsProtocol(81, "managedBackgroundDelivery"), false);
   assert.equal(runnerSupportsProtocol(82, "managedBackgroundDelivery"), true);
