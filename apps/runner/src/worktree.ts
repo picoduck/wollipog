@@ -11,6 +11,7 @@ import {
   constants,
   fsyncSync,
   lstatSync,
+  existsSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -120,6 +121,9 @@ export interface RequestedWorktreeOptions extends WorktreeOptions {
    * these roots contains the repository that registers it, when the worktree itself sits inside
    * one of them, or when it sits inside the runner-owned worktree root. */
   allowedProjectPaths?: string[];
+  /** Called with no await before it, just before Git makes a NEW worktree, and never for one that
+   * already exists, so a caller can claim and journal it first (#4209). A throw creates nothing. */
+  reserveWorktree?: (path: string, branch: string) => void;
 }
 
 export interface WorktreeCleanupRecord {
@@ -902,6 +906,7 @@ export async function createRequestedWorktree(
   )).trim();
   if (existingBranch === branchRef) throw new Error("requested worktree branch already exists");
   options.onProgress?.("materializing");
+  options.reserveWorktree?.(path, branch);
   await removeExternalDirectory(context, repoPath, path, options);
   await command(context, repoPath, ["worktree", "add", "-b", branch, path, baseCommit], 120_000);
   return { path, branch, baseRef, baseCommit, attached: false, created: true };
@@ -1010,6 +1015,7 @@ export async function createRecoveredBranchWorktree(
   if (placement.kind === "reuse") return reuseRecoveredBranchWorktree(repoPath, placement.entry.path, branch, options);
   const branchRef = `refs/heads/${branch}`;
   const local = (await command(context, repoPath, ["for-each-ref", "--format=%(refname)", branchRef])).trim() === branchRef;
+  options.reserveWorktree?.(path, branch);
   await removeExternalDirectory(context, repoPath, path, options);
   if (local) {
     await command(context, repoPath, ["worktree", "add", path, branch], 120_000);
@@ -2801,7 +2807,9 @@ export async function discardWorktreeIfSafe(
 
 /** Remove a worktree this runner just checked out on an existing branch, keeping the branch. Git
  * refuses (and the worktree stays) if anything in it changed, unless `force` says those changes are
- * the runner's own: a setup that ran there before the worktree was given back (#4209). */
+ * the runner's own: a setup that ran there before the worktree was given back (#4209). A forced
+ * release may be replaying a reservation whose checkout never happened, so an absent path only
+ * needs its registration pruned. */
 export async function releaseRecoveredWorktree(
   repoPath: string,
   path: string,
@@ -2809,6 +2817,10 @@ export async function releaseRecoveredWorktree(
   { force = false }: { force?: boolean } = {},
 ): Promise<void> {
   const context = options.context ?? nativeContext;
+  if (force && context.kind === "native" && !existsSync(path)) {
+    await command(context, repoPath, ["worktree", "prune"]);
+    return;
+  }
   await command(context, repoPath,
     ["worktree", "remove", ...(force ? ["--force"] : []), safeGitArgument(path, "worktree path")], 120_000);
 }
