@@ -4,7 +4,8 @@
  * session itself; the runner launches it outside the requester's sandbox, read-only, against a
  * runner-owned checkout of the exact pushed head, with a runner-owned launch preset that loads no
  * project settings, hooks, skills or MCP configuration. Review sessions are exempt from every
- * session limit; a requester may have at most one active review.
+ * session limit; on protocol 335+ a requester may have one active review per pull request.
+ * Older runners retain one active review per requester.
  *
  * Phase 1 returns the reviewer's final structured output unvalidated. Contract validation, rounds
  * and epochs belong to the review run (#3369).

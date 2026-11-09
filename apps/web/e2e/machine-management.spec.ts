@@ -1029,6 +1029,204 @@ test("account menus save independent defaults and explicitly recover a missing d
   await expect(accountRow(page, "Codex Solo").locator(".provider-default-marker")).toHaveText("Default");
 });
 
+test.describe("usage through a failed refresh (#4353)", () => {
+  const dropAndFailReads = async (page: import("@playwright/test").Page) => {
+    await page.evaluate(() => {
+      window.__WOLLIPOG_MACHINE_E2E__.setUsageReadFailure(true);
+      window.__WOLLIPOG_MACHINE_E2E__.setRunnerStatus("offline");
+    });
+  };
+  const usage = (page: import("@playwright/test").Page) =>
+    accountRow(page, "Codex Team").getByRole("button", { name: /Usage Details/u });
+
+  test("keeps each account's last reading, marked Last Known, and keeps it after a reconnect", async ({ page }) => {
+    await page.goto(`/machine-management-e2e.html?${DESIGN_WORKSTATION}`);
+    await expect(usage(page)).toContainText("% Left");
+    await expect(usage(page)).not.toContainText("Last Known");
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/usage-1-read-desktop.png" });
+
+    await dropAndFailReads(page);
+    await expect(usage(page)).toContainText("Last Known");
+    await expect(usage(page)).toContainText("% Left");
+    await expect(usage(page)).not.toContainText("Usage Not Reported");
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/usage-2-failed-refresh-offline-desktop.png" });
+
+    await usage(page).click();
+    await expect(accountRow(page, "Codex Team").getByText(/^Last known reading/u)).toBeVisible();
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/usage-3-details-desktop.png" });
+    await usage(page).click();
+
+    // Back online with reads still failing: nothing newer is known, and a recent reading stays.
+    await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setRunnerStatus("online"));
+    await expect(usage(page)).toContainText("% Left");
+    await expect(usage(page)).not.toContainText("Last Known");
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/usage-4-reconnected-read-failing-desktop.png" });
+  });
+
+  for (const theme of ["dark", "light"] as const) {
+    test(`reads at phone width in the ${theme} theme`, async ({ browser }) => {
+      // The same touch device in both themes, so their controls are the same size.
+      const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+      const phone = await context.newPage();
+      try {
+        await phone.goto(`/machine-management-e2e.html?theme=${theme}&${DESIGN_WORKSTATION}`);
+        await expect(usage(phone)).toContainText("% Left");
+        await dropAndFailReads(phone);
+        await expect(usage(phone)).toContainText("Last Known");
+        await providerAccounts(phone).screenshot({ path: `playwright-report/provider-accounts/usage-failed-refresh-${theme}-phone.png` });
+      } finally { await context.close(); }
+    });
+  }
+});
+
+test.describe("Priority Order (#4353)", () => {
+  const openPriority = async (page: import("@playwright/test").Page, query: string, viewport?: { width: number; height: number }) => {
+    if (viewport) await page.setViewportSize(viewport);
+    await page.goto(`/machine-management-e2e.html?priority=on&priorityLimit=1&${query}`);
+    await expect(providerAccounts(page)).toBeVisible();
+  };
+  const moveButton = (page: import("@playwright/test").Page, id: string, direction: "up" | "down") =>
+    providerAccounts(page).locator(`[data-move="${id}:${direction}"]`);
+
+  test("shows its ranking, expected account and skip reasons, and reorders by keyboard alone", async ({ page }) => {
+    await openPriority(page, DESIGN_WORKSTATION);
+    const accounts = providerAccounts(page);
+    await expect(accounts.getByRole("radiogroup", { name: "Claude Account Selection" }).getByRole("radio", { name: "Priority Order" })).toHaveAttribute("aria-checked", "true");
+    await expect(accounts.getByRole("radio", { name: /balance/i })).toHaveCount(0);
+    await expect(accounts.getByText("New sessions use")).toBeVisible();
+    await expect(accounts.getByText("Skipped: needs sign-in.")).toBeVisible();
+    await expect(accounts.getByText(/Skipped: at a usage limit \(Session Window\)\. Resets in 2 hours\./u)).toBeVisible();
+    await expect(accountRow(page, "work@example.com").getByRole("button", { name: /Usage Details/u }), "the usage line reads the same window").toContainText("0% Left · Resets in 2 hours");
+    await expect(accounts.getByText("Skipped: no longer on this machine.")).toBeVisible();
+    await expect(accounts.getByText("Next Session")).toBeVisible();
+    await expect(accounts.getByText("Not Ranked")).toBeVisible();
+    await accounts.screenshot({ path: "playwright-report/provider-accounts/priority-desktop.png" });
+
+    const down = moveButton(page, "claude-work", "down");
+    await down.focus();
+    await page.keyboard.press("Enter");
+    await expect(accounts.getByRole("status").filter({ hasText: /Moved .* to position 3 of 4\./u }), "the new position is shown, not only announced").toBeVisible();
+    await expect(down, "focus stays with the moved row").toBeFocused();
+    await accounts.screenshot({ path: "playwright-report/provider-accounts/priority-keyboard-focus-desktop.png" });
+    await page.keyboard.press("Space");
+    await expect(accounts.getByRole("status").filter({ hasText: /position 4 of 4\./u })).toBeVisible();
+    await expect(moveButton(page, "claude-work", "up"), "at the edge, focus moves to the direction that still works").toBeFocused();
+    await expect(down).toHaveAttribute("aria-disabled", "true");
+    await page.keyboard.press("Enter");
+    await expect(accounts.getByRole("status").filter({ hasText: /position 3 of 4\./u })).toBeVisible();
+  });
+
+  test("reads in the light theme at both widths", async ({ browser, page }) => {
+    await openPriority(page, `theme=light&${DESIGN_WORKSTATION}`);
+    await expect(providerAccounts(page).getByText("Skipped: needs sign-in.")).toBeVisible();
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/priority-light-desktop.png" });
+    // The same touch device as the dark capture, so their controls are the same size.
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+    const phone = await context.newPage();
+    try {
+      await openPriority(phone, `theme=light&${DESIGN_WORKSTATION}`);
+      await expect(providerAccounts(phone).getByText("Skipped: needs sign-in.")).toBeVisible();
+      await providerAccounts(phone).screenshot({ path: "playwright-report/provider-accounts/priority-light-mobile.png" });
+    } finally { await context.close(); }
+  });
+
+  test("the account menu adds to and removes from the order", async ({ page }) => {
+    await openPriority(page, DESIGN_WORKSTATION);
+    const addMenu = await openAccountMenu(page, "credits@example.com");
+    await expect(addMenu.getByRole("menuitem", { name: "Add to Priority Order", exact: true })).toBeVisible();
+    await expect(addMenu.getByRole("menuitem", { name: "Set as Default", exact: true }), "a default wouldn't apply here").toHaveCount(0);
+    await settleAnimations(page);
+    await page.screenshot({ path: "playwright-report/provider-accounts/priority-menu-add-desktop.png" });
+    await page.keyboard.press("Escape");
+    const removeMenu = await openAccountMenu(page, "team@example.com");
+    await expect(removeMenu.getByRole("menuitem", { name: "Remove from Priority Order", exact: true })).toBeVisible();
+    await settleAnimations(page);
+    await page.screenshot({ path: "playwright-report/provider-accounts/priority-menu-remove-desktop.png" });
+    await removeMenu.getByRole("menuitem", { name: "Remove from Priority Order", exact: true }).click();
+    await expect(accountRow(page, "team@example.com").locator(".provider-default-marker")).toHaveText("Not Ranked");
+  });
+
+  test("a missing account takes only Remove, and the others can move past it", async ({ page }) => {
+    await openPriority(page, DESIGN_WORKSTATION);
+    await moveButton(page, "claude-team", "down").click();
+    await expect(providerAccounts(page).getByRole("status").filter({ hasText: /position 4 of 4\./u })).toBeVisible();
+    await expect(accountRow(page, "Missing Account").getByRole("button", { name: /^Remove Missing Account 3 from Priority Order$/u })).toBeVisible();
+  });
+
+  test("moves by tap on a phone, with targets large enough to touch", async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+    const page = await context.newPage();
+    try {
+      await openPriority(page, DESIGN_WORKSTATION);
+      const accounts = providerAccounts(page);
+      await expect(accounts.getByText("Skipped: needs sign-in.")).toBeVisible();
+      const up = moveButton(page, "claude-team", "up");
+      const box = await up.boundingBox();
+      expect(box!.width).toBeGreaterThanOrEqual(28);
+      const scroll = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      expect(scroll, "the rows fit without sideways scrolling").toBeLessThanOrEqual(0);
+      const clipped = await accounts.locator(".provider-account-skip").evaluateAll((reasons) => reasons
+        .filter((reason) => reason.scrollWidth > reason.clientWidth).map((reason) => reason.textContent));
+      expect(clipped, "every skip reason reads whole").toEqual([]);
+      await accounts.screenshot({ path: "playwright-report/provider-accounts/priority-mobile.png" });
+      await up.tap();
+      await expect(accounts.getByRole("status").filter({ hasText: /position 2 of 4\./u })).toBeVisible();
+      const usageRows = accounts.locator(".provider-accounts-list > .row:has(.provider-usage-toggle)");
+      for (const row of await usageRows.all()) {
+        const [menu, usage] = [await row.getByRole("button", { name: /^More Actions for/u }).boundingBox(), await row.locator(".provider-usage-toggle").boundingBox()];
+        expect(Math.abs((menu!.y + menu!.height / 2) - (usage!.y + usage!.height / 2)), "the menu sits level with its usage line").toBeLessThanOrEqual(2);
+      }
+      await accounts.screenshot({ path: "playwright-report/provider-accounts/priority-mobile-moved.png" });
+    } finally { await context.close(); }
+  });
+
+  test("no eligible account says so, and a lost race shows the saved order", async ({ page }) => {
+    await page.goto(`/machine-management-e2e.html?priority=none&${DESIGN_WORKSTATION}`);
+    const accounts = providerAccounts(page);
+    await expect(accounts.getByText("No Eligible Account")).toBeVisible();
+    await expect(accounts.getByText(/one would spend API credits/u)).toBeVisible();
+    await expect(accounts.getByText(/each new session needs an account chosen when it starts/u)).toBeVisible();
+    await expect(accounts.getByText(/Choose an account for this session|review this machine's Provider Accounts/u), "that's a launch's wording, not this page's").toHaveCount(0);
+    await expect(accounts.getByText("Next Session")).toHaveCount(0);
+    await accounts.screenshot({ path: "playwright-report/provider-accounts/priority-no-eligible-desktop.png" });
+
+    await page.goto(`/machine-management-e2e.html?priority=on&policyConflict=1&${DESIGN_WORKSTATION}`);
+    await expect(accountRow(page, "personal@example.com").locator(".provider-account-rank")).toContainText("1");
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/priority-conflict-before-desktop.png" });
+    // Attempts work above personal; another client saved the reverse order first.
+    await moveButton(page, "claude-work", "up").click();
+    const refusal = providerAccounts(page).getByRole("alert");
+    await expect(refusal).toContainText("Couldn't Update Claude Account Selection");
+    await expect(refusal).toContainText("Claude account selection changed in another client. The list now shows what's saved.");
+    await expect(accountRow(page, "personal@example.com").locator(".provider-account-rank"), "the saved order shows, not the attempted one").toContainText("4");
+    await expect(accountRow(page, "work@example.com").locator(".provider-account-rank")).toContainText("3");
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/priority-conflict-desktop.png" });
+  });
+
+  test("turning it on starts from the saved order, and an older runner can't", async ({ page }) => {
+    await page.goto(`/machine-management-e2e.html?priority=off&${DESIGN_WORKSTATION}`);
+    const accounts = providerAccounts(page);
+    await (await openAccountMenu(page, "work@example.com")).getByRole("menuitem", { name: "Set as Default", exact: true }).click();
+    const claude = accounts.getByRole("radiogroup", { name: "Claude Account Selection" });
+    await expect(claude.getByRole("radio", { name: "Default Account" })).toHaveAttribute("aria-checked", "true");
+    await claude.getByRole("radio", { name: "Priority Order" }).click();
+    await expect(claude.getByRole("radio", { name: "Priority Order" })).toHaveAttribute("aria-checked", "true");
+    await expect(moveButton(page, "claude-work", "up"), "the saved default ranks first").toHaveAttribute("aria-disabled", "true");
+    await claude.getByRole("radio", { name: "Default Account" }).click();
+    await expect(accountRow(page, "work@example.com").locator(".provider-default-marker"), "and returning restores it").toHaveText("Default");
+
+    await page.goto(`/machine-management-e2e.html?priority=off&policyOutdated=1&${DESIGN_WORKSTATION}`);
+    await expect(providerAccounts(page).getByText("Update this machine's runner to use Priority Order.").first()).toBeVisible();
+    await page.goto(`/machine-management-e2e.html?priority=on&policyOutdated=1&${DESIGN_WORKSTATION}`);
+    await expect(providerAccounts(page).getByText("Priority Order Isn't Being Applied")).toBeVisible();
+    await expect(providerAccounts(page).locator("[data-move]"), "an order it can't enforce can't be changed").toHaveCount(0);
+    await expect(providerAccounts(page).getByText(/^Skipped:/u), "nor read as if it were checked").toHaveCount(0);
+    await expect(providerAccounts(page).getByText("Next Session")).toHaveCount(0);
+    await expect(providerAccounts(page).getByRole("radiogroup", { name: "Claude Account Selection" }).getByRole("radio", { name: "Default Account" }), "it can still be replaced").toBeEnabled();
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/priority-older-runner-desktop.png" });
+  });
+});
+
 for (const width of [390, 320]) {
   test("at " + width + "px Account Access is content-height and its consent returns safely", async ({ page }) => {
     await page.setViewportSize({ width, height: 844 });

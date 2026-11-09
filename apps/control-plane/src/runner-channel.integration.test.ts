@@ -440,9 +440,18 @@ import { SessionsService } from ${JSON.stringify(new URL("./sessions.ts", import
 const req = createRequire(${JSON.stringify(import.meta.url)});
 const ws = createRequire(req.resolve('@fastify/websocket'))('ws').WebSocket;
 const send = ws.prototype.send;
+// What this fixture itself slept in the frame queue, reported at the first processing ACK. Frames
+// wait behind the inventory, so all of it falls between runner online and that ACK.
+let injectedMs = 0;
+let firstAckReported = false;
 ws.prototype.send = function(data, ...args) {
   const result = Reflect.apply(send, this, [data, ...args]);
-  if (typeof data === 'string' && JSON.parse(data).type === 'registered') {
+  const sentType = typeof data === 'string' ? JSON.parse(data).type : undefined;
+  if (sentType === 'runner_processing_ack' && !firstAckReported) {
+    firstAckReported = true;
+    console.error('FIRST_ACK_INJECTED_MS=' + injectedMs + ';');
+  }
+  if (sentType === 'registered') {
     const files = [{path:'SKILL.md',content:['---','name: synthetic','description: Test','---','x'.repeat(65536)].join(String.fromCharCode(10)),encoding:'utf8'}];
     Reflect.apply(send,this,[JSON.stringify({type:'skills_sync_manifest',runnerId:'runner-limits-555',syncId:'synthetic',skills:[{name:'synthetic',versionDigest:skillVersionDigest(files),targets:[]}]})]);
     setTimeout(() => {
@@ -482,7 +491,9 @@ if (receiptReplay) {
     return result;
   };
 }
-{
+// Receipt replay starts only after runner online, so this wait could not overlap it. All it did
+// there was spend 16 of the 30 seconds that test allows registration (#4325).
+if (!receiptReplay) {
   const hydrate = SessionsService.prototype.hydrateRunnerSessionsCooperatively;
   SessionsService.prototype.hydrateRunnerSessionsCooperatively = async function(...args) {
     // An early registration ACK admits republish before inventory completes. Keep HTTP/pongs
@@ -496,13 +507,13 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
   if (!wrapped.has(this)) {
     const runs = Reflect.get(this,'runs');
     const handle = runs.handle;
-    runs.handle = async function(messages) { if(messages[0]?.type==='session_runtime_updated') await delay(350); return Reflect.apply(handle,this,[messages]); };
+    runs.handle = async function(messages) { if(messages[0]?.type==='session_runtime_updated') { injectedMs += 350; await delay(350); } return Reflect.apply(handle,this,[messages]); };
     const pressure = Reflect.get(this,'onPressure');
     Reflect.set(this,'onPressure',(paused)=>{ console.error('BULK_PRESSURE='+JSON.stringify({paused,at:Date.now(),...this.pressureStats})); return pressure(paused); });
     if (smallFrames) {
       const handleSingle = Reflect.get(this,'handle');
       Reflect.set(this,'handle',async (message, preparation) => {
-        if (message.type === 'session_queue' || (receiptReplay && (message.type === 'durable_session_command_update' || message.type === 'session_command_invocation_update'))) await delay(2);
+        if (message.type === 'session_queue' || (receiptReplay && (message.type === 'durable_session_command_update' || message.type === 'session_command_invocation_update'))) { injectedMs += 2; await delay(2); }
         return handleSingle(message, preparation);
       });
     }
@@ -514,6 +525,7 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
   let runnerOnlineAt: number | undefined;
   let output = "";
   let receiptDiagnostics = "";
+  let firstAckInjectedMs: string | undefined;
   let reconciliationCompleted = false;
   const trace = new ReconciliationDiagnostics();
   const captureStdout = trace.capture();
@@ -537,6 +549,7 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
     output = (output + String(chunk)).slice(-128_000);
     // Keep pressure/receipt probes apart from high-volume HTTP stdout throughout the replay.
     receiptDiagnostics = (receiptDiagnostics + String(chunk)).slice(-16_000);
+    firstAckInjectedMs ??= /FIRST_ACK_INJECTED_MS=(\d+);/.exec(receiptDiagnostics)?.[1];
   });
   const sockets: StrictSocket[] = [];
   let read: DatabaseSync | undefined;
@@ -573,12 +586,15 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
     let republishStarted = 0;
     let firstAckMs: number | undefined;
     let firstAckAt: number | undefined;
+    let unsentBarrier = { frames: 0, bytes: 0 };
+    let openWindow: { barrierId: number; frames: number; bytes: number; sentAt: number } | undefined;
     socket.on("message", (raw) => {
       const message = JSON.parse(raw.toString());
       if (message.type === "registered") barrierSupported = message.protocolVersion >= 270;
       if (message.type === "runner_processing_ack") {
         firstAckMs ??= performance.now() - republishStarted;
         firstAckAt ??= performance.now();
+        if (openWindow?.barrierId === message.barrierId) openWindow = undefined;
         window?.acknowledge(message.barrierId);
         processingAcknowledgements++;
         lastProcessingAckAt = performance.now();
@@ -627,21 +643,29 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
       // deliberately slow registration fixture so a pause measures receipt handling alone.
       const onlineDeadline = performance.now() + 30_000;
       while (runnerOnlineAt === undefined) {
-        assert.ok(performance.now() < onlineDeadline, "runner did not come online before receipt replay");
+        assert.ok(performance.now() < onlineDeadline, `runner did not come online before receipt replay\n${failureContext(pass, handshakeStarted)}`);
         await delay(20);
       }
     }
     republishStarted = performance.now();
     if (barrierSupported) {
+      // Republish writes a window of frames and then its barrier, so the barrier names the window.
+      const writeWindow = (wire: string) => {
+        socket.send(wire);
+        const barrier = /^\{"type":"runner_processing_barrier","barrierId":(\d+)/.exec(wire);
+        if (!barrier) { unsentBarrier.frames++; unsentBarrier.bytes += Buffer.byteLength(wire); return; }
+        openWindow = { barrierId: Number(barrier[1]), frames: unsentBarrier.frames, bytes: unsentBarrier.bytes, sentAt: performance.now() };
+        unsentBarrier = { frames: 0, bytes: 0 };
+      };
       window = smallFrames ? republishReconnectState({
         republishSessionIds: () => snapshots.map((snapshot) => snapshot.id),
         republishSessionSnapshot: (id) => current.get(id),
         republishSessionQueue: (id) => ({ type: "session_queue", sessionId: id, queue: [] }),
-      }, (message) => message, (wire) => socket.send(wire), () => socket.terminate(),
+      }, (message) => message, writeWindow, () => socket.terminate(),
       (details) => t.diagnostic(JSON.stringify(details)), durable && invocations ? { durable, invocations } : undefined) : new ProcessingWindow(snapshots.map((snapshot) => snapshot.id), (id) => {
         const snapshot = current.get(id);
         return snapshot ? JSON.stringify({ type: "session_runtime_updated", snapshot }) : null;
-      }, (wire) => socket.send(wire), () => socket.terminate(), (details) => t.diagnostic(JSON.stringify(details)));
+      }, writeWindow, () => socket.terminate(), (details) => t.diagnostic(JSON.stringify(details)));
       lastProcessingAckAt = performance.now();
     } else {
       for (const snapshot of current.values()) socket.send(JSON.stringify({ type: "session_runtime_updated", snapshot }));
@@ -704,12 +728,12 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
         convergenceOutcome = "converged";
         break;
       }
-      // The early registration ACK admits the first window before the inventory is applied.
-      // Its credit is not eligible until runner online; subsequent credits retain the existing
-      // inter-window watchdog. Keep the first-ACK acceptance budget at five seconds after online.
-      const creditStalled = processingAcknowledgements === 0
-        ? runnerOnlineAt !== undefined && performance.now() - runnerOnlineAt > 5000
-        : performance.now() - lastProcessingAckAt > 15_000;
+      // The early registration ACK admits the first window before the inventory is applied, so
+      // its credit is not eligible until runner online. From there every credit gets the same
+      // inter-window watchdog. This only ends the wait for a window that stopped; the five-second
+      // first-ACK acceptance (#4163) is asserted below on what the product itself took.
+      const creditWaitingSince = processingAcknowledgements === 0 ? runnerOnlineAt : lastProcessingAckAt;
+      const creditStalled = creditWaitingSince !== undefined && performance.now() - creditWaitingSince > 15_000;
       if (window && !window.complete && creditStalled) {
         convergenceOutcome = "stalled";
         break;
@@ -717,7 +741,10 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
       await probe();
       await delay(50);
     }
-    const convergenceContext = `${convergenceOutcome}; ${processingAcknowledgements} acknowledgements\n${failureContext(pass, convergenceStarted)}`;
+    const stalledWindow = openWindow
+      ? `; barrier ${openWindow.barrierId} (${openWindow.frames} frames, ${openWindow.bytes} bytes) unacknowledged after ${Math.round(performance.now() - openWindow.sentAt)}ms`
+      : "";
+    const convergenceContext = `${convergenceOutcome}; ${processingAcknowledgements} acknowledgements${stalledWindow}\n${failureContext(pass, convergenceStarted)}`;
     assert.equal(read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-1499'").get()?.runner_snapshot_fingerprint,
       fingerprint, `newer snapshot did not converge\n${convergenceContext}\n${output}`);
     maxConvergenceMs = Math.max(maxConvergenceMs, performance.now() - convergenceStarted);
@@ -740,9 +767,14 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
     assert.equal(reconciliationCompleted, true);
     assert.ok(firstAckAt !== undefined && runnerOnlineAt !== undefined);
     const firstAckAfterOnlineMs = Math.max(0, firstAckAt - runnerOnlineAt);
-    assert.ok(firstAckAfterOnlineMs < 5000, `first processing ACK after runner online took ${firstAckAfterOnlineMs}ms`);
-    t.diagnostic(`${snapshots.length} children: first ACK ${Math.round(firstAckAfterOnlineMs)}ms after runner online, ${Math.round(firstAckMs!)}ms after republish start`);
-    t.diagnostic("Initial registration includes a test-only asynchronous 16000ms wait before hydration; the trace below measures hydration separately.");
+    // #4163 accepts five seconds of product latency. The fixture's own sleeps sit in the same queue
+    // ahead of this ACK and set the 2.1 s floor seen on hosted runners, so they do not count.
+    const injectedMs = Number(firstAckInjectedMs);
+    assert.ok(Number.isFinite(injectedMs), "the fixture reported what it injected before the first ACK");
+    assert.ok(firstAckAfterOnlineMs - injectedMs < 5000,
+      `first processing ACK after runner online took ${firstAckAfterOnlineMs}ms, ${injectedMs}ms of it injected by this fixture`);
+    t.diagnostic(`${snapshots.length} children: first ACK ${Math.round(firstAckAfterOnlineMs)}ms after runner online (${injectedMs}ms injected), ${Math.round(firstAckMs!)}ms after republish start`);
+    if (!receiptReplay) t.diagnostic("Initial registration includes a test-only asynchronous 16000ms wait before hydration; the trace below measures hydration separately.");
     t.diagnostic(`Registration measured separately: ${trace.summary()}`);
     t.diagnostic(`${snapshots.length} children: HTTP ${Math.round(maxHealthMs)}ms, pong ${Math.round(maxPongMs)}ms, convergence ${Math.round(maxConvergenceMs)}ms, receive pause 0ms`);
   }

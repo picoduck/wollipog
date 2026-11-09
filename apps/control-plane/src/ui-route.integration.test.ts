@@ -992,6 +992,45 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     "the saved provider account default in the Machine view",
   );
   assert.equal(projectedDefaults?.length, 1);
+  // Versioned policy (#4353): a Machine manager writes it, its writes detect conflicts, and an older
+  // client's route can no longer replace it.
+  const policyUrl = `${httpBase}/api/runners/runner-ui-route/provider-account-policies/claude`;
+  const putPolicy = (token: string, body: unknown, url = policyUrl) => fetchWithBearer(url, token, {
+    method: "PUT", body: JSON.stringify(body), headers: { "content-type": "application/json" },
+  });
+  const priorityBody = { mode: "priority", priorityAccountIds: ["work"], expectedRevision: 1 };
+  assert.equal((await putPolicy(operatorToken, priorityBody)).status, 403, "only a Machine manager can change the policy");
+  assert.equal((await putPolicy(ownerToken, { ...priorityBody, mode: "automatic_balance" })).status, 400, "no mode beyond the ones this release enforces");
+  assert.equal((await putPolicy(ownerToken, { ...priorityBody, priorityAccountIds: ["nope"] })).status, 409, "a new entry must exist on the Machine");
+  const notGrantedOrder = await putPolicy(ownerToken, { ...priorityBody, priorityAccountIds: ["work", "theirs"] });
+  assert.equal(notGrantedOrder.status, 409);
+  assert.equal((await notGrantedOrder.json() as { code?: string }).code, "PROVIDER_PROFILE_NOT_GRANTED");
+  assert.equal((await putPolicy(ownerToken, { ...priorityBody, expectedRevision: 0 })).status, 409, "a stale revision is refused");
+  const savedPolicy = await putPolicy(ownerToken, priorityBody);
+  assert.equal(savedPolicy.status, 200);
+  assert.deepEqual(await savedPolicy.json(), { providerAccountPolicy: {
+    provider: "claude", accountId: null, revision: 2, mode: "priority", schemaVersion: 1, fixedAccountId: "work", priorityAccountIds: ["work"],
+  } });
+  const olderClientWrite = await fetchWithBearer(defaultUrl, ownerToken, {
+    method: "PUT", body: JSON.stringify({ accountId: "work", expectedRevision: 2 }), headers: { "content-type": "application/json" },
+  });
+  assert.equal(olderClientWrite.status, 409, "an older client can't silently overwrite Priority Order");
+  const olderClientRefusal = await olderClientWrite.json() as { code?: string; error?: string; current?: unknown };
+  assert.equal(olderClientRefusal.code, "PROVIDER_ACCOUNT_POLICY_NOT_FIXED");
+  assert.equal(olderClientRefusal.current, undefined, "it isn't told to retry as if it lost a race");
+  const preview = await fetchWithBearer(`${httpBase}/api/runners/runner-ui-route/provider-account-selection?provider=claude`, ownerToken);
+  assert.equal(preview.status, 200);
+  assert.equal((await preview.json() as { mode?: string }).mode, "priority");
+  assert.equal((await fetchWithBearer(`${httpBase}/api/runners/runner-ui-route/provider-account-selection`, ownerToken)).status, 400);
+  assert.equal((await fetchWithBearer(`${httpBase}/api/runners/runner-ui-route/provider-account-selection?provider=claude&workspaceId=no-such-workspace`, ownerToken)).status, 404,
+    "a preview reads only a workspace its caller could launch in");
+  assert.equal((await fetchWithBearer(`${httpBase}/api/runners/runner-ui-route/provider-account-selection?provider=claude&projectId=no-such-project`, ownerToken)).status, 404,
+    "and only a project its caller could launch in");
+  assert.equal((await fetchWithBearer(`${httpBase}/api/runners/runner-ui-route/provider-account-selection?provider=claude&noProject=1`, ownerToken)).status, 200);
+  const restoredFixed = await putPolicy(ownerToken, { mode: "fixed", expectedRevision: 2 });
+  assert.equal(restoredFixed.status, 200);
+  assert.equal((await restoredFixed.json() as { providerAccountPolicy: { accountId?: string } }).providerAccountPolicy.accountId, "work",
+    "returning to Default Account restores the saved default");
   // Provider profiles (#3239): registration carries the complete grant list for the profiles the
   // runner reports, and adoption runs behind the central auth gate and the mutation audit.
   assert.deepEqual(registeredRunner.providerProfileGrants, [], "a v225 runner is told its scope holds no grants yet");

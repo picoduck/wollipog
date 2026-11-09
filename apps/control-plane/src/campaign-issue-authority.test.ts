@@ -2550,6 +2550,26 @@ test("#4267 an owner request states the Maximum Issues increase its additions ne
   } finally { epic.db.close(); }
 });
 
+test("#4334 an owner review's entry names its exact additions, removals and Maximum Issues increase, however long the change", async () => {
+  const withRemoval = harness(true, 5, [100, 103]);
+  try {
+    const proposed = await withRemoval.svc.proposeCampaignIssueScope("root", { requestId: "swap", expectedRevision: 1, explanation: "The owner swapped them in chat",
+      additions: [{ repository: "team/repo", number: 101 }], removals: [{ repository: "team/repo", number: 103 }] });
+    assert.ok(proposed.ok, proposed.error ?? "refused");
+    assert.equal(proposed.data!.authority, "human");
+    assert.equal(withRemoval.db.campaignOwnerDecisions("root")?.items[0]?.summary, "Add team/repo#101 and remove team/repo#103");
+  } finally { withRemoval.db.close(); }
+  // 40 issues pass the 200 characters other summaries are held to: the change and the increase after it survive whole.
+  const long = harness(true, 2);
+  try {
+    const numbers = Array.from({ length: 40 }, (_, index) => 200 + index);
+    const proposed = await proposeWithoutLineage(long, "long", numbers);
+    assert.ok(proposed.ok, proposed.error ?? "refused");
+    assert.equal(long.db.campaignOwnerDecisions("root")?.items[0]?.summary,
+      `Add ${numbers.map((number) => `team/repo#${number}`).join(", ")}, raising Maximum Issues from 2 to 41`);
+  } finally { long.db.close(); }
+});
+
 test("#4267 only the owner resolves an owner request; the Orchestrator cannot approve, consume or widen it", async () => {
   const h = harness(true, 2);
   try {
@@ -3173,6 +3193,291 @@ test("#3915 a person's scope approval under Full Control re-authorizes the bound
     assert.deepEqual(revocationAudit(h, unrelated, question).workflowDecision?.revocation,
       { reason: "superseded_by_scope_change", triggeredBy: { kind: "human", id: h.principal.userId } });
   } finally { h.db.close(); }
+});
+
+/** A child's question, screened as a request from its session is. */
+async function screenedQuestion(h: ReturnType<typeof harness>, sessionId: string, requestId: string) {
+  const created = await h.svc.createWorkflowDecisionWithVideo(sessionId, { requestId, resourceKey: requestId, resourceSnapshot: { category: "implementation_question",
+    question: "Which test?", options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } });
+  assert.ok(created.ok && created.data, created.error ?? "refused");
+  return created.data.occurrenceId;
+}
+
+/** A Full Control campaign whose unrelated child already holds decisions a person's request lists. */
+async function busyPersonScopeRequest(route: "owner_request" | "campaign_status") {
+  const h = fullControlMergeHarness();
+  const f = scopeImpactFixture(h, false);
+  const unrelated = f.child("merger", "other", "claude-code");
+  const stays = await screenedQuestion(h, unrelated, "listed-stays");
+  const consumed = await screenedQuestion(h, unrelated, "listed-consumed");
+  const denied = await screenedQuestion(h, unrelated, "listed-denied");
+  const withdrawn = await screenedQuestion(h, unrelated, "listed-withdrawn");
+  const proposed = route === "owner_request" ? await proposeWithoutLineage(h, "owner-add", [101]) : await humanScopeAddition(h, "human-add", 101);
+  assert.ok(proposed.ok && proposed.data, proposed.error ?? "proposal");
+  assert.equal(proposed.data.authority, "human");
+  const snapshot = proposed.data.resourceSnapshot;
+  assert.ok(snapshot.category === "campaign_issue_scope");
+  assert.deepEqual(snapshot.affectedDecisions, [stays, consumed, denied, withdrawn].sort(), "the request lists every outstanding decision");
+  return { h, f, unrelated, stays, consumed, denied, withdrawn, proposed: proposed.data, listed: [...snapshot.affectedDecisions] };
+}
+
+const scopeNumbers = (h: ReturnType<typeof harness>) => h.db.getSession("root")!.orchestratorPolicy!.issueNumbers;
+
+/** Answers or denies a child's question as whoever owns it. */
+function settleQuestion(h: ReturnType<typeof harness>, child: string, occurrenceId: string, outcome: "approve" | "deny") {
+  const authority = h.db.workflowDecisionByOccurrence(occurrenceId)!.authority;
+  const settled = h.svc.resolveWorkflowDecision("root", child, occurrenceId, { outcome, ...(outcome === "approve" ? { selectedOptionId: "a" } : {}) }, authority,
+    authority === "human" ? { kind: "human", id: h.principal.userId } : { kind: "agent", id: "root" }, () => true);
+  assert.ok(settled.ok, settled.error ?? outcome);
+  return settled.data!;
+}
+
+/** A refused approval leaves the scope alone and revokes the request as stale. */
+function assertRefusedAsStale(h: ReturnType<typeof harness>, request: WorkflowDecisionView, before: readonly number[], label: string) {
+  const refused = h.approve(request);
+  assert.equal(refused.status, 409, `${label}: ${refused.error ?? "approved"}`);
+  assert.equal(h.db.workflowDecisionByOccurrence(request.occurrenceId)!.status, "revoked", label);
+  assert.deepEqual(scopeNumbers(h), before, `${label}: nothing is applied`);
+}
+
+for (const route of ["owner_request", "campaign_status"] as const) {
+  test(`#4332 a person's ${route} stays approvable through unrelated decisions, and its record lists exactly what it revoked`, async () => {
+    const { h, f, unrelated, stays, consumed, denied, withdrawn, proposed, listed } = await busyPersonScopeRequest(route);
+    try {
+      // Listed decisions settle: consumed, denied and withdrawn.
+      const answered = settleQuestion(h, unrelated, consumed, "approve");
+      const spent = await h.svc.consumeWorkflowDecision(unrelated, consumed, { resourceSnapshot: answered.resourceSnapshot });
+      assert.ok(spent.ok, spent.error ?? "consume");
+      assert.equal(f.status(consumed), "consumed");
+      settleQuestion(h, unrelated, denied, "deny");
+      assert.ok(h.svc.withdrawWorkflowDecision(unrelated, withdrawn, { reason: "No longer needed" }).ok);
+      // New decisions of the unrelated child, one of them an armed merge.
+      const later = await screenedQuestion(h, unrelated, "created-after");
+      const merge = await f.armedMerge(unrelated, 31);
+      const approved = h.approve(proposed);
+      assert.ok(approved.ok, approved.error ?? "approve");
+      assert.deepEqual(scopeNumbers(h), [100, 101]);
+
+      const revoked = [stays, later, merge.occurrenceId].sort();
+      for (const occurrenceId of revoked) assert.equal(f.status(occurrenceId), "revoked", occurrenceId);
+      assert.equal(f.status(consumed), "consumed", "a settled decision is not revoked");
+      assert.equal(f.status(denied), "denied");
+      assert.deepEqual(approved.data!.scopeRevokedDecisions, revoked, "the result lists exactly what it revoked, newer decisions included");
+      const stored = h.db.workflowDecisionByOccurrence(proposed.occurrenceId)!;
+      assert.deepEqual(stored.scopeRevokedDecisions, revoked);
+      assert.ok(stored.resourceSnapshot.category === "campaign_issue_scope");
+      assert.deepEqual(stored.resourceSnapshot.affectedDecisions, listed, "the request as the person saw it is unchanged");
+      assert.equal(stored.resourceDigest, proposed.resourceDigest);
+      const audit = h.db.listGovernanceAudit("root").filter((entry) => entry.requestId === proposed.occurrenceId && entry.outcome === "consumed");
+      assert.equal(audit.length, 1);
+      assert.deepEqual(audit[0]!.workflowDecision?.revokedDecisions, revoked, "the audit lists them too");
+      for (const occurrenceId of revoked) {
+        assert.deepEqual(revocationAudit(h, unrelated, occurrenceId).workflowDecision?.revocation,
+          { reason: "superseded_by_scope_change", triggeredBy: { kind: "human", id: h.principal.userId } });
+      }
+
+      // An armed merge filed after the request is on the record, so its forge-proven merge is still recorded.
+      let merged = true;
+      f.forge(merge, unrelated, () => merged);
+      assert.equal(h.db.scopeApprovalRevoking(h.db.workflowDecisionByOccurrence(merge.occurrenceId)!)?.occurrenceId, proposed.occurrenceId);
+      const recorded = await h.svc.reconcileWorkflowDecision(unrelated, merge.occurrenceId, { resourceSnapshot: merge.snapshot });
+      assert.ok(recorded.ok, recorded.error ?? "reconcile");
+      assert.equal(recorded.data?.status, "consumed");
+      merged = false;
+    } finally { h.db.close(); }
+  });
+}
+
+test("#4332 a decision the approval did not revoke proves no reconciliation, whatever the request listed", async () => {
+  const h = fullControlMergeHarness();
+  try {
+    const f = scopeImpactFixture(h, false);
+    const unrelated = f.child("merger", "other", "claude-code");
+    const armed = await f.armedMerge(unrelated, 41);
+    const proposed = await humanScopeAddition(h, "human-add", 101); assert.ok(proposed.ok, proposed.error ?? "proposal");
+    assert.ok(h.approve(proposed.data!).ok);
+    const scope = h.db.workflowDecisionByOccurrence(proposed.data!.occurrenceId)!;
+    assert.deepEqual(scope.scopeRevokedDecisions, [armed.occurrenceId]);
+    // The recorded list decides, not the request's list.
+    h.db.raw().prepare("UPDATE workflow_decisions SET scope_revoked_decisions=? WHERE occurrence_id=?").run("[]", scope.occurrenceId);
+    assert.equal(h.db.scopeApprovalRevoking(h.db.workflowDecisionByOccurrence(armed.occurrenceId)!), null);
+    // A scope decision consumed before the record existed still reads what its request listed.
+    h.db.raw().prepare("UPDATE workflow_decisions SET scope_revoked_decisions=NULL WHERE occurrence_id=?").run(scope.occurrenceId);
+    assert.equal(h.db.scopeApprovalRevoking(h.db.workflowDecisionByOccurrence(armed.occurrenceId)!)?.occurrenceId, scope.occurrenceId);
+  } finally { h.db.close(); }
+});
+
+test("#4332 a changed scope revision, boundary, Maximum Issues, addition or removal still refuses a person's request as stale", async () => {
+  // The scope revision moved under a boundary that still names it.
+  {
+    const h = harness();
+    try {
+      const pending = await proposeWithoutLineage(h, "owner-add", [102]); assert.ok(pending.ok, pending.error ?? "proposal");
+      const policy = h.db.getSession("root")!.orchestratorPolicy!;
+      assert.ok(policy.control?.mode === "full_control");
+      policy.issueScope!.revision = 2;
+      policy.control.boundary.issueScopeRevision = 2;
+      h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
+      const refused = h.approve(pending.data!);
+      assert.equal(refused.status, 409);
+      assert.match(refused.error ?? "", /Campaign scope or affected work changed/u);
+      assert.deepEqual(scopeNumbers(h), [100]);
+      assert.deepEqual(revocationAudit(h, "root", pending.data!.occurrenceId).actor, { kind: "system", id: "approval_refused_stale" });
+    } finally { h.db.close(); }
+  }
+  // The boundary: a new authorization moves the policy revision every pending decision is bound to.
+  {
+    const h = harness();
+    try {
+      const pending = await proposeWithoutLineage(h, "owner-add", [102]); assert.ok(pending.ok, pending.error ?? "proposal");
+      const policy = h.db.getSession("root")!.parentControlPolicy!;
+      assert.ok(h.svc.setCampaignControl("root", { mode: "full_control", objective: "Implement epic 100 and more", operations: ["campaign_issue_scope", "issue_closure"],
+        delegatablePolicyIds: [], issueAuthority: { epics: [100], relatedFollowUps: true, maxIssues: 5, closureReasons: ["completed"] } }, policy.revision, h.principal).ok);
+      assertRefusedAsStale(h, pending.data!, [100], "boundary");
+    } finally { h.db.close(); }
+  }
+  // Maximum Issues: the limit the stated increase was computed from moved.
+  {
+    const h = harness(true, 2);
+    try {
+      const pending = await proposeWithoutLineage(h, "owner-raise", [101, 102]); assert.ok(pending.ok, pending.error ?? "proposal");
+      assert.deepEqual((pending.data!.resourceSnapshot as ScopeSnapshot).ownerReview?.maxIssuesIncrease, { from: 2, increase: 1 });
+      const policy = h.db.getSession("root")!.orchestratorPolicy!;
+      assert.ok(policy.control?.mode === "full_control");
+      policy.control.boundary.issueAuthority!.maxIssues = 4;
+      h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
+      assertRefusedAsStale(h, pending.data!, [100], "Maximum Issues");
+    } finally { h.db.close(); }
+  }
+  // The additions or removals: the stored change no longer matches what the request bound.
+  for (const change of ["additions", "removals"] as const) {
+    const h = harness();
+    try {
+      const pending = await proposeWithoutLineage(h, "owner-add", [101]); assert.ok(pending.ok, pending.error ?? "proposal");
+      const stored = { ...pending.data!.resourceSnapshot } as ScopeSnapshot;
+      if (change === "additions") stored.additions = [102]; else stored.removals = [100];
+      h.db.raw().prepare("UPDATE workflow_decisions SET resource_snapshot=? WHERE occurrence_id=?").run(JSON.stringify(stored), pending.data!.occurrenceId);
+      assertRefusedAsStale(h, h.db.workflowDecisionByOccurrence(pending.data!.occurrenceId)!, [100], change);
+    } finally { h.db.close(); }
+  }
+  // The list itself is bound too: a stored list that isn't the one requested is a changed request.
+  {
+    const h = harness();
+    try {
+      const pending = await proposeWithoutLineage(h, "owner-add", [101]); assert.ok(pending.ok, pending.error ?? "proposal");
+      const stored = { ...pending.data!.resourceSnapshot, affectedDecisions: ["not-requested"] };
+      h.db.raw().prepare("UPDATE workflow_decisions SET resource_snapshot=? WHERE occurrence_id=?").run(JSON.stringify(stored), pending.data!.occurrenceId);
+      assertRefusedAsStale(h, h.db.workflowDecisionByOccurrence(pending.data!.occurrenceId)!, [100], "listed decisions");
+    } finally { h.db.close(); }
+  }
+});
+
+test("#4332 any change to a child assigned to an added or removed issue still refuses a person's request as stale", async () => {
+  type Fixture = ReturnType<typeof scopeImpactFixture>;
+  const changes: Array<[string, (h: ReturnType<typeof harness>, f: Fixture, child: string, listed: string) => unknown]> = [
+    ["a new decision", (h, _f, child) => screenedQuestion(h, child, "related-new")],
+    ["a listed decision answered", (h, _f, child, listed) => settleQuestion(h, child, listed, "approve")],
+    ["a listed decision denied", (h, _f, child, listed) => settleQuestion(h, child, listed, "deny")],
+    ["a listed decision withdrawn", (h, _f, child, listed) => assert.ok(h.svc.withdrawWorkflowDecision(child, listed, { reason: "No longer needed" }).ok)],
+    ["a new prompt", (h, _f, child) => h.db.stageSessionPromptCommand({ commandId: "prompt-related", sessionId: child, runnerId: "r",
+      payloadJson: JSON.stringify({ text: "Continue." }), payloadSha256: "d".repeat(64), expiresAt: Date.now() + 60_000, now: Date.now() })],
+  ];
+  for (const removes of [false, true]) {
+    for (const [label, change] of changes) {
+      // Full Control refuses an assignment outside its scope, so the child held its issue first.
+      const h = harness(false);
+      try {
+        const f = scopeImpactFixture(h, false);
+        const related = f.child("worker", removes ? "issue:100" : "issue:101");
+        assert.ok(h.svc.setCampaignControl("root", { mode: "full_control", objective: "Implement epic 100", operations: ["campaign_issue_scope", "issue_closure", "implementation_question"],
+          delegatablePolicyIds: [], issueAuthority: { epics: [100], relatedFollowUps: true, maxIssues: 5, closureReasons: ["completed"] } },
+        h.db.getSession("root")!.parentControlPolicy!.revision, h.principal).ok);
+        const listed = await screenedQuestion(h, related, "related-listed");
+        const proposed = await h.svc.proposeCampaignIssueScope("root", { requestId: "human-change", expectedRevision: 1,
+          additions: [{ repository: "team/repo", number: 102 }, ...(removes ? [] : [{ repository: "team/repo", number: 101 }])],
+          removals: removes ? [{ repository: "team/repo", number: 100 }] : [], explanation: "Change the members" }, () => true, h.principal);
+        assert.ok(proposed.ok && proposed.data, proposed.error ?? "proposal");
+        assert.equal(proposed.data.authority, "human");
+        assert.ok((proposed.data.resourceSnapshot as ScopeSnapshot).activeChildren.some((c) => c.sessionId === related));
+        await change(h, f, related, listed);
+        assertRefusedAsStale(h, proposed.data, [100], `${removes ? "removed" : "added"} issue: ${label}`);
+      } finally { h.db.close(); }
+    }
+  }
+  // A child that becomes assigned to the removed issue after the request is a change to that child.
+  const h = harness();
+  try {
+    const f = scopeImpactFixture(h);
+    const child = f.child("child", "other");
+    const proposed = await h.svc.proposeCampaignIssueScope("root", { requestId: "human-swap", expectedRevision: 1,
+      additions: [{ repository: "team/repo", number: 101 }], removals: [{ repository: "team/repo", number: 100 }], explanation: "Swap" }, () => true, h.principal);
+    assert.ok(proposed.ok, proposed.error ?? "proposal");
+    assert.deepEqual((proposed.data!.resourceSnapshot as ScopeSnapshot).activeChildren, []);
+    assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.item.id, childSessionId: child }).ok);
+    assertRefusedAsStale(h, proposed.data!, [100], "newly assigned child");
+  } finally { h.db.close(); }
+});
+
+test("#4332 of the root's own decisions, only a closure of another issue or a publication leaves a person's request approvable", async () => {
+  // A closure of an issue the change keeps, listed and executed, and another filed after the request.
+  {
+    const h = harness(true, 5, [100, 103]);
+    try {
+      const f = scopeImpactFixture(h);
+      const listed = await f.closure(100);
+      assert.ok(h.approve(listed).ok);
+      const proposed = await humanScopeAddition(h, "human-add", 101); assert.ok(proposed.ok, proposed.error ?? "proposal");
+      assert.deepEqual((proposed.data!.resourceSnapshot as ScopeSnapshot).affectedDecisions, [listed.occurrenceId]);
+      const executed = await h.svc.executeGithubIssueClosure("root", listed.occurrenceId, listed.resourceDigest);
+      assert.ok(executed.ok, executed.error ?? "closure");
+      const later = await f.closure(103);
+      const approved = h.approve(proposed.data!);
+      assert.ok(approved.ok, approved.error ?? "approve");
+      assert.deepEqual(approved.data!.scopeRevokedDecisions, [later.occurrenceId]);
+      assert.equal(f.status(later.occurrenceId), "revoked");
+    } finally { h.db.close(); }
+  }
+  // A closure of an issue the change removes bears on that issue.
+  {
+    const h = harness();
+    try {
+      const f = scopeImpactFixture(h);
+      const proposed = await h.svc.proposeCampaignIssueScope("root", { requestId: "human-swap", expectedRevision: 1,
+        additions: [{ repository: "team/repo", number: 101 }], removals: [{ repository: "team/repo", number: 100 }], explanation: "Swap" }, () => true, h.principal);
+      assert.ok(proposed.ok, proposed.error ?? "proposal");
+      await f.closure(100);
+      assertRefusedAsStale(h, proposed.data!, [100], "closure of a removed issue");
+    } finally { h.db.close(); }
+  }
+  // A publication holds a slot the approval counts again, so a change in them isn't stale by itself.
+  {
+    const h = harness();
+    try {
+      const proposed = await humanScopeAddition(h, "human-add", 101); assert.ok(proposed.ok, proposed.error ?? "proposal");
+      const rec = h.svc.recordCampaignFollowUp("root", { originSessionId: "child", repository: "team/repo", title: "Related repair", originWorkItemIds: [h.item.id] });
+      assert.ok(rec.ok, rec.error ?? "recommendation");
+      assert.ok(h.svc.adjudicateCampaignRecommendation("root", { recommendationId: rec.data!.id, disposition: "accepted", reason: "Observed related work", publicationRequired: true }).ok);
+      const publication = await h.svc.createWorkflowDecisionWithVideo("root", { requestId: "root-publication", resourceKey: "publication",
+        resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "Related repair", sanitizedBody: body, labels: [], recommendationId: rec.data!.id } });
+      assert.ok(publication.ok, publication.error ?? "publication");
+      const approved = h.approve(proposed.data!);
+      assert.ok(approved.ok, approved.error ?? "approve");
+      assert.deepEqual(approved.data!.scopeRevokedDecisions, [publication.data!.occurrenceId]);
+    } finally { h.db.close(); }
+  }
+  // Nothing proves any other decision of the root unrelated: its own work may be on the changed issue.
+  {
+    const h = fullControlMergeHarness();
+    try {
+      const f = scopeImpactFixture(h, false);
+      const proposed = await humanScopeAddition(h, "human-add", 101); assert.ok(proposed.ok, proposed.error ?? "proposal");
+      const own = h.svc.createWorkflowDecision("root", { requestId: "root-merge", resourceKey: "team/repo#51", resourceSnapshot: { category: "pr_merge", repository: "team/repo", pullRequest: 51,
+        headSha: "e".repeat(40), reviewResult: "merge", requiredChecks: { headSha: "e".repeat(40), status: "passed", checkedAt: 10, checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" }] } } });
+      assert.ok(own.ok, own.error ?? "root merge");
+      assert.ok(f.status(own.data!.occurrenceId));
+      assertRefusedAsStale(h, proposed.data!, [100], "the root's own merge");
+    } finally { h.db.close(); }
+  }
 });
 
 test("#3915 an armed merge a person's Full Control scope approval revoked is recorded once from forge proof; an unarmed one stays terminal", async () => {

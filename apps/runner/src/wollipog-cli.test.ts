@@ -845,6 +845,48 @@ test("CLI rejects explicit effort against pre-v138 control planes without creati
   assert.deepEqual(requests, ["http://cp/api/compatibility"]);
 });
 
+test("CLI names a provider account and lists choices only on a control plane that reads them (#4353)", async () => {
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" };
+  const create = ["node", "cli.js", "--wollipog-cli", "session", "create", "--runner", "r1", "--agent", "claude",
+    "--workspace", "ws", "--provider-account", "acct:aaaaaaaaaaaaaaaa", "--json"];
+  const accounts = ["node", "cli.js", "--wollipog-cli", "session", "accounts", "--runner", "r1", "--agent", "claude", "--workspace", "ws", "--json"];
+  for (const protocolVersion of [RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccountAgentChoice - 1, PROTOCOL_VERSION]) {
+    for (const argv of [create, accounts]) {
+      const requests: Array<{ url: string; body?: string }> = [];
+      const fetch: McpFetch = async (url, init) => {
+        requests.push({ url, body: init?.body });
+        return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+          ? { protocolVersion }
+          : url.includes("provider-account-selection")
+            ? { provider: "claude", accountId: "person-example-com-1234", choices: [{ accountRef: "acct:aaaaaaaaaaaaaaaa", position: 1, canName: true }] }
+            : { id: "s_new", status: "starting", runnerId: "r1", title: "New" }) };
+      };
+      let output = "";
+      const code = await runWollipogCli(argv, env, { stdout: (text) => { output += text; }, stderr: () => {} }, fetch);
+      if (protocolVersion < RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccountAgentChoice) {
+        assert.equal(code, 1);
+        assert.match(JSON.parse(output).error, /requires v337/u, "an older control plane would not read the choice, so nothing is sent");
+        assert.deepEqual(requests.map((request) => request.url), ["http://cp/api/compatibility"]);
+      } else if (argv === create) {
+        assert.equal(code, 0);
+        assert.equal(JSON.parse(requests[1]!.body!).providerAccountId, "acct:aaaaaaaaaaaaaaaa");
+      } else {
+        assert.equal(code, 0);
+        assert.equal(requests[1]!.url, "http://cp/api/runners/r1/provider-account-selection?agentId=claude&workspaceId=ws");
+        assert.ok(!output.includes("person-example-com"), output);
+        assert.equal(JSON.parse(output).accounts[0].accountRef, "acct:aaaaaaaaaaaaaaaa");
+      }
+    }
+  }
+  for (const suffix of [["--provider-account"], ["--provider-account="], ["--provider-account", "  "], ["--provider-account", "--json"]]) {
+    let output = "";
+    const argv = ["node", "cli.js", "--wollipog-cli", "session", "create", "--runner", "r1", "--agent", "claude", "--workspace", "ws", ...suffix];
+    const code = await runWollipogCli(argv, env, { stdout: (text) => { output += text; }, stderr: (text) => { output += text; } }, async () => { throw new Error("nothing is sent"); });
+    assert.notEqual(code, 0);
+    assert.match(output, /--provider-account requires an account reference/u);
+  }
+});
+
 test("CLI sends a campaign work item at creation only to a v220 control plane (#3106)", async () => {
   const create = ["node", "cli.js", "--wollipog-cli", "session", "create", "--runner", "r1", "--agent", "codex",
     "--workspace", "ws", "--effort", "high", "--work-item", "cwi_item", "--json"];

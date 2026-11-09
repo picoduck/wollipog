@@ -79,7 +79,8 @@ export function sessionHelp(): string {
     "  session create --runner <runner-id> --agent <agent-id> [--workspace <workspace-id> | --path <path>]",
     "                 [--prompt <text>] [--title <title>] [--model <model>] [--effort <effort>] [--permission-mode <mode>] [--worktree]",
     "                 [--cost-budget <usd>] [--max-tool-calls <count>] [--max-child-sessions <count>]",
-    "                 [--work-item <campaign-work-item-id>] [--json]",
+    "                 [--work-item <campaign-work-item-id>] [--provider-account <account-ref>] [--json]",
+    "  session accounts --runner <runner-id> --agent <agent-id> [--workspace <workspace-id>] [--model <model>] [--json]",
     "  session prompt <session-id> <text> [--json]",
     "  session steering <session-id> [--json]",
     "  session steering-get <session-id> <submission-id> [--json]",
@@ -290,7 +291,7 @@ export function reviewHelp(): string {
     "  review session get <review-session-id> [--json]",
     "  review session list [--limit <1-100>] [--cursor <review-session-id>] [--json]",
     "  review session cancel <review-session-id> [--json]",
-    "review session run starts a review session: the other model family as its own read-only session, launched by the runner outside this session's sandbox against the runner's checkout of the pull request's pushed head, loading none of the repository's settings, hooks, skills or MCP servers. It takes no session slot; one review session is active per session at a time. Reviews of a pull request form a run: the first round reviews it in full, later rounds only the changes since the last valid round with its open findings (or in full with --full-reason), and a rebased head starts a new epoch that reviews the range-diff. Each epoch has at most 4 valid rounds and each round 2 counted attempts. Poll review session get until terminal is true; its verdict says whether the report met the review contract, and only a valid report's vote and findings count. Tools: request_review_session, get_review_session, list_review_sessions, cancel_review_session.",
+    "review session run starts a review session: the other model family as its own read-only session, launched by the runner outside this session's sandbox against the runner's checkout of the pull request's pushed head, loading none of the repository's settings, hooks, skills or MCP servers. It takes no session slot; on protocol 335+ each owned linked worktree can be reviewed without selecting it and different pull requests can be reviewed concurrently, with one active review per pull request. Older runners require selection and serial requests. Reviews of a pull request form a run: the first round reviews it in full, later rounds only the changes since the last valid round with its open findings (or in full with --full-reason), and a rebased head starts a new epoch that reviews the range-diff. Each epoch has at most 4 valid rounds and each round 2 counted attempts. Poll review session get until terminal is true; its verdict says whether the report met the review contract, and only a valid report's vote and findings count. Tools: request_review_session, get_review_session, list_review_sessions, cancel_review_session.",
   ].join("\n");
 }
 

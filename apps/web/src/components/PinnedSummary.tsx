@@ -207,7 +207,8 @@ export function PinnedSummary({
             icon={<AccountIcon className="ps-icon" size={14} aria-hidden="true" />}
             label="Account"
             value={<AccountIdentifier identity={`${session.id}:${session.providerAccountId ?? ""}`} value={session.providerAccountLabel} label="Account Email" />}
-            note={session.providerAccountAutomaticallySelected ? "Chosen Automatically" : undefined}
+            note={session.providerAccountAutomaticallySelected ? "Chosen Automatically"
+              : session.providerAccountSelection?.source === "priority" ? "Priority Order" : undefined}
           />
         )}
         {/* The id is short enough to show whole (#3897), so it is not shortened like a hash. */}

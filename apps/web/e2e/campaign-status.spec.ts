@@ -467,18 +467,53 @@ test("decisions the owner kept wait for them in Campaign Status, and each opens 
 });
 
 for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "phone", width: 390, height: 844 }]) {
-  test(`an Orchestrator's scope proposal without lineage waits for the owner with its Maximum Issues increase, ${viewport.name} (#4267)`, async ({ page }) => {
+  for (const route of [
+    { name: "a proposal without lineage (#4267)", scope: "1", request: "wd_scope_141", summary: "Add team/repo#141, team/repo#142, raising Maximum Issues from 6 to 7", limit: "6 to 7" },
+    { name: "a failed grant's proposal (#4334)", scope: "grant", request: "wd_scope_143", summary: "Add team/repo#143, team/docs#7, raising Maximum Issues from 6 to 9", limit: "6 to 9" },
+    { name: "a proposal check's owner route (#4334)", scope: "proposal", request: "wd_scope_151", summary: "Add team/repo#151, team/repo#152, raising Maximum Issues from 6 to 8", limit: "6 to 8" },
+  ]) {
+    test(`${route.name} waits for the owner as a Scope Approval and opens its own request, ${viewport.name}`, async ({ page }) => {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await page.goto(`/campaign-status-e2e.html?scenario=campaign&ownerScope=${route.scope}`);
+      const waiting = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Waiting for You" }) });
+      await expect(waiting.locator("dt")).toHaveText(["Scope Approval"]);
+      await expect(waiting).toContainText(route.summary);
+      await expect(waiting).toContainText("Proposed by the Orchestrator");
+      await expect(waiting).toContainText("Only you can make this decision.");
+      await assertNoHorizontalOverflow(page, ".campaign-status");
+      await waiting.getByRole("button", { name: `Open Request: ${route.summary}`, exact: true }).click();
+      const card = page.locator(`[data-session-request-id="${route.request}"]`);
+      await expect(card).toBeVisible();
+      await expect(card.locator(":focus")).toHaveCount(1);
+      // The card it opens states the same increase the entry names (#4334).
+      await expect(card).toContainText(`Maximum Issues${route.scope === "proposal" ? ": " : ""}${route.limit}`);
+    });
+  }
+
+  test(`each routed scope approval opens exactly its own request, ${viewport.name} (#4334)`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
-    await page.goto("/campaign-status-e2e.html?scenario=campaign&ownerScope=1");
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&ownerScope=routed");
     const waiting = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Waiting for You" }) });
-    const summary = "Add team/repo#141, team/repo#142, raising Maximum Issues from 6 to 7";
-    await expect(waiting).toContainText("Scope Approval");
-    await expect(waiting).toContainText(summary);
-    await expect(waiting).toContainText("Proposed by the Orchestrator");
-    await expect(waiting).toContainText("Only you can make this decision.");
-    // The root's own request opens as its dock card above the composer, which this harness does not
-    // render; campaign-issue-scope.spec.ts reads that card.
-    await expect(waiting.getByRole("button", { name: `Open Request: ${summary}` })).toBeVisible();
+    await expect(waiting.locator("dt")).toHaveText(["Scope Approval", "Scope Approval", "Scope Approval"]);
+    await expect(waiting.getByText("Only you can make these decisions.")).toBeVisible();
+    // The third request waits behind the first in the dock, so reaching it can't be an accident.
+    await waiting.getByRole("button", { name: "Open Request: Add team/repo#151, team/repo#152, raising Maximum Issues from 6 to 8", exact: true }).click();
+    const card = page.locator('[data-session-request-id="wd_scope_151"]');
+    await expect(card).toBeVisible();
+    await expect(card.locator(":focus")).toHaveCount(1);
+    await expect(card.getByText("Approve Scope")).toBeVisible();
+    await expect(page.locator('[data-session-request-id="wd_scope_141"]')).toHaveCount(0);
+  });
+
+  test(`routed scope approvals leave Waiting for You once settled, ${viewport.name} (#4334)`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&ownerScope=routed");
+    const heading = page.getByRole("heading", { name: "Waiting for You" });
+    await expect(heading).toBeVisible();
+    await page.evaluate(() => window.__WOLLIPOG_CAMPAIGN_STATUS_E2E__!.bumpRevision());
+    await expect(heading).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /^Open Request: Add team\/repo/u })).toHaveCount(0);
+    await expect(page.locator(".campaign-status")).toBeVisible();
   });
 
   test(`a merge an installed rule keeps for the owner waits for them with the rule's source and quote, ${viewport.name} (#4137)`, async ({ page }) => {

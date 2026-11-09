@@ -897,6 +897,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "get_automation_creation",
       "execute_automation_creation",
       "list_runners",
+      "get_provider_account_selection",
       "get_agent_capabilities",
       "list_sessions",
       "get_session",
@@ -1751,6 +1752,84 @@ test("child creation revalidates a pair after advisory capability discovery", as
     ["GET", `${CP_URL}/api/runners`],
     ["POST", `${CP_URL}/api/sessions`],
   ]);
+});
+
+test("a launch with no eligible account tells the agent what it can do, without naming accounts (#4353)", async () => {
+  const { deps } = makeDeps(() => ({ status: 409, body: {
+    error: "No Claude account in this machine's Priority Order can start this session.",
+    code: "PROVIDER_ACCOUNT_CHOICE_REQUIRED",
+    providerAccountSelection: {
+      provider: "claude", mode: "priority", policyRevision: 2, refusal: "no_eligible_account",
+      actions: ["choose_account", "wait"], retryAt: 1_800_000_000_000,
+      candidates: [{ accountId: "person-example-com-1234", position: 1, eligible: false, reason: "usage_exhausted" }],
+    },
+  } }));
+  const created = await callTool(deps, "create_session", { runnerId: "r1", agentId: "claude", workspaceId: "ws" });
+  assert.equal(created.isError, true);
+  const text = resultText(created);
+  assert.match(text, /No Claude account/u);
+  assert.match(text, /PROVIDER_ACCOUNT_CHOICE_REQUIRED refusal=no_eligible_account actions=choose_account, wait retryAt=2027-/u);
+  assert.match(text, /get_provider_account_selection .*create_session providerAccountId .*--provider-account/u);
+  assert.ok(!text.includes("person-example-com"), text);
+});
+
+test("an agent reads the accounts it could name as references, never as identifiers (#4353)", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 200, body: {
+    provider: "claude", mode: "priority", policyRevision: 2, status: "selected", source: "priority",
+    accountId: "person-example-com-1234", enforcement: "enforced", generatedAt: 1,
+    candidates: [{ accountId: "person-example-com-1234", position: 1, eligible: true, selected: true }],
+    choices: [
+      { accountRef: "acct:aaaaaaaaaaaaaaaa", position: 1, expected: true, canName: true },
+      { accountRef: "acct:bbbbbbbbbbbbbbbb", position: 2, canName: false, reason: "signed_out" },
+      { accountRef: "acct:cccccccccccccccc", position: null, canName: true, reason: "usage_exhausted", retryAt: 1_800_000_000_000, limitLabel: "Weekly" },
+    ],
+  } }));
+  deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  const read = await callTool(deps, "get_provider_account_selection", { runnerId: "r 1", agentId: "claude", workspaceId: "ws" });
+  assert.equal(read.isError, undefined);
+  assert.equal(calls[0]?.url, `${CP_URL}/api/runners/r%201/provider-account-selection?agentId=claude&workspaceId=ws`);
+  const text = resultText(read);
+  assert.ok(!text.includes("person-example-com"), text);
+  const body = JSON.parse(text);
+  assert.deepEqual(body.accounts, [
+    { accountRef: "acct:aaaaaaaaaaaaaaaa", position: 1, expected: true, canName: true },
+    { accountRef: "acct:bbbbbbbbbbbbbbbb", position: 2, canName: false, reason: "signed_out", because: "needs sign-in" },
+    { accountRef: "acct:cccccccccccccccc", position: null, canName: true, reason: "usage_exhausted", because: "is at a usage limit",
+      retryAt: new Date(1_800_000_000_000).toISOString(), limitLabel: "Weekly" },
+  ]);
+});
+
+test("create_session carries a named account, and refuses it before sending to an older control plane (#4353)", async () => {
+  const current = makeDeps(() => ({ status: 200, body: { id: "s_child", status: "queued", runnerId: "r1" } }));
+  current.deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  const created = await callTool(current.deps, "create_session", { runnerId: "r1", agentId: "claude", workspaceId: "ws", providerAccountId: "acct:aaaaaaaaaaaaaaaa" });
+  assert.equal(created.isError, undefined, resultText(created));
+  assert.equal((current.calls[0]?.body as { providerAccountId?: string })?.providerAccountId, "acct:aaaaaaaaaaaaaaaa");
+
+  const older = makeDeps(() => ({ status: 200, body: {} }));
+  older.deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccountAgentChoice - 1;
+  const refused = await callTool(older.deps, "create_session", { runnerId: "r1", agentId: "claude", workspaceId: "ws", providerAccountId: "acct:aaaaaaaaaaaaaaaa" });
+  assert.equal(refused.isError, true);
+  assert.match(resultText(refused), /Choosing a provider account from an agent needs/u);
+  assert.deepEqual(older.calls, [], "an older control plane can't silently ignore the choice, because it never receives it");
+
+  const blank = await callTool(current.deps, "create_session", { runnerId: "r1", agentId: "claude", workspaceId: "ws", providerAccountId: "  " });
+  assert.equal(blank.isError, true);
+});
+
+test("an agent hears that a plan wasn't checked only when it named a model under a policy (#4353)", async () => {
+  const plain = makeDeps(() => ({ status: 200, body: { id: "s_child", status: "queued", runnerId: "r1", providerAccountSelection: { source: "priority" } } }));
+  plain.deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  const silent = resultText(await callTool(plain.deps, "create_session", { runnerId: "r1", agentId: "claude", workspaceId: "ws" }));
+  assert.ok(!silent.includes("modelCompatibility"), silent);
+
+  const named = makeDeps(() => ({ status: 200, body: { id: "s_child", status: "queued", runnerId: "r1", model: "m",
+    providerAccountSelection: { source: "priority", modelCompatibility: "unknown" } } }));
+  named.deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  const told = resultJson(await callTool(named.deps, "create_session", { runnerId: "r1", agentId: "claude", workspaceId: "ws", model: "m" }));
+  assert.equal(told.session.modelCompatibility, "unknown");
+  assert.match(told.session.modelNote, /isn't known/u);
+  assert.ok(!/checked|verified|compatible/u.test(told.session.modelNote), "the note doesn't imply a check happened");
 });
 
 test("list_sessions -> GET /api/sessions (+?archived=true), mapped with pendingApproval title only", async () => {

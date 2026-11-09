@@ -1358,17 +1358,28 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   332,
   // v333 slot
   // v334 slot
-  // 334: subscription-usage snapshots may carry `subscriptionIdentity`, a one-way fingerprint of the
+  // 334: Per-provider account selection policy (#4353). A runner reports each account's verified
+  //      billing and usage-limit cooldown, and rechecks a policy-chosen account before binding a new
+  //      session. Priority Order is refused on a runner below v334, which could not recheck it, and
+  //      its explicit account choices keep working. Older clients cannot overwrite a non-fixed policy.
+  334,
+  // v335 slot
+  // 335: Review any owned worktree without selecting it; concurrent admission per pull request (#4329).
+  335,
+  // v336 slot
+  // v337 slot
+  // 337: Agent tools and the CLI can name a provider account (#4353). The control plane resolves an
+  //      opaque account reference and refuses an account an agent can't use. A runner's tools refuse
+  //      a choice below v337, where the reference would not resolve.
+  337,
+  // v338 slot
+  // v339 slot
+  // 339: subscription-usage snapshots may carry `subscriptionIdentity`, a one-way fingerprint of the
   //      provider account, and source views an opaque `subscriptionKey` derived from it, so one
   //      subscription on several machines shows once. Each usage window may carry `observedAt`, so
   //      machines' readings compare by when each was reported. Additive: an older runner sends
   //      neither and its sources stay separate; an older control plane drops both fields.
-  334,
-  // v335 slot
-  // v336 slot
-  // v337 slot
-  // v338 slot
-  // v339 slot
+  339,
   // v340 slot
   // v341 slot
   // v342 slot

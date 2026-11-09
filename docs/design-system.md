@@ -2176,7 +2176,13 @@ the new baseline, and a danger Notice above the footer names what wasn't saved (
 wasn't saved.") with the server's words behind Show Details; Save Changes then retries only those.
 Provider Accounts uses one shared surface, short provider labels, and compact account rows.
 Set as Default and Clear Default are immediate per-account menu actions, with a Default badge;
-one Add Account… opens the provider-aware add dialog. Usage window names and reset detail stay
+with more than one account, a small segmented control in the provider's heading chooses Default
+Account or Priority Order. Priority Order leads each ranked name with its place, adds Move Up and
+Move Down icon buttons before its menu (never drag), states skip reasons in the row's second line,
+where they wrap rather than truncate, and marks the expected account Next Session. A moved row's
+button keeps focus, handing it to the other direction at an edge, and a status line announces the new
+position. On a phone a ranked row's controls share the second line with its usage. One Add Account…
+opens the provider-aware add dialog. Usage window names and reset detail stay
 behind Usage Details. Account Access… opens a content-height dialog explaining server access.
 Usage-limit switching is an independent inline SwitchRow. Turning it on asks for provider-terms
 consent before anything is sent; turning it off saves directly. Conditional-write conflicts show

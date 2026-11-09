@@ -420,6 +420,29 @@ test("an issue-scope change leaves a pending Owner Question pending and answerab
   } finally { h.db.close(); }
 });
 
+test("an Owner Question filed or answered while a person's scope request waits is never listed, revoked or a reason to refuse it (#4332)", async () => {
+  const h = harness({ issueScope: true });
+  try {
+    const answered = await h.askQuestion("answered-question");
+    assert.ok(answered.ok && answered.data);
+    const proposed = await h.svc.proposeCampaignIssueScope("root", { requestId: "owner-add", expectedRevision: 1,
+      additions: [{ repository: "team/repo", number: 101 }], removals: [], explanation: "The owner adds #101" }, () => true, h.principal);
+    assert.ok(proposed.ok && proposed.data, proposed.error ?? "proposed");
+    assert.equal(proposed.data.authority, "human");
+    const snapshot = proposed.data.resourceSnapshot;
+    assert.ok(snapshot.category === "campaign_issue_scope");
+    assert.deepEqual(snapshot.affectedDecisions, [], "an Owner Question is never listed");
+    const later = await h.askQuestion("later-question");
+    assert.ok(later.ok && later.data);
+    assert.ok(h.answer(answered.data, { [OWNER_QUESTION_ANSWER_ID]: "Broker Process" }).ok);
+    const applied = h.svc.resolveWorkflowDecision("root", "root", proposed.data.occurrenceId, { outcome: "approve" }, "human", h.owner, () => true);
+    assert.ok(applied.ok, applied.error ?? "applied");
+    assert.deepEqual(applied.data!.scopeRevokedDecisions, [], "an Owner Question is never revoked");
+    assert.equal(h.db.workflowDecisionByOccurrence(later.data.occurrenceId)!.status, "pending");
+    assert.ok(h.card(later.data), "its card still waits on the root");
+  } finally { h.db.close(); }
+});
+
 test("a root withdraws its Owner Question, and a newer one under the same key replaces it (#4270)", async () => {
   const h = harness();
   try {

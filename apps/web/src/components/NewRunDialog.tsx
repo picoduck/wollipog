@@ -1,5 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { runnerSupportsProtocol, type BoxView } from "@wollipog/protocol";
+import { providerForDriver, runnerSupportsProtocol, type BoxView, type RunnerView } from "@wollipog/protocol";
+import { agentDisplayName } from "../agent-presentation.js";
+import { ExpectedProviderAccount, providerAccountPreviewPlacement, providerAccountSelectionRefreshKey, useProviderAccountSelection } from "./ProviderAccountSelection.js";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { useStore } from "../store.js";
@@ -492,6 +494,7 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
                 }))}
               />
             )}
+            {runner && chosenAgentIds.map((id) => <RunMemberExpectedAccount key={id} runner={runner} agentId={id} projectId={selectedProject?.id} projectsSupported={projectsSupported} workspaceId={workspaceId || undefined} />)}
           </div>
         ) : (
           <>
@@ -557,4 +560,14 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
       )}
     </Modal>
   );
+}
+
+/** The account one chosen agent would use, when its Machine has more than one to choose from (#4353).
+ * The project matters: a policy won't move a project's account-held memory, and the run would refuse. */
+function RunMemberExpectedAccount({ runner, agentId, projectId, projectsSupported, workspaceId }: { runner: RunnerView; agentId: string; projectId: string | undefined; projectsSupported: boolean; workspaceId: string | undefined }) {
+  const agent = runner.agents.find((candidate) => candidate.id === agentId);
+  const provider = agent ? providerForDriver(agent.driver ?? "acp") : null;
+  const several = (runner.providerAccounts ?? []).filter((account) => account.provider === provider).length > 1;
+  const preview = useProviderAccountSelection(runner.runnerId, provider && several ? { agentId, ...providerAccountPreviewPlacement({ projectsSupported, projectId, workspaceId }) } : null, providerAccountSelectionRefreshKey(runner, runner.status === "online"));
+  return preview ? <ExpectedProviderAccount runner={runner} preview={preview} providerName={agent ? agentDisplayName(agent) : undefined} /> : null;
 }

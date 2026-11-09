@@ -1,6 +1,13 @@
 import { normalizeWorkflowDecisionOwnerRule, sameWorkflowDecisionOwnerRule } from "@wollipog/protocol";
 import { normalizeDeliveryVerificationFailure } from "@wollipog/protocol";
 import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
+import {
+  isProviderAccountRef, PROVIDER_ACCOUNT_CHOICE_REQUIRED, PROVIDER_ACCOUNT_REF_PREFIX, providerAccountChoiceRequired, providerAccountChoiceRequiredSentence,
+  providerAccountExplicitRecord, providerAccountIneligibility, providerAccountNamedRefusal, providerAccountNamedRefusalSentence,
+  providerAccountSelectionRecord, providerForDriver, resolveProviderAccountSelection,
+  supportsClaudeProjectMemory, type AgentDefinition, type ProviderAccountChoice, type ProviderAccountChoiceRequired, type ProviderAccountDefinition, type ProviderAccountSelectionPreview,
+  type ProviderAccountSelectionRecord, type ProviderAccountSelectionResult, type RunnerProviderAccountDefault, type RunnerView,
+} from "@wollipog/protocol";
 import { runnerSupportsReviewQuestionPreservation } from "./review-session-capability.js";
 import { AUTOMATIC_TURN_RESTART_CANCELLED_REASON } from "@wollipog/protocol";
 import { FORGE_DECISION_ACTION_REFUSAL_REASONS, FORGE_DECISION_ACTION_STALE_REFUSALS, FORGE_DECISION_ACTION_SUCCESSES,
@@ -62,7 +69,7 @@ import { scopeGrantDigest, scopeReviewInputDigest, scopeReviewInputs, scopeRevie
 import { boundedIssueNumbers, validCampaignIssueFacts, type CampaignIssueFacts, type CampaignScopeGrantReview, type CampaignScopeOwnerReview, type DecisionErrorClass, type FullControlScopeGrant } from "@wollipog/protocol";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
-  everyOutstandingScopeDecision, campaignAwaitsInitialScope, campaignScopeIsProposed, participantScope, participantScopeRefusal, repositoryOutsideBoundary, scopeRequestOutsideBoundary } from "./campaign-issue-scope.js";
+  everyOutstandingScopeDecision, outstandingDecisionsBearOnScopeRequest, campaignAwaitsInitialScope, campaignScopeIsProposed, participantScope, participantScopeRefusal, repositoryOutsideBoundary, scopeRequestOutsideBoundary } from "./campaign-issue-scope.js";
 import { boundedDecisionString, issueClosureRequestInvalid, issueClosureRequestInvalidFields, issueClosureScopeRefusal } from "./issue-closure-request-refusal.js";
 import { needsCampaignIssueScopeSeed } from "./campaign-issue-scope-seed.js";
 import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, heldCampaignIssues, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureCrossRepositoryDelivery, closureCrossRepositoryPullRequests, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
@@ -861,6 +868,9 @@ export interface ServiceResult<T> {
   /** Machine-readable refusal fields routes return beside `error`, such as a ledger cursor's
    * `{ code: "revision_changed", revision }`. */
   errorDetails?: Record<string, string | number>;
+  /** A launch whose account policy needs an explicit choice (#4353), under
+   * `code: PROVIDER_ACCOUNT_CHOICE_REQUIRED`. Routes return it beside `error`. */
+  providerAccountSelection?: ProviderAccountChoiceRequired;
 }
 
 /** Exact runner commands plus the control-plane resources they materialize. Durable automation
@@ -872,6 +882,12 @@ export interface PreStagedDeliveryPlan {
   sessionId?: string;
   runId?: string;
   workflowInstanceId?: string;
+}
+
+/** The account a workflow member starts on, resolved like any session's. */
+interface WorkflowMemberAccount {
+  providerAccount?: ProviderAccountDefinition;
+  selection?: ProviderAccountSelectionRecord;
 }
 
 /** Optional delivery seam used by durable automations. Callers supply deterministic resource IDs;
@@ -900,6 +916,13 @@ export interface PreStagedDeliveryOptions {
 function ok<T>(data: T, status = 200): ServiceResult<T> {
   return { ok: true, status, data };
 }
+/** The opaque name agent tools use for an account (#4353), since an account's id embeds its label.
+ * It is stable for one account on one Machine and means nothing outside this control plane's check. */
+function providerAccountRef(runnerId: string, accountId: string): string {
+  const digest = createHash("sha256").update(`wollipog-provider-account-ref\0${runnerId}\0${accountId}`).digest("hex");
+  return `${PROVIDER_ACCOUNT_REF_PREFIX}${digest.slice(0, 16)}`;
+}
+
 function fail<T>(error: string, status = 400): ServiceResult<T> {
   return { ok: false, status, error };
 }
@@ -935,6 +958,8 @@ function failAs<T>(result: ServiceResult<unknown>, fallback?: string): ServiceRe
     status: result.status,
     error: result.error ?? fallback,
     ...(result.capabilityRequirement ? { capabilityRequirement: result.capabilityRequirement } : {}),
+    ...(result.errorDetails ? { errorDetails: result.errorDetails } : {}),
+    ...(result.providerAccountSelection ? { providerAccountSelection: result.providerAccountSelection } : {}),
   };
 }
 
@@ -4935,7 +4960,7 @@ export class SessionsService {
     const useWorktree = resolvedTarget.useWorktree;
     if (req.providerAccountId !== undefined &&
         (typeof req.providerAccountId !== "string" ||
-          !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(req.providerAccountId))) {
+          !(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(req.providerAccountId) || isProviderAccountRef(req.providerAccountId)))) {
       return fail("providerAccountId is invalid", 400);
     }
     const usesRunnerProviderAccount = executionTarget.adapter === "host";
@@ -4943,61 +4968,26 @@ export class SessionsService {
         !runnerSupportsProtocol(runner.protocolVersion, "providerAccounts")) {
       return capabilityFail(runnerCapabilityRequirementError(runner.protocolVersion, "providerAccounts", "choosing an account"));
     }
-    const launchProvider = launch.driver === "claude-code" ? "claude"
-      : launch.driver === "codex" || launch.driver === "codex-app-server" ? "codex" : null;
-    const compatibleProviderAccounts = launchProvider
-      ? (runner.providerAccounts ?? []).filter((account) => account.provider === launchProvider)
-      : [];
-    const defaultProviderAccountId = runner.agents.find((agent) => agent.id === req.agentId)
-      ?.defaultProviderAccountId;
-    const savedProviderAccountId = usesRunnerProviderAccount && launchProvider &&
-      (launch.context?.kind ?? "native") === "native" &&
-      runnerSupportsProtocol(runner.protocolVersion, "providerAccounts")
-      ? this.db.machineProviderAccountDefault(runner.runnerId, launchProvider)?.accountId
-      : undefined;
-    // The implicit choice skips a profile this control plane may not use (#3240): another control
-    // plane connected to the same runner reports its accounts as not granted here.
-    const implicitProviderAccountId = (launch.context?.kind ?? "native") === "native"
-      ? compatibleProviderAccounts.find((account) => account.profile?.access !== "not_granted")?.id
-      : undefined;
-    const providerAccountId = usesRunnerProviderAccount
-      ? snapshotSpec?.providerAccountId ?? req.providerAccountId ??
-        savedProviderAccountId ?? defaultProviderAccountId ?? implicitProviderAccountId
-      : undefined;
-    // With no account chosen and every compatible one another control plane's profile, the runner
-    // would fall back to the first of them and refuse it at its lease (#3240): say so here instead.
-    if (usesRunnerProviderAccount && !providerAccountId && (launch.context?.kind ?? "native") === "native" &&
-        compatibleProviderAccounts.length > 0 &&
-        compatibleProviderAccounts.every((account) => account.profile?.access === "not_granted")) {
-      return fail(
-        "Every account for this provider on this Machine is a profile of another control plane. " +
-          "Set up a managed profile for this control plane, or adopt one, in the Machine's accounts.",
-        409,
-      );
-    }
-    const providerAccount = providerAccountId
-      ? compatibleProviderAccounts.find((account) => account.id === providerAccountId)
-      : undefined;
-    if (providerAccountId && !providerAccount) {
-      if (providerAccountId === savedProviderAccountId && !req.providerAccountId && !snapshotSpec?.providerAccountId) {
-        return fail("The saved default provider account is unavailable on this Machine. Choose another account or change the default in this Machine's Provider Accounts.", 409);
-      }
-      return fail(`provider account '${providerAccountId}' is not available for the selected agent`, 409);
-    }
-    if (providerAccount) {
-      // Provider profiles (#3239): refuse here, with a specific sentence, a binding the runner would
-      // refuse at its lease (an old runner and an active grant; a revoked grant).
-      const profileRefusal = providerProfileSessionRefusal(this.db, runner, providerAccount);
-      if (profileRefusal && "capability" in profileRefusal) return capabilityFail(profileRefusal.capability);
-      if (profileRefusal) return fail(profileRefusal.error, 409);
-    }
-    // Manual account selection and recorded session snapshots retain their bindings/auth recovery.
-    // Unattended/implicit requests must assess the account this launch will actually use.
-    const selectedAgent = runner.agents.find((agent) => agent.id === req.agentId);
-    if (usesRunnerProviderAccount && !snapshotSpec && req.providerAccountId === undefined &&
-        selectedAgent?.providerAccountReadiness && !agentAvailableForImplicitLaunch(selectedAgent, providerAccountId)) {
-      return fail("The default provider account is not ready. Choose a ready account or review its sign-in and ownership details.", 409);
-    }
+    // An accepted launch keeps the account it first resolved to, whatever the policy says now: the
+    // recorded command, or the row a pre-staged retry finds. A different explicit account on that
+    // retry stays a conflict below rather than quietly moving it.
+    const stagedSession = delivery?.sessionId ? this.db.getSession(delivery.sessionId) : null;
+    const launchAccount = this.launchProviderAccount({
+      runner,
+      agentId: req.agentId,
+      launch,
+      hostTarget: usesRunnerProviderAccount,
+      ...(req.providerAccountId ? { requestedId: req.providerAccountId } : {}),
+      ...(creationContext?.parentSessionId ? { namedByAgent: true } : {}),
+      ...(req.config?.model ? { model: req.config.model } : {}),
+      ...(snapshotSpec
+        ? { pinned: { accountId: snapshotSpec.providerAccountId, selection: snapshotSpec.providerAccountSelection } }
+        : stagedSession && !req.providerAccountId
+          ? { pinned: { accountId: stagedSession.providerAccountId, selection: stagedSession.providerAccountSelection } }
+          : {}),
+    });
+    if (!launchAccount.ok || !launchAccount.data) return failAs(launchAccount);
+    const { providerAccount, selection: providerAccountSelection } = launchAccount.data;
     const acpSessionContext = snapshotSpec?.acpSessionContext ?? req.acpSessionContext;
     if ((executionTarget.adapter === "container" || executionTarget.adapter === "cloud") &&
         ((acpSessionContext?.additionalDirectories?.length ?? 0) > 0 || (acpSessionContext?.mcpServers?.length ?? 0) > 0)) {
@@ -5596,6 +5586,12 @@ export class SessionsService {
     // the explicit one, the Project's, or what the workspace/runner confers — resolved above, so
     // a user-owned Project on an organization workspace cannot slip past its owner's budget.
     const effectiveSessionScope = this.db.effectiveSessionScope(req.runnerId, workspaceId, sessionScope);
+    // Against the project this session ends up in, inferred ones included. A retried launch keeps
+    // the account it already has, whatever it would be refused now.
+    const accountPinned = Boolean(snapshotSpec) || (Boolean(stagedSession) && !req.providerAccountId);
+    const accountMemoryRefusal = accountPinned ? null : this.accountMemoryRefusal<SessionView>(runner, req.agentId, launch, providerAccountSelection,
+      this.launchProjectId(requestedProject.data, req.runnerId, workspaceId, effectiveSessionScope));
+    if (accountMemoryRefusal) return accountMemoryRefusal;
     // An organization- or team-owned session meets its launcher's allowance instead (#3840). A child
     // or review session inherits the launcher of its parent or requester, as the insert records it.
     const launcherSource = creationContext?.review?.policy.requesterSessionId ?? parentSessionId;
@@ -5677,6 +5673,7 @@ export class SessionsService {
       agentId: req.agentId,
       providerAccountId: providerAccount?.id,
       providerAccountLabel: providerAccount?.label,
+      ...this.providerAccountSelectionForRunner(runner, providerAccountSelection),
       agentVersion: launch.version,
       capabilities: launch.capabilities,
       title,
@@ -5768,6 +5765,7 @@ export class SessionsService {
       agentId: req.agentId,
       providerAccountId: providerAccount?.id,
       providerAccountLabel: providerAccount?.label,
+      ...(providerAccountSelection ? { providerAccountSelection } : {}),
       title,
       titleSource,
       useWorktree,
@@ -11314,7 +11312,7 @@ export class SessionsService {
    * reviewer is the other model family, launched by the session's runner outside the session's
    * sandbox, read-only, against the runner's own checkout of that head. The runner proves the scope
    * again against the session's worktree. A review session takes no session slot or child
-   * capacity; a requester has at most one active review.
+   * capacity; a requester has at most one active review per pull request.
    */
   requestReviewSession(callerSessionId: string, request: ReviewSessionRequest,
     canAccess: (id: string) => boolean = () => true): ServiceResult<ReviewSessionView> {
@@ -11381,7 +11379,8 @@ export class SessionsService {
       return fail(`The ${label} reviewer is unavailable on this session's runner${why ? `: ${why}` : ""}.`, 409);
     }
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("this session's runner is offline; request the review again once it reconnects", 409);
-    const active = this.db.reviewSessions.activeFor(session.id);
+    const concurrentReviews = runnerSupportsProtocol(runner?.protocolVersion, "parallelWorktreeReviews");
+    const active = this.db.reviewSessions.activeFor(session.id, concurrentReviews ? pullRequest : undefined);
     if (active) return fail(`This session already has an active review session (${active}); wait for it, or cancel it with cancel_review_session.`, 409);
     // The requester's guardrails: a review spends from what remains of its cost budget after its own
     // spending and everything its earlier reviews spent, so repeated reviews cannot exceed it.
@@ -11390,7 +11389,12 @@ export class SessionsService {
     // an original human session ceiling also limits its reviews, never the worker allocation.
     const requesterCeiling = budgetRoot ? this.db.campaignBudgets.userLimits(session.id)?.costBudgetUsd : session.costBudgetUsd;
     if (requesterCeiling != null && requesterCeiling > 0) {
-      costBudgetUsd = requesterCeiling - (session.costUsd ?? 0) - this.db.reviewSessions.spentFor(session.id);
+      costBudgetUsd = requesterCeiling - (session.costUsd ?? 0) - this.db.reviewSessions.spentFor(session.id)
+        - this.db.reviewSessions.reservedFor(session.id);
+      if (!(costBudgetUsd > 0)) return fail("this session has no cost budget left for a review", 409);
+      // Leave a share of the original human ceiling for another pull request. Campaign admission
+      // still reserves each review's allowance share, capped by this requester remainder.
+      if (concurrentReviews) costBudgetUsd /= 2;
       if (!(costBudgetUsd > 0)) return fail("this session has no cost budget left for a review", 409);
     }
     const policy: ReviewLaunchPolicy = {
@@ -15265,9 +15269,12 @@ export class SessionsService {
       if (latest && snapshot.grantReview) latest.grantReview = snapshot.grantReview;
       if (latest && snapshot.selectionReview) latest.selectionReview = snapshot.selectionReview;
       if (latest && snapshot.ownerReview) latest.ownerReview = snapshot.ownerReview;
-      if (latest && authority === "human" && currentChild.orchestratorPolicy?.control?.mode === "full_control") {
-        latest.affectedDecisions = everyOutstandingScopeDecision(this.db, childSessionId);
-      }
+      // A person's Full Control approval revokes every decision outstanding when it happens and records
+      // exactly those (#4332), so their list isn't compared; only a change that bears on this request
+      // makes it stale. The rest of the snapshot, the additions, removals and active children included,
+      // must still match what was requested.
+      const personFullControl = authority === "human" && currentChild.orchestratorPolicy?.control?.mode === "full_control";
+      if (latest && personFullControl) latest.affectedDecisions = [...snapshot.affectedDecisions];
       if (snapshot.verifiedPublications?.some((p) => this.db.admittedCampaignPublicationIssue(childSessionId, p.publicationOccurrenceId) !== null)) return fail("Publication lineage was already admitted; refresh the scope proposal", 409);
       const boundary = issueBoundary(currentChild);
       const reserved = reservedPublicationSlots(this.db, currentChild, snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined);
@@ -15314,6 +15321,7 @@ export class SessionsService {
           "Orchestrator Controls, then Enable Full Control to authorize a larger scope.", 409);
       }
       if (!latest || auditDigest(latest) !== decision.resourceDigest ||
+          (personFullControl && outstandingDecisionsBearOnScopeRequest(this.db, childSessionId, snapshot)) ||
           (currentChild.orchestratorPolicy?.issueScope?.revision ?? 0) !== snapshot.expectedRevision) {
         this.revokeWorkflowDecision(decision, { reason: "approval_refused_stale", triggeredBy: actor });
         return fail("Campaign scope or affected work changed. Refresh Campaign Status and request approval of a new exact proposal.", 409);
@@ -18210,6 +18218,7 @@ export class SessionsService {
           : {}),
         ...(publicationAuthority ? { publicationAuthority } : {}),
         ...(revocation ? { revocation } : {}),
+        ...(outcome === "consumed" && decision.scopeRevokedDecisions ? { revokedDecisions: decision.scopeRevokedDecisions } : {}),
       },
       timestamp: now,
     });
@@ -19968,6 +19977,7 @@ export class SessionsService {
       agentId: string;
       launch: AgentLaunch;
       orchestrator: boolean;
+      account: WorkflowMemberAccount;
     }> = [];
     const expectedMemberCount = logicalAgentIds.length + (req.orchestratorAgentId ? 1 : 0);
     if (snapshotStarts && snapshotStarts.length !== expectedMemberCount) {
@@ -19987,14 +19997,18 @@ export class SessionsService {
         context: snapshot.spec.context ?? { kind: "native" as const },
         version: snapshot.spec.agentVersion,
         capabilities: snapshot.spec.capabilities,
-      } : this.db.getAgentLaunch(req.runnerId, agentId);
+        // Account readiness is `launchProviderAccount`'s to refuse, with its reasons.
+      } : this.db.getAgentLaunch(req.runnerId, agentId, false, { allowAccountSelection: true });
       if (!launch && retiredCodexExecAgent(this.db, req.runnerId, agentId)) {
         return fail(`${agentId}: ${CODEX_EXEC_RETIRED_REASON}`, 409);
       }
       if (!launch) return fail(`workflow role '${roleId}' is bound to unknown agent '${agentId}'`, 404);
       const configError = workflowMemberCapabilityError(agentId, req.config, launch);
       if (configError) return fail(configError, 409);
-      members.push({ roleId, agentId, launch, orchestrator: false });
+      const account = this.workflowMemberAccount(req, agentId, launch, snapshot, this.memberLaunchProjectId(requestedProject.data, req, parentSessionId),
+        delivery?.memberSessionId?.(members.length) ?? delivery?.memberSessionIds?.[members.length]);
+      if (!account.ok || !account.data) return failAs(account);
+      members.push({ roleId, agentId, launch, orchestrator: false, account: account.data });
     }
     if (req.orchestratorAgentId) {
       const snapshot = snapshotStarts?.[logicalAgentIds.length];
@@ -20009,14 +20023,17 @@ export class SessionsService {
         context: snapshot.spec.context ?? { kind: "native" as const },
         version: snapshot.spec.agentVersion,
         capabilities: snapshot.spec.capabilities,
-      } : this.db.getAgentLaunch(req.runnerId, req.orchestratorAgentId);
+      } : this.db.getAgentLaunch(req.runnerId, req.orchestratorAgentId, false, { allowAccountSelection: true });
       if (!launch && retiredCodexExecAgent(this.db, req.runnerId, req.orchestratorAgentId)) {
         return fail(`${req.orchestratorAgentId}: ${CODEX_EXEC_RETIRED_REASON}`, 409);
       }
       if (!launch) return fail(`unknown orchestrator agent '${req.orchestratorAgentId}'`, 404);
       const configError = workflowMemberCapabilityError(req.orchestratorAgentId, req.config, launch);
       if (configError) return fail(configError, 409);
-      members.push({ roleId: "__orchestrator__", agentId: req.orchestratorAgentId, launch, orchestrator: true });
+      const account = this.workflowMemberAccount(req, req.orchestratorAgentId, launch, snapshot, this.workflowOrchestratorLaunchProjectId(requestedProject.data, req),
+        delivery?.memberSessionId?.(members.length) ?? delivery?.memberSessionIds?.[members.length]);
+      if (!account.ok || !account.data) return failAs(account);
+      members.push({ roleId: "__orchestrator__", agentId: req.orchestratorAgentId, launch, orchestrator: true, account: account.data });
     }
 
     // Workflow/run definitions and their orchestrator-facing MCP tools are organization resources.
@@ -20024,12 +20041,7 @@ export class SessionsService {
     // session an explicit organization scope so a user/team-owned project cannot accidentally
     // disable the workflow routes it was created to drive.
     const runnerScope = this.db.runnerScope(req.runnerId);
-    const orchestratorScope: ResourceScope | null = members.some((member) => member.orchestrator) && runnerScope
-      ? {
-          organizationId: runnerScope.organizationId,
-          owner: { kind: "organization", organizationId: runnerScope.organizationId },
-        }
-      : null;
+    const orchestratorScope = members.some((member) => member.orchestrator) ? this.workflowOrchestratorScope(req.runnerId) : null;
     if (members.some((member) => member.orchestrator) && !orchestratorScope) {
       return fail(`runner '${req.runnerId}' has no organization ownership`, 409);
     }
@@ -20121,6 +20133,9 @@ export class SessionsService {
         workspaceId: req.workspaceId,
         ...memberProject,
         agentId: member.agentId,
+        ...(member.account.providerAccount
+          ? { providerAccountId: member.account.providerAccount.id, providerAccountLabel: member.account.providerAccount.label } : {}),
+        ...(member.account.selection ? { providerAccountSelection: member.account.selection } : {}),
         title: memberTitle,
         titleSource,
         useWorktree,
@@ -20146,6 +20161,9 @@ export class SessionsService {
           workspaceId: req.workspaceId,
           workspacePath,
           agentId: member.agentId,
+          ...(member.account.providerAccount
+            ? { providerAccountId: member.account.providerAccount.id, providerAccountLabel: member.account.providerAccount.label } : {}),
+          ...this.providerAccountSelectionForRunner(this.db.getRunner(req.runnerId) ?? {}, member.account.selection),
           agentVersion: member.launch.version,
           capabilities: member.launch.capabilities,
           title: memberTitle,
@@ -20232,7 +20250,7 @@ export class SessionsService {
     actor: GovernanceActor,
     definition: WorkflowDefinition,
     workspacePath: string,
-    members: Array<{ roleId: string; agentId: string; launch: AgentLaunch; orchestrator: boolean }>,
+    members: Array<{ roleId: string; agentId: string; launch: AgentLaunch; orchestrator: boolean; account: WorkflowMemberAccount }>,
     delivery: PreStagedDeliveryOptions,
     orchestratorScope: ResourceScope | null,
     workerSessionScope: ResourceScope,
@@ -20286,6 +20304,9 @@ export class SessionsService {
         workspaceId: req.workspaceId,
         workspacePath,
         agentId: member.agentId,
+        ...(member.account.providerAccount
+          ? { providerAccountId: member.account.providerAccount.id, providerAccountLabel: member.account.providerAccount.label } : {}),
+        ...this.providerAccountSelectionForRunner(this.db.getRunner(req.runnerId) ?? {}, member.account.selection),
         agentVersion: member.launch.version,
         capabilities: member.launch.capabilities,
         title: memberTitle,
@@ -20390,6 +20411,9 @@ export class SessionsService {
         workspaceId: req.workspaceId,
         ...itemProject,
         agentId: item.member.agentId,
+        ...(item.member.account.providerAccount
+          ? { providerAccountId: item.member.account.providerAccount.id, providerAccountLabel: item.member.account.providerAccount.label } : {}),
+        ...(item.member.account.selection ? { providerAccountSelection: item.member.account.selection } : {}),
         title: item.memberTitle,
         titleSource,
         useWorktree: item.useWorktree,
@@ -21069,6 +21093,315 @@ export class SessionsService {
       .filter((session): session is SessionView => Boolean(session));
   }
 
+  /** One workflow member's account. A recorded command keeps the account it was staged with. */
+  private workflowMemberAccount(
+    req: Pick<CreateWorkflowRunRequest, "runnerId" | "config">,
+    agentId: string,
+    launch: AgentLaunch,
+    snapshot: DurableSessionCommand | undefined,
+    projectId: string | null | undefined,
+    stagedSessionId: string | undefined,
+  ): ServiceResult<WorkflowMemberAccount> {
+    const runner = this.db.getRunner(req.runnerId);
+    if (!runner) return fail("runner not found", 404);
+    // A retried delivery keeps what it first resolved to: its recorded command, or the row it finds.
+    const staged = stagedSessionId ? this.db.getSession(stagedSessionId) : null;
+    const pinned = snapshot?.type === "start_session"
+      ? { accountId: snapshot.spec.providerAccountId, selection: snapshot.spec.providerAccountSelection }
+      : staged ? { accountId: staged.providerAccountId, selection: staged.providerAccountSelection } : undefined;
+    const account = this.launchProviderAccount({ runner, agentId, launch, hostTarget: true, ...(pinned ? { pinned } : {}),
+      ...(req.config?.model ? { model: req.config.model } : {}) });
+    if (!account.ok || !account.data) return failAs(account);
+    const memoryRefusal = pinned ? null : this.accountMemoryRefusal<WorkflowMemberAccount>(runner, agentId, launch, account.data.selection, projectId);
+    return memoryRefusal ?? account;
+  }
+
+  /** The saved policy this runner's launch must honor. A fixed default needs a runner with accounts.
+   * A non-fixed policy counts on every runner, however old, so a runner that can't enforce it refuses
+   * rather than quietly falling back. */
+  private applicableProviderAccountPolicy(
+    runner: Pick<RunnerView, "runnerId" | "protocolVersion">,
+    provider: ProviderAccountDefinition["provider"],
+  ): RunnerProviderAccountDefault | null {
+    const policy = this.db.machineProviderAccountDefault(runner.runnerId, provider);
+    return runnerSupportsProtocol(runner.protocolVersion, "providerAccounts") || (policy?.mode ?? "fixed") !== "fixed" ? policy : null;
+  }
+
+  /** The Machine's policy for one launch's provider, resolved from what the control plane knows now. */
+  private providerAccountPolicyResult(
+    runner: RunnerView,
+    provider: ProviderAccountDefinition["provider"],
+    agent: AgentDefinition | undefined,
+    native: boolean,
+    policy: RunnerProviderAccountDefault | null,
+    accountSpecificMemory = false,
+  ): ProviderAccountSelectionResult {
+    return resolveProviderAccountSelection({
+      provider,
+      policy,
+      accounts: (runner.providerAccounts ?? []).filter((account) => account.provider === provider),
+      agent,
+      native,
+      usage: this.db.providerAccountUsageSnapshots(runner.runnerId),
+      accessRefused: (account) => providerProfileSessionRefusal(this.db, runner, account) !== null,
+      accountSpecificMemory,
+      policySupported: runnerSupportsProtocol(runner.protocolVersion, "providerAccountSelectionPolicy"),
+      now: Date.now(),
+    });
+  }
+
+  /** A launch with no account the policy could use: a sentence naming no account, and beside it the
+   * structured form an unattended caller reads and an interactive one turns into a choice. */
+  private providerAccountChoiceFailure<T>(runner: RunnerView, result: ProviderAccountSelectionResult): ServiceResult<T> {
+    const refusal = result.refusal ?? "no_eligible_account";
+    this.log.info(JSON.stringify({ event: "provider_account_selection_refused", runnerId: runner.runnerId,
+      provider: result.provider, mode: result.mode, policyRevision: result.policyRevision, refusal,
+      skipped: providerAccountSelectionRecord(result).skipped ?? {} }));
+    const details = { errorDetails: { code: PROVIDER_ACCOUNT_CHOICE_REQUIRED }, providerAccountSelection: providerAccountChoiceRequired(result) };
+    return refusal === "runner_update_required"
+      ? { ...capabilityFail<T>(runnerCapabilityRequirementError(runner.protocolVersion, "providerAccountSelectionPolicy", "priority order")), ...details }
+      : { ok: false, status: 409, error: providerAccountChoiceRequiredSentence(result.provider, refusal, result.candidates), ...details };
+  }
+
+  /**
+   * The one place a new session's account is decided, for sessions, children, runs and workflows
+   * alike: a retried launch's recorded account, then an explicit choice, then the Machine's policy.
+   * Nothing here moves an existing session, whose binding the runner keeps across restarts.
+   */
+  private launchProviderAccount(input: {
+    runner: RunnerView;
+    agentId: string;
+    launch: Pick<AgentLaunch, "driver" | "context">;
+    hostTarget: boolean;
+    requestedId?: string;
+    /** The account was named by an agent, which can't recover a sign-in or accept a billing choice. */
+    namedByAgent?: boolean;
+    /** The model this launch names, if any: a policy's choice can't vouch for it. */
+    model?: string;
+    pinned?: { accountId?: string; selection?: ProviderAccountSelectionRecord };
+  }): ServiceResult<{ providerAccount?: ProviderAccountDefinition; selection?: ProviderAccountSelectionRecord }> {
+    if (!input.hostTarget) {
+      // A person's request keeps its long-standing shape; an agent must learn its choice can't apply.
+      return input.namedByAgent && input.requestedId && !input.pinned
+        ? fail("This session's execution target doesn't use this machine's provider accounts, so it can't run with the chosen account.", 409)
+        : ok({});
+    }
+    const { runner, launch, pinned } = input;
+    const provider = providerForDriver(launch.driver);
+    const accounts = provider ? (runner.providerAccounts ?? []).filter((account) => account.provider === provider) : [];
+    // An agent names an account by reference, which can't be an id. One that matches nothing here,
+    // including another provider's account, stays unresolved and is refused below like an unknown id.
+    const requestedId = input.requestedId && isProviderAccountRef(input.requestedId)
+      ? accounts.find((account) => providerAccountRef(runner.runnerId, account.id) === input.requestedId)?.id ?? input.requestedId
+      : input.requestedId;
+    const native = (launch.context?.kind ?? "native") === "native";
+    const agent = runner.agents.find((candidate) => candidate.id === input.agentId);
+    const policy = provider ? this.applicableProviderAccountPolicy(runner, provider) : null;
+    let providerAccountId: string | undefined;
+    let selection: ProviderAccountSelectionRecord | undefined;
+    let savedDefault = false;
+    if (pinned) {
+      providerAccountId = pinned.accountId;
+      selection = pinned.selection;
+    } else if (requestedId) {
+      providerAccountId = requestedId;
+      selection = providerAccountExplicitRecord(policy);
+    } else if (provider) {
+      const result = this.providerAccountPolicyResult(runner, provider, agent, native, policy);
+      // A fixed default's refusals keep their own sentences below, with the same conditions.
+      if (result.status === "choice_required" && result.mode !== "fixed") return this.providerAccountChoiceFailure(runner, result);
+      providerAccountId = result.accountId;
+      savedDefault = result.source === "fixed_default";
+      if (result.status !== "none") selection = providerAccountSelectionRecord(result, { modelNamed: Boolean(input.model) });
+      if (result.source === "priority") {
+        this.log.info(JSON.stringify({ event: "provider_account_selected", runnerId: runner.runnerId, provider,
+          mode: result.mode, policyRevision: result.policyRevision, skipped: selection?.skipped ?? {} }));
+      }
+    } else {
+      providerAccountId = agent?.defaultProviderAccountId;
+    }
+    // With no account chosen and every compatible one another control plane's profile, the runner
+    // would fall back to the first of them and refuse it at its lease (#3240): say so here instead.
+    if (!providerAccountId && native && accounts.length > 0 &&
+        accounts.every((account) => account.profile?.access === "not_granted")) {
+      return fail(
+        "Every account for this provider on this Machine is a profile of another control plane. " +
+          "Set up a managed profile for this control plane, or adopt one, in the Machine's accounts.",
+        409,
+      );
+    }
+    const providerAccount = providerAccountId ? accounts.find((account) => account.id === providerAccountId) : undefined;
+    if (providerAccountId && !providerAccount) {
+      if (savedDefault) {
+        return fail("The saved default provider account is unavailable on this Machine. Choose another account or change the default in this Machine's Provider Accounts.", 409);
+      }
+      // No id in the sentence: account ids are derived from account labels.
+      return fail("The chosen provider account is not available for the selected agent.", 409);
+    }
+    if (providerAccount) {
+      // Provider profiles (#3239): refuse here, with a specific sentence, a binding the runner would
+      // refuse at its lease (an old runner and an active grant; a revoked grant).
+      const profileRefusal = providerProfileSessionRefusal(this.db, runner, providerAccount);
+      if (profileRefusal && "capability" in profileRefusal) return capabilityFail(profileRefusal.capability);
+      if (profileRefusal) return fail(profileRefusal.error, 409);
+      if (input.namedByAgent && requestedId && !pinned) {
+        const usage = this.db.providerAccountUsageSnapshots(runner.runnerId).find((snapshot) => snapshot.providerAccountId === providerAccount.id);
+        const refused = providerAccountNamedRefusal(providerAccount, { ...(agent ? { agent } : {}), ...(usage ? { usage } : {}), now: Date.now() });
+        if (refused) return fail(providerAccountNamedRefusalSentence(refused), 409);
+      }
+    }
+    // Manual account selection and recorded session snapshots retain their bindings/auth recovery.
+    // Unattended/implicit requests must assess the account this launch will actually use.
+    if (!pinned && !requestedId && agent?.providerAccountReadiness && !agentAvailableForImplicitLaunch(agent, providerAccountId)) {
+      return fail("The default provider account is not ready. Choose a ready account or review its sign-in and ownership details.", 409);
+    }
+    return ok({ ...(providerAccount ? { providerAccount } : {}), ...(selection ? { selection } : {}) });
+  }
+
+  /** A Claude project session on a version without Wollipog's project memory keeps that memory in the
+   * account's HOME, so a policy that chooses between launches would silently change what it knows. */
+  private accountMemoryRefusal<T>(
+    runner: RunnerView,
+    agentId: string,
+    launch: Pick<AgentLaunch, "driver" | "context" | "version">,
+    selection: ProviderAccountSelectionRecord | undefined,
+    projectId: string | null | undefined,
+  ): ServiceResult<T> | null {
+    if (selection?.source !== "priority" || !projectId || launch.driver !== "claude-code" ||
+        supportsClaudeProjectMemory(launch.version)) return null;
+    return this.providerAccountChoiceFailure(runner, this.providerAccountPolicyResult(runner, "claude",
+      runner.agents.find((candidate) => candidate.id === agentId), true,
+      this.db.machineProviderAccountDefault(runner.runnerId, "claude"), true));
+  }
+
+  /** The launch spec's reason, for a runner that reads it; an older one would ignore its recheck. */
+  private providerAccountSelectionForRunner(
+    runner: Partial<Pick<RunnerView, "protocolVersion">>,
+    selection: ProviderAccountSelectionRecord | undefined,
+  ): { providerAccountSelection?: ProviderAccountSelectionRecord } {
+    return selection && runnerSupportsProtocol(runner.protocolVersion, "providerAccountSelectionPolicy")
+      ? { providerAccountSelection: selection } : {};
+  }
+
+  /**
+   * What a launch without a chosen account would do now, by the launch's own code. Any provider or an
+   * exact agent, so a dialog sees the same eligibility its launch will. Offline or older Machines
+   * report so in `enforcement` rather than appearing to apply a policy they can't.
+   */
+  providerAccountSelectionPreview(
+    runnerId: string,
+    target: {
+      agentId?: string;
+      provider?: ProviderAccountDefinition["provider"];
+      /** A chosen project, or null for No Project. Omitted: the project the launch would infer. */
+      projectId?: string | null;
+      workspaceId?: string;
+      /** The scope a launch by this caller would carry. */
+      scope?: ResourceScope;
+      /** An agent's child takes its parent's project and scope. */
+      parentSessionId?: string;
+      /** The model the launch would name, if any. */
+      model?: string;
+    },
+  ): ServiceResult<ProviderAccountSelectionPreview> {
+    const runner = this.db.getRunner(runnerId);
+    if (!runner) return fail("runner not found", 404);
+    const requested = target.agentId ? runner.agents.find((agent) => agent.id === target.agentId) : undefined;
+    if (target.agentId && !requested) return fail(`unknown agent '${target.agentId}' on runner '${runnerId}'`, 404);
+    const provider = requested ? providerForDriver(requested.driver ?? "acp") : target.provider ?? null;
+    if (!provider) return fail("this agent has no provider accounts", 400);
+    const providerAgents = runner.agents.filter((agent) => providerForDriver(agent.driver ?? "acp") === provider &&
+      (agent.context?.kind ?? "native") === "native");
+    const agent = requested ?? providerAgents.find((candidate) => candidate.available === true) ?? providerAgents[0];
+    const native = (agent?.context?.kind ?? "native") === "native";
+    const policy = this.applicableProviderAccountPolicy(runner, provider);
+    const parent = target.parentSessionId ? this.db.getSession(target.parentSessionId) : null;
+    const projectId = parent ? parent.projectId ?? null : this.launchProjectId(target, runnerId, target.workspaceId ?? null,
+      this.db.effectiveSessionScope(runnerId, target.workspaceId ?? null, target.scope));
+    const accountSpecificMemory = Boolean(projectId) && provider === "claude" && agent?.driver === "claude-code" &&
+      !supportsClaudeProjectMemory(agent.version);
+    const result = this.providerAccountPolicyResult(runner, provider, agent, native, policy, accountSpecificMemory);
+    return ok({
+      ...result,
+      enforcement: !this.hub.isRunnerOnline(runnerId) ? "machine_offline"
+        : result.mode !== "fixed" && !runnerSupportsProtocol(runner.protocolVersion, "providerAccountSelectionPolicy")
+          ? "runner_update_required" : "enforced",
+      generatedAt: Date.now(),
+      choices: this.providerAccountChoices(runner, provider, agent, result),
+      ...(target.model && result.source === "priority" ? { modelCompatibility: "unknown" as const } : {}),
+    });
+  }
+
+  /** The project a launch ends up in: the assignment it names, else what session creation infers. */
+  private launchProjectId(
+    assignment: { projectId?: string | null },
+    runnerId: string,
+    workspaceId: string | null,
+    scope: ResourceScope | null,
+  ): string | null {
+    if (assignment.projectId !== undefined) return assignment.projectId;
+    return scope ? this.db.inferredSessionProjectLocation(runnerId, workspaceId, scope)?.projectId ?? null : null;
+  }
+
+  /** The inputs of `launchProjectId` for a run or workflow, whose members carry the parent's scope,
+   * or the workspace's when nobody launched them from a session. */
+  private memberLaunchProjectId(
+    assignment: { projectId?: string | null },
+    req: { runnerId: string; workspaceId: string },
+    parentSessionId: string | undefined,
+  ): string | null {
+    return this.launchProjectId(assignment, req.runnerId, req.workspaceId, this.db.effectiveSessionScope(req.runnerId, req.workspaceId,
+      (parentSessionId ? this.db.sessionScope(parentSessionId) : null) ?? undefined));
+  }
+
+  private workflowOrchestratorScope(runnerId: string): ResourceScope | null {
+    const runnerScope = this.db.runnerScope(runnerId);
+    return runnerScope
+      ? { organizationId: runnerScope.organizationId, owner: { kind: "organization", organizationId: runnerScope.organizationId } }
+      : null;
+  }
+
+  /** A workflow's orchestrator is organization-scoped, so a narrower project keeps it out, however the
+   * project was assigned. This answers for that session, whose memory may differ from its workers'. */
+  private workflowOrchestratorLaunchProjectId(
+    assignment: { projectId?: string | null },
+    req: { runnerId: string; workspaceId: string },
+  ): string | null {
+    const scope = this.workflowOrchestratorScope(req.runnerId);
+    const projectScope = assignment.projectId ? this.db.projectScope(assignment.projectId) : null;
+    if (scope && projectScope && !this.db.scopeAudienceContainedWithMembership(scope, projectScope)) return null;
+    return this.launchProjectId(assignment, req.runnerId, req.workspaceId, scope);
+  }
+
+  /** Every account of this provider an agent could name instead. References and reason codes only. */
+  private providerAccountChoices(
+    runner: RunnerView,
+    provider: ProviderAccountDefinition["provider"],
+    agent: AgentDefinition | undefined,
+    result: ProviderAccountSelectionResult,
+  ): ProviderAccountChoice[] {
+    const now = Date.now();
+    const usage = this.db.providerAccountUsageSnapshots(runner.runnerId);
+    return (runner.providerAccounts ?? []).filter((account) => account.provider === provider).map((account) => {
+      const facts = {
+        ...(agent ? { agent } : {}),
+        ...(usage.find((snapshot) => snapshot.providerAccountId === account.id) ? { usage: usage.find((snapshot) => snapshot.providerAccountId === account.id)! } : {}),
+        accessRefused: providerProfileSessionRefusal(this.db, runner, account) !== null,
+        now,
+      };
+      const named = providerAccountNamedRefusal(account, facts);
+      const limit = named ? null : providerAccountIneligibility(account, { ...facts, positiveEvidenceOnly: true });
+      const position = result.mode === "priority" ? result.candidates.find((candidate) => candidate.accountId === account.id)?.position ?? null : null;
+      return {
+        accountRef: providerAccountRef(runner.runnerId, account.id),
+        position,
+        ...(result.status === "selected" && result.accountId === account.id ? { expected: true } : {}),
+        canName: named === null,
+        ...(named ? { reason: named } : limit ?? {}),
+      };
+    });
+  }
+
   createRun(
     req: CreateRunRequest,
     creationContext?: { parentSessionId?: string; /** The authenticated human launching it (#3840). */ launcherUserId?: string },
@@ -21120,7 +21453,8 @@ export class SessionsService {
     const resolved: { agentId: string; launch: AgentLaunch }[] = [];
     const unknown: string[] = [];
     for (const agentId of req.agentIds) {
-      const launch = this.db.getAgentLaunch(req.runnerId, agentId);
+      // Account readiness is `launchProviderAccount`'s to refuse below, with its reasons.
+      const launch = this.db.getAgentLaunch(req.runnerId, agentId, false, { allowAccountSelection: true });
       // Checked against the catalog too, so a retired member never leaves a partial run behind.
       if ((launch && isRetiredCodexExec(launch)) || retiredCodexExecAgent(this.db, req.runnerId, agentId)) {
         return fail(`${agentId}: ${CODEX_EXEC_RETIRED_REASON}`, 409);
@@ -21139,6 +21473,20 @@ export class SessionsService {
     }
     if (!resolved.length) {
       return fail(`no known agents on runner '${req.runnerId}': ${unknown.join(", ")}`, 404);
+    }
+    // Each member resolves the same way a session does, before anything is created, so one member
+    // without an account refuses the run rather than leaving part of it started.
+    const runRunner = this.db.getRunner(req.runnerId);
+    if (!runRunner) return fail("runner not found", 404);
+    const memberAccounts = new Map<string, { providerAccount?: ProviderAccountDefinition; selection?: ProviderAccountSelectionRecord }>();
+    for (const { agentId, launch } of resolved) {
+      const account = this.launchProviderAccount({ runner: runRunner, agentId, launch, hostTarget: true,
+        ...(req.config?.model ? { model: req.config.model } : {}) });
+      if (!account.ok || !account.data) return failAs(account);
+      const memoryRefusal = this.accountMemoryRefusal<{ run: RunView; sessions: SessionView[] }>(
+        runRunner, agentId, launch, account.data.selection, this.memberLaunchProjectId(requestedProject.data, req, parentSessionId));
+      if (memoryRefusal) return memoryRefusal;
+      memberAccounts.set(agentId, account.data);
     }
 
     const memberConfig = this.runMemberConfig(req, Boolean(parentSessionId));
@@ -21170,6 +21518,7 @@ export class SessionsService {
 
     const sessions: SessionView[] = [];
     for (const [memberIndex, { agentId, launch }] of resolved.entries()) {
+      const memberAccount = memberAccounts.get(agentId);
       const id = shortId("s_");
       // Multi-agent runs always isolate in their own worktree (brief: don't let
       // multiple agents write the same working tree).
@@ -21205,6 +21554,9 @@ export class SessionsService {
         workspaceId: req.workspaceId,
         ...requestedProject.data,
         agentId,
+        ...(memberAccount?.providerAccount
+          ? { providerAccountId: memberAccount.providerAccount.id, providerAccountLabel: memberAccount.providerAccount.label } : {}),
+        ...(memberAccount?.selection ? { providerAccountSelection: memberAccount.selection } : {}),
         title: `${title} · ${agentId}`,
         titleSource,
         useWorktree: req.useWorktree ?? true,
@@ -21231,6 +21583,9 @@ export class SessionsService {
         campaignBudgetDispatch: this.db.campaignBudgets.dispatchTo(id),
         workspacePath,
         agentId,
+        ...(memberAccount?.providerAccount
+          ? { providerAccountId: memberAccount.providerAccount.id, providerAccountLabel: memberAccount.providerAccount.label } : {}),
+        ...this.providerAccountSelectionForRunner(runRunner, memberAccount?.selection),
         agentVersion: launch.version,
         capabilities: launch.capabilities,
         title: `${title} · ${agentId}`,

@@ -44,7 +44,8 @@ if (args[0] === "auth") {
   process.stdout.write(JSON.stringify({ loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty" }) + "\n");
   process.exit(0);
 }
-const record = join(process.env.HOOK_LAUNCH_DIR, String(process.hrtime.bigint()));
+// Padded so name order is launch order when the host's uptime in nanoseconds gains a digit.
+const record = join(process.env.HOOK_LAUNCH_DIR, String(process.hrtime.bigint()).padStart(20, "0"));
 writeFileSync(record + ".part", JSON.stringify({ args, env: process.env }));
 renameSync(record + ".part", record + ".json");
 const flag = Math.max(args.indexOf("--session-id"), args.indexOf("--resume"));

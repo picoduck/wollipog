@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
@@ -15,11 +15,14 @@ import { HIDE_ACCOUNT_EMAILS_STORAGE_KEY, setHideAccountEmails } from "../accoun
 import { ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
+import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import type { MachineAccountsIntent } from "../navigation.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
-import { ProviderAccountsSection, providerAccountRemovalRefusal, providerProfileErrorMessage, PROFILES_UNSUPPORTED_ON_WINDOWS } from "./ProviderAccountsSection.js";
+import { providerAccountSkipLabel } from "./ProviderAccountSelection.js";
+import { initialPriorityOrder, movedPriorityOrder, ProviderAccountsSection, providerAccountRemovalRefusal, providerProfileErrorMessage, PROFILES_UNSUPPORTED_ON_WINDOWS } from "./ProviderAccountsSection.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
+installDomTestCleanup(domWindow);
 for (const [name, value] of Object.entries({
   window: domWindow, document: domWindow.document, navigator: domWindow.navigator, localStorage: domWindow.localStorage,
   HTMLElement: domWindow.HTMLElement, HTMLButtonElement: domWindow.HTMLButtonElement, HTMLInputElement: domWindow.HTMLInputElement,
@@ -2004,7 +2007,167 @@ test("usage-limit switching waits for terms consent, cancellation writes nothing
   } finally { await ui.unmount(); }
 });
 
-test("an expanded usage row keeps its disclosure during a failed reconnect refresh and remains collapsible", async () => {
+/** Runs the section's minute polls by hand, against a clock the test moves (#4353). */
+function installMinuteClock(t: TestContext, start: number) {
+  let time = start;
+  t.mock.method(Date, "now", () => time);
+  const timers = new Map<number, () => void>();
+  let nextTimer = 1;
+  const original = { set: domWindow.setInterval, clear: domWindow.clearInterval };
+  domWindow.setInterval = ((run: () => void, ms: number) => {
+    const id = nextTimer++;
+    if (ms === 60_000) timers.set(id, run);
+    return id;
+  }) as unknown as typeof domWindow.setInterval;
+  domWindow.clearInterval = ((id: number) => { timers.delete(id); }) as unknown as typeof domWindow.clearInterval;
+  t.after(() => { domWindow.setInterval = original.set; domWindow.clearInterval = original.clear; });
+  return { tickTo: async (next: number, settle: () => Promise<unknown>) => {
+    time = next;
+    await act(async () => { for (const run of timers.values()) run(); });
+    await settle();
+  } };
+}
+
+const usageReading = (at: number, buckets: Array<{ id: string; label: string; remainingPercent: number; resetsAt?: number }>) => ({
+  sources: [{ sourceId: "work", runnerId: "runner-1", runnerName: "Machine", runnerStatus: "online" as const, agentId: "claude", agentName: "Claude",
+    provider: "claude" as const, providerAccountId: "work", state: "available" as const, freshness: "fresh" as const, fetchedAt: at, buckets }],
+  staleAfterMs: 600_000, generatedAt: at,
+});
+
+test("the minute tick counts a reset down, and a passed reset reads as Last Known (#4353)", async (t) => {
+  const start = 1_800_000_000_000;
+  const clock = installMinuteClock(t, start);
+  let reads = 0;
+  const reading = usageReading(start, [{ id: "session", label: "Session Window", remainingPercent: 36, resetsAt: start + 150_000 }]);
+  const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: { ...client().client,
+    subscriptionUsage: async () => { reads += 1; return reading; } } });
+  try {
+    const text = () => ui.row("Work").querySelector(".provider-account-usage")?.textContent ?? "";
+    assert.match(text(), /36% Left · Resets in 3 minutes/);
+    const before = reads;
+    await clock.tickTo(start + 60_000, ui.settle);
+    assert.equal(reads, before + 1, "each tick reads again");
+    assert.match(text(), /36% Left · Resets in 2 minutes/);
+    await clock.tickTo(start + 150_001, ui.settle);
+    assert.match(text(), /36% Left · Last Known/, "nothing has confirmed what the window holds after its reset");
+    assert.doesNotMatch(text(), /Resets in/);
+  } finally { await ui.unmount(); }
+});
+
+test("a reading ages into Last Known when later reads fail, and a new one replaces it (#4353)", async (t) => {
+  const start = 1_800_000_000_000;
+  const clock = installMinuteClock(t, start);
+  let answer: () => ReturnType<typeof usageReading> = () => usageReading(start, [{ id: "session", label: "Session Window", remainingPercent: 36 }]);
+  const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: { ...client().client,
+    subscriptionUsage: async () => answer() } });
+  try {
+    const text = () => ui.row("Work").querySelector(".provider-account-usage")?.textContent ?? "";
+    assert.match(text(), /^36% Left/);
+    assert.doesNotMatch(text(), /Last Known/);
+    answer = () => { throw new Error("Usage unavailable"); };
+    await clock.tickTo(start + 60_000, ui.settle);
+    assert.match(text(), /^36% Left/, "a failed read keeps a reading still inside its freshness window");
+    assert.doesNotMatch(text(), /Last Known/, "and doesn't call it old before it is");
+    await clock.tickTo(start + 600_001, ui.settle);
+    assert.match(text(), /36% Left · Last Known/, "it ages at the reading's own limit");
+    answer = () => usageReading(start + 660_000, [{ id: "session", label: "Session Window", remainingPercent: 80 }]);
+    await clock.tickTo(start + 660_000, ui.settle);
+    assert.match(text(), /^80% Left/);
+    assert.doesNotMatch(text(), /Last Known/);
+  } finally { await ui.unmount(); }
+});
+
+test("a kept reading never crosses to another Machine or an account whose access changed (#4353)", async () => {
+  const start = Date.now();
+  let reads = 0;
+  const api = { ...client().client, subscriptionUsage: async () => {
+    if (reads++ > 0) throw new Error("Usage unavailable");
+    return usageReading(start, [{ id: "session", label: "Session Window", remainingPercent: 36 }]);
+  } };
+  const granted = SIGN_IN_ACCOUNTS.map((account) => account.id === "work" ? { ...account, profile: { id: "p1", access: "granted" as const } } : account);
+  const ui = await render({ api, runner: runnerView({ providerAccounts: granted }) });
+  try {
+    const text = () => ui.row("Work").querySelector(".provider-account-usage")?.textContent ?? "";
+    assert.match(text(), /36% Left/);
+    await ui.rerender({ runner: runnerView({ providerAccounts: granted.map((account) => ({ ...account, authStatus: "unauthenticated" as const })) }) });
+    assert.match(text(), /36% Left/, "a changed sign-in state is the same account");
+    await ui.rerender({ runner: runnerView({ providerAccounts: [...granted, { id: "added", label: "Added", provider: "claude", authStatus: "authenticated" }] }) });
+    assert.match(text(), /36% Left/, "an inventory refresh that adds an account keeps the others'");
+    await ui.rerender({ runner: runnerView({ providerAccounts: granted.map((account) => account.id === "work"
+      ? { ...account, profile: { id: "p1", access: "not_granted" as const } } : account) }) });
+    assert.match(text(), /Usage Not Reported/, "lost server access drops what was read under it");
+    await ui.rerender({ runner: runnerView({ runnerId: "runner-2", providerAccounts: granted }) });
+    assert.match(text(), /Usage Not Reported/, "another Machine starts with nothing");
+  } finally { await ui.unmount(); }
+});
+
+test("a dropped reading stays dropped until a new read succeeds (#4353)", async () => {
+  const start = Date.now();
+  const granted = SIGN_IN_ACCOUNTS.map((account) => account.id === "work" ? { ...account, profile: { id: "p1", access: "granted" as const } } : account);
+  const scenarios: Array<[string, (ui: Awaited<ReturnType<typeof render>>) => Promise<void>]> = [
+    ["access lost and restored", async (ui) => {
+      await ui.rerender({ runner: runnerView({ providerAccounts: granted.map((account) => account.id === "work"
+        ? { ...account, profile: { id: "p1", access: "not_granted" as const } } : account) }) });
+    }],
+    ["the account removed and restored under its id", async (ui) => {
+      await ui.rerender({ runner: runnerView({ providerAccounts: granted.filter((account) => account.id !== "work") }) });
+    }],
+    ["another Machine and back", async (ui) => {
+      await ui.rerender({ runner: runnerView({ runnerId: "runner-2", providerAccounts: granted }) });
+    }],
+  ];
+  for (const [name, leave] of scenarios) {
+    let failing = false;
+    const api = { ...client().client, subscriptionUsage: async () => {
+      if (failing) throw new Error("Usage unavailable");
+      return usageReading(start, [{ id: "session", label: "Session Window", remainingPercent: 36 }]);
+    } };
+    const ui = await render({ api, runner: runnerView({ providerAccounts: granted }) });
+    try {
+      const text = () => ui.row("Work").querySelector(".provider-account-usage")?.textContent ?? "";
+      assert.match(text(), /36% Left/, name);
+      failing = true;
+      await leave(ui);
+      await ui.rerender({ runner: runnerView({ providerAccounts: granted }) });
+      assert.match(text(), /Usage Not Reported/, `${name}: the old reading doesn't come back by itself`);
+      failing = false;
+      await ui.rerender({ online: false });
+      assert.match(text(), /36% Left · Last Known/, `${name}: a successful read brings usage back`);
+    } finally { await ui.unmount(); }
+  }
+});
+
+test("Use for New Sessions stays available when the machine goes offline after a sign-in (#4353)", async () => {
+  const saved: unknown[] = [];
+  const base = client({ login: async () => ({ login: { ...runningLogin("codex-new", "Codex New"), provider: "codex" } }) });
+  const api = { ...base.client,
+    updateMachineProviderAccountDefault: async (_runnerId: string, provider: string, body: unknown) => {
+      saved.push(body);
+      return { providerAccountDefault: { provider, accountId: (body as { accountId: string }).accountId, revision: 4 } };
+    },
+  } as unknown as ApiClient;
+  const defaults = [{ provider: "codex" as const, accountId: null, revision: 3 }];
+  const ui = await render({ api, runner: runnerView({ providerAccountDefaults: defaults }),
+    intent: { kind: "add_account", provider: "codex", activationId: 1 } });
+  try {
+    const dialog = ui.dialog()!;
+    await typeAccountLabel(dialog, "Codex New");
+    await act(async () => { ui.button(dialog, "Start Sign-In").click(); });
+    await ui.settle();
+    await ui.rerender({ online: false, runner: runnerView({ status: "offline", providerAccountDefaults: defaults, providerAccounts: [...ACCOUNTS,
+      { id: "codex-new", label: "Codex New", provider: "codex", authStatus: "authenticated", profile: { id: "p9", access: "granted" } }] }) });
+    const offer = ui.container.querySelector<HTMLElement>('[aria-label="Use for New Sessions"]');
+    assert.ok(offer, "a preference saves offline, so it stays offered");
+    const button = ui.button(offer, "Use for New Sessions");
+    assert.equal(button.disabled, false);
+    await act(async () => { button.click(); });
+    await ui.settle();
+    assert.deepEqual(saved, [{ accountId: "codex-new", expectedRevision: 3 }]);
+    assertNoDomNode(ui.container.querySelector('[aria-label="Use for New Sessions"]'), "the offer ends once saved");
+  } finally { await ui.unmount(); }
+});
+
+test("an expanded usage row keeps its reading and disclosure during a failed reconnect refresh and remains collapsible", async () => {
   let reads = 0;
   const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: {
     ...client().client, subscriptionUsage: async () => {
@@ -2020,11 +2183,211 @@ test("an expanded usage row keeps its disclosure during a failed reconnect refre
     await ui.rerender({ online: false });
     assert.equal(toggle.isConnected, true);
     assert.equal(toggle.getAttribute("aria-expanded"), "true");
-    assert.match(toggle.textContent ?? "", /Usage Not Reported/);
-    assert.match(ui.row("Work").textContent ?? "", /No allowance reading is available/);
+    assert.match(toggle.textContent ?? "", /36% Left · Last Known/, "the last reading stays, marked for what it is");
+    assert.doesNotMatch(ui.row("Work").textContent ?? "", /No allowance reading is available/);
+    assert.match(ui.row("Work").textContent ?? "", /Last known reading/);
+    await ui.rerender({ online: true });
+    assert.ok(reads > 2, "reconnecting reads again");
+    assert.match(toggle.textContent ?? "", /36% Left/, "and a read that fails then changes nothing");
     await act(async () => toggle.click());
     assert.equal(toggle.getAttribute("aria-expanded"), "false");
     assert.equal(toggle.isConnected, true, "collapsing does not remove the operated control");
     assertNoDomNode(ui.row("Work").querySelector(".provider-usage-details"));
   } finally { await ui.unmount(); }
+});
+
+const RANKED: ProviderAccountDefinition[] = [
+  { id: "first", label: "first@example.com", provider: "claude", authStatus: "unauthenticated", billing: "subscription" },
+  { id: "second", label: "second@example.com", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+  { id: "third", label: "third@example.com", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+  { id: "unranked", label: "unranked@example.com", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+];
+const POLICY = RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccountSelectionPolicy;
+const priorityPolicy = (order: string[], revision = 4) => ({ provider: "claude" as const, accountId: null, revision, mode: "priority" as const, schemaVersion: 1, fixedAccountId: "third", priorityAccountIds: order });
+
+function priorityClient(handlers: { write?: (input: { priorityAccountIds?: string[]; mode: string; expectedRevision: number }) => Promise<unknown> } = {}) {
+  const writes: Array<{ priorityAccountIds?: string[]; mode: string; expectedRevision: number }> = [];
+  const api = { ...client().client,
+    inspectProviderHomeLease: async () => ({ state: "none" }),
+    updateMachineProviderAccountPolicy: async (_runner: string, _provider: string, input: { priorityAccountIds?: string[]; mode: string; expectedRevision: number }) => {
+      writes.push(input);
+      if (handlers.write) await handlers.write(input);
+      return { providerAccountPolicy: priorityPolicy(input.priorityAccountIds ?? [], input.expectedRevision + 1) };
+    },
+    providerAccountSelection: async () => ({
+      provider: "claude", mode: "priority", policyRevision: 4, status: "selected", source: "priority", accountId: "second",
+      enforcement: "enforced", generatedAt: 1,
+      candidates: [
+        { accountId: "first", position: 1, eligible: false, reason: "signed_out" },
+        { accountId: "second", position: 2, eligible: true, selected: true },
+        { accountId: "third", position: 3, eligible: true },
+        { accountId: "unranked", position: null, eligible: false, reason: "not_ranked" },
+      ],
+    }),
+  } as unknown as ApiClient;
+  return { api, writes };
+}
+
+test("Priority Order lists its ranking, expected account and skip reasons, and moves by button (#4353)", async () => {
+  const { api, writes } = priorityClient();
+  const ui = await render({ runner: runnerView({ protocolVersion: POLICY, providerAccounts: RANKED,
+    providerAccountDefaults: [priorityPolicy(["first", "second", "third"])] }), api });
+  try {
+    await ui.settle();
+    const text = ui.container.textContent ?? "";
+    assert.match(text, /New sessions use/);
+    assert.match(text, /first account in the machine's Priority Order|first eligible account/);
+    assert.match(text, /Skipped: needs sign-in\./);
+    assert.match(text, /Next Session/);
+    assert.match(text, /Not Ranked/);
+    assert.equal(ui.container.querySelectorAll(".provider-account-rank").length, 3);
+    const up = ui.container.querySelector<HTMLButtonElement>('[data-move="first:up"]')!;
+    assert.equal(up.getAttribute("aria-disabled"), "true", "the first account can't move up");
+    await act(async () => up.click());
+    assert.deepEqual(writes, [], "and pressing it writes nothing");
+    const down = ui.container.querySelector<HTMLButtonElement>('[data-move="second:down"]')!;
+    assert.match(down.getAttribute("aria-label") ?? "", /^Move .* Down$/);
+    await act(async () => down.click()); await ui.settle();
+    assert.deepEqual(writes, [{ mode: "priority", priorityAccountIds: ["first", "third", "second"], expectedRevision: 4 }]);
+    assert.match(ui.container.querySelector('.provider-selection-status[role="status"]')?.textContent ?? "", /Moved .* to position 3 of 3\./);
+    assert.equal(domWindow.document.activeElement?.getAttribute("data-move"), "second:up", "a row that reached the edge hands focus to its other direction");
+  } finally { await ui.unmount(); }
+});
+
+test("a move that lost a race shows the saved order and asks for another action (#4353)", async () => {
+  const current = priorityPolicy(["third", "first", "second"], 5);
+  const { api: base, writes } = priorityClient({ write: async () => { throw new ApiError("changed", 409, undefined, { current }); } });
+  // The server already holds revision 5; the runner props below stay at 4 until its stream arrives.
+  let readings = 0;
+  let revision = 4;
+  const api = { ...base, providerAccountSelection: async () => {
+    readings += 1;
+    return { provider: "claude", mode: "priority", policyRevision: revision, status: "selected", source: "priority",
+      accountId: revision === 4 ? "second" : "third", enforcement: "enforced", generatedAt: 1,
+      candidates: revision === 4
+        ? [{ accountId: "first", position: 1, eligible: false, reason: "signed_out" }, { accountId: "second", position: 2, eligible: true, selected: true }]
+        : [{ accountId: "third", position: 1, eligible: true, selected: true }] };
+  } } as unknown as ApiClient;
+  const ui = await render({ runner: runnerView({ protocolVersion: POLICY, providerAccounts: RANKED,
+    providerAccountDefaults: [priorityPolicy(["first", "second", "third"])] }), api });
+  try {
+    await ui.settle();
+    assert.match(ui.container.textContent ?? "", /Skipped: needs sign-in\./u);
+    const before = readings;
+    revision = 5;
+    await act(async () => ui.container.querySelector<HTMLButtonElement>('[data-move="second:up"]')!.click()); await ui.settle();
+    assert.equal(writes.length, 1, "nothing retries on its own");
+    assert.ok(readings > before, "the saved order is read again at once, not at the next minute's poll");
+    assert.doesNotMatch(ui.container.textContent ?? "", /Skipped: needs sign-in\./u, "the earlier revision's reasons are gone");
+    assert.equal(ui.container.querySelector('[data-move="third:up"]')?.closest(".row")?.textContent?.includes("Next Session"), true,
+      "the expectation matches the order on screen");
+    assert.match(ui.container.textContent ?? "", /Couldn't Update Claude Account Selection/);
+    assert.match(ui.container.textContent ?? "", /Claude account selection changed in another client\. The list now shows what's saved\./);
+    assert.equal(ui.container.querySelector('[data-move="third:up"]')?.getAttribute("aria-disabled"), "true", "the saved order shows");
+  } finally { await ui.unmount(); }
+});
+
+test("switching to Priority Order starts from the saved default, without accounts this server can't use (#4353)", () => {
+  const accounts: ProviderAccountDefinition[] = [
+    { id: "a", label: "A", provider: "claude", authStatus: "authenticated" },
+    { id: "b", label: "B", provider: "claude", authStatus: "authenticated" },
+    { id: "theirs", label: "Theirs", provider: "claude", authStatus: "authenticated", profile: { id: "p", access: "not_granted" } },
+  ];
+  assert.deepEqual(initialPriorityOrder(accounts, "b"), ["b", "a"]);
+  assert.deepEqual(initialPriorityOrder(accounts, null), ["a", "b"]);
+  assert.deepEqual(initialPriorityOrder(accounts, "theirs"), ["a", "b"]);
+  assert.deepEqual(movedPriorityOrder(["a", "b", "c"], "b", "up"), ["b", "a", "c"]);
+  assert.deepEqual(movedPriorityOrder(["a", "b", "c"], "a", "up"), ["a", "b", "c"]);
+  assert.deepEqual(movedPriorityOrder(["a", "b", "c"], "c", "down"), ["a", "b", "c"]);
+});
+
+test("an older runner offers no Priority Order, and one policy already saved says it isn't applied (#4353)", async () => {
+  const older = POLICY - 1;
+  const { api } = priorityClient();
+  const fixed = await render({ runner: runnerView({ protocolVersion: older, providerAccounts: RANKED, providerAccountDefaults: [] }), api });
+  try {
+    await fixed.settle();
+    assert.equal(fixed.container.querySelectorAll('[role="radio"]').length, 0);
+    assert.match(fixed.container.textContent ?? "", /Update this machine's runner to use Priority Order/);
+  } finally { await fixed.unmount(); }
+  const saved = await render({ runner: runnerView({ protocolVersion: older, providerAccounts: RANKED,
+    providerAccountDefaults: [priorityPolicy(["second"])] }), api: { ...api,
+      providerAccountSelection: async () => ({ provider: "claude", mode: "priority", policyRevision: 4, status: "choice_required", source: "none",
+        refusal: "runner_update_required", candidates: [], enforcement: "runner_update_required", generatedAt: 1 }) } as unknown as ApiClient });
+  try {
+    await saved.settle();
+    assert.match(saved.container.textContent ?? "", /Priority Order Isn't Being Applied/);
+    assert.equal(saved.container.querySelectorAll("[data-move]").length, 0, "an order it can't enforce can't be changed");
+    assert.doesNotMatch(saved.container.textContent ?? "", /Skipped:|Next Session/, "nor read as if it were checked");
+    assert.ok(saved.container.querySelector('[role="radio"]'), "the mode control stays, so the policy can be replaced");
+  } finally { await saved.unmount(); }
+});
+
+test("no eligible account says so instead of naming one (#4353)", async () => {
+  const { api } = priorityClient();
+  const ui = await render({ runner: runnerView({ protocolVersion: POLICY, providerAccounts: RANKED, providerAccountDefaults: [priorityPolicy(["first"])] }),
+    api: { ...api, providerAccountSelection: async () => ({ provider: "claude", mode: "priority", policyRevision: 4, status: "choice_required", source: "none",
+      refusal: "no_eligible_account", enforcement: "enforced", generatedAt: 1, candidates: [{ accountId: "first", position: 1, eligible: false, reason: "signed_out" }] }) } as unknown as ApiClient });
+  try {
+    await ui.settle();
+    const text = ui.container.textContent ?? "";
+    assert.match(text, /No Eligible Account/);
+    assert.match(text, /each new session needs an account chosen when it starts/);
+    assert.doesNotMatch(text, /Choose an account for this session|review this machine's Provider Accounts/, "that's a launch's wording, not this page's");
+    assert.doesNotMatch(text, /New sessions use/);
+    assert.doesNotMatch(text, /Next Session/);
+  } finally { await ui.unmount(); }
+});
+
+test("a viewer sees the mode but gets no controls for it (#4353)", async () => {
+  const { api } = priorityClient();
+  const ui = await render({ runner: runnerView({ protocolVersion: POLICY, providerAccounts: RANKED, providerAccountDefaults: [priorityPolicy(["first", "second"])] }),
+    canManageProfiles: false, api });
+  try {
+    await ui.settle();
+    assert.equal(ui.container.querySelectorAll('[role="radio"]').length, 0);
+    assert.equal(ui.container.querySelectorAll("[data-move]").length, 0);
+    assert.match(ui.container.textContent ?? "", /Priority Order/);
+  } finally { await ui.unmount(); }
+});
+
+test("an expectation from another revision is never shown beside the order on screen (#4353)", async () => {
+  const { api } = priorityClient();
+  const ui = await render({ runner: runnerView({ protocolVersion: POLICY, providerAccounts: RANKED,
+    providerAccountDefaults: [priorityPolicy(["first", "second", "third"], 9)] }), api });
+  try {
+    await ui.settle();
+    assert.doesNotMatch(ui.container.textContent ?? "", /New sessions use|Next Session|Skipped:/u,
+      "the fixture's reading is revision 4, and the list holds revision 9");
+    assert.match(ui.container.textContent ?? "", /Priority Order/u);
+  } finally { await ui.unmount(); }
+});
+
+test("a skip reason names the limit, and a cooldown says when it ends rather than a reset (#4353)", () => {
+  const now = 1_000_000;
+  assert.equal(providerAccountSkipLabel({ reason: "usage_exhausted", limitLabel: "Session Window", retryAt: now + 2 * 3_600_000 }, now),
+    "Skipped: at a usage limit (Session Window). Resets in 2 hours.");
+  assert.equal(providerAccountSkipLabel({ reason: "spend_limit_reached", limitLabel: "Monthly" }, now), "Skipped: spend limit reached (Monthly).");
+  assert.equal(providerAccountSkipLabel({ reason: "cooldown", retryAt: now + 5 * 60_000 }, now), "Skipped: recently hit a usage limit. Available again in 5 minutes.");
+  assert.equal(providerAccountSkipLabel({ reason: "signed_out" }, now), "Skipped: needs sign-in.");
+  assert.equal(providerAccountSkipLabel({ reason: "not_ranked" }, now), undefined);
+});
+
+test("the visible move status follows Hide Account Emails while it is on screen (#4353)", async () => {
+  const { api } = priorityClient();
+  const ui = await render({ runner: runnerView({ protocolVersion: POLICY, providerAccounts: RANKED,
+    providerAccountDefaults: [priorityPolicy(["first", "second", "third"])] }), api });
+  try {
+    await ui.settle();
+    await act(async () => { setHideAccountEmails(false); });
+    await act(async () => ui.container.querySelector<HTMLButtonElement>('[data-move="second:down"]')!.click()); await ui.settle();
+    const status = () => ui.container.querySelector('.provider-selection-status[role="status"]')?.textContent ?? "";
+    assert.match(status(), /Moved second@example\.com to position 3 of 3\./u);
+    await act(async () => { setHideAccountEmails(true); });
+    assert.doesNotMatch(status(), /second@example\.com/u, "turning the preference on hides it at once");
+    assert.match(status(), /Moved .* to position 3 of 3\./u);
+  } finally {
+    await act(async () => { setHideAccountEmails(false); });
+    await ui.unmount();
+  }
 });

@@ -1,5 +1,5 @@
 import {
-  SCOPE_GRANT_DEFAULT_SELECTION_COUNT,
+  SCOPE_GRANT_DEFAULT_SELECTION_COUNT, campaignScopeChangeResult,
   type CampaignAuthorityBoundary, type CampaignAuthorityOperation, type CampaignIssueScopeSnapshot, type FullControlDerivedLimits,
   type OrchestratorCampaignPolicy, type ScopeGrantDropReason, type ScopeGrantSelection,
 } from "@wollipog/protocol";
@@ -306,4 +306,19 @@ export function proposalMaxIssues(policy: Pick<OrchestratorCampaignPolicy, "firs
       first.derivedLimits?.maxIssues !== true) return undefined;
   const followUps = boundary.budgetAuthority?.acceptedFollowUps;
   return Math.min(MAX_MESSAGE_ISSUES, Math.max(issues.maxIssues, followUps === undefined ? MAX_MESSAGE_ISSUES : scopeSize + followUps));
+}
+
+/** The Maximum Issues increase the owner's approval of this scope request applies, to name it where the
+ * request is listed (#4334): the one an owner review states, or the derived limit a failed or uncertain
+ * grant or a proposal grows to fit, which no snapshot field records. `boundary` is the one the approval
+ * would re-mint, absent when it wouldn't, and the scope size is the change's own result. It reads the
+ * limit and decides nothing; approval still applies its own rules. */
+export function scopeApprovalMaxIssuesIncrease(policy: Pick<OrchestratorCampaignPolicy, "firstMessageScope"> | undefined,
+  snapshot: CampaignIssueScopeSnapshot, boundary: CampaignAuthorityBoundary | undefined): { from: number; increase: number } | undefined {
+  if (snapshot.ownerReview?.maxIssuesIncrease) return snapshot.ownerReview.maxIssuesIncrease;
+  const from = boundary?.issueAuthority?.maxIssues;
+  if (!boundary || from === undefined) return undefined;
+  const scopeSize = campaignScopeChangeResult(snapshot).length;
+  const grown = proposalMaxIssues(policy, snapshot, boundary, scopeSize) ?? grantReviewMaxIssues(policy, snapshot, boundary, scopeSize);
+  return grown !== undefined && grown > from ? { from, increase: grown - from } : undefined;
 }

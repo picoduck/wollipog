@@ -1,3 +1,4 @@
+import { PROVIDER_ACCOUNT_CHOICE_REQUIRED, PROVIDER_ACCOUNT_MODEL_UNKNOWN_SENTENCE, PROVIDER_ACCOUNT_SKIP_TEXT } from "@wollipog/protocol";
 import { RETIRED_REVIEW_TOOL_NAMES, REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
 import { normalizeWorkflowDecisionOwnerRule, WORKFLOW_DECISION_OWNER_RULE_QUOTE_MAX_CHARS, WORKFLOW_DECISION_OWNER_RULE_SOURCE_MAX_CHARS } from "@wollipog/protocol";
 import { sessionCredentialRefusal } from "./session-credential-error.js";
@@ -278,9 +279,69 @@ async function cpFetch(
     if (res.status === 401 && deps.selfSessionId && actorHeader === WOLLIPOG_AGENT_ACTOR_SESSION_HEADER) {
       detail = sessionCredentialRefusal(detail);
     }
+    detail += providerAccountChoiceSuffix(data);
     return { ok: false, message: `HTTP ${res.status}: ${detail}`, status: res.status };
   }
   return { ok: true, data };
+}
+
+/** What an unattended caller can do about a launch with no eligible account (#4353). Candidates stay
+ * out of the model's context: account ids are derived from account labels. */
+function providerAccountChoiceSuffix(data: Json): string {
+  const selection = data?.providerAccountSelection;
+  if (data?.code !== PROVIDER_ACCOUNT_CHOICE_REQUIRED || !selection || typeof selection !== "object") return "";
+  const actions = Array.isArray(selection.actions) ? selection.actions.filter((action: unknown) => typeof action === "string").join(", ") : "";
+  const retryAt = typeof selection.retryAt === "number" ? ` retryAt=${new Date(selection.retryAt).toISOString()}` : "";
+  return ` [${PROVIDER_ACCOUNT_CHOICE_REQUIRED} refusal=${String(selection.refusal)} actions=${actions}${retryAt}] ` +
+    "choose_account: read get_provider_account_selection (wollipog session accounts) and pass an accountRef whose canName is true " +
+    "as create_session providerAccountId (wollipog session create --provider-account). Runs and workflows can't name an account.";
+}
+
+/** A control plane below v337 can't read an account reference. Sending one would be refused as an
+ * unknown account at best, so say what actually stands in the way. */
+async function providerAccountChoiceCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccountAgentChoice;
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const result = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!result.ok) return controlPlaneUpdateRequired(wollipogSupportUnverified("provider account choice", result.message), required);
+    actual = result.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= required
+    ? null
+    : controlPlaneUpdateRequired(needsNewerWollipog("Choosing a provider account from an agent needs",
+      "No session was started. Update Wollipog, or start it without naming an account."), required, actual);
+}
+
+/** What a launch would use and which accounts could be named, for the model's context: account
+ * references and reason codes, never the ids or labels beside them in the control plane's reply. */
+function mapProviderAccountSelection(preview: Json): Json {
+  const choices = capArray(preview?.choices).map((choice) => ({
+    accountRef: choice?.accountRef,
+    position: choice?.position ?? null,
+    ...(choice?.expected === true ? { expected: true } : {}),
+    canName: choice?.canName === true,
+    ...(typeof choice?.reason === "string" ? { reason: choice.reason, because: providerAccountSkipFragment(choice.reason) } : {}),
+    ...(typeof choice?.retryAt === "number" ? { retryAt: new Date(choice.retryAt).toISOString() } : {}),
+    ...(typeof choice?.limitLabel === "string" ? { limitLabel: choice.limitLabel } : {}),
+  }));
+  return {
+    provider: preview?.provider,
+    mode: preview?.mode,
+    policyRevision: preview?.policyRevision,
+    status: preview?.status,
+    source: preview?.source,
+    ...(typeof preview?.refusal === "string" ? { refusal: preview.refusal } : {}),
+    enforcement: preview?.enforcement,
+    accounts: choices,
+    ...(preview?.modelCompatibility === "unknown" ? { modelCompatibility: "unknown", modelNote: PROVIDER_ACCOUNT_MODEL_UNKNOWN_SENTENCE } : {}),
+  };
+}
+
+function providerAccountSkipFragment(reason: string): string | undefined {
+  return Object.hasOwn(PROVIDER_ACCOUNT_SKIP_TEXT, reason)
+    ? PROVIDER_ACCOUNT_SKIP_TEXT[reason as keyof typeof PROVIDER_ACCOUNT_SKIP_TEXT]
+    : undefined;
 }
 
 /** How long one wait report may take: a slow control plane never holds the wait itself. */
@@ -1357,7 +1418,7 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
 
 const CAMPAIGN_WORK_LEDGER_TOOLS = ["record_campaign_plan", "update_campaign_work_item", "assign_campaign_work_item",
   "record_campaign_work_item_delivery", "adjudicate_campaign_recommendation", "get_campaign_work_items"];
-const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "list_sessions", "get_session", "get_session_events",
+const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "get_provider_account_selection", "list_sessions", "get_session", "get_session_events",
   "request_automation_creation", "get_automation_creation", "execute_automation_creation",
   "allocate_campaign_budget",
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child", ...CAMPAIGN_WORK_LEDGER_TOOLS,
@@ -1683,6 +1744,35 @@ export const TOOLS: McpTool[] = [
         workspaces: capArray(run?.workspaces).map((w) => ({ id: w?.id, name: w?.name, path: w?.path })),
       }));
       return textResult({ runners });
+    },
+  },
+  {
+    name: "get_provider_account_selection",
+    description:
+      "Read which provider account a new session of this agent would use and which accounts you could name instead, without launching anything. Accounts appear only as opaque accountRef values, never as names. canName says whether create_session accepts one in providerAccountId; reason says why not, or which usage limit naming it would override. A reading promises nothing: every launch resolves again.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        runnerId: { type: "string" },
+        agentId: { type: "string" },
+        workspaceId: { type: "string", description: "The workspace the session would run in, for the project it would join" },
+        model: { type: "string", minLength: 1, description: "The model the session would name, if any" },
+      },
+      required: ["runnerId", "agentId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.runnerId !== "string" || typeof args?.agentId !== "string") {
+        return errorResult("runnerId and agentId are required");
+      }
+      const compatibilityError = await providerAccountChoiceCompatibilityError(deps);
+      if (compatibilityError) return compatibilityError;
+      const query = new URLSearchParams({ agentId: args.agentId,
+        ...(typeof args.workspaceId === "string" ? { workspaceId: args.workspaceId } : {}),
+        ...(typeof args.model === "string" ? { model: args.model } : {}) });
+      const r = await cpFetch(deps, "GET", `/api/runners/${encodeURIComponent(args.runnerId)}/provider-account-selection?${query.toString()}`);
+      if (!r.ok) return errorResult(r.message);
+      return textResult(mapProviderAccountSelection(r.data));
     },
   },
   {
@@ -3230,7 +3320,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_review_session",
-    description: "Start a review session for this session's own open pull request at its pushed head (#561). The reviewer is the other model family (Codex for a Claude Code session, Claude Code for a Codex session), launched by your runner as its own read-only session outside your sandbox, against the runner's checkout of exactly that head: it never touches your worktree and loads none of the repository's settings, hooks, skills or MCP servers. Push first: headSha must be the pull request's current head, and the pull request must be open, from this repository, on this session's managed worktree branch. A GitLab merge request works the same way (v244): repository is the project named by its host and full namespace, number is its IID, and the runner reads it with a trusted glab. The brief (intent, acceptance criteria, verification already run) is the reviewer's only context. A review session takes no session slot or child capacity; this session may have one active review. Reviews of a pull request form a run: the first round reviews it in full; later rounds review only the changes since the last valid round, with its open findings, unless fullReason asks for a full review; a rebased or force-pushed head starts a new epoch that reviews the range-diff. Each epoch allows 4 valid rounds and each round 2 counted attempts; an upvoted or unchanged head is refused. Returns reviewSessionId at once: you can watch it with get_session_events, and poll get_review_session until terminal is true. The runner and control plane check the report against the review contract (verdict); only a valid report's vote and findings count, and you still adjudicate every finding yourself. Campaign members request their own review sessions through this tool; the server reserves allowance before launch and records actual session usage against the campaign allowance.",
+    description: "Start a review session for this session's own open pull request at its pushed head (#561). The reviewer is the other model family (Codex for a Claude Code session, Claude Code for a Codex session), launched by your runner as its own read-only session outside your sandbox, against the runner's checkout of exactly that head: it never touches your worktree and loads none of the repository's settings, hooks, skills or MCP servers. Push first: headSha must be the pull request's current head, and the pull request must be open, from this repository, on any of this session's own linked managed worktree branches (protocol 335+), without selecting it. A GitLab merge request works the same way (v244): repository is the project named by its host and full namespace, number is its IID, and the runner reads it with a trusted glab. The brief (intent, acceptance criteria, verification already run) is the reviewer's only context. A review session takes no session slot or child capacity; on protocol 335+ this session may have one active review per pull request, with different pull requests reviewed concurrently; older runners require selecting the worktree and serializing reviews. Reviews of a pull request form a run: the first round reviews it in full; later rounds review only the changes since the last valid round, with its open findings, unless fullReason asks for a full review; a rebased or force-pushed head starts a new epoch that reviews the range-diff. Each epoch allows 4 valid rounds and each round 2 counted attempts; an upvoted or unchanged head is refused. Returns reviewSessionId at once: you can watch it with get_session_events, and poll get_review_session until terminal is true. The runner and control plane check the report against the review contract (verdict); only a valid report's vote and findings count, and you still adjudicate every finding yourself. Campaign members request their own review sessions through this tool; the server reserves allowance before launch and records actual session usage against the campaign allowance.",
     inputSchema: { type: "object", properties: {
       repository: { type: "string", description: "The pull request's GitHub repository, owner/name, or a GitLab merge request's project, <host>/group[/subgroup…]/project." },
       number: { type: "integer", minimum: 1 },
@@ -3908,6 +3998,7 @@ export const TOOLS: McpTool[] = [
         maxToolCalls: { type: "number" },
         maxChildSessions: { type: "integer", minimum: 0, maximum: 64 },
         campaignWorkItemId: { type: "string", minLength: 1, maxLength: 256, description: "Campaign work item (cwi_…) the child works on; same assignment rules as assign_campaign_work_item" },
+        providerAccountId: { type: "string", minLength: 1, maxLength: 128, description: "An accountRef from get_provider_account_selection whose canName is true. Overrides the Machine's account policy for this session; omit it to let the policy choose" },
       },
       required: ["runnerId", "agentId"],
       additionalProperties: false,
@@ -3932,8 +4023,15 @@ export const TOOLS: McpTool[] = [
           (typeof args.campaignWorkItemId !== "string" || !args.campaignWorkItemId.trim())) {
         return errorResult("campaignWorkItemId must be a non-empty campaign work item ID");
       }
+      if (args.providerAccountId !== undefined && (typeof args.providerAccountId !== "string" || !args.providerAccountId.trim())) {
+        return errorResult("providerAccountId must be an accountRef from get_provider_account_selection");
+      }
       if (typeof args.effort === "string") {
         const compatibilityError = await explicitEffortCompatibilityError(deps);
+        if (compatibilityError) return compatibilityError;
+      }
+      if (typeof args.providerAccountId === "string") {
+        const compatibilityError = await providerAccountChoiceCompatibilityError(deps);
         if (compatibilityError) return compatibilityError;
       }
       if (typeof args.campaignWorkItemId === "string") {
@@ -3953,6 +4051,7 @@ export const TOOLS: McpTool[] = [
       if (typeof args.title === "string") body.title = args.title;
       if (typeof args.prompt === "string") body.prompt = args.prompt;
       if (typeof args.campaignWorkItemId === "string") body.campaignWorkItemId = args.campaignWorkItemId;
+      if (typeof args.providerAccountId === "string") body.providerAccountId = args.providerAccountId;
       // A child that starts in the primary checkout has no branch, so diff, checkpoint, review,
       // and PR surfaces are blind to it. An agent asks for a worktree by default; only an explicit
       // `useWorktree: false` keeps the in-place behavior. Human/UI-created sessions are unaffected
@@ -3968,6 +4067,8 @@ export const TOOLS: McpTool[] = [
           ...mapSession(view),
           model: view?.model ?? null,
           effort: view?.effort ?? null,
+          ...(view?.providerAccountSelection?.modelCompatibility === "unknown"
+            ? { modelCompatibility: "unknown", modelNote: PROVIDER_ACCOUNT_MODEL_UNKNOWN_SENTENCE } : {}),
         },
       });
     },

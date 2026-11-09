@@ -1630,6 +1630,21 @@ export function createApiClient(transport: ApiTransport) {
     { method: "PUT", body: JSON.stringify(body) },
   ),
 
+  updateMachineProviderAccountPolicy: (
+    runnerId: string,
+    provider: "claude" | "codex",
+    body: { mode: "fixed" | "priority"; priorityAccountIds?: string[]; fixedAccountId?: string | null; expectedRevision: number },
+  ) => req<{ providerAccountPolicy: import("@wollipog/protocol").RunnerProviderAccountDefault }>(
+    `/api/runners/${encodeURIComponent(runnerId)}/provider-account-policies/${provider}`,
+    { method: "PUT", body: JSON.stringify(body) },
+  ),
+  providerAccountSelection: (
+    runnerId: string,
+    target: ProviderAccountSelectionTarget,
+  ) => req<import("@wollipog/protocol").ProviderAccountSelectionPreview>(
+    `/api/runners/${encodeURIComponent(runnerId)}/provider-account-selection?${new URLSearchParams(target).toString()}`,
+  ),
+
   // Phase 3: external (CLI-started) sessions on a box.
   listExternalSessions: (runnerId: string, agentId?: string) =>
     req<{ sessions: ExternalSessionDescriptor[] }>(
@@ -1902,6 +1917,16 @@ export function createApiClient(transport: ApiTransport) {
 }
 
 export type ApiClient = ReturnType<typeof createApiClient>;
+
+/** What a provider account preview is for. `noProject` means the launch chose No Project; omitting
+ * both it and `projectId` lets the server infer the project from `workspaceId`, as a launch would. */
+export type ProviderAccountSelectionTarget = {
+  agentId?: string;
+  provider?: "claude" | "codex";
+  projectId?: string;
+  workspaceId?: string;
+  noProject?: "1";
+};
 
 const defaultApiTransport = createBrowserApiTransport({
   instanceId: "local",

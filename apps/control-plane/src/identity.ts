@@ -111,8 +111,9 @@ export function mutationAuthorizationError(
 
 export function agentDelegationAuthorizationError(routePath: string, principal: AgentPrincipal): string | null {
   if (principal.orchestrator && routePath === "/api/governance/policies") return null;
+  // The account selection route checks access to its runner itself, as `/api/runners` filters its list.
   const resourceRoute = routePath === "/api/compatibility" || routePath === "/api/runners" || routePath === "/api/sessions" ||
-    routePath.startsWith("/api/sessions/");
+    routePath === "/api/runners/:id/provider-account-selection" || routePath.startsWith("/api/sessions/");
   if (resourceRoute || principal.delegatedScope.owner.kind === "organization") return null;
   return "the agent session is not delegated organization-wide access to this global resource";
 }
