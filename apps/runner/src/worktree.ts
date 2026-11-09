@@ -2947,8 +2947,10 @@ export async function worktreeRollbackProofState(
   try {
     return (await command(context, path, ["for-each-ref", "--format=%(refname)", ref])).trim() === ref ? "proved" : "mismatch";
   } catch (error) {
-    // The directory is no repository any more (its registration went, say). Nothing there is proved.
-    return isMissingGitRepositoryError(error) ? "mismatch" : "unavailable";
+    // Git ran and refused, whatever its wording (it varies by version): the directory is no worktree
+    // of a repository any more, its registration having gone, say. Nothing there is proved, and the
+    // answer only ever removes less. A timeout or a failed spawn says nothing, so that one waits.
+    return typeof (error as NodeJS.ErrnoException & { code?: unknown }).code === "number" ? "mismatch" : "unavailable";
   }
 }
 
