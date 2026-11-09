@@ -78,6 +78,8 @@ test("Priority Order shows its expected account and reason, and an explicit choi
   const account = page.getByRole("button", { name: /Account:/ });
   await expect(account).toHaveAccessibleName(/Account: Personal/);
   await expect(page.getByText(/first eligible account in the machine's Priority Order\. Skipped ahead of it: one needs sign-in\./u)).toBeVisible();
+  // Nothing else on screen: the dialog opens with Project focused and its text selected.
+  await page.evaluate(() => { (document.activeElement as HTMLElement | null)?.blur(); });
   await page.screenshot({ path: "playwright-report/provider-accounts/new-session-expected-desktop.png", fullPage: true });
   await page.getByRole("button", { name: "Create Session" }).click();
   await expect.poll(() => page.evaluate(() => document.documentElement.dataset.createSessionRequest)).toBeTruthy();
@@ -88,9 +90,12 @@ test("no eligible account requires an explicit choice before a session starts (#
   await page.setViewportSize({ width: 390, height: 844 });
   await openDialog(page, "?accountPriority=none");
   await expect(page.getByText(/No Claude account in this machine's Priority Order can start this session/u)).toBeVisible();
-  await page.screenshot({ path: "playwright-report/provider-accounts/new-session-choice-required-mobile.png", fullPage: true });
+  // Like every field in this dialog, Create Session stays pressable and the press explains: it starts
+  // nothing and takes focus to the choice it needs (the dialog's convention, not a gap in this one).
   await page.getByRole("button", { name: "Create Session" }).click();
+  await expect(page.getByRole("button", { name: /Account:/ }), "the press lands on the choice it needs").toBeFocused();
   await expect.poll(() => page.evaluate(() => document.documentElement.dataset.createSessionCount ?? "0")).toBe("0");
+  await page.screenshot({ path: "playwright-report/provider-accounts/new-session-choice-required-mobile.png", fullPage: true });
   await page.getByRole("button", { name: /Account:/ }).click();
   await page.getByRole("option", { name: /Personal/ }).click();
   await page.getByRole("button", { name: "Create Session" }).click();

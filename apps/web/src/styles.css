@@ -10798,6 +10798,8 @@ textarea {
 .provider-selection-summary { padding: var(--space-2) var(--space-3); border-top: 1px solid var(--border); }
 .provider-selection-summary p { margin: 0; }
 .provider-selection-note { margin: 0; padding: var(--space-2) var(--space-3); }
+.provider-selection-status { margin: 0; padding: 0 var(--space-3); color: var(--text-dim); font: var(--type-small); }
+.provider-selection-status:not(:empty) { padding-bottom: var(--space-2); }
 .provider-account-move[aria-disabled="true"] { opacity: 0.45; cursor: default; }
 /* A skip reason is why the account wasn't chosen, so it wraps rather than truncates. */
 .provider-account-sub:has(.provider-account-skip) { white-space: normal; overflow: visible; flex-wrap: wrap; }
@@ -10846,13 +10848,13 @@ textarea {
   .provider-accounts-list .provider-usage-details { grid-column: 1 / -1; grid-row: 3; }
   .provider-accounts-list .provider-account-actions,
   .provider-accounts-list .provider-account-usage + .provider-account-actions { grid-column: 2; grid-row: 1 / span 2; }
-  /* A ranked row's controls need the width its name and skip reason would lose beside them, so the
-     name takes the first line whole and the controls share the second with its usage. */
-  .provider-accounts-list > .row:has(.provider-account-move) > .row-body { grid-column: 1 / -1; }
-  .provider-accounts-list > .row:has(.provider-account-move) .provider-usage-toggle,
-  .provider-accounts-list > .row:has(.provider-account-move) .provider-usage-empty { grid-column: 1; grid-row: 2; align-self: center; }
-  .provider-accounts-list > .row:has(.provider-account-move) .provider-account-actions { grid-column: 2; grid-row: 2; padding-block: var(--space-1); }
-  .provider-accounts-list > .row:has(.provider-account-move) .provider-usage-details { grid-row: 3; }
+  /* A row's controls need the width its name and skip reason would lose beside them, so the name
+     takes the first line whole and the controls share the second, level with its usage. */
+  .provider-accounts-list > .row:has(.provider-account-usage) > .row-body { grid-column: 1 / -1; }
+  .provider-accounts-list > .row:has(.provider-account-usage) .provider-usage-toggle,
+  .provider-accounts-list > .row:has(.provider-account-usage) .provider-usage-empty { grid-column: 1; grid-row: 2; align-self: center; }
+  .provider-accounts-list > .row:has(.provider-account-usage) .provider-account-actions { grid-column: 2; grid-row: 2; align-self: center; padding-block: var(--space-1); }
+  .provider-accounts-list > .row:has(.provider-account-usage) .provider-usage-details { grid-row: 3; }
   .provider-default-marker { white-space: nowrap; }
 }
 /* A provider sign-in's two numbered steps and its endings (#2996, §8.7, §13.2): a local block of the

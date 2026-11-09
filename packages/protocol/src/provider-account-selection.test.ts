@@ -52,7 +52,7 @@ test("Priority Order selects the first eligible account and reports each one it 
   assert.equal(result.accountId, "ready");
   assert.deepEqual(result.candidates, [
     { accountId: "signed-out", position: 1, eligible: false, reason: "signed_out" },
-    { accountId: "at-limit", position: 2, eligible: false, reason: "usage_exhausted", retryAt: NOW + 60_000 },
+    { accountId: "at-limit", position: 2, eligible: false, reason: "usage_exhausted", retryAt: NOW + 60_000, limitLabel: "5 hours" },
     { accountId: "ready", position: 3, eligible: true, selected: true },
     { accountId: "also-ready", position: 4, eligible: true },
     { accountId: "unranked", position: null, eligible: false, reason: "not_ranked" },

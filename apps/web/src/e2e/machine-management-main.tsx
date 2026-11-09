@@ -223,7 +223,7 @@ if (fixtureParams.has("priority") && runner) {
 const fixturePolicyUsage = (): SubscriptionUsageSnapshot[] => fixtureParams.has("priorityLimit") ? [{
   sourceId: "fixture-work", runnerId: runner?.runnerId ?? "", agentId: "claude", provider: "claude", state: "available",
   fetchedAt: Date.now(), providerAccountId: "claude-work",
-  buckets: [{ id: "five-hour", label: "5 Hours", status: "exhausted", resetsAt: Date.now() + 2 * 3_600_000 }],
+  buckets: [{ id: "session", label: "Session Window", remainingPercent: 0, status: "exhausted", resetsAt: Date.now() + 2 * 3_600_000 }],
 }] : [];
 // `identity=fail` fails every permission load until `restoreIdentity()`, so Retry can recover (#2984).
 let identityFails = fixtureParams.get("identity") === "fail";
@@ -468,7 +468,8 @@ const client = {
       sourceId: `fixture-${account.id}`, runnerId: runner!.runnerId, runnerName: "Design Workstation", runnerStatus: runner!.status,
       agentId: "fixture", agentName: "Fixture", provider: account.provider, providerAccountId: account.id,
       state: "available" as const, freshness: "fresh" as const, fetchedAt: Date.now(),
-      buckets: [{ id: "session", label: "Session Window", remainingPercent: 74, resetsAt: Date.now() + 18 * 60 * 60_000 },
+      // The usage row and the skip reason read the same window, as they do from one real reading.
+      buckets: fixturePolicyUsage().find((usage) => usage.providerAccountId === account.id)?.buckets ?? [{ id: "session", label: "Session Window", remainingPercent: 74, resetsAt: Date.now() + 18 * 60 * 60_000 },
         { id: "weekly", label: "Weekly Window", remainingPercent: 81, resetsAt: Date.now() + 5 * 24 * 60 * 60_000 }],
     })), staleAfterMs: 600_000, generatedAt: Date.now(),
   }),

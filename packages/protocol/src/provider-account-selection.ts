@@ -104,6 +104,8 @@ export interface ProviderAccountSelectionCandidate {
   reason?: ProviderAccountSkipReason;
   /** When a time-limited reason should clear, in epoch milliseconds, if known. */
   retryAt?: number;
+  /** The provider's name for the usage window or spend control that is used up. */
+  limitLabel?: string;
 }
 
 /** Why the policy could not pick an account by itself. */
@@ -208,7 +210,7 @@ export interface ProviderAccountEligibilityInput {
 export function providerAccountIneligibility(
   account: ProviderAccountDefinition,
   input: ProviderAccountEligibilityInput,
-): { reason: ProviderAccountSkipReason; retryAt?: number } | null {
+): { reason: ProviderAccountSkipReason; retryAt?: number; limitLabel?: string } | null {
   const { agent, usage, now } = input;
   if (account.profile?.access === "not_granted") return { reason: "access_not_granted" };
   if (account.profile?.access === "pending") return { reason: "access_pending" };
@@ -232,15 +234,17 @@ export function providerAccountIneligibility(
   }
   const exhausted = (usage?.buckets ?? []).filter((bucket) => subscriptionUsageBucketExhausted(bucket, now));
   if (exhausted.length) {
-    const resetsAt = longestExhaustedUsageBucket(exhausted)?.resetsAt;
-    return { reason: "usage_exhausted", ...(resetsAt !== undefined ? { retryAt: resetsAt } : {}) };
+    const limiting = longestExhaustedUsageBucket(exhausted);
+    return { reason: "usage_exhausted", ...(limiting?.resetsAt !== undefined ? { retryAt: limiting.resetsAt } : {}),
+      ...(limiting?.label ? { limitLabel: limiting.label } : {}) };
   }
   const reached = (usage?.spendControls ?? []).filter((control) =>
     control.reached === true && (control.resetsAt === undefined || control.resetsAt > now));
   if (reached.length) {
     const resets = reached.map((control) => control.resetsAt);
     return { reason: "spend_limit_reached",
-      ...(resets.every((value): value is number => value !== undefined) ? { retryAt: Math.max(...resets) } : {}) };
+      ...(resets.every((value): value is number => value !== undefined) ? { retryAt: Math.max(...resets) } : {}),
+      ...(reached[0]?.label ? { limitLabel: reached[0].label } : {}) };
   }
   return null;
 }

@@ -17,6 +17,7 @@ import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import type { MachineAccountsIntent } from "../navigation.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
+import { providerAccountSkipLabel } from "./ProviderAccountSelection.js";
 import { initialPriorityOrder, movedPriorityOrder, ProviderAccountsSection, providerAccountRemovalRefusal, providerProfileErrorMessage, PROFILES_UNSUPPORTED_ON_WINDOWS } from "./ProviderAccountsSection.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -2082,7 +2083,7 @@ test("Priority Order lists its ranking, expected account and skip reasons, and m
     assert.match(down.getAttribute("aria-label") ?? "", /^Move .* Down$/);
     await act(async () => down.click()); await ui.settle();
     assert.deepEqual(writes, [{ mode: "priority", priorityAccountIds: ["first", "third", "second"], expectedRevision: 4 }]);
-    assert.match(ui.container.querySelector('[role="status"].sr-only')?.textContent ?? "", /Moved .* to position 3 of 3\./);
+    assert.match(ui.container.querySelector('.provider-selection-status[role="status"]')?.textContent ?? "", /Moved .* to position 3 of 3\./);
     assert.equal(domWindow.document.activeElement?.getAttribute("data-move"), "second:up", "a row that reached the edge hands focus to its other direction");
   } finally { await ui.unmount(); }
 });
@@ -2114,7 +2115,8 @@ test("a move that lost a race shows the saved order and asks for another action 
     assert.doesNotMatch(ui.container.textContent ?? "", /Skipped: needs sign-in\./u, "the earlier revision's reasons are gone");
     assert.equal(ui.container.querySelector('[data-move="third:up"]')?.closest(".row")?.textContent?.includes("Next Session"), true,
       "the expectation matches the order on screen");
-    assert.match(ui.container.textContent ?? "", /changed in another client\. Review it, then choose again/);
+    assert.match(ui.container.textContent ?? "", /Couldn't Update Claude Account Selection/);
+    assert.match(ui.container.textContent ?? "", /Claude account selection changed in another client\. The list now shows what's saved\./);
     assert.equal(ui.container.querySelector('[data-move="third:up"]')?.getAttribute("aria-disabled"), "true", "the saved order shows");
   } finally { await ui.unmount(); }
 });
@@ -2149,6 +2151,9 @@ test("an older runner offers no Priority Order, and one policy already saved say
   try {
     await saved.settle();
     assert.match(saved.container.textContent ?? "", /Priority Order Isn't Being Applied/);
+    assert.equal(saved.container.querySelectorAll("[data-move]").length, 0, "an order it can't enforce can't be changed");
+    assert.doesNotMatch(saved.container.textContent ?? "", /Skipped:|Next Session/, "nor read as if it were checked");
+    assert.ok(saved.container.querySelector('[role="radio"]'), "the mode control stays, so the policy can be replaced");
   } finally { await saved.unmount(); }
 });
 
@@ -2161,7 +2166,8 @@ test("no eligible account says so instead of naming one (#4353)", async () => {
     await ui.settle();
     const text = ui.container.textContent ?? "";
     assert.match(text, /No Eligible Account/);
-    assert.match(text, /Choose an account for this session/);
+    assert.match(text, /each new session needs an account chosen when it starts/);
+    assert.doesNotMatch(text, /Choose an account for this session|review this machine's Provider Accounts/, "that's a launch's wording, not this page's");
     assert.doesNotMatch(text, /New sessions use/);
     assert.doesNotMatch(text, /Next Session/);
   } finally { await ui.unmount(); }
@@ -2189,4 +2195,14 @@ test("an expectation from another revision is never shown beside the order on sc
       "the fixture's reading is revision 4, and the list holds revision 9");
     assert.match(ui.container.textContent ?? "", /Priority Order/u);
   } finally { await ui.unmount(); }
+});
+
+test("a skip reason names the limit, and a cooldown says when it ends rather than a reset (#4353)", () => {
+  const now = 1_000_000;
+  assert.equal(providerAccountSkipLabel({ reason: "usage_exhausted", limitLabel: "Session Window", retryAt: now + 2 * 3_600_000 }, now),
+    "Skipped: at a usage limit (Session Window). Resets in 2 hours.");
+  assert.equal(providerAccountSkipLabel({ reason: "spend_limit_reached", limitLabel: "Monthly" }, now), "Skipped: spend limit reached (Monthly).");
+  assert.equal(providerAccountSkipLabel({ reason: "cooldown", retryAt: now + 5 * 60_000 }, now), "Skipped: recently hit a usage limit. Available again in 5 minutes.");
+  assert.equal(providerAccountSkipLabel({ reason: "signed_out" }, now), "Skipped: needs sign-in.");
+  assert.equal(providerAccountSkipLabel({ reason: "not_ranked" }, now), undefined);
 });

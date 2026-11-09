@@ -3,6 +3,7 @@ import {
   providerAccountChoiceRequiredSentence,
   providerAccountSelectionRecord,
   providerAccountSelectionSentence,
+  providerAccountSkipSummary,
   type ProviderAccountSelectionCandidate,
   type ProviderAccountSelectionPreview,
   type ProviderAccountSkipReason,
@@ -35,11 +36,15 @@ const SKIP_LABEL: Readonly<Record<ProviderAccountSkipReason, string>> = {
   spend_limit_reached: "spend limit reached",
 };
 
-/** "Skipped: at a usage limit. Resets in 2 hours." Names no account. */
-export function providerAccountSkipLabel(candidate: Pick<ProviderAccountSelectionCandidate, "reason" | "retryAt">, now = Date.now()): string | undefined {
+/** "Skipped: at a usage limit (Session Window). Resets in 2 hours." It names the window or spend
+ * control, because the row's usage summary may be about another, and never the account. A cooldown
+ * isn't a provider's reset, so it says when the account is available again. */
+export function providerAccountSkipLabel(candidate: Pick<ProviderAccountSelectionCandidate, "reason" | "retryAt" | "limitLabel">, now = Date.now()): string | undefined {
   if (!candidate.reason || candidate.reason === "not_ranked") return undefined;
-  const resets = candidate.retryAt !== undefined && candidate.retryAt > now ? ` ${subscriptionResetLabel(candidate.retryAt, now)}.` : "";
-  return `Skipped: ${SKIP_LABEL[candidate.reason]}.${resets}`;
+  const limit = candidate.limitLabel ? ` (${candidate.limitLabel})` : "";
+  const reset = candidate.retryAt !== undefined && candidate.retryAt > now ? subscriptionResetLabel(candidate.retryAt, now) : null;
+  const when = reset === null ? "" : ` ${candidate.reason === "cooldown" ? reset.replace(/^Resets in/u, "Available again in") : reset}.`;
+  return `Skipped: ${SKIP_LABEL[candidate.reason]}${limit}.${when}`;
 }
 
 /** Everything a preview reads from the Machine, so it refreshes when any of them change. */
@@ -91,6 +96,22 @@ export function providerAccountExpectationSentence(preview: ProviderAccountSelec
   return preview.status === "choice_required" && preview.refusal
     ? providerAccountChoiceRequiredSentence(preview.provider, preview.refusal, preview.candidates)
     : providerAccountSelectionSentence(providerAccountSelectionRecord(preview));
+}
+
+/** Why Provider Accounts has no expected account. Unlike a launch's refusal, it speaks about new
+ * sessions in general and from this page, where the accounts in question are listed just below. */
+export function providerAccountGroupRefusalSentence(preview: ProviderAccountSelectionPreview, providerName: string): string {
+  if (preview.refusal === "empty_order") {
+    return `This Priority Order has no accounts. Add one from its menu so new ${providerName} sessions can choose it.`;
+  }
+  if (preview.refusal !== "no_eligible_account") return providerAccountExpectationSentence(preview);
+  const skipped: Partial<Record<ProviderAccountSkipReason, number>> = {};
+  for (const candidate of preview.candidates) {
+    if (candidate.reason && candidate.position !== null) skipped[candidate.reason] = (skipped[candidate.reason] ?? 0) + 1;
+  }
+  const summary = providerAccountSkipSummary(skipped);
+  return `No account in this Priority Order can start a new ${providerName} session right now${summary ? ` (${summary})` : ""}. ` +
+    "Until one can, each new session needs an account chosen when it starts.";
 }
 
 /** The expected account beside a launch that doesn't choose one, and why. */

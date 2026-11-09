@@ -21,7 +21,7 @@ import { Modal } from "./common.js";
 import { AddProviderAccountDialog, providerLoginRunning, providerName, type ProviderCredentialImportOffer } from "./AddProviderAccountDialog.js";
 import { ArrowDownIcon, ArrowUpIcon, MoreHorizontalIcon, SignInIcon } from "./Icons.js";
 import { SegmentedControl } from "./ui/ChoiceControls.js";
-import { ExpectedProviderAccount, providerAccountExpectationSentence, providerAccountSelectionRefreshKey, providerAccountSkipLabel, useProviderAccountSelection } from "./ProviderAccountSelection.js";
+import { ExpectedProviderAccount, providerAccountGroupRefusalSentence, providerAccountSelectionRefreshKey, providerAccountSkipLabel, useProviderAccountSelection } from "./ProviderAccountSelection.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuLabel, MenuSeparator, MenuSurface } from "./Menu.js";
 import { Notice } from "./Notice.js";
@@ -370,11 +370,11 @@ function PrioritySummary({ runner, preview }: {
 }) {
   if (preview.enforcement === "runner_update_required") {
     return <Notice compact tone="warning" title="Priority Order Isn't Being Applied">
-      This machine's runner can't enforce Priority Order. New sessions here need an account chosen until the runner is updated.
+      This machine's runner can't enforce the saved order, so it can't be changed or checked here, and new sessions need an account chosen. Update the runner, or switch to Default Account.
     </Notice>;
   }
   if (preview.status === "choice_required") {
-    return <Notice compact tone="warning" title="No Eligible Account">{providerAccountExpectationSentence(preview)}</Notice>;
+    return <Notice compact tone="warning" title="No Eligible Account">{providerAccountGroupRefusalSentence(preview, providerName(preview.provider))}</Notice>;
   }
   return <div className="provider-selection-summary">
     {preview.enforcement === "machine_offline" && <p className="section-note">This machine is offline. The order applies when it reconnects.</p>}
@@ -386,7 +386,7 @@ function PrioritySummary({ runner, preview }: {
  * One provider's heading and policy: the mode, what the policy expects now, then its rows.
  * A component of its own so each provider reads its own preview.
  */
-function ProviderAccountGroup({ runner, online, provider, policy, canEdit, saving, chooseMode, providerNotices, rows }: {
+function ProviderAccountGroup({ runner, online, provider, policy, canEdit, saving, chooseMode, providerNotices, moveStatus, rows }: {
   runner: RunnerView;
   online: boolean;
   provider: AccountProvider;
@@ -396,6 +396,8 @@ function ProviderAccountGroup({ runner, online, provider, policy, canEdit, savin
   chooseMode: (provider: AccountProvider, mode: "fixed" | "priority") => void;
   /** The fixed default's own notices, shown only under that mode. */
   providerNotices: ReactNode;
+  /** Where the last moved row landed. Visible for sighted and touch users, and announced. */
+  moveStatus: string;
   rows: (preview: ReturnType<typeof useProviderAccountSelection>) => ReactNode;
 }) {
   const mode = providerAccountPolicyMode(policy);
@@ -433,8 +435,11 @@ function ProviderAccountGroup({ runner, online, provider, policy, canEdit, savin
       This server can't apply the saved policy, so new sessions need an account chosen. {canEdit ? "Choose a mode to replace it." : "Ask this machine's owner to replace it."}
     </Notice>}
     {mode === "priority" && preview && <PrioritySummary runner={runner} preview={preview} />}
+    {/* Always rendered, so a screen reader is already listening when the text arrives. */}
+    {mode === "priority" && <p className="provider-selection-status" role="status">{moveStatus}</p>}
     {mode === "fixed" && providerNotices}
-    <div className="provider-accounts-list">{rows(preview)}</div>
+    {/* An older runner evaluates nothing, so its rows must not read as if the order were checked. */}
+    <div className="provider-accounts-list">{rows(preview?.enforcement === "runner_update_required" ? null : preview)}</div>
   </div>;
 }
 
@@ -475,7 +480,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   const defaultWrites = useRef(new Set<ProviderAccountDefinition["provider"]>());
   const [savedDefaults, setSavedDefaults] = useState<NonNullable<RunnerView["providerAccountDefaults"]>>([]);
   // A control whose row just moved takes focus back once the list has redrawn, and a reader hears where.
-  const [moved, setMoved] = useState<{ selector: string; fallback: string; message: string } | null>(null);
+  const [moved, setMoved] = useState<{ provider: AccountProvider; selector: string; fallback: string; message: string } | null>(null);
   const usage = useMachineAccountUsage(runner, online);
   const defaults = (["claude", "codex"] as const).flatMap(provider => {
     const live = runner.providerAccountDefaults?.find(value => value.provider === provider);
@@ -487,6 +492,8 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   const removalSupported = runnerSupportsProtocol(runner.protocolVersion, "providerAccountRemoval");
   const canManage = runner.canManage === true;
   const canEditDefaults = canManageProfiles && canManage && runnerSupportsProtocol(runner.protocolVersion, "providerAccounts");
+  // A runner that can't enforce an order refuses changes to it, so it offers none. Default Account stays.
+  const prioritySupported = runnerSupportsProtocol(runner.protocolVersion, "providerAccountSelectionPolicy");
   const profileActions = canManageProfiles && runnerSupportsProtocol(runner.protocolVersion, "providerProfiles");
   const machine = machineName ?? runnerDisplay(runner, undefined).name;
   const accounts = runner.providerAccounts ?? [];
@@ -816,8 +823,8 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
       } catch (cause) {
         const current = conflictCurrent(cause);
         if (current?.provider === provider) setSavedDefaults((values) => [...values.filter((value) => value.provider !== provider), current as unknown as AccountPolicy]);
-        setNotice({ title: "Couldn't Update Account Selection", body: current?.provider === provider
-          ? "This provider's account selection changed in another client. Review it, then choose again."
+        setNotice({ title: `Couldn't Update ${providerName(provider)} Account Selection`, body: current?.provider === provider
+          ? `${providerName(provider)} account selection changed in another client. The list now shows what's saved. Choose again to change it.`
           : machineSettingsMutationError(cause) });
       } finally { defaultWrites.current.delete(provider); }
     });
@@ -840,6 +847,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
       const atEdge = direction === "up" ? position === 1 : position === next.length;
       const opposite = direction === "up" ? "down" : "up";
       setMoved({
+        provider,
         selector: `${accountId}:${atEdge ? opposite : direction}`,
         fallback: `${accountId}:${direction}`,
         message: `Moved ${name} to position ${position} of ${next.length}.`,
@@ -860,6 +868,8 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
     const button = sectionRef.current?.querySelector<HTMLElement>(`[data-move="${moved.selector}"]`) ??
       sectionRef.current?.querySelector<HTMLElement>(`[data-move="${moved.fallback}"]`);
     button?.focus();
+    const timer = window.setTimeout(() => setMoved(null), 10_000);
+    return () => window.clearTimeout(timer);
   }, [moved]);
 
   const menuItems = (account: ProviderAccountDefinition, signingIn: boolean): RowMenuItem[] => {
@@ -867,7 +877,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
     const offline = online ? {} : { disabled: true, description: OFFLINE };
     const items: RowMenuItem[] = [];
     const policy = defaults.find(value => value.provider === account.provider);
-    if (canEditDefaults && providerAccountPolicyMode(policy) === "priority") {
+    if (canEditDefaults && providerAccountPolicyMode(policy) === "priority" && prioritySupported) {
       const order = policy?.priorityAccountIds ?? [];
       const ranked = order.includes(account.id);
       const saving = defaultWrites.current.has(account.provider);
@@ -998,7 +1008,6 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
           New {providerName(defaultOffer.provider)} sessions on this machine that don't choose an account will use it.
         </Notice>
       )}
-      {moved && <span className="sr-only" role="status">{moved.message}</span>}
       {count > 0 || defaults.some(value => value.accountId || value.priorityAccountIds?.length) ? <div className="surface provider-accounts-surface">
       {(["claude", "codex"] as const).filter(provider => accounts.some(account => account.provider === provider) ||
         newLogins.some(login => login.provider === provider) ||
@@ -1018,6 +1027,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
         const savingPolicy = busy[`policy:${provider}`] !== undefined;
         return <ProviderAccountGroup key={provider} runner={runner} online={online} provider={provider} policy={choice}
           canEdit={canEditDefaults} saving={savingPolicy} chooseMode={chooseMode}
+          moveStatus={moved?.provider === provider ? moved.message : ""}
           providerNotices={unavailable && <Notice compact tone="warning" title="Default Account Unavailable"
             actions={canEditDefaults && <button type="button" className="btn sm" disabled={defaultWrites.current.has(provider)}
               onClick={() => void saveDefault(provider, null)}>Clear {providerName(provider)} Default</button>}>
@@ -1029,8 +1039,8 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
             if (typeof account === "string") {
               const position = order.indexOf(account);
               return <ProviderAccountRow key={account} identity={`${runner.runnerId}:${account}`} label="Missing Account" status={null}
-                rank={position + 1} skip={providerAccountSkipLabel({ reason: "missing" })}
-                actions={canEditDefaults && (
+                rank={position + 1} skip={preview ? providerAccountSkipLabel({ reason: "missing" }) : "No longer on this machine."}
+                actions={canEditDefaults && prioritySupported && (
                   <button type="button" className="btn sm" disabled={savingPolicy || order.length === 1}
                     aria-label={`Remove Missing Account ${position + 1} from Priority Order`}
                     onClick={() => rankAccount(provider, account, false)}>Remove</button>
@@ -1064,7 +1074,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
                 usage={!signingIn && <ProviderAccountUsage account={account} runnerId={runner.runnerId} online={online} data={usage} />}
                 actions={canManage && (
                   <>
-                    {canEditDefaults && priority && position >= 0 && order.length > 1 && <>
+                    {canEditDefaults && prioritySupported && priority && position >= 0 && order.length > 1 && <>
                       <MoveButton accountId={account.id} direction="up" name={masked(account.label)} edge={position === 0} busy={savingPolicy}
                         onMove={() => moveAccount(provider, account.id, "up", masked(account.label))} />
                       <MoveButton accountId={account.id} direction="down" name={masked(account.label)} edge={position === order.length - 1} busy={savingPolicy}
