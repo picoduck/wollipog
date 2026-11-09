@@ -412,12 +412,19 @@ test.describe("touch", () => {
       await expect(control(page)).toBeVisible();
 
       // A pan that ends at the tail while output streams still resumes following there. It travels
-      // twice as far, because the rows streaming in during it move the tail away from the finger.
+      // far enough to cover the measured growth of streamed rows as well as the initial gap.
       const back = await readBackNearTail();
       await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: back.x, y: back.y, id: 1 }] });
+      let panY = back.y;
       for (let step = 1; step <= 20; step += 1) {
-        await touchAt(back.x, back.y - 30 * step);
-        if (step % 2 === 0) await append();
+        const heightBefore = await reader(page).evaluate((el) => el.scrollHeight);
+        if (step % 2 === 0) {
+          await append();
+          await page.waitForTimeout(16);
+        }
+        const heightAfter = await reader(page).evaluate((el) => el.scrollHeight);
+        panY -= 30 + Math.max(0, heightAfter - heightBefore);
+        await touchAt(back.x, panY);
         await page.waitForTimeout(16);
       }
       await page.waitForTimeout(150);

@@ -35,8 +35,11 @@ for (const theme of ["dark", "light"]) {
       await expect(reader).toBeFocused();
       const anchor = reader.getByText(/^Question 20:/u);
       const initialOffset = (await anchor.boundingBox())!.y - (await reader.boundingBox())!.y;
+      const rowsBefore = await reader.locator("[data-virtual-total]").getAttribute("data-virtual-total");
       await page.evaluate(() => window.__releaseEarlierHistory!());
-      await expect(reader.getByText(/^Question 16:/u)).toBeAttached();
+      // Older rows outside the viewport may be virtualized out as message metadata changes height.
+      await expect.poll(async () => Number(await reader.locator("[data-virtual-total]")
+        .getAttribute("data-virtual-total"))).toBeGreaterThan(Number(rowsBefore));
       await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
       await expect(reader.getByText(/^Question 20:/u)).toBeInViewport();
       await expect.poll(() => reader.evaluate(element => element.scrollHeight - element.clientHeight)).toBeGreaterThan(1);
