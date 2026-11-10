@@ -1,5 +1,5 @@
 import { normalizeWorkflowDecisionOwnerRule, sameWorkflowDecisionOwnerRule } from "@wollipog/protocol";
-import { normalizeDeliveryVerificationFailure } from "@wollipog/protocol";
+import { normalizeDeliveryVerificationFailure, publishedIssueFailure, type PublishedIssueFailure } from "@wollipog/protocol";
 import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
 import {
   isProviderAccountRef, PROVIDER_ACCOUNT_CHOICE_REQUIRED, PROVIDER_ACCOUNT_REF_PREFIX, providerAccountChoiceRequired, providerAccountChoiceRequiredSentence,
@@ -12853,23 +12853,28 @@ export class SessionsService {
 
   /** `humanApproved`: the caller verified a person's qualifying approval of a publication that has
    * no bounded admission (#2940); without it, only a bounded grant is inspected. */
-  private async inspectPublishedScopeIssue(sessionId: string, grant: WorkflowDecisionView, issue: number, humanApproved = false): Promise<boolean> {
+  private async inspectPublishedScopeIssue(sessionId: string, grant: WorkflowDecisionView, issue: number, humanApproved = false): Promise<PublishedIssueFailure | null> {
     if (grant.status !== "consumed" || grant.controllingSessionId !== sessionId || grant.resourceSnapshot.category !== "follow_up_issue_publication" ||
-        !grant.resourceSnapshot.issueAdmission && !humanApproved || this.db.admittedCampaignPublicationIssue(sessionId, grant.occurrenceId) !== null) return false;
+        !grant.resourceSnapshot.issueAdmission && !humanApproved || this.db.admittedCampaignPublicationIssue(sessionId, grant.occurrenceId) !== null) return "read_failed";
     const publication = grant.resourceSnapshot;
     const root = this.db.getSession(sessionId)!;
     // An issue published in another boundary repository is read through one of its Locations (#4119).
     if (publication.repository !== campaignLaunchRepository(root)) {
       const entry = campaignScopeRepositories(root).find((candidate) => candidate.repository === publication.repository);
       return entry ? verifyBoundaryPublishedIssue({ db: this.db, hub: this.hub }, root, entry,
-        { sanitizedTitle: publication.sanitizedTitle, sanitizedBody: publication.sanitizedBody, labels: publication.labels }, issue) : false;
+        { sanitizedTitle: publication.sanitizedTitle, sanitizedBody: publication.sanitizedBody, labels: publication.labels }, issue) : "read_failed";
     }
     const requestId = `publication_verify_${randomUUID()}`;
-    const inspected = await this.hub.requestFromRunner(root.runnerId, requestId, { type: "campaign_issue_scope", operation: "inspect", requestId,
-      sessionId, issues: [issue], publication: { sanitizedTitle: publication.sanitizedTitle, sanitizedBody: publication.sanitizedBody, labels: publication.labels } }, 60_000);
-    return inspected.type === "campaign_issue_scope_result" && inspected.ok && inspected.sessionId === sessionId &&
-      inspected.repository?.toLowerCase() === publication.repository && Boolean(inspected.candidates?.some((c) => c.issue.number === issue &&
-        c.issue.repository.toLowerCase() === publication.repository && c.title === publication.sanitizedTitle));
+    try {
+      const inspected = await this.hub.requestFromRunner(root.runnerId, requestId, { type: "campaign_issue_scope", operation: "inspect", requestId,
+        sessionId, issues: [issue], publication: { sanitizedTitle: publication.sanitizedTitle, sanitizedBody: publication.sanitizedBody, labels: publication.labels } }, 60_000);
+      if (inspected.type !== "campaign_issue_scope_result" || inspected.sessionId !== sessionId) return "read_failed";
+      if (!inspected.ok) return publishedIssueFailure(inspected.publicationFailure);
+      if (inspected.publicationFailure !== undefined || inspected.repository?.toLowerCase() !== publication.repository) return "read_failed";
+      const candidate = inspected.candidates?.find((c) => c.issue.number === issue && c.issue.repository.toLowerCase() === publication.repository);
+      if (!candidate) return "read_failed";
+      return candidate.title === publication.sanitizedTitle ? null : "title";
+    } catch { return "read_failed"; }
   }
 
   /** `repository` names the epic's repository, defaulting to the launch repository (#4118). An epic
@@ -13030,7 +13035,7 @@ export class SessionsService {
             !settlements.some((p) => p.publicationOccurrenceId === d.occurrenceId) &&
             d.resourceSnapshot.category === "follow_up_issue_publication" && d.resourceSnapshot.repository === snapshot.repository &&
             d.resourceSnapshot.sanitizedTitle === candidate.title && this.db.admittedCampaignPublicationIssue(sessionId, d.occurrenceId) === null);
-          if (grant && await this.inspectPublishedScopeIssue(sessionId, grant, candidate.issue.number)) settlements.push({ publicationOccurrenceId: grant.occurrenceId, issue: candidate.issue.number });
+          if (grant && await this.inspectPublishedScopeIssue(sessionId, grant, candidate.issue.number) === null) settlements.push({ publicationOccurrenceId: grant.occurrenceId, issue: candidate.issue.number });
         }
         // A publication in another repository settles the same way, named by its recorded issue (#4119).
         for (const group of snapshot.otherRepositories ?? []) {
@@ -13040,7 +13045,7 @@ export class SessionsService {
                 !published.recommendationId || this.db.admittedCampaignPublicationIssue(sessionId, grant.occurrenceId) !== null) continue;
             const resulting = this.db.campaignWorkLedger.recommendation(sessionId, published.recommendationId)?.resultingIssue;
             if (!resulting || resulting.repository.toLowerCase() !== group.repository || !group.additions.includes(resulting.number)) continue;
-            if (await this.inspectPublishedScopeIssue(sessionId, grant, resulting.number)) settlements.push({ publicationOccurrenceId: grant.occurrenceId, issue: resulting.number });
+            if (await this.inspectPublishedScopeIssue(sessionId, grant, resulting.number) === null) settlements.push({ publicationOccurrenceId: grant.occurrenceId, issue: resulting.number });
           }
         }
         if (settlements.length) snapshot.verifiedPublications = settlements;
@@ -13146,7 +13151,8 @@ export class SessionsService {
               const origin = this.db.campaignWorkLedger.detail(sessionId, id, Date.now())?.issue;
               return !origin || !heldScope || !campaignScopeHolds(heldScope, origin);
             })) return refuse("origin_outside_scope");
-            if (!await this.inspectPublishedScopeIssue(sessionId, grant, addedIssue, Boolean(approval) || Boolean(ownerReview))) return refuse("payload_mismatch");
+            const publicationFailure = await this.inspectPublishedScopeIssue(sessionId, grant, addedIssue, Boolean(approval) || Boolean(ownerReview));
+            if (publicationFailure) return refuse(publicationFailure === "read_failed" ? "payload_read_failed" : `payload_${publicationFailure}_mismatch`);
             snapshot.verifiedPublications = [{ publicationOccurrenceId: grant.occurrenceId, issue: addedIssue }];
             evidence = { occurrenceId: grant.occurrenceId, payloadDigest: grant.resourceDigest, issue: addedIssue,
               ...(otherGroup ? { repository: otherGroup.repository } : {}), ...(approval ? { approval } : {}) };

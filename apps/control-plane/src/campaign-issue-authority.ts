@@ -121,6 +121,7 @@ export function publicationEvidenceCheck(db: ControlPlaneDb, root: SessionView,
  * Additions without any lineage are not refused: they become the owner's typed approval (#4267). */
 export type CampaignScopeAdmissionFailure =
   | "capacity_exhausted" | "epic_not_authorized" | "epic_members_unverified"
+  | "payload_title_mismatch" | "payload_body_mismatch" | "payload_labels_mismatch" | "payload_read_failed"
   | "follow_ups_not_authorized" | "follow_up_not_single" | "publication_not_found" | "publication_not_consumed"
   | "publication_already_admitted" | "publication_unapproved" | "publication_approved_under_earlier_boundary" | "publication_approver_not_owner"
   | "publication_authority_changed" | "recommendation_not_found" | "recommendation_not_accepted" | "resulting_issue_mismatch" | "origin_outside_scope" | "payload_mismatch"
@@ -160,6 +161,10 @@ export const CAMPAIGN_SCOPE_ADMISSION_REFUSALS: Readonly<Record<CampaignScopeAdm
   resulting_issue_mismatch: { status: 409, message: "Record the verified published issue on exactly one accepted recommendation before admitting scope" },
   origin_outside_scope: { status: 409, message: "The published follow-up's authorized origins were removed from scope" },
   payload_mismatch: { status: 409, message: "The published issue does not match the exact approved payload." },
+  payload_title_mismatch: { status: 409, message: "The published issue's title differs from the approved title." },
+  payload_body_mismatch: { status: 409, message: "The published issue's body differs from the approved body, beyond trailing whitespace." },
+  payload_labels_mismatch: { status: 409, message: "The published issue's labels differ from the approved labels." },
+  payload_read_failed: { status: 409, message: "The published issue could not be read and verified against the approved payload." },
   selection_not_granted: { status: 403, message: "Selection lineage needs a scope grant in which the owner's first message asked the campaign to choose " +
     `issues, and this campaign's grant has none. Name a human-authorized epic or the consumed publication of an accepted follow-up, or ${HUMAN_SCOPE_ROUTE}.` },
   selection_additions_only: { status: 400, message: "A selection proposal adds issues only; propose removals as their own change." },

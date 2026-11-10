@@ -1041,7 +1041,7 @@ The server derives the cause, explains it in plain words and states any Maximum 
 Keep published follow-up lineage: only server-verified consumed payloads settle their reserved slots
 on approval, so Maximum Issues counts the issue once. Denial changes nothing. Fixable errors
 (for example follow_up_not_single, publication_not_consumed, publication_already_admitted,
-payload_mismatch and epic_members_unverified) remain refusals; correct them and retry.
+payload_title_mismatch, payload_body_mismatch, payload_labels_mismatch and epic_members_unverified) remain refusals; correct them and retry. payload_read_failed means the published issue could not be read and verified; retry the read. Only trailing body whitespace is ignored; titles and labels stay exact. Older peers may report the generic payload_mismatch refusal.
 Never supply an owner-review cause or a settled publication yourself.
 Resolution applies and consumes scope atomically; do not separately consume it. A root can resolve
 only an eligible occurrence backed by its standing human authorization: when the effective owner is

@@ -6,7 +6,7 @@ import { restartResumeId } from "./restart-resume.js";
 import { campaignOperationEvidenceCurrent } from "./campaign-operation-evidence.js";
 import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
 import { type BackgroundFollowUpView, type CampaignRetirementHold, CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, isTerminal } from "@wollipog/protocol";
-import { CampaignIssueScopeRefusal, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
+import { CampaignIssueScopeRefusal, PublishedIssueMismatch, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
 import { launchOrchestratorMeta, nextCampaignControl, validControlRevision } from "./campaign-control-order.js";
 import { boundedIssueNumbers, campaignBoundaryRepository, campaignRepositoryLocation, parseFullControlAutomaticResponse, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
@@ -21574,7 +21574,9 @@ export class SessionManager {
         controlRevision: ordered.controlRevision ?? null }));
       return { ...base, ok: true, repository, revision: scope.revision };
     } catch (error) {
-      return { ...base, ok: false, error: error instanceof CampaignIssueScopeRefusal ? error.message
+      return { ...base, ok: false,
+        ...(message.operation === "inspect" && message.publication ? { publicationFailure: error instanceof PublishedIssueMismatch ? error.field : "read_failed" as const } : {}),
+        error: error instanceof CampaignIssueScopeRefusal ? error.message
         : "Cannot inspect or synchronize campaign scope; verify origin and gh or glab authentication" };
     }
   }
