@@ -130,7 +130,7 @@ export interface CampaignScopeProposal {
    * proven to be written in the message; the `repository_limit` check judges whether the message
    * limits the work to them. Read it with `scopeProposalRepositoryConstraints`. */
   repositoryConstraints?: ScopeProposalRepositoryConstraint[];
-  /** Server-proven literal owner-named request in one repository (protocol 346). Never agent input. */
+  /** Server-proven literal owner-named request in one repository (protocol 348). Never agent input. */
   repositoryLimitVerified?: true;
   /** The one name a record from before the list held (#4118). Read as a one-entry list. */
   repositoryConstraint?: ScopeProposalRepositoryConstraint;

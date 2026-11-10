@@ -319,7 +319,7 @@ approval is invalidated. A legacy campaign with no saved repository stays unveri
   initial proposal with no limit (`repository_mentioned`) reaches this check unless the literal fast path
   below proves the limit; `owner/repo#12` and an
   issue's URL point at an issue and don't count.
-- **Exact owner-named repository (#4402, protocol 346).** An affirmative request such as
+- **Exact owner-named repository (#4402, protocol 348).** An affirmative request such as
   `Use the orchestrate-issues skill to fix #1, #2 and #3 in owner/repo` with exactly those owner-named
   issues in that repository records the full repository name as a limit, with the server-derived
   `repositoryLimitVerified` marker. No model judges that repository phrase. With nothing else to check,
@@ -327,6 +327,11 @@ approval is invalidated. A legacy campaign with no saved repository stays unveri
   their existing checks; the recorded limit counts as listed for `constraints_complete`. Omissions,
   another repository's proposed or named issue, multiple repository names, exclusions, aliases and
   ambiguous wording retain the existing check/owner route. Older runners retain that route too.
+  The named repository becomes the admitted limit even with a broad trailing invitation such as
+  `Fix #12 in owner/repo. Afterwards feel free to pick follow-ups from any of the campaign's repositories.`
+  This conservatively narrows the boundary; it never grants more authority. Work in another repository
+  must first use the existing owner-approved repository-addition and scope routes to widen that limit.
+  In unusual wording this may cost an extra owner approval rather than silently widening authority.
 - **Narrowing the boundary (#4117).** Admitting a limited initial scope, by the check or by the owner,
   re-mints the boundary without the other repositories at a new revision, and revokes what was bound to
   the old one. It happens before anything is dispatched. The admitted scope records `repositoryLimits`, and

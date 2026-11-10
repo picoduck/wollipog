@@ -30,8 +30,8 @@ test("only server-derived exact owner-named limits may omit the repository judgm
     assert.equal(validScopeProposal({ ...record, ...extra }), false);
   }
   assert.match(normalizeScopeProposalInput(input({ repositoryLimitVerified: true }), additions) as string, /unknown field/u);
-  assert.equal(runnerSupportsProtocol(345, "exactNamedRepositoryScope"), false);
-  assert.equal(runnerSupportsProtocol(346, "exactNamedRepositoryScope"), true);
+  assert.equal(runnerSupportsProtocol(347, "exactNamedRepositoryScope"), false);
+  assert.equal(runnerSupportsProtocol(348, "exactNamedRepositoryScope"), true);
 });
 
 test("a proposal must list exactly its additions, each once, with an origin and a rationale; text is only trimmed (#4282)", () => {

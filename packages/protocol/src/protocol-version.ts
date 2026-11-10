@@ -1404,10 +1404,10 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 345: Read-only authoritative forge request diffs with pinned revision metadata (#1270).
   345,
   // v346 slot
-  // 346: Server-proven repository limits for exact owner-named scope proposals (#4402).
-  346,
   // v347 slot
   // v348 slot
+  // 348: Server-proven repository limits for exact owner-named scope proposals (#4402).
+  348,
   // v349 slot
   // v350 slot
   // v351 slot

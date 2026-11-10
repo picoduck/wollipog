@@ -462,7 +462,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * Checked against the control plane by the runner, and against the root's runner by the control
    * plane, which sends an older runner's proposal to the owner. */
   campaignScopeProposals: 308,
-  exactNamedRepositoryScope: 346,
+  exactNamedRepositoryScope: 348,
   /** v296 (#4137): `ownerRule` on request_workflow_decision. Checked against the control plane by
    * the runner, because an older control plane ignores the field and would let the Orchestrator
    * decide a gate its owner kept. */

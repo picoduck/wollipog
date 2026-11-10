@@ -4955,6 +4955,28 @@ test("trailing restrictions and counts cannot disappear behind the repository fa
   } finally { await c.server.close(); c.f.db.close(); }
 });
 
+test("a broad trailing invitation keeps the literal named repository as the admitted limit (#4402)", async () => {
+  const c = await threeRepositoryProposals("Fix #12 in owner/repo. Afterwards feel free to pick follow-ups from any of the campaign's repositories.");
+  try {
+    c.f.decision.state.check = (message) => {
+      assert.doesNotMatch(JSON.stringify(message), /repository_limit__/u);
+      return scopeCheckAnswer(message);
+    };
+    const proposed = await c.propose([named(12)]);
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "orchestrator");
+    const record = (proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!;
+    assert.equal(record.repositoryLimitVerified, true);
+    assert.deepEqual(record.checks, ["constraints"]);
+    assert.equal(c.f.decision.checkCalls.length, 1);
+    assert.equal(c.apply(proposed.data!.occurrenceId).ok, true);
+    assert.deepEqual(repositoriesOf(c.boundary()), ["owner/repo"]);
+    const first = c.policy().firstMessageScope!;
+    assert.deepEqual(first.state === "established" ? first.initialScope?.repositoryLimits : null, ["owner/repo"]);
+    assert.deepEqual((await c.propose([otherNamed(60)])).errorDetails, { code: "repository_outside_boundary", repository: "other/repo" });
+  } finally { await c.server.close(); c.f.db.close(); }
+});
+
 test("ambiguous and incomplete owner-named repository requests keep the check (#4402)", async () => {
   for (const [message, issues] of [
     ["Fix #12 and #13 in owner/repo.", [named(12)]],
