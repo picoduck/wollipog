@@ -1419,6 +1419,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // v353 slot
   // v354 slot
   // v355 slot
+  // 355: Audit byte-verified UI evidence receipt reuse across approval occurrences.
+  355,
   // v356 slot
   // v357 slot
   // v358 slot

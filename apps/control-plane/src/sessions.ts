@@ -15532,6 +15532,8 @@ export class SessionsService {
         if (refused) return fail(refused, 409);
       }
       reviewReceipts = this.db.validUiEvidenceReviewReceipts(occurrenceId, delegatedImage?.reviewerSessionId ?? parentSessionId, now);
+      reviewReceipts.push(...this.db.reusableUiEvidenceReviewReceipts(decision, delegatedImage?.reviewerSessionId ?? parentSessionId, now)
+        .filter((receipt) => !reviewReceipts.some((current) => current.evidenceId === receipt.evidenceId)));
       const unreviewed = decision.resourceSnapshot.evidence.filter((item) =>
         !(normalizedResolution.delegatedVideoEvidence?.some((reference) => reference.evidenceId === item.evidenceId)) && !reviewReceipts.some((receipt) =>
         receipt.evidenceId === item.evidenceId && receipt.sha256 === item.sha256 &&
@@ -15714,6 +15716,7 @@ export class SessionsService {
       now,
       normalizedResolution.rationale,
       reviewReceipts.map((receipt) => receipt.receiptId),
+      "resolution", undefined, reviewReceipts.filter((receipt) => receipt.occurrenceId !== occurrenceId),
     );
     this.hub.sessionChangedById(childSessionId);
     this.publishCampaignAttentionTransition(currentParent);
@@ -17266,6 +17269,16 @@ export class SessionsService {
     if (!rootScope || !childScope || !this.db.scopeAudienceContainedWithMembership(rootScope, childScope)) {
       return fail(`This Orchestrator's audience reaches beyond the child's, so its evidence cannot go to a reviewer. ${direct}`, 409);
     }
+    // Reuse an actual verdict only with that same reviewer's acknowledged byte deliveries.
+    // A fresh reviewer never inherits images delivered to a different Session.
+    for (const prior of this.db.delegatedImageReviews.forChild(parentSessionId, childSessionId)) {
+      if (prior.occurrenceId === occurrenceId || !prior.verdict) continue;
+      const reference = { reviewId: prior.reviewId, verdictId: prior.verdict.verdictId, reviewerSessionId: prior.reviewerSessionId };
+      if (!this.delegatedImageApprovalRefusal(decision, reference, now)) {
+        return ok({ ...this.db.delegatedImageReviews.view(prior, false), occurrenceId,
+          delegatedImageReview: reference });
+      }
+    }
     // A live review is returned as it is. One that can no longer back an approval (its reviewer ended
     // without a verdict, or its verdict's receipts expired) is retired, and a fresh reviewer replaces it.
     const live = this.db.delegatedImageReviews.liveForOccurrence(occurrenceId);
@@ -17388,13 +17401,14 @@ export class SessionsService {
     }
     const review = this.db.delegatedImageReviews.get(reference.reviewId);
     const verdict = review?.verdict;
-    if (!review || !verdict || review.occurrenceId !== decision.occurrenceId ||
+    if (!review || !verdict ||
         review.rootSessionId !== decision.controllingSessionId || review.childSessionId !== decision.sessionId ||
         review.reviewerSessionId !== reference.reviewerSessionId || verdict.reviewerSessionId !== reference.reviewerSessionId ||
         verdict.verdictId !== reference.verdictId) {
       return "the delegated image review does not identify an actual reviewer verdict for this decision";
     }
-    if (review.state !== "verdict") return `the delegated image review is ${review.state}${review.endedReason ? ` (${review.endedReason})` : ""}`;
+    const reuse = review.occurrenceId !== decision.occurrenceId;
+    if (!reuse && review.state !== "verdict") return `the delegated image review is ${review.state}${review.endedReason ? ` (${review.endedReason})` : ""}`;
     if (review.verdictSha256 !== delegatedImageVerdictSha256(verdict)) return "the delegated image review verdict is invalid";
     if (verdict.recommendation !== "approve") return "the reviewer recommended denial, so its verdict cannot back an approval";
     // The producing child, and the Orchestrator itself, can never be the reviewer.
@@ -17406,12 +17420,14 @@ export class SessionsService {
     if (!this.delegatedImageReviewerAudienceCurrent(review)) {
       return "the delegated image reviewer's audience no longer sits inside the decision's audience";
     }
-    if (review.policyRevision !== decision.policyRevision || review.resourceDigest !== decision.resourceDigest ||
+    if (review.policyRevision !== decision.policyRevision || (!reuse && review.resourceDigest !== decision.resourceDigest) ||
         review.evidence.length !== snapshot.evidence.length || snapshot.evidence.some((item) => !review.evidence.some((bound) =>
-          bound.evidenceId === item.evidenceId && bound.artifactId === item.artifactId && bound.sha256 === item.sha256))) {
+          (reuse || bound.evidenceId === item.evidenceId) && bound.artifactId === item.artifactId && bound.sha256 === item.sha256))) {
       return "the decision changed after the image review was prepared";
     }
-    const receipts = this.db.validUiEvidenceReviewReceipts(decision.occurrenceId, review.reviewerSessionId, now);
+    const receipts = reuse ? this.db.reusableUiEvidenceReviewReceipts(decision, review.reviewerSessionId, now)
+      .filter((receipt) => receipt.occurrenceId === review.occurrenceId)
+      : this.db.validUiEvidenceReviewReceipts(decision.occurrenceId, review.reviewerSessionId, now);
     const unreviewed = snapshot.evidence.filter((item) => !receipts.some((receipt) =>
       receipt.evidenceId === item.evidenceId && receipt.sha256 === item.sha256 && receipt.artifactId === item.artifactId &&
       receipt.childSessionId === decision.sessionId && receipt.policyRevision === decision.policyRevision &&
@@ -18493,6 +18509,7 @@ export class SessionsService {
     reviewReceiptIds?: string[],
     stage: GovernanceAuditStage = outcome === "pending" ? "request" : "resolution",
     revocation?: WorkflowDecisionRevocation,
+    reusedReviewReceipts?: UiEvidenceReviewReceipt[],
   ): void {
     const child = this.db.getSession(decision.sessionId);
     if (!child) return;
@@ -18561,6 +18578,10 @@ export class SessionsService {
             frameCount: decision.resourceSnapshot.videoReview.frames.length,
           } } : {}),
         ...(reviewReceiptIds?.length ? { reviewReceiptIds } : {}),
+        ...(reusedReviewReceipts?.length ? { reusedReviewReceipts: reusedReviewReceipts.map((receipt) => ({
+          receiptId: receipt.receiptId, occurrenceId: receipt.occurrenceId, evidenceId: receipt.evidenceId,
+          reviewedAt: receipt.deliveredAt, reviewerSessionId: receipt.reviewerSessionId,
+        })) } : {}),
         ...(delegatedImageReview ? { delegatedImageReview } : {}),
         ...(rationale ? { rationaleDigest: auditDigest(rationale)! } : {}),
         ...(resolvingRecord && decision.childMessage

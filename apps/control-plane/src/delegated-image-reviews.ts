@@ -182,6 +182,12 @@ export class DelegatedImageReviews {
       .get(reviewerSessionId) as Row | undefined);
   }
 
+  forChild(rootSessionId: string, childSessionId: string): DelegatedImageReviewRecord[] {
+    return (this.stmt(`SELECT * FROM delegated_image_reviews WHERE root_session_id=? AND child_session_id=?
+      AND verdict_json IS NOT NULL ORDER BY created_at DESC`).all(rootSessionId, childSessionId) as unknown as Row[])
+      .map((row) => this.parse(row)!);
+  }
+
   isReviewer(sessionId: string): boolean {
     return Boolean(this.stmt("SELECT 1 FROM delegated_image_reviews WHERE reviewer_session_id=?").get(sessionId));
   }
