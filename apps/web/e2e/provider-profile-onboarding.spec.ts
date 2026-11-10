@@ -43,12 +43,13 @@ for (const width of [390, 1280]) {
 
 for (const width of [390, 1280]) test(`Set Up Managed Profile opens Add Account for the provider, and the new account can serve new sessions at ${width}px`, async ({ page }) => {
   await page.setViewportSize({ width, height: 844 });
-  await page.goto(`/machine-management-e2e.html?profiles&${DESIGN_WORKSTATION}&accounts=add-claude`);
+  await page.goto(`/machine-management-e2e.html?profiles&providerSetup=installed&${DESIGN_WORKSTATION}&accounts=add-claude`);
   const dialog = page.getByRole("dialog", { name: "Add Account" });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole("radio", { name: "Claude" })).toHaveAttribute("aria-checked", "true");
   await capture(page, `set-up-add-account-${width}`);
   await dialog.getByLabel("Account Label").fill("Second Control Plane");
+  await expect(dialog.getByRole("button", { name: "Start Sign-In", exact: true })).toBeEnabled();
   await dialog.getByRole("button", { name: "Start Sign-In" }).click();
   const steps = signInSteps(page, "Second Control Plane");
   await steps.getByLabel("Paste the Code It Shows").fill("fixture-code");

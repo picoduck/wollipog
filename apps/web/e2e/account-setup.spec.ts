@@ -16,10 +16,13 @@ for (const theme of ["light", "dark"]) {
       await page.keyboard.press("Enter");
       const setup = page.getByRole("dialog", { name: "Account Setup", exact: true });
       await expect(setup).toBeVisible();
-      await expect(setup.getByRole("button", { name: "Add Account…" })).toBeEnabled();
+      await expect(setup.getByRole("button", { name: "Add Separate Sign-In…" })).toBeEnabled();
+      await setup.getByRole("button", { name: "Rediscover Agents", exact: true }).click();
+      await expect(setup.getByText("Rediscovery Requested", { exact: true })).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.dataset.rediscoverRequests)).toBe("1");
       await dialogMotionSettled(page);
       await page.screenshot({ path: testInfo.outputPath(`setup-${width}-${theme}.png`) });
-      await setup.getByRole("button", { name: "Add Account…" }).click();
+      await setup.getByRole("button", { name: "Add Separate Sign-In…" }).click();
       const add = page.getByRole("dialog", { name: "Add Account", exact: true });
       await expect(add).toBeVisible();
       await add.getByRole("button", { name: "Cancel", exact: true }).click();
@@ -41,7 +44,7 @@ for (const state of ["viewer", "old", "missing"]) {
     await expect(setup).toBeVisible();
     if (state === "viewer") {
       await expect(setup.getByText("Only this machine's owner or an organization admin can add or remove its accounts.")).toBeVisible();
-      await expect(setup.getByRole("button", { name: "Add Account…" })).toHaveCount(0);
+      await expect(setup.getByRole("button", { name: "Add Separate Sign-In…" })).toHaveCount(0);
     } else if (state === "old") {
       await expect(setup.getByText(/Update this machine's runner to set up accounts here/)).toBeVisible();
     } else {
@@ -63,3 +66,63 @@ test("returning from setup preserves an explicit account, installation and proje
   const request = JSON.parse((await page.evaluate(() => document.documentElement.dataset.createSessionRequest))!);
   expect(request).toMatchObject({ runnerId: "runner-1", agentId: "claude", workspaceId: "workspace-1", providerAccountId: "claude-personal" });
 });
+
+for (const state of ["busy", "unknown", "restricted", "offline"]) {
+  test(`Account Setup keeps ${state} observations distinct from missing or signed out`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width: 390, height: 900 });
+    await page.goto(`/new-session-choices-e2e.html?accountSetup=${state}`);
+    await page.getByRole("button", { name: "Account Setup…", exact: true }).click();
+    const setup = page.getByRole("dialog", { name: "Account Setup", exact: true });
+    await expect(setup).toBeVisible();
+    await expect(setup.getByText("Sign-In Required", { exact: true })).toHaveCount(0);
+    await expect(setup.getByText(/Install Claude Code or Codex on this machine/)).toHaveCount(0);
+    await expect(setup.getByText(/Checked .*ago\./).first()).toBeVisible();
+    if (state === "busy") await expect(setup.getByText(/This sign-in is in use/).first()).toBeVisible();
+    if (state === "restricted") await expect(setup.getByText(/current access permissions/).first()).toBeVisible();
+    if (state === "offline") await expect(setup.getByRole("button", { name: "Add Separate Sign-In…" })).toBeDisabled();
+    await dialogMotionSettled(page);
+    expect(await setup.locator(".modal-body").evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+    await page.screenshot({ path: testInfo.outputPath(`readiness-${state}.png`) });
+  });
+}
+
+for (const state of ["installation-blocked", "prerequisite-missing"]) {
+  test(`Account Setup keeps ${state} installation unavailable with a confirmed sign-in`, async ({ page }, testInfo) => {
+    await page.goto(`/new-session-choices-e2e.html?accountSetup=${state}`);
+    await page.getByRole("button", { name: "Account Setup…", exact: true }).click();
+    const setup = page.getByRole("dialog", { name: "Account Setup", exact: true });
+    await expect(setup.locator(".machine-agent-status")).toHaveText("Unavailable");
+    await expect(setup.getByText("Sign-In Confirmed", { exact: true })).toHaveCount(0);
+    await dialogMotionSettled(page);
+    await page.screenshot({ path: testInfo.outputPath(`readiness-${state}.png`) });
+  });
+}
+
+test("missing provider installation explains the next step before starting setup", async ({ page }) => {
+  await page.goto("/new-session-choices-e2e.html?accountSetup=missing");
+  await page.getByRole("button", { name: "Account Setup…", exact: true }).click();
+  await page.getByRole("button", { name: "Add Separate Sign-In…" }).click();
+  const add = page.getByRole("dialog", { name: "Add Account", exact: true });
+  await expect(add.getByText(/Install Claude on this machine/)).toBeVisible();
+  await expect(add.getByRole("button", { name: "Start Sign-In", exact: true })).toBeDisabled();
+});
+
+for (const theme of ["light", "dark"]) {
+  for (const width of [1280, 390]) {
+    test(`SSH connection and readiness remain distinct at ${width}px in ${theme}`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto(`/machine-management-e2e.html?ssh=online&readinessFailure=1&machine=native-t14s&theme=${theme}`);
+      await expect(page.getByRole("heading", { name: "Design Workstation", exact: true })).toBeVisible();
+      await expect(page.locator(".machine-detail-status")).toHaveText("Online");
+      await expect(page.getByText("Provider Readiness Needs Attention", { exact: true })).toBeVisible();
+      await dialogMotionSettled(page);
+      await page.screenshot({ path: testInfo.outputPath(`ssh-readiness-${width}-${theme}.png`) });
+      await page.goto(`/machine-management-e2e.html?theme=${theme}`);
+      await page.locator(".page-header").getByRole("button", { name: "Add Machine", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Connect via SSH…", exact: true }).click();
+      await expect(page.getByText(/Connecting lets this server use the machine's existing permitted/)).toBeVisible();
+      await dialogMotionSettled(page);
+      await page.screenshot({ path: testInfo.outputPath(`ssh-trust-${width}-${theme}.png`) });
+    });
+  }
+}

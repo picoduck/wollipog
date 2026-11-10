@@ -371,6 +371,20 @@ if (accountSetup) {
   runner.providerAccounts = [];
   if (accountSetup === "missing") runner.agents = [];
   if (accountSetup === "old") runner.protocolVersion = 100;
+  if (["installation-blocked", "prerequisite-missing"].includes(accountSetup)) {
+    runner.agents = runner.agents.map((agent) => ({ ...agent, authStatus: "authenticated", providerReadiness: {
+      checkedAt: Date.now() - 60_000, installation: "unknown", authentication: "authenticated", reason: "ready",
+      installationAdmission: accountSetup === "installation-blocked" ? "blocked" : "permitted",
+    } }));
+  }
+  if (["busy", "unknown", "restricted", "offline"].includes(accountSetup)) {
+    const report = { checkedAt: Date.now() - 60_000, installation: "compatible" as const, authentication: "unknown" as const,
+      reason: accountSetup === "busy" ? "in_use" as const : accountSetup === "restricted" ? "restricted" as const : "unknown" as const };
+    runner.agents = runner.agents.map((agent) => ({ ...agent, authStatus: "unknown", providerReadiness: report,
+      ...(agent.claudeCode ? { claudeCode: { ...agent.claudeCode, status: "ready", auth: { status: "unknown", billingSource: "unknown" } } } : {}) }));
+    runner.providerAccounts = [{ id: "work", label: "Work", provider: "claude", authStatus: "unknown", providerReadiness: report }];
+    if (accountSetup === "offline") runner.status = "offline";
+  }
 }
 
 const snapshot: UiSnapshotMessage = {
@@ -439,6 +453,10 @@ const defaults: AgentHarnessDefaultsView = {
 
 const client = {
   ...api,
+  rediscover: async () => {
+    document.documentElement.dataset.rediscoverRequests = String(Number(document.documentElement.dataset.rediscoverRequests ?? "0") + 1);
+    return { ok: true as const };
+  },
   agentHarnessDefaults: () => savedDefaults === "error"
     ? Promise.reject(new Error("Saved defaults are unavailable."))
     : savedDefaults === "pending" ? new Promise<AgentHarnessDefaultsView>(() => undefined) : Promise.resolve(defaults),

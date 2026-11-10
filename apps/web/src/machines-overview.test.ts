@@ -39,6 +39,19 @@ function box(runnerId: string, overrides: Partial<BoxView> = {}): BoxView {
   return { boxId: `box-${runnerId}`, runnerId, sshTarget: `me@${runnerId}`, status: "online", lastError: null, createdAt: 1, ...overrides };
 }
 
+test("a stored readiness failure never replaces lost-connection guidance with an online claim", () => {
+  for (const boxStatus of ["failed", "offline", "online"] as const) {
+    const entries = machineListEntries(new Map([["remote", runner("remote", { status: "offline" })]]), [box("remote", {
+      status: boxStatus, lastError: boxStatus === "offline" ? "lost connection" : null,
+      harnessReadiness: { state: "failed", checkedAt: NOW - 100, reason: "report_timeout" },
+    })]);
+    assert.equal(entries[0]!.readinessNeedsAttention, undefined);
+    const attention = machinesOverviewAttention(entries, new Map(), true, NOW);
+    assert.doesNotMatch(attention[0]!.reason, /connection is online/);
+    assert.equal(attention[0]!.action, "reconnect");
+  }
+});
+
 function session(id: string, runnerId: string, status: SessionView["status"], archived = false): Pick<SessionView, "runnerId" | "status" | "archived"> & { id: string } {
   return { id, runnerId, status, archived };
 }

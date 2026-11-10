@@ -19,6 +19,16 @@ function agent(id: string, name: string): AgentDefinition {
   return { id, name, command: "agent", args: [], env: {}, driver: "claude-code" };
 }
 
+test("typed unknown prerequisite state does not tell a Windows Git Bash installation to update", () => {
+  const windows: AgentDefinition = { ...agent("claude", "Claude Code"), available: false,
+    claudeCode: { status: "unsupported", failure: { code: "unsupported_mode", message: "Native Claude Code requires Git for Windows Bash.", retryable: false },
+      effortLevels: [], permissionModes: [], streamJsonInput: false, streamJsonImages: false, controlProtocol: false, forkSession: false,
+      replayUserMessages: false, auth: { status: "unknown", billingSource: "unknown" } },
+    providerReadiness: { checkedAt: Date.now(), installation: "unknown", authentication: "unknown", reason: "unknown" },
+  };
+  assert.equal(agentStatus(windows), "unavailable");
+});
+
 test("discovered Codex transports keep their canonical user-facing names", () => {
   assert.equal(agentDisplayName({ ...agent("codex-app", "Codex"), driver: "codex-app-server", source: "discovered" }), "Codex App Server");
   assert.equal(agentDisplayName({ ...agent("codex-exec", "Codex"), driver: "codex", source: "discovered" }), "Codex (Non-Interactive)");

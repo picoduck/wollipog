@@ -157,6 +157,8 @@ function MachineRow({ entry, selected, onSelect }: {
             {entry.kind === "ssh" ? <GlobeIcon size={14} aria-hidden="true" /> : <ComputerIcon size={14} aria-hidden="true" />}
             {entry.kind === "ssh" ? "SSH" : "Native Runner"}
           </span>
+          {entry.readinessNeedsAttention ? <span>Provider Readiness Failed</span>
+            : entry.attentionStatus && <span>{statusMeta("machine", entry.attentionStatus).label}</span>}
           {entry.capacity && (
             <span>
               <CapacityIcon size={14} aria-hidden="true" />

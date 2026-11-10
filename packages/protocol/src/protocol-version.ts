@@ -1427,6 +1427,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 356: Audit byte-verified UI evidence receipt reuse across approval occurrences.
   356,
   // v357 slot
+  // 357: Timestamped provider setup observations and transport-independent SSH readiness (#4438).
+  357,
   // v358 slot
   // v359 slot
   // v360 slot

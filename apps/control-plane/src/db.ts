@@ -8,6 +8,7 @@ import { CAMPAIGN_CLEANUP_ITEMS_LIMIT, CAMPAIGN_LIVE_WORK_KINDS, CAMPAIGN_STUCK_
   worktreeRefusalAction, cleanupReasonSentence, PROTOCOL_VERSION, type CampaignActivityView, type CampaignCleanupItem, type CampaignLiveWorkKind,
   type CampaignRepairView, type CampaignStuckItem, type OrchestratorCampaignHandoff } from "@wollipog/protocol";
 import { safeReviewSessionCapability } from "./review-session-capability.js";
+import { safeProviderReadiness } from "@wollipog/protocol";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
 /**
@@ -457,7 +458,7 @@ const SESSION_PROMPT_TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60_000;
 export const PROJECT_CREATION_REQUESTS_PER_USER = 100;
 const SESSION_PROMPT_ATTEMPT_RETENTION_LIMIT = 128;
 
-function safeProviderAccounts(value: RunnerView["providerAccounts"]): NonNullable<RunnerView["providerAccounts"]> {
+function safeProviderAccounts(value: RunnerView["providerAccounts"], readinessSupported = false): NonNullable<RunnerView["providerAccounts"]> {
   if (!Array.isArray(value) || value.length > 32) throw new Error("runner provider account inventory is invalid");
   const ids = new Set<string>();
   return value.map((account) => {
@@ -483,6 +484,7 @@ function safeProviderAccounts(value: RunnerView["providerAccounts"]): NonNullabl
       label: account.label.trim(),
       provider: account.provider,
       authStatus: account.authStatus,
+      ...(readinessSupported && safeProviderReadiness(account.providerReadiness) ? { providerReadiness: safeProviderReadiness(account.providerReadiness)! } : {}),
       ...(account.profile ? { profile: { id: account.profile.id, access: account.profile.access } } : {}),
       // Protocol v334 (#4353). An unrecognized value reads as unverified, which selection passes over.
       ...(account.billing === "subscription" || account.billing === "api" || account.billing === "unknown"
@@ -823,6 +825,7 @@ CREATE TABLE IF NOT EXISTS runner_agents (
   native_tui_accounting TEXT,
   default_provider_account_id TEXT,
   provider_account_readiness TEXT,
+  provider_readiness TEXT,
   wsl_agent_control TEXT,
   acp TEXT,
   registry TEXT,
@@ -2380,6 +2383,7 @@ CREATE TABLE IF NOT EXISTS boxes (
   last_error       TEXT,
   auto_reconnect   INTEGER NOT NULL DEFAULT 1,
   deployed_version TEXT,
+  harness_readiness TEXT,
   triple           TEXT,
   runner_data_dir  TEXT,
   legacy_adoption_epoch TEXT,
@@ -4579,6 +4583,7 @@ interface BoxRow {
   last_error: string | null;
   auto_reconnect: number;
   deployed_version: string | null;
+  harness_readiness: string | null;
   triple: string | null;
   runner_data_dir: string | null;
   legacy_adoption_epoch: string | null;
@@ -7814,7 +7819,7 @@ export class ControlPlaneDb {
     );
     db.prepare("DELETE FROM driver_telemetry_hourly WHERE bucket_ts < ?").run(Date.now() - 180 * 86_400_000);
     // Additive migrations for DBs created before discovery columns existed.
-    for (const col of ["version TEXT", "auth_status TEXT", "available INTEGER", "unavailable_reason TEXT", "source TEXT", "installation TEXT", "update_assessment TEXT", "codex_app_server TEXT", "claude_code TEXT", "native_tui_accounting TEXT", "default_provider_account_id TEXT", "provider_account_readiness TEXT", "wsl_agent_control TEXT", "acp TEXT", "registry TEXT", "acp_transport TEXT"]) {
+    for (const col of ["version TEXT", "auth_status TEXT", "available INTEGER", "unavailable_reason TEXT", "source TEXT", "installation TEXT", "update_assessment TEXT", "codex_app_server TEXT", "claude_code TEXT", "native_tui_accounting TEXT", "default_provider_account_id TEXT", "provider_account_readiness TEXT", "provider_readiness TEXT", "wsl_agent_control TEXT", "acp TEXT", "registry TEXT", "acp_transport TEXT"]) {
       try {
         db.exec(`ALTER TABLE runner_agents ADD COLUMN ${col}`);
       } catch {
@@ -8343,6 +8348,7 @@ export class ControlPlaneDb {
     }
     for (const column of [
       "runner_data_dir TEXT",
+      "harness_readiness TEXT",
       "legacy_adoption_epoch TEXT",
       "legacy_adoption_pending INTEGER NOT NULL DEFAULT 0",
       "legacy_adoption_authorized_by TEXT",
@@ -8765,7 +8771,7 @@ export class ControlPlaneDb {
         reviewSession: safeReviewSessionCapability(meta.runtime.reviewSession),
       }) : null;
       const providerAccounts = runnerSupportsProtocol(protocolVersion, "providerAccounts")
-        ? JSON.stringify(safeProviderAccounts(meta.providerAccounts ?? []))
+        ? JSON.stringify(safeProviderAccounts(meta.providerAccounts ?? [], runnerSupportsProtocol(protocolVersion, "providerSetupReadiness")))
         : null;
       const providerLogins = runnerSupportsProtocol(protocolVersion, "providerLogin")
         ? JSON.stringify(safeProviderLogins(meta.providerLogins ?? []))
@@ -8853,6 +8859,7 @@ export class ControlPlaneDb {
         !runnerSupportsProtocol(protocolVersion, "runnerLocalAgentEnv"),
         runnerSupportsProtocol(protocolVersion, "nativeTuiAccountingDiagnostics"),
         runnerSupportsProtocol(protocolVersion, "wslSafeLauncher"),
+        runnerSupportsProtocol(protocolVersion, "providerSetupReadiness"),
       );
       if (manageTransaction) this.db.exec("COMMIT");
     } catch (err) {
@@ -8869,6 +8876,7 @@ export class ControlPlaneDb {
     persistEnvironment: boolean,
     persistNativeTuiAccounting: boolean,
     persistWslSafeLauncher: boolean,
+    persistProviderReadiness: boolean,
   ): void {
     this.stmt("DELETE FROM runner_agents WHERE runner_id = ?").run(runnerId);
     const upAgent = this.stmt(
@@ -8877,8 +8885,8 @@ export class ControlPlaneDb {
     );
     const insRa = this.stmt(
       `INSERT INTO runner_agents
-         (runner_id, agent_id, command, args, env, driver, context, capabilities, version, auth_status, available, unavailable_reason, source, installation, update_assessment, codex_app_server, claude_code, native_tui_accounting, default_provider_account_id, wsl_agent_control, acp, registry, acp_transport, provider_account_readiness)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (runner_id, agent_id, command, args, env, driver, context, capabilities, version, auth_status, available, unavailable_reason, source, installation, update_assessment, codex_app_server, claude_code, native_tui_accounting, default_provider_account_id, wsl_agent_control, acp, registry, acp_transport, provider_account_readiness, provider_readiness)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const a of agents) {
       upAgent.run(a.id, a.name, now);
@@ -8909,6 +8917,7 @@ export class ControlPlaneDb {
         a.registry ? JSON.stringify(a.registry) : null,
         a.acpTransport ?? null,
         a.providerAccountReadiness ? JSON.stringify(a.providerAccountReadiness) : null,
+        persistProviderReadiness && safeProviderReadiness(a.providerReadiness) ? JSON.stringify(safeProviderReadiness(a.providerReadiness)) : null,
       );
     }
   }
@@ -8929,6 +8938,7 @@ export class ControlPlaneDb {
         !runnerSupportsProtocol(protocol?.protocol_version, "runnerLocalAgentEnv"),
         runnerSupportsProtocol(protocol?.protocol_version, "nativeTuiAccountingDiagnostics"),
         runnerSupportsProtocol(protocol?.protocol_version, "wslSafeLauncher"),
+        runnerSupportsProtocol(protocol?.protocol_version, "providerSetupReadiness"),
       );
       if (executionTargets !== undefined) {
         if (!runnerSupportsProtocol(protocol?.protocol_version, "targetHarnessInstallations") ||
@@ -8947,7 +8957,7 @@ export class ControlPlaneDb {
           "UPDATE runners SET agents_refreshed_at=?, updated_at=?, editors=COALESCE(?, editors), provider_accounts=COALESCE(?, provider_accounts) WHERE runner_id=?",
         )
         .run(now, now, editors ? JSON.stringify(editors) : null,
-          providerAccounts ? JSON.stringify(safeProviderAccounts(providerAccounts)) : null, runnerId);
+          providerAccounts ? JSON.stringify(safeProviderAccounts(providerAccounts, runnerSupportsProtocol(protocol?.protocol_version, "providerSetupReadiness"))) : null, runnerId);
       this.db.exec("COMMIT");
     } catch (err) {
       this.db.exec("ROLLBACK");
@@ -15083,6 +15093,10 @@ export class ControlPlaneDb {
       .run(status, lastError, now, boxId);
   }
 
+  setBoxHarnessReadiness(boxId: string, readiness: NonNullable<BoxView["harnessReadiness"]>): void {
+    this.stmt("UPDATE boxes SET harness_readiness=? WHERE box_id=?").run(JSON.stringify(readiness), boxId);
+  }
+
   authorizeBoxLegacyDataAdoption(input: {
     boxId: string;
     epoch: string;
@@ -15732,6 +15746,7 @@ export class ControlPlaneDb {
       sshTarget: row.ssh_target,
       runnerId: row.runner_id,
       status: row.status as BoxStatus,
+      harnessReadiness: parseJson<BoxView["harnessReadiness"]>(row.harness_readiness) ?? undefined,
       lastError: row.last_error,
       createdAt: row.created_at,
       deployedVersion: row.deployed_version,
@@ -15825,6 +15840,7 @@ export class ControlPlaneDb {
                   ra.native_tui_accounting AS native_tui_accounting,
                   ra.default_provider_account_id AS default_provider_account_id,
                   ra.provider_account_readiness AS provider_account_readiness,
+                  ra.provider_readiness AS provider_readiness,
                   ra.wsl_agent_control AS wsl_agent_control,
                   ra.acp AS acp, ra.registry AS registry, ra.acp_transport AS acp_transport
              FROM runner_agents ra JOIN agent_definitions ad ON ad.id = ra.agent_id
@@ -15851,6 +15867,7 @@ export class ControlPlaneDb {
         native_tui_accounting: string | null;
         default_provider_account_id: string | null;
         provider_account_readiness: string | null;
+        provider_readiness: string | null;
         wsl_agent_control: string | null;
         acp: string | null;
         registry: string | null;
@@ -15879,6 +15896,7 @@ export class ControlPlaneDb {
       nativeTuiAccounting: parseJson<AgentDefinition["nativeTuiAccounting"]>(a.native_tui_accounting) ?? undefined,
       defaultProviderAccountId: a.default_provider_account_id ?? undefined,
       providerAccountReadiness: parseJson<AgentDefinition["providerAccountReadiness"]>(a.provider_account_readiness) ?? undefined,
+      providerReadiness: safeProviderReadiness(parseJson(a.provider_readiness)),
       wslAgentControl: parseJson<AgentDefinition["wslAgentControl"]>(a.wsl_agent_control) ?? undefined,
       acp: parseJson<AgentDefinition["acp"]>(a.acp) ?? undefined,
       registry: parseJson<AgentDefinition["registry"]>(a.registry) ?? undefined,

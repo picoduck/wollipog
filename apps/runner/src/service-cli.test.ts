@@ -10,6 +10,8 @@ import { executableFromUnit, runServiceCli, type ServiceHost, type ServiceIo } f
 import { CONTROL_PLANE_UNIT, RUNNER_UNIT, serviceLayout } from "./systemd-service.js";
 import { ReleaseStaging, stagingFilesystem } from "./release-staging.js";
 import { describeJournal } from "./release-staging-journal.js";
+import { runnerHarnessReadiness } from "../../control-plane/src/host-admin-route.js";
+import { mergeInstallationAndAccountReadiness } from "./provider-readiness.js";
 
 const LOCAL_TOKEN = "L".repeat(43);
 const RUNNER_TOKEN = `wollipogr_${"r".repeat(43)}`;
@@ -779,7 +781,7 @@ test("upgrading a legacy runner unit preserves settings, enables delegation, and
 });
 
 test("upgrade cannot succeed on stale discovery, ownership refusal, or a lost previously ready harness", { skip: process.platform !== "linux" }, async t => {
-  for (const problem of ["stale", "pre-restart-inventory", "ownership", "unknown-ownership", "lost", "account-lost", "pending", "healthy", "already-blocked"]) await t.test(problem, async t => {
+  for (const problem of ["stale", "pre-restart-inventory", "ownership", "typed-ownership", "unknown-ownership", "lost", "account-lost", "pending", "healthy", "already-blocked"]) await t.test(problem, async t => {
     const f = fake(t);
     assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
     const fixture = releaseFixture(f);
@@ -803,6 +805,14 @@ test("upgrade cannot succeed on stale discovery, ownership refusal, or a lost pr
             accounts: [{ id: "account-1", authStatus: installed && problem === "account-lost" ? "unknown" : "authenticated" }],
           };
           if (!installed && problem === "unknown-ownership") delete runner.harnessReadiness;
+          if (problem === "typed-ownership") {
+            const providerReadiness = mergeInstallationAndAccountReadiness({ checkedAt: 1, installation: "unknown", authentication: "unknown", reason: "unknown",
+              installationAdmission: installed ? "blocked" : "permitted" },
+            { checkedAt: 1, installation: "compatible", authentication: "authenticated", reason: "ready" });
+            runner.harnessReadiness.agents = runnerHarnessReadiness({ connectedAt: installed ? 2 : 1, agents: [
+              { id: "claude", name: "Claude", command: "claude", args: [], env: {}, available: false, providerReadiness },
+            ] }).agents;
+          }
         }
         return { ...response, text: async () => JSON.stringify(body) };
       },
@@ -816,6 +826,7 @@ test("upgrade cannot succeed on stale discovery, ownership refusal, or a lost pr
     } else if (problem !== "healthy") {
       assert.match(io.stdout() + io.stderr(), /failed upgrade readiness.*rolled back/s);
       if (problem === "account-lost") assert.match(io.stdout() + io.stderr(), /previously signed-in provider account became unavailable/);
+      if (problem === "typed-ownership") assert.match(io.stdout() + io.stderr(), /provider HOME ownership blocks harness discovery/);
       assert.equal(readFileSync(join(f.root, "wollipog-runner"), "utf8"), "#!/bin/sh\n");
     }
   });

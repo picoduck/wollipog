@@ -1,5 +1,6 @@
 export * from "./shared-predicates.js";
 export * from "./provider-account-selection.js";
+export * from "./provider-readiness.js";
 import { isProviderHomeRecoveryCause, PROVIDER_HOME_RECOVERY_CAUSE_CODES, type ProviderHomeRecoveryCause, type ProviderHomeBlockingProcess } from "./provider-home-recovery.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, type OrchestratorReviewPolicy } from "./orchestrator-review-policy.js";
 export * from "./orchestrator-review-policy.js";
@@ -296,6 +297,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v180 current-identity inspection and account selection from an Authentication Required card. */
   providerAuthenticationAccountRecovery: 180,
   providerAccounts: 170,
+  providerSetupReadiness: 357,
   /** v334 (#4353): a runner reports each account's billing and cooldown and rechecks a policy-chosen
    * account at launch, so the control plane may enforce a non-fixed account selection policy. */
   providerAccountSelectionPolicy: 334,
@@ -2945,6 +2947,8 @@ export interface AgentDefinition {
    * environment names, environment values, or provider diagnostics. */
   unavailableReason?: string;
   authStatus?: "authenticated" | "unauthenticated" | "unknown";
+  /** Protocol v357: timestamped setup observations, independent of launch readiness. */
+  providerReadiness?: import("./provider-readiness.js").ProviderReadiness;
   /** Opaque runner-local account selected when a client omits an explicit account. */
   defaultProviderAccountId?: string;
   /** Secret-free observations; aggregate availability may offer a ready explicit account while
@@ -3025,6 +3029,7 @@ export interface ProviderAccountDefinition {
   label: string;
   provider: "claude" | "codex";
   authStatus: "authenticated" | "unauthenticated" | "unknown";
+  providerReadiness?: import("./provider-readiness.js").ProviderReadiness;
   /** Protocol v225: the account HOME's stable provider profile identity and whether this control
    * plane may use it. Absent means a legacy, unadopted HOME. Older control planes never receive
    * it, nor any profile-bearing account they are not granted. */
@@ -3712,6 +3717,8 @@ export interface BoxView {
   /** Runner id the orchestrator launches the box's runner with. */
   runnerId: string;
   status: BoxStatus;
+  /** Protocol v357: replacement verification, independent of the connected SSH transport. */
+  harnessReadiness?: import("./provider-readiness.js").SshHarnessReadiness;
   /** Last bootstrap/connection error, if any. */
   lastError: string | null;
   createdAt: number;

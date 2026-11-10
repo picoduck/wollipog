@@ -21,6 +21,7 @@ import {
 } from "../machine-agents.js";
 import { agentInstallHints, harnessUpdateGuidance } from "../runners.js";
 import { statusMeta } from "../status-meta.js";
+import { providerReadinessSentence, providerReadinessLabel } from "../provider-readiness.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { agentSessionDiscoveryUnavailableReason, agentSupportsSessionDiscovery, AgentSessionDiscoveryDialog } from "./AgentSessionDiscoveryDialog.js";
 import { CopyButton, Modal } from "./common.js";
@@ -35,12 +36,12 @@ import { StatusBadge } from "./StatusBadge.js";
 
 const SKELETON_ROWS = 3;
 
-function AgentBadge({ status }: { status: AgentStatus }) {
-  return <StatusBadge meta={statusMeta("agent", status)} inline={status === "ready"} className="machine-agent-status" />;
+function AgentBadge({ status, label }: { status: AgentStatus; label?: string }) {
+  return <StatusBadge meta={{ ...statusMeta("agent", status), ...(label ? { label } : {}) }} inline={status === "ready"} className="machine-agent-status" />;
 }
 
 /** One agent: its name and one badge, then the integration, where it runs and its version (§5.2). */
-function AgentRow({ row, name, onOpen }: { row: MachineAgentRow; name: string; onOpen: (opener: HTMLButtonElement) => void }) {
+function AgentRow({ row, name, current, onOpen }: { row: MachineAgentRow; name: string; current: boolean; onOpen: (opener: HTMLButtonElement) => void }) {
   const { agent, status } = row;
   return (
     <li>
@@ -50,10 +51,12 @@ function AgentRow({ row, name, onOpen }: { row: MachineAgentRow; name: string; o
         <span className="row-body">
           <span className="row-line">
             <span className="row-title" title={name}>{name}</span>
-            <AgentBadge status={status} />
+            <AgentBadge status={status} label={status === "unavailable" && agent.providerReadiness &&
+              agent.providerReadiness.reason !== "ready" && agent.providerReadiness.installationAdmission !== "blocked"
+              ? providerReadinessLabel(agent.providerReadiness) : undefined} />
           </span>
           <span className="row-sub machine-agent-meta">
-            <span>{agentDriverLabel(agent)}</span>
+            <span>{agent.providerReadiness ? `${current ? "Checked" : "Last Checked"} ${relativeTime(agent.providerReadiness.checkedAt)}` : agentDriverLabel(agent)}</span>
             <span className="machine-agent-meta-extra">{agentContextLabel(agent.context)}</span>
             {agent.version && <span className="machine-agent-meta-extra">v{agent.version}</span>}
           </span>
@@ -168,6 +171,7 @@ function AgentDetailsDialog({ agent, name, machineName, runner, online, returnFo
         )}
         <div><dt>Version</dt><dd>{agent.version ? `v${agent.version}` : "Unknown"}</dd></div>
         <div><dt>Sign-In</dt><dd>{agentSignInFact(agent)}</dd></div>
+        {agent.providerReadiness && <div><dt>Last Check</dt><dd>{providerReadinessSentence(agent.providerReadiness, online && runner.agentsRefreshed === true)}</dd></div>}
         {agent.update && (
           <div>
             <dt>Updates</dt>
@@ -299,7 +303,7 @@ export function MachineAgentsSection({ runner, online, machineName, canFindSessi
           {listed.length > 0 && (
             <ul className="machine-agent-list" aria-label="Agents">
               {listed.map((row) => (
-                <AgentRow key={row.agent.id} row={row} name={nameOf(row.agent)} onOpen={open(row.agent.id)} />
+                <AgentRow key={row.agent.id} row={row} name={nameOf(row.agent)} current={online && runner.agentsRefreshed === true} onOpen={open(row.agent.id)} />
               ))}
             </ul>
           )}
@@ -311,7 +315,7 @@ export function MachineAgentsSection({ runner, online, machineName, canFindSessi
               </summary>
               <ul className="disclosure-body machine-agent-list" aria-label={notInstalledLabel(notInstalled.length)}>
                 {notInstalled.map((row) => (
-                  <AgentRow key={row.agent.id} row={row} name={nameOf(row.agent)} onOpen={open(row.agent.id)} />
+                  <AgentRow key={row.agent.id} row={row} name={nameOf(row.agent)} current={online && runner.agentsRefreshed === true} onOpen={open(row.agent.id)} />
                 ))}
               </ul>
             </details>

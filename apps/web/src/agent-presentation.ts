@@ -179,6 +179,15 @@ function agentNeedsUpdate(agent: AgentDefinition): boolean {
 function reportedAgentStatus(agent: AgentDefinition): Exclude<AgentStatus, "ready_when_last_seen"> {
   // The retired Codex exec driver (#3259) never runs, whatever an older runner reports for it.
   if (isRetiredCodexExec(agent)) return "unavailable";
+  if (agent.providerReadiness) {
+    if (agent.providerReadiness.installation === "missing") return "not_installed";
+    if (agent.providerReadiness.installation === "incompatible") return "update_required";
+    // Another explicitly permitted account may prove aggregate availability without changing the
+    // default. Its observation must not disable that installation or select another account.
+    if (agent.available === true) return "ready";
+    if (agent.providerReadiness.reason === "sign_in_required") return "sign_in_required";
+    return "unavailable";
+  }
   if (agent.claudeCode?.status === "unavailable" || agent.codexAppServer?.status === "unavailable" ||
       RUNNER_REASON_PATTERNS.notInstalled.test(agent.unavailableReason ?? "") ||
       (agent.registry?.installStatus === "manual-only" && agent.available !== true)) return "not_installed";

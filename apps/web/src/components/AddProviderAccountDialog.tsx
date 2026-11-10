@@ -64,7 +64,7 @@ type Method = "sign_in" | "copy";
  * the new profile (#3719), after a confirmation that names the source and the new profile. Where
  * that isn't available, the dialog says why and keeps the sign-in.
  */
-export function AddProviderAccountDialog({ runnerId, machineName, accounts, logins, initialProvider = "claude", importOffer, onStarted, onImported, onClose }: {
+export function AddProviderAccountDialog({ runnerId, machineName, accounts, logins, initialProvider = "claude", importOffer, onStarted, onImported, onClose, installationIssues }: {
   runnerId: string;
   machineName: string;
   accounts: readonly ProviderAccountDefinition[];
@@ -73,6 +73,7 @@ export function AddProviderAccountDialog({ runnerId, machineName, accounts, logi
   initialProvider?: Provider;
   /** Owner/Admin only (#3719): copying an existing sign-in, or why it isn't available. */
   importOffer?: ProviderCredentialImportOffer;
+  installationIssues?: Partial<Record<Provider, string>>;
   /** The started sign-in, which names the account it will record. */
   onStarted?: (login: ProviderLoginView) => void;
   /** The account a copied sign-in recorded. */
@@ -98,6 +99,8 @@ export function AddProviderAccountDialog({ runnerId, machineName, accounts, logi
 
   const copyOffered = provider === "codex" && importOffer?.available === true && importOffer.sources.length > 0;
   const copying = copyOffered && method === "copy";
+  // Copying an admitted API-key record does not execute the provider's sign-in command.
+  const installationIssue = copying ? undefined : installationIssues?.[provider];
   const source = copying ? importOffer.sources.find((choice) => choice.key === sourceKey) ?? importOffer.sources[0] : undefined;
   // A hidden email label shows numbered until the person reveals emails, so they can tell which
   // account's key and billing they are copying without exposing it before reveal (#3719).
@@ -120,7 +123,7 @@ export function AddProviderAccountDialog({ runnerId, machineName, accounts, logi
   };
 
   const submit = async () => {
-    if (submittingRef.current) return;
+    if (submittingRef.current || installationIssue) return;
     const trimmed = label.trim();
     setFailure(null);
     if (!trimmed) return refuse({ kind: "empty" });
@@ -189,7 +192,7 @@ export function AddProviderAccountDialog({ runnerId, machineName, accounts, logi
       footer={(
         <>
           <button type="button" className="btn" disabled={submitting} onClick={close}>Cancel</button>
-          <BusyButton className="btn primary" type="submit" form={`${ids}-form`} busy={submitting}
+          <BusyButton className="btn primary" type="submit" form={`${ids}-form`} busy={submitting} disabled={!!installationIssue}
             progress={copying ? "Copying the sign-in…" : "Starting the sign-in…"}>
             {copying ? "Copy Sign-In" : "Start Sign-In"}
           </BusyButton>
@@ -205,6 +208,7 @@ export function AddProviderAccountDialog({ runnerId, machineName, accounts, logi
           void submit();
         }}
       >
+        {installationIssue && <Notice compact tone="warning" title="Installation Needed">{installationIssue}</Notice>}
         <div className="field">
           <div className="field-head"><span id={`${ids}-provider`}>Provider</span></div>
           <SegmentedControl<Provider>
