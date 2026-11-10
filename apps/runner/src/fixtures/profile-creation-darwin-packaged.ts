@@ -69,13 +69,15 @@ export async function verifyPackagedDarwinProfileCreation(root: string, setter: 
       writeFileSync(join(source, "auth.json"), auth, { mode: 0o600 });
       const imported = await supervisor.importAccount({ provider: "codex", label: "Imported", source: { kind: "default_home" }, profileGrantId: grant });
       const importedHome = join(profileRoot, imported.profileId);
-      assert.equal(readFileSync(join(importedHome, "auth.json"), "utf8"), auth);
-      assert.equal(readFileSync(join(source, "auth.json"), "utf8"), auth, "synthetic source is unchanged");
+      // Import reconstructs the canonical key-only record; it does not copy source formatting.
+      assert.deepEqual(JSON.parse(readFileSync(join(importedHome, "auth.json"), "utf8")),
+        { auth_mode: "apikey", OPENAI_API_KEY: "sk-fake-darwin-fixture" }, "target contains exactly the allowed fields");
+      assert.deepEqual(readFileSync(join(source, "auth.json")), Buffer.from(auth), "synthetic source bytes are unchanged");
       assert.ok(accounts.some(account => account.id === imported.accountId && account.profileId === imported.profileId));
       assert.equal(await registry.acquireHome(importedHome, "codex"), true, "post-import marker/grant admission succeeds");
       assert.equal(await registry.releaseHome(importedHome), true);
       assert.equal(spawned, 1, "import never invokes a provider");
-      assert.equal(readFileSync(join(home, "sentinel"), "utf8"), "preserved");
+      assert.deepEqual(readFileSync(join(home, "sentinel")), Buffer.from("preserved"), "existing payload bytes are unchanged");
       assert.ok(existsSync(join(importedHome, ".agent-manager", "profile-v1.json")));
     } finally { await registry.close(); }
   }
