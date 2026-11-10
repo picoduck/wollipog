@@ -10,7 +10,7 @@ import { RequestDiff } from "./RequestDiff.js";
 
 test("a late response cannot replace a newer observation; failed reload removes the old diff", async () => {
   const window = new Window({ url: "http://localhost/" });
-  const globals = { window, document: window.document, HTMLElement: window.HTMLElement, Node: window.Node, React, IS_REACT_ACT_ENVIRONMENT: true };
+  const globals = { window, document: window.document, Event: window.Event, HTMLElement: window.HTMLElement, Node: window.Node, React, IS_REACT_ACT_ENVIRONMENT: true };
   const prior = Object.getOwnPropertyDescriptors(globalThis);
   for (const [name, value] of Object.entries(globals)) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
   const container = document.createElement("div");
@@ -29,7 +29,7 @@ test("a late response cannot replace a newer observation; failed reload removes 
     await act(async () => {
       const details = container.querySelector("details")!;
       details.open = true;
-      details.dispatchEvent(new window.Event("toggle"));
+      details.dispatchEvent(new Event("toggle"));
     });
     assert.equal(pending.length, 1);
     await render(2);
