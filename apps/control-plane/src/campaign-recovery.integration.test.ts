@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BACKGROUND_JOB_STALL_MS, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
+import { BACKGROUND_JOB_STALL_MS, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, issueClosureDeliveryGap,
   type CampaignBudgetAuthority, type CampaignForgePullRequestObservation, type PendingApproval, type RunnerMetadata,
   type GithubIssueClosureSnapshot, type SessionSnapshot } from "@wollipog/protocol";
 import { closureDeliveryGaps } from "./campaign-issue-authority.js";
@@ -1351,6 +1351,11 @@ test("#4403 Campaign Status finishes ended epic tracking and retains the same de
       recordEpicClosure(h, "tracking-closure");
       assert.equal(h.db.campaignRecoveryCompletion("root", Date.now()).state, mode === "tracking" ? "complete" : "recovery_held", mode);
       assert.equal(h.db.campaignProjection("root")!.status, mode === "tracking" ? "verified_complete" : "stuck", mode);
+      if (mode === "legacy" || mode === "legacy_undispatched") {
+        assert.equal(h.db.campaignProjection("root")!.stuck?.items.find((item) => item.kind === "work_item" && item.workItemId === itemId)?.reason,
+          issueClosureDeliveryGap("epic_tracking_history_unavailable", { workItemId: itemId }).summary,
+          "Campaign Status names the same history gap as the closure proof");
+      }
       const after = h.db.campaignProjection("root")!.work!;
       assert.ok(after.revision > before.revision, "the closure receipt invalidates the summary and work-list cursor");
       assert.equal(after.counts.delivered, mode === "tracking" ? 2 : 1, mode);

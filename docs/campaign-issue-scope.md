@@ -747,6 +747,7 @@ Orchestrator-owned and supersedes the person's pending request for the same issu
 | `attempt_awaiting_verification` (item) | `verify_child`: `verify_campaign_child` with that item |
 | `attempt_open` (item) | `finish_attempt`: wait and verify, or end the attempt |
 | `no_work_item`, `no_delivered_verification`, `work_item_not_delivered` (item) | `deliver_work_item` |
+| `epic_tracking_history_unavailable` (item) | `person_decides`: this item predates delivery history, so it can't be confirmed as epic tracking only |
 | `no_merged_delivery_pull_request`, `pull_request_outside_repository` (item) | `record_delivery_pull_requests`: the item's reported stage |
 | `unmerged_pull_request` (item, numbers) | `wait_for_pull_requests` |
 | `stale_pull_request`, `delivery_merge_unconfirmed` (item, numbers) | `request_again` |

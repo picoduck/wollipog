@@ -286,6 +286,13 @@ test("#4403 an ended epic-tracking attempt is enough, but delivery work, PRs, op
       const gaps = closureSnapshot(decision).deliveryGaps;
       assert.equal(gaps === undefined, mode === "tracking", mode);
       if (gaps) assert.ok(gaps.some((gap) => gap.workItemId === h.item.id), mode);
+      if (mode === "legacy" || mode === "legacy_undispatched") {
+        const gap = gaps?.find((gap) => gap.workItemId === h.item.id);
+        assert.equal(gap?.summary,
+          issueClosureDeliveryGap("epic_tracking_history_unavailable", { workItemId: h.item.id }).summary);
+        assert.equal(gap?.action, "person_decides");
+        assert.match(gap!.summary, /^This item predates delivery history, so it can't be confirmed as epic tracking only\./u);
+      }
       assert.equal(h.db.campaignWorkLedger.epicTrackingItem("root", h.item.id), mode === "tracking", mode);
     } finally { h.db.close(); }
   }

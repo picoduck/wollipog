@@ -553,7 +553,14 @@ function epicGapsInto(db: ControlPlaneDb, root: SessionView, snapshot: GithubIss
   }
   const own = trackedIssueWork(db, root, snapshot.issue, snapshot.repository);
   if (!own) return add("delivery_unverified");
-  itemGapsInto(db, root, snapshot, own.filter((item) => !epicPlaceholderItem(db, root, item)), add, count);
+  const ordinary: CampaignWorkItemDetail[] = [];
+  for (const item of own) {
+    if (epicPlaceholderItem(db, root, item)) continue;
+    if (db.campaignWorkLedger.epicTrackingHistoryUnavailable(root.id, item.id)) {
+      add("epic_tracking_history_unavailable", { workItemId: item.id });
+    } else ordinary.push(item);
+  }
+  itemGapsInto(db, root, snapshot, ordinary, add, count);
 }
 
 function itemGapsInto(db: ControlPlaneDb, root: SessionView, snapshot: GithubIssueClosureSnapshot, items: CampaignWorkItemDetail[],

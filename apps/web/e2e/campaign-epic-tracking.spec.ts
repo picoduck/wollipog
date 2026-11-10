@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { issueClosureDeliveryGap } from "@wollipog/protocol";
 
 for (const [device, width, height, theme] of [["desktop", 1440, 1200, "dark"], ["phone", 390, 844, "light"]] as const) {
   test(`#4403 epic tracking and delivery gaps stay coherent on ${device}`, async ({ page }) => {
@@ -12,6 +13,7 @@ for (const [device, width, height, theme] of [["desktop", 1440, 1200, "dark"], [
       const summary = page.locator(".campaign-status-summary");
       await expect(summary).toContainText(mode === "complete" ? "Campaign Complete" : "Campaign Stuck");
       await expect(summary).toContainText(mode === "complete" ? "2 of 2 Delivered" : "1 of 2 Delivered");
+      if (mode === "legacy") await expect(panel).toContainText(issueClosureDeliveryGap("epic_tracking_history_unavailable").summary);
       await page.getByRole("button", { name: /^State:/ }).click();
       await page.getByRole("option", { name: "All States" }).click();
       const rows = page.locator(".campaign-work-row");
@@ -19,6 +21,12 @@ for (const [device, width, height, theme] of [["desktop", 1440, 1200, "dark"], [
       const title = mode === "legacy" ? "Legacy Epic Tracking" : mode === "complete" ? "Epic Tracking" : "Epic With Delivery Work";
       const epic = rows.filter({ hasText: title });
       await expect(epic).toHaveAttribute("data-state", mode === "complete" ? "delivered" : "planned");
+      if (mode === "legacy") {
+        await expect(summary).toContainText("12m");
+        await expect(epic).toContainText("10m");
+        await expect(panel).toContainText("picoduck/wollipog#4401");
+        await expect(panel).not.toContainText("#44031");
+      }
       const geometry = await panel.evaluate((element) => ({ width: element.clientWidth, scroll: element.scrollWidth }));
       expect(geometry.scroll).toBeLessThanOrEqual(geometry.width + 1);
       if (process.env.CAMPAIGN_EPIC_TRACKING_EVIDENCE_DIR) {

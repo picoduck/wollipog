@@ -1190,7 +1190,7 @@ const client = {
     ...(activityScenario ? { repository: "picoduck/wollipog", revision: 1, canPropose: false, outsideScope: [], candidates: [],
       issueNumbers: [...new Set(items.flatMap((item) => item.issue ? [item.issue.number] : []))] } : {}),
     ...(params.has("closureRecovery") ? { repository: "picoduck/wollipog", revision: 1, issueNumbers: [4398], outsideScope: [], candidates: [] } : {}),
-    ...(epicTracking ? { repository: "picoduck/wollipog", revision: 1, canPropose: false, issueNumbers: [4403, 44031], outsideScope: [], candidates: [] } : {}),
+    ...(epicTracking ? { repository: "picoduck/wollipog", revision: 1, canPropose: false, issueNumbers: [4403, 4401], outsideScope: [], candidates: [] } : {}),
     ...(params.get("completedChildren") === "1" && recoveryRecord?.reason === "failed_checks" ? {
       // Disclosed static scope data, not a live mint/approval or supported-profile assertion.
       issueNumbers: [123], revision: 1, canPropose: false, outsideScope: [], candidates: [],

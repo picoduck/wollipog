@@ -1,4 +1,4 @@
-import { CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS } from "@wollipog/protocol";
+import { CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS, issueClosureDeliveryGap } from "@wollipog/protocol";
 import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
 import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, agentAvailableForRunnerDefault, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
 import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, CAMPAIGN_PENDING_CAUSES, PROJECT_LOCATION_INSPECTION_FAILURES, validCampaignRepositoryList,
@@ -23649,11 +23649,16 @@ export class ControlPlaneDb {
     // Only a completion check that ran judged the in-scope original items; when it could not run
     // (a worktree retirement still pending, or no child at all), they count as agent work here.
     const scopeJudged = completion.state !== "children_unfinished";
-    const agentWork = ledger.agentUnfinished.filter((item) => !(scopeJudged && scope && item.origin === "original" && item.issue &&
+    const closedEpics = this.memberProvenEpicClosures(campaignId);
+    const unknownEpicHistory = new Set(ledger.agentUnfinished.filter((item) => item.issue &&
+      closedEpics.has(`${item.issue.repository.toLowerCase()}#${item.issue.number}`) &&
+      this.campaignWorkLedger.epicTrackingHistoryUnavailable(campaignId, item.id)).map((item) => item.id));
+    const agentWork = ledger.agentUnfinished.filter((item) => unknownEpicHistory.has(item.id) || !(scopeJudged && scope && item.origin === "original" && item.issue &&
       item.issue.repository.toLowerCase() === scope.repository.toLowerCase() && scope.issueNumbers.includes(item.issue.number) &&
       policy.issueNumbers?.includes(item.issue.number)));
     const stuckItems: CampaignStuckItem[] = agentWork.map((item) => ({ kind: "work_item", workItemId: item.id, issue: item.issue,
-      reason: "Committed work is not delivered and no agent is working on it." }));
+      reason: unknownEpicHistory.has(item.id) ? issueClosureDeliveryGap("epic_tracking_history_unavailable", { workItemId: item.id }).summary
+        : "Committed work is not delivered and no agent is working on it." }));
     const result = (status: "waiting_human" | "complete_needs_cleanup" | "verified_complete" | "stuck") =>
       ({ status, recoveryIds: completion.recoveryIds, stuckItems: status === "stuck" ? stuckItems : [], handoffs: ledger.handoffs });
     if (completion.state === "recovery_ready" || completion.state === "recovery_held") {
