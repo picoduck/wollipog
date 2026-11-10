@@ -226,6 +226,13 @@
     "correlationId": "3072fa72-f54a-44ea-b9ee-b77c8e1b83e9",
     "scope": "workflow; omitted from job/check-run annotations and gh run view"
   },
+  "overlappingGitHubIncident": {
+    "url": "https://www.githubstatus.com/incidents/tp8cghg7tlc4",
+    "name": "Incident with Actions and Checks API",
+    "createdAt": "2026-11-09T18:12:37.242Z",
+    "resolvedAt": "2026-11-09T18:59:32.565Z",
+    "relationship": "Temporal overlap only; no verified correlation-ID linkage"
+  },
   "checkSuite": {
     "id": 115572303054,
     "status": "completed",

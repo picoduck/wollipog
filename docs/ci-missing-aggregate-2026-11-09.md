@@ -50,6 +50,12 @@ ID above for GitHub Support; obtaining internal orchestration diagnostics requir
 A local expression fixture cannot reproduce those internals. The unchanged-head re-enqueue and
 eventual merge demonstrate recovery in this occurrence, not prevention of recurrence.
 
+GitHub also published an [Actions and Checks API incident](https://www.githubstatus.com/incidents/tp8cghg7tlc4)
+on November 9: investigation began at 18:12 UTC, elevated Actions/Checks errors were reported at
+18:24, mitigation at 18:43, and resolution at 18:59. This overlaps the affected run's 18:27
+failure. Temporal overlap supports an infrastructure explanation but does not bind this run's
+correlation ID to that incident or establish the exact internal cause.
+
 The delivered correction is to investigation output: version-2 per-attempt reports now classify
 absent, pending, running, passing, failing, cancelled, skipped, and unmeasured aggregation
 independently of timing. Partial or duplicate inventories cannot establish absence.
