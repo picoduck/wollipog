@@ -677,3 +677,42 @@ test("a session opened from its preview restores an expanded panel for a failure
     await fixture.unmount();
   }
 });
+
+for (const state of ["rejected", "uncertain"] as const) {
+test(`${state} slash command receipts can be dismissed and stay dismissed after reopening`, async () => {
+  const command = {
+    invocationId: "reload-rejected", submissionId: "reload-submission", sessionId: `dismiss-command-${state}`,
+    providerCommandId: "reload-skills", catalogRevision: "old-catalog", commandName: "reload-skills",
+    argumentText: "", executionMode: "passthrough" as const, state,
+    revision: 1, createdAt: 1, updatedAt: 1, code: "COMMAND_CATALOG_STALE" as const,
+    error: "The provider command catalog changed.",
+  };
+  const current = sessionView({ id: command.sessionId, commandInvocations: [command] });
+  let fixture = await mount(current);
+  try {
+    assert.ok(fixture.container.querySelector('[data-testid="provider-command-reload-submission"]'));
+    await fixture.click("Dismiss Command Message");
+    assertNoDomNode(fixture.container.querySelector('[data-testid="provider-command-reload-submission"]'));
+    assert.doesNotMatch(fixture.container.textContent ?? "", /Message Not Sent/);
+  } finally { await fixture.unmount(); }
+  fixture = await mount(current);
+  try {
+    assertNoDomNode(fixture.container.querySelector('[data-testid="provider-command-reload-submission"]'));
+  } finally { await fixture.unmount(); }
+  // A new attempt at the same command still needs attention.
+  fixture = await mount({ ...current, commandInvocations: [command, {
+    ...command, invocationId: "reload-second", submissionId: "reload-second-submission",
+  }] });
+  try {
+    assert.ok(fixture.container.querySelector('[data-testid="provider-command-reload-second-submission"]'));
+    assertNoDomNode(fixture.container.querySelector('[data-testid="provider-command-reload-submission"]'));
+  } finally { await fixture.unmount(); }
+  if (state === "uncertain") {
+    fixture = await mount({ ...current, commandInvocations: [{ ...command, state: "rejected", revision: 2 }] });
+    try {
+      assert.ok(fixture.container.querySelector('[data-testid="provider-command-reload-submission"]'),
+        "a definitive rejection after uncertainty is new information");
+    } finally { await fixture.unmount(); }
+  }
+});
+}
