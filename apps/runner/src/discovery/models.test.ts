@@ -299,7 +299,7 @@ test("parseClaudeModels: live metadata drives versioned labels, effort, context,
   });
   assert.deepEqual(
     models.filter((model) => !model.hidden).map((model) => model.id),
-    ["default", "opus[1m]", "haiku", "sonnet"],
+    ["default", "opus[1m]", "haiku", "sonnet", "claude-opus-5[1m]", "claude-haiku-4-5-20251001", "claude-sonnet-5"],
   );
   assert.equal(models[0]!.displayName, "Default (Opus 5)");
   assert.equal(models[0]!.default, true);
@@ -331,6 +331,42 @@ test("parseClaudeModels: live metadata drives versioned labels, effort, context,
   assert.equal(datedAndDistinct.find((model) => model.id === "future-opus")?.displayName, "Opus 5");
   assert.equal(datedAndDistinct.find((model) => model.id === "opus-plan")?.displayName, "Opus Plan");
   assert.equal(datedAndDistinct.find((model) => model.id === "opus-fast")?.displayName, "Opus Fast");
+});
+
+test("parseClaudeModels: retain provider-resolved concrete pins for protected campaigns", () => {
+  const models = parseClaudeModels({ models: [
+    { value: "default", resolvedModel: "claude-opus-5-5", displayName: "Default",
+      supportedEffortLevels: ["low", "high"] },
+    { value: "opus", resolvedModel: "claude-opus-5-5", displayName: "Opus",
+      supportedEffortLevels: ["low", "high"] },
+    { value: "opus[1m]", resolvedModel: "claude-opus-5-5[1m]", displayName: "Opus (1M context)",
+      supportedEffortLevels: ["high"] },
+    { value: "sonnet", displayName: "Sonnet 5.5" },
+    { value: "haiku", resolvedModel: "haiku", displayName: "Haiku" },
+  ] });
+  const pin = models.find(model => model.id === "claude-opus-5-5");
+  assert.ok(pin, "the concrete provider ID must pass the same catalog validation as its alias");
+  assert.equal(pin.displayName, "Opus 5.5 (Pinned)");
+  assert.deepEqual(pin.efforts, ["low", "high"]);
+  assert.equal(pin.hidden, undefined, "concrete pins must be selectable by campaign and reviewer settings");
+  assert.equal(pin.default, false);
+  assert.equal(pin.baseModelId, undefined);
+  assert.equal(models.filter(model => model.id === pin.id).length, 1);
+  const variant = models.find(model => model.id === "claude-opus-5-5[1m]");
+  assert.equal(variant?.contextWindow, 1_000_000);
+  assert.equal(variant?.baseModelId, pin.id);
+  assert.equal(models.some(model => model.id === "claude-sonnet-5-5"), false,
+    "a display label cannot prove a concrete launch ID");
+  assert.deepEqual(models.filter(model => !model.hidden).map(model => model.id),
+    ["default", "opus", "opus[1m]", "sonnet", "haiku", "claude-opus-5-5", "claude-opus-5-5[1m]"]);
+
+  const explicit = parseClaudeModels({ models: [
+    { value: "opus", resolvedModel: "claude-opus-5-5", supportedEffortLevels: ["high"] },
+    { value: "claude-opus-5-5", displayName: "Pinned Opus", supportedEffortLevels: ["low"] },
+  ] });
+  assert.deepEqual(explicit.find(model => model.id === pin.id)?.efforts, ["low"]);
+  assert.equal(explicit.find(model => model.id === pin.id)?.hidden, undefined,
+    "an explicit catalog entry retains its own visibility and capabilities");
 });
 
 test("claudeModels: fallback aliases are version-neutral and mark the configured default", () => {

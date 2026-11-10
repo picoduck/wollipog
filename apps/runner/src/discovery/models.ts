@@ -250,6 +250,7 @@ export function parseClaudeModels(initialization: unknown): AgentModel[] {
       ? (initialization as { models: unknown[] }).models
       : [];
   const models: AgentModel[] = [];
+  const resolvedModels: AgentModel[] = [];
   for (const entry of rawModels) {
     if (!entry || typeof entry !== "object") continue;
     const info = entry as ClaudeModelInfo;
@@ -267,9 +268,26 @@ export function parseClaudeModels(initialization: unknown): AgentModel[] {
       contextWindow: claudeContextWindow(info),
       ...(claudeBaseModelId(id) ? { baseModelId: claudeBaseModelId(id) } : {}),
     });
+    // The live CLI proves these exact launch IDs. Keep them selectable for pinned campaigns:
+    // aliases such as `opus` intentionally cannot be priced for protected budget admission.
+    // Never derive an ID from a version label or replace an explicitly advertised entry.
+    const resolved = typeof info.resolvedModel === "string" ? info.resolvedModel.trim() : "";
+    if (resolved !== id && claudeResolvedDisplayName(resolved)) {
+      resolvedModels.push({
+        id: resolved,
+        displayName: `${claudeResolvedDisplayName(resolved)!} (Pinned)`,
+        default: false,
+        efforts: efforts.length ? [...new Set(efforts)] : undefined,
+        contextWindow: claudeContextWindow(info),
+        ...(claudeBaseModelId(resolved) ? { baseModelId: claudeBaseModelId(resolved) } : {}),
+      });
+    }
   }
   const deduped = [...new Map(models.map((model) => [model.id, model])).values()];
   if (deduped.length && !deduped.some((model) => model.default)) deduped[0]!.default = true;
+  for (const resolved of resolvedModels) {
+    if (!deduped.some(model => model.id === resolved.id)) deduped.push(resolved);
+  }
   // Keep pre-discovery persisted aliases resolvable without duplicating them in the picker.
   // Hidden aliases surface only when an existing session selected that exact id.
   if (deduped.length) {
