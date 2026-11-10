@@ -459,22 +459,22 @@ test("a target another switch has claimed is refused before Git creates anything
     // Model the other switch getting there first: the first holder this switch sees for the path it
     // is about to create is that session.
     const runner = h.manager as unknown as {
-      worktreeHolder: (sessionId: string, context: unknown, path: string) => unknown;
+      worktreeHolder: (sessionId: string, context: unknown, path: string, ...rest: unknown[]) => unknown;
       reusedWorktreeClaims: Map<string, string>;
     };
     const holder = runner.worktreeHolder.bind(h.manager);
     let contested: string | undefined;
-    runner.worktreeHolder = (sessionId, context, path) => {
+    runner.worktreeHolder = (sessionId, context, path, ...rest) => {
       if (sessionId === h.sessionId && !contested) {
         contested = path;
         runner.reusedWorktreeClaims.set(path, "s_switch_setup_first");
       }
-      return holder(sessionId, context, path);
+      return holder(sessionId, context, path, ...rest);
     };
     assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
     await waitFor(() => failure(h) !== undefined, "the losing switch was not refused");
 
-    assert.match(failure(h)!.reason!, /is held by session s_switch_setup_first/u);
+    assert.match(failure(h)!.reason!, /which session s_switch_setup_first is using; continue the task in that session instead/u);
     assertStayed(h);
     assert.equal(runner.reusedWorktreeClaims.get(contested!), "s_switch_setup_first", "the winner's claim is not overwritten");
     assert.deepEqual(docsWorktrees(h), [h.docs], "this switch made nothing");
@@ -3922,5 +3922,73 @@ test("discarding a requested worktree leaves the hooks, marker and port block of
     assert.deepEqual(internals.worktreePortAllocator.get(appOwner), appBlock, "and its port block");
     assert.ok(meta().locationHistory!.some((left) => left.worktrees.some((row) => row.id === appRow.id && row.path === appRow.path)),
       "and its row in the Location the session left");
+  });
+});
+
+test("a switch back to a worktree this session left and another session now works in is refused, whatever is listed first", async () => {
+  await withSession("own-record-first", async (h) => {
+    const worktree = await leaveWorkBehind(h, "fix/install-link", {});
+    const before = files(worktree);
+    const status = git(worktree, "status", "--porcelain=v1", "--untracked-files=all");
+    // Another session, running, has since attached the worktree this session left in Docs. This
+    // session's own record of it, from that earlier Location, is listed before the other one's.
+    const other = "s_switch_setup_zz_other_holder";
+    h.store.create({ ...h.store.readMeta(h.sessionId)!, sessionId: other, workspaceId: "docs", repoPath: h.docs, status: "running",
+      agentSessionId: "other-conversation", worktreePath: worktree, worktreeBranch: "fix/install-link", locationHistory: undefined,
+      worktrees: [{ id: "other", path: worktree, branch: "fix/install-link", source: "attached" }] });
+    h.store.flush(other);
+    assert.equal(h.store.listSessions()[0]?.sessionId, h.sessionId);
+    const otherBefore = JSON.stringify(h.store.readMeta(other));
+
+    assert.deepEqual(await backToDocs(h, "fix/install-link"), { ok: true });
+    await waitFor(() => failure(h) !== undefined || h.providers[3]?.prompts.length === 1, "the switch back did not settle");
+    assert.equal(failure(h)?.reason, "the target worktree could not be prepared: branch fix/install-link is checked out in " +
+      `worktree ${worktree}, which session ${other} is using; continue the task in that session instead, so the work and its ` +
+      "pull request stay with it");
+    assert.equal(h.providers.length, 3, "this session's provider never moved");
+    const meta = h.store.readMeta(h.sessionId)!;
+    assert.equal(meta.repoPath, h.app, "the session stays where it was");
+    assert.equal(JSON.stringify(h.store.readMeta(other)), otherBefore, "the other session's record is exactly as it was");
+    assert.deepEqual(files(worktree), before);
+    assert.equal(git(worktree, "status", "--porcelain=v1", "--untracked-files=all"), status);
+    assert.deepEqual(journal(h), [], "nothing is queued to remove it");
+  });
+});
+
+test("a switch never makes a worktree again where another session still records one, whatever is listed first", async () => {
+  await withSession("own-record-first-reserve", async (h) => {
+    const worktree = await leaveWorkBehind(h, "fix/install-link", {});
+    // Another session, running, records the path, and the worktree there has since been removed by
+    // hand, so this switch would make it again at its own slot. This session's own record of the
+    // path, from its earlier Location, is listed before the other one's.
+    const other = "s_switch_setup_zz_other_reserver";
+    h.store.create({ ...h.store.readMeta(h.sessionId)!, sessionId: other, workspaceId: "docs", repoPath: h.docs, status: "running",
+      agentSessionId: "other-conversation", worktreePath: worktree, worktreeBranch: "fix/install-link", locationHistory: undefined,
+      worktrees: [{ id: "other", path: worktree, branch: "fix/install-link", source: "attached" }] });
+    h.store.flush(other);
+    git(h.docs, "worktree", "remove", "--force", worktree);
+    assert.equal(h.store.listSessions()[0]?.sessionId, h.sessionId);
+    const otherBefore = JSON.stringify(h.store.readMeta(other));
+    // Refused before the reservation, so Git is never asked to make anything there, not even briefly.
+    const cleanup = (h.manager as unknown as { cleanupJournal: { add: (record: WorktreeCleanupRecord) => void } }).cleanupJournal;
+    const add = cleanup.add.bind(cleanup);
+    const reserved: string[] = [];
+    cleanup.add = (record) => {
+      reserved.push(record.worktreePath);
+      add(record);
+    };
+
+    assert.deepEqual(await backToDocs(h, "fix/install-link"), { ok: true });
+    await waitFor(() => failure(h) !== undefined || h.providers[3]?.prompts.length === 1, "the switch back did not settle");
+    assert.equal(failure(h)?.reason, "the target worktree could not be prepared: branch fix/install-link is checked out in " +
+      `worktree ${worktree}, which session ${other} is using; continue the task in that session instead, so the work and its ` +
+      "pull request stay with it");
+    assert.deepEqual(reserved, [], "no reservation was ever recorded");
+    assert.equal(h.providers.length, 3, "this session's provider never moved");
+    assert.equal(h.store.readMeta(h.sessionId)!.repoPath, h.app);
+    assert.equal(JSON.stringify(h.store.readMeta(other)), otherBefore);
+    assert.equal(existsSync(worktree), false, "nothing was made at the path");
+    assert.deepEqual(docsWorktrees(h), [h.docs]);
+    assert.deepEqual(journal(h), []);
   });
 });

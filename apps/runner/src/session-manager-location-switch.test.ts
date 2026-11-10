@@ -437,13 +437,13 @@ test("two switches racing for one worktree: the one that claims it first wins, a
     // This switch passes its first holder check; while it is still verifying the worktree, another
     // session's switch gets there first and claims it (as its own final check would).
     const runner = h.manager as unknown as {
-      worktreeHolder: (sessionId: string, context: unknown, path: string) => unknown;
+      worktreeHolder: (sessionId: string, context: unknown, path: string, ...rest: unknown[]) => unknown;
       reusedWorktreeClaims: Map<string, string>;
     };
     const holder = runner.worktreeHolder.bind(h.manager);
     let raced = false;
-    runner.worktreeHolder = (sessionId, context, path) => {
-      const found = holder(sessionId, context, path);
+    runner.worktreeHolder = (sessionId, context, path, ...rest) => {
+      const found = holder(sessionId, context, path, ...rest);
       if (!raced) {
         raced = true;
         setImmediate(() => runner.reusedWorktreeClaims.set(busy, "s_location_winner"));
@@ -454,8 +454,8 @@ test("two switches racing for one worktree: the one that claims it first wins, a
     await waitFor(() => h.store.readMeta(h.sessionId)?.locationSwitchFailure !== undefined, "the losing switch was not refused");
     const meta = h.store.readMeta(h.sessionId)!;
     assert.equal(raced, true);
-    assert.match(meta.locationSwitchFailure!.reason!, new RegExp(`worktree ${busy}, which session s_location_winner took while it was ` +
-      "being verified; continue the task in that session instead", "u"));
+    assert.match(meta.locationSwitchFailure!.reason!, new RegExp(`worktree ${busy}, which session s_location_winner is using; ` +
+      "continue the task in that session instead", "u"));
     assert.equal(meta.repoPath, h.app, "the loser stays where it was");
     assert.equal(h.fake.launches(), 1, "the loser's provider was never retired");
     assert.equal(runner.reusedWorktreeClaims.get(busy), "s_location_winner", "the loser never releases the winner's claim");
@@ -799,4 +799,287 @@ test("a session that moves again carries its latest conversation, including back
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+type ReusedLookup = (path: string, branch: string, options: { onForgeAttempt?: (identity: string) => boolean;
+  onForgeUnavailable?: () => void }) => Promise<unknown>;
+const reusedLookupOf = (manager: SessionManager) =>
+  manager as unknown as { discoverAttachedWorktreePullRequest: ReusedLookup; worktreePullRequestDiscoveryNow: () => number;
+    resolveWorktreePullRequestState: (path: string, url: string) => Promise<unknown> };
+const OPEN_PULL_REQUEST = { url: "https://github.com/acme/docs/pull/12", state: "open", provider: "github", kind: "pull_request" };
+
+test("a worktree a switch reused in place gets its branch's pull request linked, and once merged it still removes nothing, across a restart", async () => {
+  await withSession("reuse-links-pr", async (h) => {
+    await establishConversation(h);
+    const busy = busyWorktree(h);
+    const before = files(busy);
+    const status = git(busy, "status", "--porcelain=v1", "--untracked-files=all");
+    const asked: string[][] = [];
+    reusedLookupOf(h.manager).discoverAttachedWorktreePullRequest = async (path, branch, options) => {
+      asked.push([path, branch]);
+      assert.equal(options.onForgeAttempt?.("identity"), true);
+      return OPEN_PULL_REQUEST;
+    };
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.store.readMeta(h.sessionId)?.worktrees?.[0]?.pullRequest !== undefined, "the pull request was not linked");
+    const linked = h.store.readMeta(h.sessionId)!.worktrees![0]!;
+    assert.deepEqual([linked.path, linked.source, linked.reusedInPlace, linked.pullRequest], [busy, "attached", true, OPEN_PULL_REQUEST]);
+    assert.deepEqual(asked, [[busy, "fix/install-link"]], "asked once, right after the move, about the reused worktree's branch");
+    const snapshot = h.sent.filter((message) => message.type === "session_runtime_updated").at(-1);
+    assert.equal(snapshot?.type === "session_runtime_updated" && snapshot.snapshot.worktrees?.[0]?.pullRequest?.url, OPEN_PULL_REQUEST.url);
+
+    // After a restart, reconciliation keeps the link current. A merged pull request is recorded,
+    // and the worktree, still the person's, stays exactly as it was.
+    await waitFor(() => h.store.readMeta(h.sessionId)?.status === "idle", "the continuation did not finish");
+    const restarted = h.restartRunner();
+    const head = git(busy, "rev-parse", "HEAD");
+    reusedLookupOf(restarted.manager).discoverAttachedWorktreePullRequest = async () => assert.fail("a linked row is not looked up again");
+    reusedLookupOf(restarted.manager).resolveWorktreePullRequestState = async () => ({ state: "merged", headOid: head });
+    await restarted.manager.reconcileWorktreePullRequests();
+    await restarted.manager.reconcileWorktreePullRequests();
+    const merged = restarted.store.readMeta(h.sessionId)!;
+    assert.deepEqual(merged.worktrees?.map((worktree) => [worktree.path, worktree.source, worktree.pullRequest?.state, worktree.pullRequest?.headOid]),
+      [[busy, "attached", "merged", head]]);
+    assert.equal(merged.worktreePath, busy);
+    assert.deepEqual(files(busy), before);
+    assert.equal(git(busy, "status", "--porcelain=v1", "--untracked-files=all"), status);
+    assert.equal(git(busy, "rev-parse", "--abbrev-ref", "HEAD"), "fix/install-link");
+  });
+});
+
+test("reconciliation links a reused worktree's pull request the lookup after the move could not, and backs off an empty answer", async () => {
+  await withSession("reuse-reconciles-pr", async (h) => {
+    await establishConversation(h);
+    const busy = busyWorktree(h);
+    const before = files(busy);
+    reusedLookupOf(h.manager).discoverAttachedWorktreePullRequest = async (_path, _branch, options) => {
+      options.onForgeAttempt?.("identity");
+      options.onForgeUnavailable?.();
+      return null;
+    };
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.fake.prompts.length === 2 && h.store.readMeta(h.sessionId)?.status === "idle", "the switch did not finish");
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    assert.equal(h.store.readMeta(h.sessionId)!.worktrees![0]!.pullRequest, undefined, "nothing is linked when the forge cannot answer");
+
+    const restarted = h.restartRunner();
+    const lookup = reusedLookupOf(restarted.manager);
+    let now = 1_000_000;
+    lookup.worktreePullRequestDiscoveryNow = () => now;
+    let answer: unknown = null;
+    let asked = 0;
+    lookup.discoverAttachedWorktreePullRequest = async (_path, branch, options) => {
+      assert.equal(branch, "fix/install-link");
+      if (options.onForgeAttempt?.("identity") === false) return null;
+      asked++;
+      return answer;
+    };
+    // The forge answers that the branch has no pull request: asked once, then not again for a while.
+    await restarted.manager.reconcileWorktreePullRequests();
+    await restarted.manager.reconcileWorktreePullRequests();
+    assert.equal(asked, 1);
+    assert.equal(restarted.store.readMeta(h.sessionId)!.worktrees![0]!.pullRequest, undefined);
+    // Once the backoff ends, the pull request opened meanwhile is linked.
+    now += 31 * 60 * 1_000;
+    answer = OPEN_PULL_REQUEST;
+    await restarted.manager.reconcileWorktreePullRequests();
+    assert.equal(asked, 2);
+    assert.deepEqual(restarted.store.readMeta(h.sessionId)!.worktrees!.map((worktree) => [worktree.path, worktree.pullRequest?.url]),
+      [[busy, OPEN_PULL_REQUEST.url]]);
+    assert.deepEqual(files(busy), before);
+  });
+});
+
+test("a switch to a branch a stopped session's worktree has says how to continue in that session, and changes nothing about it", async () => {
+  await withSession("stopped-holder", async (h) => {
+    await establishConversation(h);
+    const busy = busyWorktree(h);
+    const before = files(busy);
+    const status = git(busy, "status", "--porcelain=v1", "--untracked-files=all");
+    const holder = "s_location_the_stopped_one";
+    h.store.create({ ...h.store.readMeta(h.sessionId)!, sessionId: holder, workspaceId: "docs", repoPath: h.docs, status: "stopped",
+      agentSessionId: "holder-conversation", worktreePath: busy, worktreeBranch: "fix/install-link",
+      worktrees: [{ id: "held", path: busy, branch: "fix/install-link", source: "attached" }] });
+    h.store.flush(holder);
+    const failure = async (occurrenceId: string) => {
+      assert.deepEqual(await h.manager.requestLocationSwitch(h.message({ occurrenceId })), { ok: true });
+      await waitFor(() => !h.store.readMeta(h.sessionId)?.pendingLocationSwitch && !!h.store.readMeta(h.sessionId)?.locationSwitchFailure,
+        "the refusal was not recorded");
+      const reason = h.store.readMeta(h.sessionId)!.locationSwitchFailure!.reason!;
+      h.store.patchMeta(h.sessionId, { locationSwitchFailure: undefined });
+      return reason;
+    };
+    const holderBefore = JSON.stringify(h.store.readMeta(holder));
+    assert.equal(await failure("occurrence-1"), "the target worktree could not be prepared: branch fix/install-link is checked out in " +
+      `worktree ${busy}, which session ${holder} still owns although it is not running. To continue the task there, send session ` +
+      `${holder} a message so it resumes in its own worktree; its work and pull request stay with it. Nothing about that session or its ` +
+      "worktree has changed");
+    assert.equal(JSON.stringify(h.store.readMeta(holder)), holderBefore, "the stopped session's record is exactly as it was");
+
+    // A stopped session that kept the worktree from an earlier Location is asked to switch back.
+    h.store.patchMeta(holder, { workspaceId: "app", repoPath: h.app, worktreePath: null, worktreeBranch: undefined, worktrees: [],
+      locationHistory: [{ occurrenceId: "earlier", workspaceId: "docs", repoPath: h.docs, worktreePath: busy, worktreeBranch: "fix/install-link",
+        worktrees: [{ id: "held", path: busy, branch: "fix/install-link", source: "attached" }], switchedAt: 1, toWorkspaceId: "app" }] });
+    h.store.flush(holder);
+    const earlierBefore = JSON.stringify(h.store.readMeta(holder));
+    assert.equal(await failure("occurrence-2"), "the target worktree could not be prepared: branch fix/install-link is checked out in " +
+      `worktree ${busy}, which session ${holder} kept from an earlier Location and is not running. To continue the task there, send ` +
+      `session ${holder} a message and have it switch back to this Location; its work and pull request stay with it. Nothing about ` +
+      "that session or its worktree has changed");
+    assert.equal(JSON.stringify(h.store.readMeta(holder)), earlierBefore);
+
+    // Running in another Location, it has to switch back.
+    h.store.patchMeta(holder, { status: "running" });
+    h.store.flush(holder);
+    assert.equal(await failure("occurrence-3"), "the target worktree could not be prepared: branch fix/install-link is checked out in " +
+      `worktree ${busy}, which session ${holder} has from an earlier Location and is running in another Location now. To continue ` +
+      `the task there, have session ${holder} switch back to this Location; its work and pull request stay with it. Nothing about ` +
+      "that session or its worktree has changed");
+    // A holder running in that worktree is refused as before.
+    h.store.patchMeta(holder, { workspaceId: "docs", repoPath: h.docs, worktreePath: busy, worktreeBranch: "fix/install-link",
+      worktrees: [{ id: "held", path: busy, branch: "fix/install-link", source: "attached" }], locationHistory: undefined });
+    h.store.flush(holder);
+    assert.equal(await failure("occurrence-4"), "the target worktree could not be prepared: branch fix/install-link is checked out in " +
+      `worktree ${busy}, which session ${holder} is using; continue the task in that session instead, so the work and its pull request stay with it`);
+    const meta = h.store.readMeta(h.sessionId)!;
+    assert.equal(meta.repoPath, h.app, "the session stays where it was");
+    assert.deepEqual(files(busy), before);
+    assert.equal(git(busy, "status", "--porcelain=v1", "--untracked-files=all"), status);
+  });
+});
+
+test("an agent's own attach of another session's worktree is refused with that session named, and nothing about either changes", async () => {
+  await withSession("attach-held", async (h) => {
+    await establishConversation(h);
+    h.manager.setConfiguredProjectPaths([h.app, h.docs]);
+    reusedLookupOf(h.manager).discoverAttachedWorktreePullRequest = async () => null;
+    const held = join(h.app, "..", "app-held");
+    git(h.app, "worktree", "add", "--quiet", "-b", "fix/held", held);
+    writeFileSync(join(held, "notes.txt"), "the holder's uncommitted notes\n");
+    const path = realpathSync(held);
+    const before = files(path);
+    const holder = "s_location_attach_holder";
+    h.store.create({ ...h.store.readMeta(h.sessionId)!, sessionId: holder, status: "stopped", agentSessionId: "holder-conversation",
+      worktreePath: path, worktreeBranch: "fix/held", worktrees: [{ id: "held", path, branch: "fix/held", source: "created" }] });
+    h.store.flush(holder);
+    const holderBefore = JSON.stringify(h.store.readMeta(holder));
+    const ownBefore = JSON.stringify(h.store.readMeta(h.sessionId)!.worktrees ?? []);
+    const attach = () => h.manager.attachWorktree(h.sessionId, path, { requestedBySession: true });
+    const unchanged = () => {
+      assert.equal(JSON.stringify(h.store.readMeta(holder)), holderBefore);
+      assert.equal(JSON.stringify(h.store.readMeta(h.sessionId)!.worktrees ?? []), ownBefore);
+      assert.deepEqual(files(path), before);
+    };
+    await assert.rejects(attach(), { message: `the worktree at ${path} belongs to session ${holder}, which is not running. To continue ` +
+      `the task there, send session ${holder} a message so it resumes in its own worktree; its work and pull request stay with it. ` +
+      "Nothing about that session or its " +
+      "worktree has changed" });
+    unchanged();
+    // This session's own record of the worktree, listed before the other session's, hides nothing.
+    assert.equal(h.store.listSessions()[0]?.sessionId, h.sessionId);
+    h.store.patchMeta(h.sessionId, { locationHistory: [{ occurrenceId: "own-earlier", workspaceId: "app", repoPath: h.app, worktreePath: path,
+      worktrees: [], switchedAt: 1, toWorkspaceId: "app" }] });
+    h.store.flush(h.sessionId);
+    await assert.rejects(attach(), /belongs to session s_location_attach_holder, which is not running/u);
+    unchanged();
+    h.store.patchMeta(holder, { status: "running" });
+    h.store.flush(holder);
+    await assert.rejects(attach(), { message: `the worktree at ${path} is in use by session ${holder}; continue the task in that ` +
+      "session instead, so the work and its pull request stay with it. Nothing about that session or its worktree has changed" });
+    h.store.patchMeta(holder, { status: "stopped", worktreePath: null, worktrees: [], locationHistory: [{ occurrenceId: "earlier",
+      workspaceId: "app", repoPath: h.app, worktreePath: path, worktrees: [{ id: "held", path, branch: "fix/held", source: "created" }],
+      switchedAt: 1, toWorkspaceId: "docs" }] });
+    h.store.flush(holder);
+    await assert.rejects(attach(), /send session s_location_attach_holder a message and have it switch back to this Location;/u);
+    // Running, but in another Location: it has to switch back.
+    h.store.patchMeta(holder, { status: "running" });
+    h.store.flush(holder);
+    await assert.rejects(attach(), { message: `the worktree at ${path} belongs to session ${holder}, which is running in another ` +
+      `Location now. To continue the task there, have session ${holder} switch back to this Location; its work and pull request ` +
+      "stay with it. Nothing about that session or its worktree has changed" });
+    assert.deepEqual(files(path), before);
+    // Another session's switch that chose it and has not recorded it yet holds it too.
+    h.store.remove(holder);
+    const claims = (h.manager as unknown as { reusedWorktreeClaims: Map<string, string> }).reusedWorktreeClaims;
+    claims.set(path, "s_location_racing");
+    await assert.rejects(attach(), /is in use by session s_location_racing;/u);
+    claims.clear();
+    assert.equal(JSON.stringify(h.store.readMeta(h.sessionId)!.worktrees ?? []), ownBefore);
+    assert.deepEqual(files(path), before);
+
+    // With no holder the attach goes ahead, holding the claim while it activates, so no switch or
+    // other attach takes the worktree in between, and the session's own record holds it afterwards.
+    const internals = h.manager as unknown as { activateWorktreeWithNotice: (...args: unknown[]) => Promise<unknown> };
+    const activate = internals.activateWorktreeWithNotice.bind(h.manager);
+    let claimedWhileActivating: string | undefined;
+    internals.activateWorktreeWithNotice = async (...args) => {
+      claimedWhileActivating = claims.get(path);
+      return activate(...args);
+    };
+    const attached = await attach();
+    assert.equal(claimedWhileActivating, h.sessionId);
+    assert.equal(claims.size, 0);
+    assert.deepEqual([attached.worktree.path, attached.worktree.source], [path, "attached"]);
+    assert.deepEqual(files(path), before);
+  });
+});
+
+test("an attached worktree gets its branch's pull request linked, whoever attached it, and once merged it still removes nothing", async () => {
+  await withSession("attach-links-pr", async (h) => {
+    await establishConversation(h);
+    h.manager.setConfiguredProjectPaths([h.app, h.docs]);
+    const existing = (name: string, branch: string) => {
+      const path = join(h.app, "..", name);
+      git(h.app, "worktree", "add", "--quiet", "-b", branch, path);
+      writeFileSync(join(path, "notes.txt"), `uncommitted notes on ${branch}\n`);
+      return realpathSync(path);
+    };
+    const agents = existing("app-agent", "fix/x");
+    const persons = existing("app-person", "fix/y");
+    const before = { agents: files(agents), persons: files(persons) };
+    const pull = (number: number) => ({ url: `https://github.com/acme/app/pull/${number}`, state: "open", provider: "github",
+      kind: "pull_request" });
+    const asked: string[][] = [];
+    reusedLookupOf(h.manager).discoverAttachedWorktreePullRequest = async (path, branch, options) => {
+      asked.push([path, branch]);
+      options.onForgeAttempt?.("identity");
+      if (path === persons) {
+        options.onForgeUnavailable?.();
+        return null;
+      }
+      return pull(12);
+    };
+    const row = (store: SessionStore, path: string) => store.readMeta(h.sessionId)!.worktrees!.find((item) => item.path === path);
+
+    // An agent's own attach of an existing worktree links its branch's open pull request.
+    await h.manager.attachWorktree(h.sessionId, agents, { requestedBySession: true });
+    await waitFor(() => row(h.store, agents)?.pullRequest !== undefined, "the agent's attach did not link the pull request");
+    assert.deepEqual([row(h.store, agents)!.source, row(h.store, agents)!.pullRequest], ["attached", pull(12)]);
+    // A person's attach is looked up too. The forge cannot answer now, so nothing is linked yet.
+    await h.manager.attachWorktree(h.sessionId, persons);
+    await waitFor(() => asked.length === 2, "the person's attach was not looked up");
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    assert.equal(row(h.store, persons)!.pullRequest, undefined);
+    assert.deepEqual(asked, [[agents, "fix/x"], [persons, "fix/y"]]);
+
+    // After a restart, reconciliation links it, and the linked one is not asked about again.
+    await waitFor(() => h.store.readMeta(h.sessionId)?.status === "idle", "the session did not settle");
+    const restarted = h.restartRunner();
+    const lookup = reusedLookupOf(restarted.manager);
+    const askedAfter: string[] = [];
+    lookup.discoverAttachedWorktreePullRequest = async (path) => {
+      askedAfter.push(path);
+      return pull(13);
+    };
+    await restarted.manager.reconcileWorktreePullRequests();
+    assert.deepEqual(askedAfter, [persons]);
+    assert.deepEqual(row(restarted.store, persons)!.pullRequest, pull(13));
+    // Merged, both stay where they are, exactly as they were.
+    lookup.resolveWorktreePullRequestState = async () => ({ state: "merged", headOid: "a".repeat(40) });
+    await restarted.manager.reconcileWorktreePullRequests();
+    await restarted.manager.reconcileWorktreePullRequests();
+    assert.deepEqual(restarted.store.readMeta(h.sessionId)!.worktrees!.filter((item) => item.source === "attached")
+      .map((item) => [item.path, item.pullRequest?.state]), [[agents, "merged"], [persons, "merged"]]);
+    assert.deepEqual({ agents: files(agents), persons: files(persons) }, before);
+  });
 });
