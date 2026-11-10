@@ -10268,9 +10268,13 @@ export class ControlPlaneDb {
    * recorded without one (`unreadNow`), names one of these Locations. */
   private campaignRootIdsRecording(locationIds: ReadonlySet<string>): string[] {
     const ids = JSON.stringify([...locationIds]);
+    // Only an object element is read: json_valid checks the whole document, and json_extract throws on
+    // an element that is a string, which would stop every campaign's lookup (review round 3).
     return (this.stmt(`SELECT id FROM sessions WHERE parent_session_id IS NULL AND CASE WHEN json_valid(orchestrator_policy) THEN
-        EXISTS (SELECT 1 FROM json_each(orchestrator_policy, '$.unreadLocations') item WHERE json_extract(item.value, '$.locationId') IN (SELECT value FROM json_each(?)))
-        OR EXISTS (SELECT 1 FROM json_each(orchestrator_policy, '$.excludedLocations') item WHERE json_extract(item.value, '$.locationId') IN (SELECT value FROM json_each(?)))
+        EXISTS (SELECT 1 FROM json_each(orchestrator_policy, '$.unreadLocations') item
+          WHERE CASE WHEN item.type='object' THEN json_extract(item.value, '$.locationId') END IN (SELECT value FROM json_each(?)))
+        OR EXISTS (SELECT 1 FROM json_each(orchestrator_policy, '$.excludedLocations') item
+          WHERE CASE WHEN item.type='object' THEN json_extract(item.value, '$.locationId') END IN (SELECT value FROM json_each(?)))
       ELSE 0 END`).all(ids, ids) as Array<{ id: string }>).map(({ id }) => id);
   }
 

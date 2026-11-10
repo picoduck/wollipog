@@ -9647,6 +9647,27 @@ test("a root that leaves its Project keeps its unread refusal, by reassignment o
   }
 });
 
+test("a malformed element in another campaign's records doesn't break finding the campaigns that count a Location (#4319 review round 3)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  registerBelow(f);
+  failBelowReads(f);
+  try {
+    // Another root whose stored records hold elements that aren't objects, in a valid document.
+    f.db.raw().prepare(`INSERT INTO sessions (id, runner_id, workspace_id, agent_id, driver, title, status, created_at, updated_at, orchestrator_policy)
+      SELECT 'malformed-root', runner_id, workspace_id, agent_id, driver, 'malformed', 'running', created_at, updated_at, ? FROM sessions WHERE id=?`)
+      .run(JSON.stringify({ ...c.policy(), unreadLocations: ["bad", 7, null], excludedLocations: ["bad"] }), c.rootId);
+    const child = childAt(f, c.rootId, "r", "w");
+    const covered = await approvedFollowUp(f, c.rootId, child, "elsewhere/repo", "covered-beside-malformed");
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(below.id, f.human);
+    await c.locations.runnerReconnected("below");
+    await stillUnread(f, c.rootId, child, "beside a malformed record");
+    f.db.removeProjectLocation(below.id);
+    assert.equal(statusOf(f, covered), "revoked", "the removal still finds the campaign that counted it");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
 test("the unread retry settles what it revokes even when the campaign has no owning person (#4319, Orchestrator's read of 5c6f47d, 3)", async () => {
   const f = fixture();
   const c = await launchedMultiRepositoryCampaign(f);
