@@ -12321,11 +12321,10 @@ export class SessionsService {
     // Asking anyone to approve what no login may carry out helps no one (#4319). The exception replaces
     // an armed merge left out after arming, which is how its session gets its shell back.
     const requesting = normalized.ok && normalized.data ? this.db.getSession(sessionId) : null;
-    const refusal = requesting && normalized.data ? this.excludedRepositoryRefusalDetail(requesting, null, normalized.data) : null;
-    // Not for a boundary repository whose runners all dropped below the floor (#4319 follow-on A): that
-    // block lifts by itself when one updates, so no replacement is needed, and refusing it keeps every
-    // request made while it stands refused, which is why its lift has nothing to revoke.
-    const excludedRepository = refusal && (refusal.entryBelow || !this.armedMergesOf(requesting!, normalized.data!).length) ? refusal.sentence : null;
+    // A boundary repository whose runners all dropped below the floor admits no replacement either; that
+    // is refused where the decision is created, after every await (#4319 follow-on A).
+    const excludedRepository = requesting && normalized.data && !this.armedMergesOf(requesting, normalized.data).length
+      ? this.excludedRepositoryRefusal(requesting, null, normalized.data) : null;
     if (excludedRepository) return fail(excludedRepository, 409);
     if (normalized.ok && normalized.data?.category === "follow_up_issue_publication" && normalized.data.recommendationId) {
       if (normalized.data.issueAdmission) return this.createWorkflowDecision(sessionId, request, canAccess);
@@ -14776,7 +14775,12 @@ export class SessionsService {
     const resourceDigest = workflowDecisionResourceDigest(normalized.data);
     // #4319: the refusal tells a blocked session to ask again for this pull request, under whatever
     // key it chooses, so the armed merge left out after arming is replaced by name, not by key.
-    const replacedArmed = child && this.excludedRepositoryRefusal(child, controller.session, normalized.data) ? this.armedMergesOf(child, normalized.data) : [];
+    const refusalNow = child ? this.excludedRepositoryRefusalDetail(child, controller.session, normalized.data) : null;
+    // Read again here, after every await before it (review round 2): a boundary repository whose runners
+    // all dropped below the floor admits no request at all while it stands, a replacement included
+    // (#4319 follow-on A), so none can supersede the armed merge or be approved during the drop.
+    if (refusalNow?.entryBelow) return { ok: false, status: 409, error: refusalNow.sentence };
+    const replacedArmed = refusalNow ? this.armedMergesOf(child!, normalized.data) : [];
     const created = this.db.createWorkflowDecision({
       requestId: request.requestId,
       occurrenceId: `workflow_${randomUUID().replace(/-/gu, "")}`,
@@ -15316,6 +15320,14 @@ export class SessionsService {
           ? { message: resolution.childMessage ?? "Full Control declined this question as a request for credentials, sign-in or access." }
           : undefined);
       return answered.ok ? ok(this.db.workflowDecisionByOccurrence(occurrenceId)!) : failAs(answered);
+    }
+    // Nothing is approved in a boundary repository whose runners all dropped below the floor while that
+    // stands (#4319 follow-on A, review round 2): a request made before the drop waits, and can be
+    // approved once a runner updates. So its lift, read live, has nothing approved during it to revoke.
+    if (decision && resolution?.outcome === "approve" && decision.sessionId === childSessionId) {
+      const requester = this.db.getSession(childSessionId);
+      const refusal = requester ? this.excludedRepositoryRefusalDetail(requester, null, decision.resourceSnapshot) : null;
+      if (refusal?.entryBelow) return fail(refusal.sentence, 409);
     }
     if (decision?.category === "automation_creation") {
       if (decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||

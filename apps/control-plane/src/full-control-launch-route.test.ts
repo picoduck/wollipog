@@ -8372,7 +8372,8 @@ async function mergeHeldAtPreflight(f: ReturnType<typeof fixture>) {
     return action;
   };
   return { ...c, child, snapshot: asked.data!.resourceSnapshot, occurrenceId: asked.data!.occurrenceId, resourceDigest: asked.data!.resourceDigest, actions,
-    holdReads: (value: boolean) => { hold = value; held = null; }, excludeDuringTheRead };
+    holdReads: (value: boolean) => { hold = value; held = null; }, excludeDuringTheRead,
+    isHeld: () => held !== null, release: () => { const answer = held; held = null; (answer as (() => void) | null)?.(); } };
 }
 const armMerge = (f: ReturnType<typeof fixture>, m: Awaited<ReturnType<typeof mergeHeldAtPreflight>>) => f.sessions.consumeWorkflowDecision(m.child, m.occurrenceId,
   { resourceSnapshot: m.snapshot, action: { kind: "pr_merge_enqueue", command: "gh pr merge https://github.com/below/repo/pull/8 --squash --match-head-commit " + "b".repeat(40) } });
@@ -10277,7 +10278,15 @@ test("a repository in the boundary whose every Location's runner drops below the
     const earlier = await ask(f, m.child, mergeIn("other/repo"), "other-merge-earlier");
     assert.equal(earlier.ok, true, earlier.error ?? "");
     assert.equal(personApproves(f, m.rootId, m.child, earlier.data!.occurrenceId).ok, true);
+    // Requested while it could, and still waiting for a person when r2 drops.
+    const waiting = await ask(f, m.child, deletionIn("other/repo"), "other-deletion-waiting");
+    assert.equal(waiting.ok, true, waiting.error ?? "");
     registerSecondMachine(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1);
+    // Nothing is approved while it stands (review round 2): that request waits for a runner's update.
+    const approvedDuring = personApproves(f, m.rootId, m.child, waiting.data!.occurrenceId);
+    assert.equal(approvedDuring.ok, false, "no approval during the drop");
+    assert.match(approvedDuring.error!, ENTRY_BELOW);
+    assert.equal(statusOf(f, waiting.data!.occurrenceId), "pending");
     for (const [snapshot, id] of [[mergeIn("other/repo"), "other-merge"], [deletionIn("other/repo"), "other-deletion"]] as const) {
       const refused = await ask(f, m.child, snapshot, id);
       assert.equal(refused.ok, false, `${id}: the requester's login doesn't stand in`);
@@ -10295,6 +10304,7 @@ test("a repository in the boundary whose every Location's runner drops below the
     registerSecondMachine(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
     const again = await ask(f, m.child, mergeIn("other/repo"), "other-merge-again");
     assert.equal(again.ok, true, again.error ?? "");
+    assert.equal(personApproves(f, m.rootId, m.child, waiting.data!.occurrenceId).ok, true, "the waiting request can be approved now");
   } finally { await m.server.close(); f.db.close(); }
 });
 
@@ -10319,6 +10329,19 @@ test("an armed merge in a boundary repository whose runners all drop below the f
     assert.equal(replacement.ok, false, "a replacement is refused like any request");
     assert.match(replacement.error!, ENTRY_BELOW);
     assert.equal(f.db.workflowDecisionByOccurrence(asked.data!.occurrenceId)!.status, "approved", "and the armed merge stays as it was");
+    // Nor one whose forge read was under way when the runner dropped (review round 2).
+    registerSecondMachine(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    m.holdReads(true);
+    const midway = ask(f, m.child, mergeIn("other/repo"), "other-merge-midway");
+    for (let tick = 0; tick < 200 && !m.isHeld(); tick += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.ok(m.isHeld(), "its GitHub read is being held");
+    registerSecondMachine(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1);
+    m.release();
+    const dropped = await midway;
+    assert.equal(dropped.ok, false, "the drop during its read refuses it");
+    assert.match(dropped.error!, ENTRY_BELOW);
+    assert.equal(f.db.workflowDecisionByOccurrence(asked.data!.occurrenceId)!.status, "approved", "and it superseded nothing");
+    m.holdReads(false);
     registerSecondMachine(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
     assert.notEqual(childHook(f, m.child, "entry-current").data?.decision, "deny");
   } finally { await m.server.close(); f.db.close(); }
