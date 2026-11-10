@@ -14216,28 +14216,43 @@ export class SessionsService {
       this.db.issueScopeUnchangedFor(session.id, snapshot.repository, snapshot.issue, snapshot.scopeRevision, scope.revision);
   }
 
+  /** Age is not an authority binding. Share diagnostics across asynchronous preparation (#4403). */
+  private closureApprovalChange(sessionId: string, decision: WorkflowDecisionView,
+    snapshot: GithubIssueClosureSnapshot, resourceDigest: string): string | null {
+    const session = this.db.getSession(sessionId);
+    if (!session || sessionRole(session) !== "orchestrator" || isTerminal(session.status) ||
+        this.db.resolvedCampaignSessionId(sessionId) !== sessionId) return "campaign session changed";
+    if (decision.resourceDigest !== resourceDigest) return "payload digest changed";
+    if (!decision.resolvedAt) return "approval resolution is missing";
+    if (!campaignClosureIssueHeld(session.orchestratorPolicy, { repository: snapshot.repository, number: snapshot.issue }) ||
+        !this.closureScopeCurrent(session, snapshot)) return "issue scope changed";
+    if (!session.parentControlPolicy || decision.policyRevision !== session.parentControlPolicy.revision) return "policy revision changed";
+    if (!this.workflowDecisionAuthorityCurrent(session, session.parentControlPolicy, decision)) return "approval authority changed";
+    if (auditDigest(issueClosureActiveChildren(this.db, sessionId, { repository: snapshot.repository, number: snapshot.issue })) !==
+        auditDigest(snapshot.activeChildren)) return "active child work changed";
+    return null;
+  }
+
   /** Whether a closure prepared at a Location may still go on (#4119): every campaign condition its
    * approval depends on, read after the Location's forge checks. Synchronous, so nothing can change
    * between the answer and the commit. */
-  private closureCommitAuthorized(sessionId: string, decision: WorkflowDecisionView, snapshot: GithubIssueClosureSnapshot,
-    synchronizedScopeRevision: number | undefined, runnerId: string, location: GithubIssueClosureLocation): boolean {
+  private closureCommitChange(sessionId: string, decision: WorkflowDecisionView, snapshot: GithubIssueClosureSnapshot,
+    synchronizedScopeRevision: number | undefined, runnerId: string, location: GithubIssueClosureLocation): string | null {
+    const bindingChange = this.closureApprovalChange(sessionId, decision, snapshot, decision.resourceDigest);
+    if (bindingChange) return bindingChange;
     const session = this.db.getSession(sessionId);
-    if (!session || isTerminal(session.status) || !campaignClosureIssueHeld(session.orchestratorPolicy, { repository: snapshot.repository, number: snapshot.issue }) ||
-        session.orchestratorPolicy?.issueScope?.revision !== synchronizedScopeRevision || !this.closureScopeCurrent(session, snapshot) ||
-        !session.parentControlPolicy || decision.policyRevision !== session.parentControlPolicy.revision ||
-        !this.workflowDecisionAuthorityCurrent(session, session.parentControlPolicy, decision) ||
-        auditDigest(issueClosureActiveChildren(this.db, sessionId, { repository: snapshot.repository, number: snapshot.issue })) !== auditDigest(snapshot.activeChildren) ||
-        this.pendingPolicyAsk(session) || pendingRequests(session.pendingApproval).some((request) => request.kind !== "workflow_decision") ||
-        this.db.listOpenPolicyHookApprovals(sessionId).length || this.gateOnPolicy(sessionId, Date.now())) return false;
+    if (!session || session.orchestratorPolicy?.issueScope?.revision !== synchronizedScopeRevision) return "synchronized issue scope changed";
+    if (this.pendingPolicyAsk(session) || pendingRequests(session.pendingApproval).some((request) => request.kind !== "workflow_decision") ||
+        this.db.listOpenPolicyHookApprovals(sessionId).length || this.gateOnPolicy(sessionId, Date.now())) return "session guardrails changed";
     if (decision.authority === "orchestrator" && (scopeCompatibility(this.db, session) ||
-        issueEvidenceDigest(closureEvidence(this.db, session, snapshot)) !== snapshot.issueAdmission?.evidenceDigest)) return false;
+        issueEvidenceDigest(closureEvidence(this.db, session, snapshot)) !== snapshot.issueAdmission?.evidenceDigest)) return "verified delivery changed";
     // The Location must still be one of that repository's, at the path the checks ran in.
     const entry = campaignScopeRepositories(session).find((candidate) => candidate.repository === location.repository);
-    return Boolean(entry?.locationIds.some((id) => {
+    return entry?.locationIds.some((id) => {
       const current = this.db.getProjectLocation(id);
       return current && current.availability !== "runner_removed" && current.projectId === session.projectId && current.runnerId === runnerId &&
         current.workspaceId === location.workspaceId && this.db.getWorkspacePath(runnerId, current.workspaceId) === location.workspacePath;
-    }));
+    }) ? null : "repository Location changed";
   }
 
   async executeGithubIssueClosure(
@@ -14257,16 +14272,10 @@ export class SessionsService {
     const session = this.db.getSession(sessionId);
     const snapshot = decision.resourceSnapshot;
     const now = Date.now();
-    const issueRef = { repository: snapshot.repository, number: snapshot.issue };
-    if (!session || sessionRole(session) !== "orchestrator" || isTerminal(session.status) ||
-        !campaignClosureIssueHeld(session.orchestratorPolicy, issueRef) || !this.closureScopeCurrent(session, snapshot) ||
-        this.db.resolvedCampaignSessionId(sessionId) !== sessionId ||
-        !this.workflowDecisionAuthorityCurrent(session, session.parentControlPolicy!, decision) || decision.policyRevision !== session.parentControlPolicy?.revision ||
-        decision.resourceDigest !== resourceDigest || !decision.resolvedAt || now - decision.resolvedAt > 30 * 60_000 ||
-        auditDigest(issueClosureActiveChildren(this.db, sessionId, { repository: snapshot.repository, number: snapshot.issue })) !==
-          auditDigest(snapshot.activeChildren)) {
+    const changed = this.closureApprovalChange(sessionId, decision, snapshot, resourceDigest);
+    if (changed || !session) {
       this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
-      return fail("issue-closure approval expired or its scope, payload, policy, or active child work changed; request renewed human review", 409);
+      return fail(`Issue-closure approval refused: ${changed ?? "campaign session changed"}; request renewed exact review`, 409);
     }
     const unsupported = this.capabilityFailure(session.runnerId, "orchestratorIssueClosure", "human-approved issue closure");
     if (unsupported) return unsupported;
@@ -14316,13 +14325,11 @@ export class SessionsService {
       return fail("Approval retired. An excluded closed pull request could not be confirmed still closed and unmerged; request a new exact closure", 409);
     }
     const freshSession = this.db.getSession(sessionId);
-    if (!freshSession || isTerminal(freshSession.status) || !campaignClosureIssueHeld(freshSession.orchestratorPolicy, issueRef) ||
-        !this.closureScopeCurrent(freshSession, snapshot) ||
-        !this.workflowDecisionAuthorityCurrent(freshSession, freshSession.parentControlPolicy!, decision) ||
-        auditDigest(issueClosureActiveChildren(this.db, sessionId, { repository: snapshot.repository, number: snapshot.issue })) !== auditDigest(snapshot.activeChildren) ||
+    const synchronizedChange = this.closureApprovalChange(sessionId, decision, snapshot, resourceDigest);
+    if (synchronizedChange || !freshSession ||
         decision.authority === "orchestrator" && (scopeCompatibility(this.db, freshSession) || issueEvidenceDigest(closureEvidence(this.db, freshSession, snapshot)) !== snapshot.issueAdmission?.evidenceDigest)) {
       this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
-      return fail("Campaign authority, work or delivery changed during synchronization; approval retired; request renewed exact review.", 409);
+      return fail(`Issue-closure approval refused: ${synchronizedChange ?? "verified delivery changed during synchronization"}; request renewed exact review`, 409);
     }
     // An unrelated scope addition only needs another synchronization, not renewed approval.
     if (freshSession.orchestratorPolicy?.issueScope?.revision !== synchronizedScopeRevision) {
@@ -14331,7 +14338,7 @@ export class SessionsService {
     const settled = Date.now();
     // Read again as the last step before consumption: the Location must still be one of the repository's.
     const target = this.closureTarget(freshSession, snapshot.repository);
-    if (this.db.workflowDecisionByOccurrence(occurrenceId)?.status !== "approved" || settled - decision.resolvedAt > 30 * 60_000 ||
+    if (this.db.workflowDecisionByOccurrence(occurrenceId)?.status !== "approved" ||
         decision.policyRevision !== freshSession.parentControlPolicy?.revision || !this.hub.isRunnerOnline(session.runnerId) || !target ||
         this.pendingPolicyAsk(freshSession) || pendingRequests(freshSession.pendingApproval).some((request) => request.kind !== "workflow_decision") ||
         this.db.listOpenPolicyHookApprovals(sessionId).length || this.gateOnPolicy(sessionId, settled)) {
@@ -14363,9 +14370,10 @@ export class SessionsService {
         // The forge reads took time. This runner holds no copy of the campaign's scope, so the checks
         // the root's runner makes at its own mutation fence are made here, with nothing awaited
         // between them and the commit.
-        if (!this.closureCommitAuthorized(sessionId, decision, snapshot, synchronizedScopeRevision, target.runnerId, target.location)) {
+        const commitChange = this.closureCommitChange(sessionId, decision, snapshot, synchronizedScopeRevision, target.runnerId, target.location);
+        if (commitChange) {
           response = { type: "github_issue_closure_result", requestId, sessionId, ok: false, failure: "campaign_authority_changed",
-            error: "The campaign's scope, authority or work changed while the Location's checks ran; nothing was written." };
+            error: `Issue-closure approval refused: ${commitChange} while the Location's checks ran; nothing was written.` };
           this.log.info(JSON.stringify({ event: "campaign_issue_closure_authority_changed", entryPoint: "closure_commit", sessionId, occurrenceId, outcome: "refused" }));
         } else {
           mayHaveWritten = true;

@@ -176,6 +176,12 @@ one keyword, reads code and the title, and may differ per instance, so GitLab's 
 a merge request closes decides where it disagrees with Wollipog's match. Delivery comments compare every
 acceptance criterion and cite the actual merge commit; report remaining original work candidly.
 
+An approved issue closure does not expire on age alone. Execution rechecks its payload digest,
+issue scope, policy revision, authority, bound child work, delivery proof and forge evidence.
+A changed binding refuses the approval; the refusal identifies the condition that changed.
+Human-owned closures remain human-owned. Offline runners and temporary evidence-read failures
+retain their existing retry and recovery rules; an approval is never proof of forge execution.
+
 An uncertain consumed issue closure is recovered by the server's read-only forge reconciliation
 (runner protocol 355+). It never repeats the comment or closure. The issue must read closed with
 the approved state reason and a unique exact-body comment by the runner's forge login, posted
