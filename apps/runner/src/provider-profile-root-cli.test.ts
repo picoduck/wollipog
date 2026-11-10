@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { runProfileRootCli, type ProfileRootCliHost } from "./provider-profile-root-cli.js";
+import { defaultProfileRootCliHost, runProfileRootCli, type ProfileRootCliHost } from "./provider-profile-root-cli.js";
 import { runWollipogCli } from "./wollipog-cli.js";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -39,6 +39,22 @@ test("one exact human response authorizes only the inspected component and snaps
     assert.equal(await runProfileRootCli(["profile-root", "repair"], cancelled.host, cancelled.io), 1);
     assert.equal(cancelled.calls.length, 1);
   }
+});
+
+test("an already-private root needs no repair, confirmation or operator warning", async () => {
+  const f = fixture();
+  f.host.run = (...args) => { f.calls.push(args); return { ok: true, component: "manager_root", reason: "private", repairable: false, identity: "1:2" }; };
+  assert.equal(await runProfileRootCli(["profile-root", "repair"], f.host, f.io), 0);
+  assert.equal(f.calls.length, 1); assert.equal(f.prompts.length, 0);
+  assert.ok(!f.output.join("").includes("operator guidance"));
+});
+
+test("a Session cannot acquire interactive consent even when both streams are TTYs", () => {
+  const terminal = { inputTTY: true, outputTTY: true };
+  assert.equal(defaultProfileRootCliHost({}, terminal).interactive, true);
+  assert.equal(defaultProfileRootCliHost({ WOLLIPOG_SESSION_ID: "synthetic-session" }, terminal).interactive, false);
+  assert.equal(defaultProfileRootCliHost({}, { inputTTY: false, outputTTY: true }).interactive, false);
+  assert.equal(defaultProfileRootCliHost({}, { inputTTY: true, outputTTY: false }).interactive, false);
 });
 test("ambiguous ACL/type/ownership states are guidance-only and never prompt or repair", async () => {
   for (const reason of ["unsupported_acl", "not_directory", "wrong_owner", "symlink", "identity_changed"]) {

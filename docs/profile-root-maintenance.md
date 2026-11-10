@@ -9,6 +9,10 @@ profile-payload option. Inspection reads directory metadata only; it does not en
 read credentials or journals, create missing directories, or change permissions. Public output
 contains an allowlisted component, reason, success flag and repairability flag. Raw filesystem
 errors, paths, UID/mode/inode values and internal snapshot tokens are not projected.
+`os_home` can identify a failing ancestor in diagnostics; it is never a selectable repair target.
+Inspection evaluates maintenance eligibility, which is deliberately stricter than account
+admission. An extended ACL or special bits can require operator guidance even when existing
+profile admission accepts the directory. Do not use maintenance eligibility as provider readiness.
 
 A person in a local interactive terminal may run `wollipog profile-root repair --component
 manager_root`. The CLI inspects again and prompts for the exact component phrase, displaying an

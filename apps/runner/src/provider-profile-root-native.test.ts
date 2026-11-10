@@ -113,8 +113,14 @@ int main(int argc, char **argv) {
   assert.equal(run("repair", "manager_root", stale.identity).reason, "not_directory");
   assert.equal(readFileSync(manager, "utf8"), "not-a-directory");
   chmodSync(home, 0o775);
-  assert.equal(run("inspect").reason, "unsafe_ancestry");
+  const unsafeHome = run("inspect");
+  assert.equal(unsafeHome.reason, "unsafe_ancestry");
+  assert.equal(unsafeHome.component, "os_home");
   chmodSync(home, 0o700);
+  execFileSync(aclSetter, [home]); chmodSync(home, 0o700);
+  const aclHome = run("inspect", "profiles_root");
+  assert.equal(aclHome.reason, "unsupported_acl");
+  assert.equal(aclHome.component, "os_home");
   // On hosts with a differently-owned OS root, exercise the actual UID guard read-only.
   // No directory under that root is opened, created, repaired or enumerated after refusal.
   if (typeof process.getuid === "function" && statSync("/").uid !== process.getuid()) {

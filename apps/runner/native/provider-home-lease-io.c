@@ -367,8 +367,8 @@ static int profile_root_command(int argc, char **argv) {
     return profile_root_result(component, "unsupported_layout");
   parent = getppid(); root_path = argv[3]; root_fd = open_root(root_path);
   if (fstat(root_fd, &root_identity) || root_identity.st_uid != getuid() || (root_identity.st_mode & 0022))
-    return profile_root_result(component, "unsafe_ancestry");
-  if (!profile_root_acl_clear(root_fd)) return profile_root_result(component, "unsupported_acl");
+    return profile_root_result("os_home", "unsafe_ancestry");
+  if (!profile_root_acl_clear(root_fd)) return profile_root_result("os_home", "unsupported_acl");
   struct stat manager, target;
   if (fstatat(root_fd, ".agent-manager", &manager, AT_SYMLINK_NOFOLLOW)) return profile_root_result(component, "unavailable");
   const char *reason = profile_root_stat_reason(&manager);

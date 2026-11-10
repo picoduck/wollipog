@@ -5,7 +5,7 @@ import { runProfileRootMetadataHelper } from "./provider-home-lease-io.js";
 
 type Component = "manager_root" | "profiles_root";
 const REASONS = new Set(["private", "repaired", "symlink", "not_directory", "wrong_owner", "group_or_other_write", "unavailable", "unsafe_ancestry", "unsupported_acl", "unsupported_platform", "unsupported_layout", "identity_changed", "may_have_changed"]);
-interface Inspection { ok: boolean; component: Component; reason: string; repairable: boolean; identity?: string }
+interface Inspection { ok: boolean; component: Component | "os_home"; reason: string; repairable: boolean; identity?: string }
 export const profileRootUsage = "profile-root inspect|repair [--component manager_root|profiles_root] [--json]";
 
 export interface ProfileRootCliHost {
@@ -15,9 +15,10 @@ export interface ProfileRootCliHost {
   confirm(prompt: string): Promise<string>;
   run(operation: "inspect" | "repair", home: string, component: Component, identity?: string): unknown;
 }
-export function defaultProfileRootCliHost(env: NodeJS.ProcessEnv): ProfileRootCliHost {
+export function defaultProfileRootCliHost(env: NodeJS.ProcessEnv,
+  terminal = { inputTTY: Boolean(process.stdin.isTTY), outputTTY: Boolean(process.stdout.isTTY) }): ProfileRootCliHost {
   return {
-    home: homedir(), platform: process.platform, interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY) && !env.WOLLIPOG_SESSION_ID,
+    home: homedir(), platform: process.platform, interactive: terminal.inputTTY && terminal.outputTTY && !env.WOLLIPOG_SESSION_ID,
     async confirm(prompt) {
       const input = createInterface({ input: process.stdin, output: process.stdout });
       try { return await input.question(prompt); } finally { input.close(); }
@@ -28,7 +29,7 @@ export function defaultProfileRootCliHost(env: NodeJS.ProcessEnv): ProfileRootCl
 function inspection(value: unknown): Inspection {
   const row = value as Partial<Inspection> | null;
   if (!row || typeof row.ok !== "boolean" || typeof row.repairable !== "boolean" ||
-    (row.component !== "manager_root" && row.component !== "profiles_root") || !REASONS.has(row.reason ?? "") ||
+    (row.component !== "manager_root" && row.component !== "profiles_root" && row.component !== "os_home") || !REASONS.has(row.reason ?? "") ||
     (row.identity !== undefined && (typeof row.identity !== "string" || !/^[0-9:-]{1,319}$/u.test(row.identity)))) {
     throw new Error("Profile root metadata response could not be verified.");
   }
@@ -64,6 +65,9 @@ export async function runProfileRootCli(args: string[], host: ProfileRootCliHost
   try {
     const before = inspection(host.run("inspect", host.home, component));
     if (operation === "inspect") { io.stdout(`${JSON.stringify(publicInspection(before))}\n`); return before.ok ? 0 : 1; }
+    if (before.ok && before.reason === "private" && before.component === component && !before.repairable) {
+      io.stdout(`${JSON.stringify(publicInspection(before))}\n`); return 0;
+    }
     if (!before.repairable || before.reason !== "group_or_other_write" || before.component !== component || !before.identity) {
       io.stdout(`${JSON.stringify(publicInspection(before))}\n`);
       io.stderr("This component cannot be repaired automatically. Preserve its contents and request operator guidance.\n"); return 1;
