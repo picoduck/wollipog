@@ -11060,11 +11060,14 @@ export class SessionsService {
    * boundary is re-minted around it (`ControlPlaneDb.setCampaignFollowUpLimit`). */
   /** Settle a repository-boundary change the campaign's owner authorized (#4117): each decision it
    * revoked leaves its requester's pause and records why, exactly as any boundary change does, and
-   * every member sees the new boundary. `before` is the root as it read before the change. */
-  settleCampaignBoundaryChange(before: SessionView, revoked: WorkflowDecisionView[], ownerUserId: string, now = Date.now()): void {
+   * every member sees the new boundary. `before` is the root as it read before the change. With no
+   * person to name (`ownerUserId` null, as for a runner's read of a campaign no person owns, #4319), it
+   * is settled and audited all the same, naming no one. */
+  settleCampaignBoundaryChange(before: SessionView, revoked: WorkflowDecisionView[], ownerUserId: string | null, now = Date.now()): void {
     for (const decision of revoked) {
       this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
-      this.recordWorkflowDecisionRevocation(decision, { reason: "campaign_control_changed", triggeredBy: { kind: "human", id: ownerUserId } }, now);
+      this.recordWorkflowDecisionRevocation(decision, { reason: "campaign_control_changed",
+        ...(ownerUserId ? { triggeredBy: { kind: "human" as const, id: ownerUserId } } : {}) }, now);
     }
     for (const id of [before.id, ...this.db.campaignDescendantIds(before.id)]) this.hub.sessionChangedById(id);
     this.publishCampaignAttentionTransition(before);
@@ -11763,9 +11766,12 @@ export class SessionsService {
    * after arming. Pass `approval` for a request whose command is known; without one (Claude's policy
    * hook never carries a command) any armed merge of the session counts, so as with a hold every shell
    * command is denied while it stands. The approval stays armed, because its command may already have
-   * run and reconciling needs it. That lifts this, as does a Location of that repository joining (Full
-   * Control or Custom), which revokes it, or a new request for the same pull request, which replaces it.
-   * Nothing else lifts it: the refusal rests on a record only an entry ends (#4319). */
+   * run and reconciling needs it. That lifts this, as does a new request for the same pull request,
+   * which replaces it. A repository refused by name lifts only when it gains an entry, by the way its
+   * refusal names (a join, Include in Campaign or an approved addition), which revokes the merge. One
+   * refused while a Location is unread lifts when that ends: a read that names another repository or
+   * succeeds on a current runner, the Location leaving its Project, or, for one counted only by consent,
+   * a revoke. Each of those revokes the armed merge (#4319). */
   private excludedArmedMerge(session: SessionView, approval?: PendingApproval): string | null {
     if (approval && (approval.kind === "authentication" || approval.kind === "question")) return null;
     const command = session.driver === "codex-app-server" ? approval?.context?.commandIdentity?.input : approval?.context?.input;
@@ -11781,7 +11787,8 @@ export class SessionsService {
             "or succeeds once it is on that version, which revokes the armed merge once no such Location is left " +
             "(a read that names this repository leaves it refused by name); " +
             `when ${refusal.unread} is removed from the Project, which revokes it too; `
-          : "Otherwise this lifts when a Location of that repository joins the campaign, which revokes the armed merge, ") +
+          // The way in is the refusal's own, which knows a first-message limit (#4319).
+          : "Otherwise this lifts once that repository is brought in as said above, which revokes the armed merge, ") +
         "or when you request a new pr_merge decision for the same pull request with the request_workflow_decision tool " +
         "(the CLI needs the shell), which replaces the armed one.";
     }
@@ -12696,13 +12703,27 @@ export class SessionsService {
     const unnamed = this.db.unnamedBelowGatesLocations(root);
     if (!unnamed.length) return null;
     const names = unnamed.map((item) => item.name).join(", ");
-    return { sentence: `${named} can't be acted on while the runner of ${names} can't perform this campaign's gates ` +
+    // What each one needs (#4319): an old runner needs its update; a current runner whose folder is
+    // missing needs the folder back, not an update.
+    const exclusion = (locationId: string) => root.orchestratorPolicy?.excludedLocations?.find((item) => item.locationId === locationId);
+    const folderMissing = (locationId: string) => exclusion(locationId)?.failure === "path_missing" &&
+      runnerSupportsProtocol(this.db.getRunner(this.db.getProjectLocation(locationId)?.runnerId ?? "")?.protocolVersion, "campaignLocationGates");
+    const missing = unnamed.filter((item) => folderMissing(item.locationId)).map((item) => item.name);
+    const old = unnamed.filter((item) => !folderMissing(item.locationId)).map((item) => item.name);
+    // Someone else's Location counts only by the consent the authorization gave, which a revoke withdraws.
+    const owner = this.db.campaignOwnerForRoot(root.id, root.orchestratorPolicy);
+    const byConsent = new Set(root.orchestratorPolicy?.unreadByConsent ?? []);
+    const consented = root.orchestratorPolicy?.control?.mode === "full_control" ? unnamed.filter((item) => byConsent.has(item.locationId) &&
+      (!owner || this.db.projectLocationAddedBy(item.locationId) !== owner)).map((item) => item.name) : [];
+    return { sentence: `${named} can't be acted on while ${old.length ? `the runner of ${names} can't perform this campaign's gates` : `${names} can't be read`} ` +
       "and no read has named the repository it holds, which may be this one. " +
-      `Update and restart that runner to protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer so it can be read, or remove that Location from the Project. ` +
+      (old.length ? `Update and restart that runner to protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer so it can be read, or remove that Location from the Project. ` : "") +
+      (missing.length ? `${missing.join(", ")} is on a current runner, but its folder is missing: restore it and restart that runner so it can be read, or remove that Location from the Project. ` : "") +
       // A read on a current runner ends the record without naming anything (#4319): that runner can
       // perform the gates, so the repository it holds keeps the ordinary rule.
-      "A read that names another repository, or one that succeeds once it is on that version, lifts this once no such Location is left; " +
+      `A read that names another repository, or one that succeeds${old.length ? " once it is on that version" : ""}, lifts this once no such Location is left; ` +
       "one that names this repository leaves it refused by name. " +
+      (consented.length ? `A revoke of Full Control also lifts this for ${consented.join(", ")}, since it counts only by the consent that revoke withdraws. ` : "") +
       "Until then no other login stands in, and nothing was performed.", unread: names };
   }
 

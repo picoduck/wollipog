@@ -57,7 +57,7 @@ export class CampaignLocations {
     /** Sends each member's runner its re-minted boundary. */
     synchronize: (rootId: string) => Promise<unknown>;
     /** Settles the decisions a boundary change revoked and publishes every member (Sessions). */
-    settle: (before: SessionView, revoked: WorkflowDecisionView[], ownerUserId: string, now: number) => void;
+    settle: (before: SessionView, revoked: WorkflowDecisionView[], ownerUserId: string | null, now: number) => void;
     /** Reads a Custom campaign's own Location again and records its list (#4319). */
     reestablish?: (rootId: string) => Promise<unknown>;
     log: { warn(message: string): void };
@@ -119,19 +119,21 @@ export class CampaignLocations {
     const { db } = this.deps;
     const standing = db.unnamedBelowGatesLocations(root)
       .map((item) => db.getProjectLocation(item.locationId))
+      // Whatever Project the root or the Location is in now: the record counts it all the same.
       .filter((location): location is ProjectLocationView => Boolean(location && location.runnerId === runnerId && location.id !== root.projectLocationId &&
-        location.projectId === root.projectId && location.availability !== "runner_removed" && !skip.has(location.id)));
+        location.availability !== "runner_removed" && !skip.has(location.id)));
     if (!standing.length) return;
     const locations = standing.filter((location) => !this.inBoundary(root, location.id));
-    const before = locations.map((location) => ({ id: location.id, name: location.name, runnerId: location.runnerId, workspaceId: location.workspaceId,
-      addedBy: db.projectLocationAddedBy(location.id) }));
+    const before = locations.map((location) => ({ id: location.id, name: location.name, projectId: location.projectId, runnerId: location.runnerId,
+      workspaceId: location.workspaceId, addedBy: db.projectLocationAddedBy(location.id) }));
     const results = await Promise.all(locations.map((location) => inspectProjectLocation(this.deps, location.id, {
-      projectId: root.projectId ?? undefined, timeoutMs: this.deps.inspectionTimeoutMs, joinsCampaign: true })));
+      projectId: location.projectId, timeoutMs: this.deps.inspectionTimeoutMs, joinsCampaign: true })));
     const now = Date.now();
     const revoked = db.recordUnreadLocationReads(root.id, before.map((location, index) => ({ location, result: results[index]! })), now);
-    const owner = this.owner(root) ?? db.campaignOwnerForRoot(root.id, root.orchestratorPolicy);
-    // A lift that isn't a join revokes what the refusal covered, and that leaves its pauses (#4319).
-    if (revoked.length && owner) this.deps.settle(root, revoked, owner, now);
+    // A lift that isn't a join revokes what the refusal covered, and that always leaves its pauses and
+    // is audited (#4319). No person's action led to it, only a runner's registration; with no owner to
+    // name, the audit names none.
+    if (revoked.length) this.deps.settle(root, revoked, this.owner(root) ?? db.campaignOwnerForRoot(root.id, root.orchestratorPolicy), now);
     else this.deps.hub.sessionChangedById(root.id);
   }
 

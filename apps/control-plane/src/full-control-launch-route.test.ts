@@ -9060,7 +9060,11 @@ test("an unread Location stays unread through its runner's update, a failed read
     const present = belowFolder(f);
     await c.locations.runnerReconnected("below");
     assert.equal(excluded().failure, "path_missing");
-    await stillUnread(f, c.rootId, child, "with its folder missing");
+    // Its runner is current now, so the refusal asks for the folder, not an update.
+    const missing = await ask(f, child, publicationIn("elsewhere/repo"), "with-its-folder-missing");
+    assert.equal(missing.ok, false);
+    assert.match(missing.error!, /below z is on a current runner, but its folder is missing: restore it and restart that runner so it can be read, or remove that Location from the Project\./u);
+    assert.doesNotMatch(missing.error!, /Update and restart that runner to protocol version/u);
 
     // A read resolves it: the owner's Location joins, and every other repository returns to its rule.
     present(true);
@@ -9402,6 +9406,8 @@ test("a Location someone else added, shown excluded before Start with no reposit
     assert.ok(c.policy().unreadLocations?.some((item) => item.locationId === theirs), "the owner saw it before Start, so it counts");
     const child = childAt(f, c.rootId, "r", "w");
     await stillUnread(f, c.rootId, child, "someone else's Location shown before Start");
+    const said = await ask(f, child, publicationIn("elsewhere/repo"), "consent-remedy");
+    assert.match(said.error ?? "", /A revoke of Full Control also lifts this for below z, since it counts only by the consent that revoke withdraws\./u);
 
     // The owner may be able neither to update that runner nor to remove that Location. A revoke
     // withdraws the consent the authorization gave, and revokes every decision as it always has.
@@ -9594,11 +9600,10 @@ test("an unread Location whose exclusion a revoke or a re-authorization dropped 
 
 test("under a first-message repository limit, a named refusal says only an approved repository addition brings the repository in (#4319 fifth read, 9)", async () => {
   const f = fixture();
-  const c = await launchedMultiRepositoryCampaign(f);
-  answerBelow(f);
-  registerBelow(f);
+  const c = await mergeHeldAtPreflight(f);
   try {
-    const child = childAt(f, c.rootId, "r", "w");
+    const child = c.child;
+    assert.equal((await armMerge(f, c)).ok, true);
     const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
     await c.locations.locationAdded(below.id, f.human);
     const unlimited = await ask(f, child, publicationIn("below/repo"), "named-unlimited");
@@ -9610,6 +9615,57 @@ test("under a first-message repository limit, a named refusal says only an appro
     const limited = await ask(f, child, publicationIn("below/repo"), "named-limited");
     assert.doesNotMatch(limited.error ?? "", /it can join/u);
     assert.match(limited.error ?? "", /first message limits its repositories, only an approved repository addition brings below\/repo into this campaign/u);
+    // The armed merge's hook says the same way in, not a join (Orchestrator's read of 5c6f47d).
+    const hook = childHook(f, child, "limited-hook").data;
+    assert.equal(hook?.decision, "deny");
+    assert.doesNotMatch(hook?.reason ?? "", /lifts when a Location of that repository joins/u);
+    assert.match(hook?.reason ?? "", /only an approved repository addition brings below\/repo into this campaign/u);
+    assert.match(hook?.reason ?? "", /this lifts once that repository is brought in as said above, which revokes the armed merge/u);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a root that leaves its Project keeps its unread refusal, by reassignment or its own Location's move, and the Location's removal still revokes (#4319, Orchestrator's read of 5c6f47d, 1)", async () => {
+  for (const leave of ["reassign", "move"] as const) {
+    const f = fixture();
+    const m = await mergeHeldAtPreflight(f);
+    try {
+      assert.equal((await armMerge(f, m)).ok, true);
+      failBelowReads(f);
+      const below = f.db.addProjectLocation(m.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+      await m.locations.locationAdded(below.id, f.human);
+      assert.equal(childHook(f, m.child, `${leave}-before`).data?.decision, "deny");
+      if (leave === "reassign") f.db.setSessionProject(m.rootId, null);
+      else f.db.moveProjectLocation(m.p.launchLocation.id, f.db.createProject({ name: "Moved Away", scope: f.scope }).id, Date.now(), f.human.userId);
+      assert.notEqual(f.db.getSession(m.rootId)!.projectId, m.p.project.id, `${leave}: the root left its Project`);
+      assert.equal(childHook(f, m.child, `${leave}-after`).data?.decision, "deny", `${leave}: the armed merge stays blocked`);
+      await stillUnread(f, m.rootId, m.child, `${leave}: still unread`);
+      const settled: string[] = [];
+      f.db.removeProjectLocation(below.id, Date.now(), (_root, revoked) => settled.push(...revoked.map((d) => d.occurrenceId)));
+      assert.equal(statusOf(f, m.occurrenceId), "revoked", `${leave}: removing the Location still finds the campaign that counts it`);
+      assert.ok(settled.includes(m.occurrenceId));
+    } finally { await m.server.close(); f.db.close(); }
+  }
+});
+
+test("the unread retry settles what it revokes even when the campaign has no owning person (#4319, Orchestrator's read of 5c6f47d, 3)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  registerBelow(f);
+  try {
+    assert.equal(f.sessions.setCampaignControl(c.rootId, { mode: "custom" }, f.db.getSession(c.rootId)!.parentControlPolicy!.revision, f.human).ok, true);
+    f.db.raw().prepare("UPDATE sessions SET parent_control_policy=? WHERE id=?").run(JSON.stringify({ ...HUMAN_ONLY_PARENT_CONTROL_POLICY }), c.rootId);
+    const child = childAt(f, c.rootId, "r", "w");
+    const covered = await approvedFollowUp(f, c.rootId, child, "elsewhere/repo", "ownerless-covered");
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify({ ...c.policy(),
+      unreadLocations: [{ locationId: below.id, name: "below z" }] }), c.rootId);
+    f.db.raw().prepare("UPDATE session_ownership SET owner_kind='team', owner_id='team_fixture' WHERE session_id=?").run(c.rootId);
+    assert.equal(f.db.campaignOwnerForRoot(c.rootId, c.policy()), null, "no owning person");
+    await stillUnread(f, c.rootId, child, "before the read");
+    answerBelow(f);
+    await c.locations.runnerReconnected("below");
+    assert.equal(statusOf(f, covered), "revoked");
+    assert.match(JSON.stringify(f.db.listGovernanceAudit(child)), /campaign_control_changed/u, "settled and audited all the same");
   } finally { await c.server.close(); f.db.close(); }
 });
 
