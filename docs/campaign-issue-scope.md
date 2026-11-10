@@ -789,7 +789,8 @@ zero attempts, so it excluded tracking items whose tracking attempts had already
 
 An approved closure's issue-specific child digest preserves its binding when the child moves to
 unrelated recorded work. New issue work, newly bound children and unconsumed issue-bound decisions
-still invalidate it. Prompt identities are captured at attempt boundaries: issue prompts admitted
+still invalidate it. Issue attempt identities remain bound even when a newly joined child ends
+before execution, including when no child was live at approval. Prompt identities are captured at attempt boundaries: issue prompts admitted
 before reassignment remain bound, while later prompts on the unrelated attempt do not. A prompt
 in an unassigned interval cannot be attributed away from the issue. Missing boundary history or
 uncertain attribution retains strict assignment binding.

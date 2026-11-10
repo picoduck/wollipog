@@ -5044,6 +5044,8 @@ export interface GithubIssueClosureSnapshot extends Omit<GithubIssueClosureInspe
   explanation: string;
   evidence: string[];
   comment?: string;
+  /** v357: server-derived issue attempt identities, including children that ended before execution. */
+  issueAttemptDigest?: string;
   activeChildren: Array<{ sessionId: string; title: string; assignmentDigest: string;
     /** v357: server-derived issue work, stable across leaving for proven unrelated work. */
     issueWorkDigest?: string }>;

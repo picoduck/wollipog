@@ -887,6 +887,21 @@ export class CampaignWorkLedgerStore {
           AND history.issue_repository=lower(?2) AND history.issue_number=?3)))`).all(campaignId, repository, issue) as Array<{ session_id: string }>).map((row) => row.session_id));
   }
 
+  /** Joining an issue remains visible even if that attempt and child end before execution.
+   * Unknown legacy attribution is conservatively related to every issue. Departure boundaries
+   * are deliberately absent: ending or reassigning an unchanged attempt does not change this set. */
+  closureIssueAttempts(campaignId: string, repository: string, issue: number) {
+    const rows = this.stmt(`WITH RECURSIVE related(work_item_id) AS (
+      SELECT item.id FROM campaign_work_items item WHERE item.campaign_session_id=?1 AND (
+        EXISTS (SELECT 1 FROM campaign_work_item_issue_history h WHERE h.work_item_id=item.id AND h.issue_repository=lower(?2) AND h.issue_number=?3)
+        OR EXISTS (SELECT 1 FROM campaign_work_legacy_items legacy WHERE legacy.work_item_id=item.id))
+      UNION SELECT edge.result_work_item_id FROM related JOIN campaign_work_lineage_edges edge ON edge.origin_work_item_id=related.work_item_id
+      UNION SELECT edge.origin_work_item_id FROM related JOIN campaign_work_lineage_edges edge ON edge.result_work_item_id=related.work_item_id)
+      SELECT a.id,a.session_id AS sessionId FROM campaign_work_attempts a JOIN related ON related.work_item_id=a.work_item_id
+      WHERE a.campaign_session_id=?1 ORDER BY a.id LIMIT 10001`).all(campaignId, repository, issue) as Array<{ id: string; sessionId: string | null }>;
+    return rows.length > 10_000 ? null : rows;
+  }
+
   /** Stable work for one issue, excluding only the assignment boundary that moves the child away.
    * Delivery, PR and verification changes remain bound. Missing history proves nothing. */
   closureChildIssueWork(campaignId: string, sessionId: string, repository: string, issue: number) {

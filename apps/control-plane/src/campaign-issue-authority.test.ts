@@ -214,7 +214,7 @@ test("#4403 an ended epic-tracking attempt is enough, but delivery work, PRs, op
 });
 
 test("#4403 a bound child can leave for unrelated work, but new issue work, decisions, children and missing history refuse", async () => {
-  for (const mode of ["left", "issue_work", "issue_prompt", "unassigned_prompt", "decision", "joined", "missing_history"] as const) {
+  for (const mode of ["left", "issue_work", "issue_prompt", "unassigned_prompt", "decision", "joined", "joined_new_item_ended", "joined_without_active", "missing_history"] as const) {
     const h = harness(false, 5, [100, 101]);
     try {
       h.db.appendEvent("child", { kind: "user_message", text: "Implement issue 100" }, Date.now());
@@ -223,13 +223,15 @@ test("#4403 a bound child can leave for unrelated work, but new issue work, deci
         items: [{ key: "other-issue", issue: { repository: "team/repo", number: 101 } }] });
       assert.ok(plan.ok, plan.error ?? "plan");
       const other = plan.data!.items.find((item) => item.key === "other-issue")!.workItemId;
+      if (mode === "joined_without_active") h.db.updateSessionStatus("child", "completed", Date.now());
       const requested = await h.svc.requestGithubIssueClosure("root", { requestId: `reassignment-${mode}`, issue: 100, reason: "completed",
         explanation: "Owner reviews exact work state", evidence: ["Report"] });
       assert.ok(requested.ok, requested.error ?? mode);
       const d = requested.data!.decision!;
       assert.equal(d.authority, "human");
       const before = closureSnapshot(d);
-      assert.ok(before.activeChildren.find((child) => child.sessionId === "child")?.issueWorkDigest);
+      assert.ok(before.issueAttemptDigest);
+      if (mode !== "joined_without_active") assert.ok(before.activeChildren.find((child) => child.sessionId === "child")?.issueWorkDigest);
       assert.ok(h.approve(d).ok);
       if (mode === "issue_prompt") assert.ok(h.svc.prompt("child", "Change the implementation of issue 100").ok);
       if (mode === "unassigned_prompt") {
@@ -238,14 +240,26 @@ test("#4403 a bound child can leave for unrelated work, but new issue work, deci
         assert.ok(h.svc.prompt("child", "Continue earlier issue work").ok);
       }
       assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: other, childSessionId: "child" }).ok);
-      assert.ok(h.svc.prompt("child", "Implement issue 101").ok);
+      if (mode !== "joined_without_active") assert.ok(h.svc.prompt("child", "Implement issue 101").ok);
       if (mode === "issue_work") assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id, stage: { stage: "implementing" } }).ok);
       if (mode === "decision") assert.ok(h.svc.createWorkflowDecision("child", { requestId: "new-issue-question", resourceKey: "new-issue-question",
         resourceSnapshot: { category: "implementation_question", kind: "question", question: "Continue earlier issue work?", options: [] } }).ok);
-      if (mode === "joined") {
+      if (mode === "joined" || mode === "joined_new_item_ended" || mode === "joined_without_active") {
         h.db.createSession({ id: "joined-child", runnerId: "r", workspaceId: "w", agentId: "codex", title: "Joined", useWorktree: false,
           driver: "codex-app-server", now: Date.now(), config: {}, parentSessionId: "root" });
-        assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.item.id, childSessionId: "joined-child" }).ok);
+        let joinedItem = h.item.id;
+        if (mode !== "joined") {
+          const added = h.svc.recordCampaignPlan("root", { planComplete: true,
+            items: [{ key: "joined-new-item", issue: { repository: "team/repo", number: 100 } }] });
+          assert.ok(added.ok, added.error ?? mode);
+          joinedItem = added.data!.items.find((item) => item.key === "joined-new-item")!.workItemId;
+        }
+        assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: joinedItem, childSessionId: "joined-child" }).ok);
+        if (mode !== "joined") {
+          assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: joinedItem,
+            endAttempt: { reason: "failed", note: "New child ended before execution" } }).ok);
+          h.db.updateSessionStatus("joined-child", "completed", Date.now());
+        }
       }
       if (mode === "missing_history") h.db.raw().prepare("INSERT INTO campaign_work_pr_history_legacy VALUES (?)").run(h.item.id);
       const executed = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);

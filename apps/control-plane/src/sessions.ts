@@ -14117,7 +14117,7 @@ export class SessionsService {
         explanation: request.explanation, evidence: request.evidence,
         ...(request.comment === undefined ? {} : { comment: request.comment }),
         ...(request.dispositionRecommendationId === undefined ? {} : { dispositionRecommendationId: request.dispositionRecommendationId }),
-        activeChildren: children.active, excludedChildren: children.excluded };
+        activeChildren: children.active, excludedChildren: children.excluded, issueAttemptDigest: children.issueAttemptDigest };
       const resourceKey = `issue_closure:${inspection.repository.toLowerCase()}#${request.issue}`;
       // Whoever reviews this request sees why the last executed approval was refused (#4059).
       const previousRefusal = this.db.latestIssueClosureRefusal(sessionId, resourceKey);
