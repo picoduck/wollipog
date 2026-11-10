@@ -22416,8 +22416,9 @@ export class ControlPlaneDb {
   }
 
   /** Seq of the session's last top-level report when no later report or assignment superseded it,
-   * and null when its last word is not a report. The same predicate that keeps a stored
-   * attestation valid, so a stopped session's report stays attestable after it ends (#1440). */
+   * and null when its last word is not a report. Failed/stopped recovery also requires proof that
+   * active commands and ledger assignments did not supersede it. Ordinary idle/completed stored
+   * attestations retain their established rules until a new turn or user message invalidates them. */
   durableFinalReportSeq(sessionId: string): number | null {
     const row = this.stmt(
       `SELECT target.seq AS seq FROM session_events target
