@@ -4,20 +4,31 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import { createPiCommandHomePrototype, installPiCommandHomePrototype, piCommandHomePrototypeEligible, verifyPiCommandHomePrototypeInstallation,
+import { createPiCommandHomePrototype, installPiCommandHomePrototype, piCommandHomePrototypeEligible, piCommandHomePrototypeNamespaceUnavailable, verifyPiCommandHomePrototypeInstallation, verifyPiCommandHomePrototypeRuntime,
   type PiCommandHomePrototypePolicy } from "./pi-command-home-prototype.js";
 import type { AgentProcess, SpawnAgentOptions } from "./spawn.js";
 
 const linux = process.platform === "linux" ? false : "prototype is native Linux only";
+
+test("namespace unavailability excludes executable, bind and payload permission failures", () => {
+  for (const message of ["bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces.",
+    "bwrap: Creating new namespace failed: Operation not permitted", "bwrap: setting up uid map: Permission denied"]) {
+    assert.equal(piCommandHomePrototypeNamespaceUnavailable(message), true);
+  }
+  for (const message of ["bwrap: execvp /immutable/shell: Permission denied", "bwrap: Can't bind mount: Operation not permitted",
+    "shell: Permission denied", "Operation not permitted", "payload: bwrap: No permissions to create new namespace"]) {
+    assert.equal(piCommandHomePrototypeNamespaceUnavailable(message), false);
+  }
+});
 function fixture() {
   const root = realpathSync(mkdtempSync(join(process.cwd(), ".pi-command-prototype-")));
   const worktree = join(root, "worktree"), home = join(root, "provider"), immutable = join(root, "immutable");
   for (const path of [worktree, home, immutable]) mkdirSync(path);
-  for (const name of ["bwrap", "shell", "env", "hook.mjs"]) writeFileSync(join(immutable, name), "inert");
+  for (const name of ["bwrap", "shell", "node", "entrypoint.mjs", "hook.mjs"]) writeFileSync(join(immutable, name), "inert");
   writeFileSync(join(home, "auth.json"), "synthetic-only");
   const policy: PiCommandHomePrototypePolicy = { providerHome: home, immutablePaths: [immutable],
     installationRoot: immutable, version: "0.85.0", configuredArgs: ["--no-extensions"],
-    shell: join(immutable, "shell"), envCommand: join(immutable, "env"),
+    shell: join(immutable, "shell"), nodeRuntime: join(immutable, "node"), commandEntrypoint: join(immutable, "entrypoint.mjs"),
     outer: { backend: "bwrap", command: join(immutable, "bwrap"), args: [], network: "inherit",
       preservesProviderHome: true, writableBinds: [{ source: home, target: home }],
       protectedWorktree: { parent: root, path: worktree, gitWritableRoots: [] } } };
@@ -34,7 +45,10 @@ test("prototype requires exact source contract and already isolated extension se
   assert.equal(piCommandHomePrototypeEligible("0.85.1", ["--no-extensions"], "linux"), false);
   assert.equal(piCommandHomePrototypeEligible("0.85.0", ["--no-extensions"], "darwin"), false);
   const f = fixture();
-  try { assert.equal(verifyPiCommandHomePrototypeInstallation(f.immutable), false); }
+  try {
+    assert.equal(verifyPiCommandHomePrototypeInstallation(f.immutable), false);
+    assert.equal(verifyPiCommandHomePrototypeRuntime(f.policy.nodeRuntime, f.policy.commandEntrypoint), false);
+  }
   finally { f.cleanup(); }
 });
 
@@ -81,12 +95,14 @@ test("pinned extension seam routes model and RPC/user bash through operations an
 test("operations capture narrows actual bwrap argv, isolates loader env and freezes policy without shell prefixing", { skip: linux }, async () => {
   const f = fixture();
   const calls: SpawnAgentOptions[] = [];
+  let handoff = "";
   try {
     const before = structuredClone(f.policy.outer);
-    const backend = createPiCommandHomePrototype(f.policy, { auditInstallation: () => true, prove: async () => true,
+    const backend = createPiCommandHomePrototype(f.policy, { auditInstallation: () => true, auditRuntime: () => true, prove: async () => true,
       spawn: options => {
         calls.push(options);
         const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() });
+        child.stdin.on("data", chunk => { handoff += chunk; });
         queueMicrotask(() => { child.stdout.emit("data", Buffer.from("inert-output")); child.emit("close", 7); });
         return child as unknown as AgentProcess;
       } });
@@ -101,10 +117,13 @@ test("operations capture narrows actual bwrap argv, isolates loader env and free
     const captured = calls[0]!;
     assert.deepEqual(captured.env, { PATH: "/usr/bin:/bin", LANG: "C" });
     assert.equal(captured.windowsShell, false);
-    assert.equal(captured.args.at(-1), command);
+    assert.equal(captured.args.includes(command), false);
     const executionBoundary = captured.args.lastIndexOf("--");
     assert.ok(executionBoundary > captured.args.indexOf("--ro-bind", captured.args.indexOf(f.home)));
-    assert.equal(captured.args.indexOf("LD_PRELOAD=synthetic-untrusted-loader") > executionBoundary, true);
+    assert.equal(JSON.stringify(captured.args).includes("synthetic-untrusted-loader"), false);
+    assert.equal(JSON.stringify(captured.env).includes("synthetic-untrusted-loader"), false);
+    assert.deepEqual(JSON.parse(handoff), { version: 1, command,
+      env: { HOME: f.home, LD_PRELOAD: "synthetic-untrusted-loader", NODE_OPTIONS: "synthetic-untrusted-node" } });
     assert.equal(captured.args.includes("/untrusted-later-shell"), false);
     assert.equal(captured.args.some((value, index, array) => value === "--bind" && array[index + 1] === f.home), false);
     assert.equal(captured.args.some((value, index, array) => value === "--bind" && array[index + 1] === f.root), false);
@@ -115,12 +134,15 @@ test("operations capture narrows actual bwrap argv, isolates loader env and free
 
 test("prototype refuses aliases, overlapping grants, mutable dependencies and wrong cwd before spawning", { skip: linux }, async () => {
   const f = fixture();
-  const deps = { auditInstallation: () => true, spawn: () => { assert.fail("refused prototype spawned"); } };
+  const deps = { auditInstallation: () => true, auditRuntime: () => true, spawn: () => { assert.fail("refused prototype spawned"); } };
   try {
     for (const mutate of [
       (p: PiCommandHomePrototypePolicy) => { p.outer.writableBinds!.push({ source: f.home, target: f.worktree }); },
       (p: PiCommandHomePrototypePolicy) => { p.outer.writableBinds!.push({ source: f.root, target: f.root }); },
       (p: PiCommandHomePrototypePolicy) => { p.immutablePaths = [f.worktree]; },
+      (p: PiCommandHomePrototypePolicy) => { p.immutablePaths = [f.home]; },
+      (p: PiCommandHomePrototypePolicy) => { p.nodeRuntime = join(f.home, "auth.json"); },
+      (p: PiCommandHomePrototypePolicy) => { p.outer.writableBinds!.push({ source: "/usr", target: "/usr" }); },
       (p: PiCommandHomePrototypePolicy) => { p.version = "0.86.0"; },
     ]) {
       const policy = structuredClone(f.policy); mutate(policy);
@@ -133,6 +155,29 @@ test("prototype refuses aliases, overlapping grants, mutable dependencies and wr
   } finally { f.cleanup(); }
 });
 
+test("spawn and private-pipe errors retire the tree and never disclose payload in diagnostics or retry", { skip: linux }, async () => {
+  const f = fixture();
+  try {
+    for (const lane of ["spawn", "stdin"] as const) {
+      let child: AgentProcess;
+      let proofs = 0, spawns = 0, kills = 0;
+      const canary = "SYNTHETIC_ERROR_CANARY_3922";
+      const backend = createPiCommandHomePrototype(f.policy, { auditInstallation: () => true, auditRuntime: () => true,
+        prove: async () => { proofs++; return true; },
+        kill: () => { kills++; queueMicrotask(() => child.emit("close", null)); },
+        spawn: () => {
+          spawns++;
+          child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() }) as unknown as AgentProcess;
+          queueMicrotask(() => (lane === "spawn" ? child : child.stdin).emit("error", new Error(canary)));
+          return child;
+        } });
+      await assert.rejects(backend.exec("inert", f.worktree, { onData() {}, env: { CANARY: canary } }),
+        { message: "Pi command-home prototype sandbox or handoff failed." });
+      assert.deepEqual({ spawns, proofs, kills }, { spawns: 1, proofs: 1, kills: 1 });
+    }
+  } finally { f.cleanup(); }
+});
+
 test("sandbox failure and cancellation never retry outside the child boundary", { skip: linux }, async () => {
   const f = fixture();
   try {
@@ -140,7 +185,7 @@ test("sandbox failure and cancellation never retry outside the child boundary", 
       let spawns = 0, kills = 0;
       const controller = new AbortController();
       let child: AgentProcess;
-      const backend = createPiCommandHomePrototype(f.policy, { auditInstallation: () => true,
+      const backend = createPiCommandHomePrototype(f.policy, { auditInstallation: () => true, auditRuntime: () => true,
         prove: async () => !cancelled,
         kill: () => { kills++; queueMicrotask(() => child.emit("close", null)); },
         spawn: () => {
@@ -153,6 +198,33 @@ test("sandbox failure and cancellation never retry outside the child boundary", 
       if (cancelled) await assert.rejects(operation, /command-tree exit/);
       else assert.deepEqual(await operation, { exitCode: 1 });
       assert.equal(spawns, 1); assert.equal(kills, cancelled ? 1 : 0);
+    }
+  } finally { f.cleanup(); }
+});
+
+test("proven cancellation and timeout preserve the pinned Pi operations error contract", { skip: linux }, async () => {
+  const f = fixture();
+  try {
+    for (const reason of ["abort", "timeout"] as const) {
+      const controller = new AbortController();
+      let child: AgentProcess;
+      let spawns = 0, proofs = 0, kills = 0;
+      const backend = createPiCommandHomePrototype(f.policy, { auditInstallation: () => true, auditRuntime: () => true,
+        prove: async () => { proofs++; return true; },
+        kill: () => { kills++; queueMicrotask(() => child.emit("close", null)); },
+        spawn: () => {
+          spawns++;
+          child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() }) as unknown as AgentProcess;
+          if (reason === "abort") queueMicrotask(() => controller.abort());
+          return child;
+        } });
+      await assert.rejects(backend.exec("inert", f.worktree, { onData() {}, signal: controller.signal,
+        timeout: reason === "timeout" ? 0.001 : undefined }),
+      { message: reason === "abort" ? "aborted" : "timeout:0.001" });
+      assert.deepEqual({ spawns, proofs, kills }, { spawns: 1, proofs: 1, kills: 1 });
+      controller.abort();
+      await assert.rejects(backend.exec("already-cancelled", f.worktree, { onData() {}, signal: controller.signal }), { message: "aborted" });
+      assert.equal(spawns, 1);
     }
   } finally { f.cleanup(); }
 });

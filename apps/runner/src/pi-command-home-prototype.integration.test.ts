@@ -7,7 +7,7 @@ import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { buildBwrapArgs, type BwrapSpawnIsolation } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths } from "./managed-worktree-sandbox.js";
-import type { PiCommandHomePrototypePolicy } from "./pi-command-home-prototype.js";
+import { piCommandHomePrototypeNamespaceUnavailable, type PiCommandHomePrototypePolicy } from "./pi-command-home-prototype.js";
 
 test("installed pinned Pi SDK factory invokes the prototype operations without any provider or command process", {
   skip: process.env.WOLLIPOG_TEST_PI_CODE_ROOT ? false : "UNAVAILABLE: supply an audited installed Pi code root; no package is downloaded",
@@ -42,7 +42,7 @@ test("inert provider keeps refresh/config/transcripts while operations commands 
     if (probe.error && (probe.error as NodeJS.ErrnoException).code === "ENOENT") {
       t.skip("UNAVAILABLE: bubblewrap is not installed"); return;
     }
-    if (probe.status !== 0 && /(?:No permissions to create new namespace|Operation not permitted|Permission denied)/u.test(probe.stderr ?? "")) {
+    if (probe.status !== 0 && piCommandHomePrototypeNamespaceUnavailable(probe.stderr ?? "")) {
       t.skip("UNAVAILABLE: host refuses the outer namespace; no write-denial conformance established"); return;
     }
     assert.equal(probe.status, 0, probe.stderr);
@@ -70,7 +70,8 @@ test("inert provider keeps refresh/config/transcripts while operations commands 
     const outer: BwrapSpawnIsolation = resolved;
     const policy: PiCommandHomePrototypePolicy = { outer, providerHome: home, immutablePaths: [immutable],
       installationRoot: immutable, version: "0.85.0", configuredArgs: ["--no-extensions"],
-      shell: realpathSync("/bin/sh"), envCommand: realpathSync("/usr/bin/env") };
+      shell: realpathSync("/bin/sh"), nodeRuntime: realpathSync(process.execPath),
+      commandEntrypoint: fileURLToPath(new URL("./pi-command-home-entrypoint.mjs", import.meta.url)) };
     const fixture = fileURLToPath(new URL("./fixtures/pi-command-home-provider.mjs", import.meta.url));
     const moduleUrl = new URL("./pi-command-home-prototype.ts", import.meta.url).href;
     const args = buildBwrapArgs({ command: process.execPath, cwd: worktree,

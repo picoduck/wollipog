@@ -11,6 +11,12 @@ for its CLI bundle, Bash implementation/schema, RPC dispatcher, session runtime,
 and extension types are recorded in `PI_COMMAND_HOME_SOURCE_PINS`. The code verifier reads only
 installation code and package metadata; it does not execute Pi or read provider state.
 Other versions, changed code and future APIs are unsupported by this prototype.
+The private child entrypoint and Linux x64 Node v24.18.1 binary are also hash-pinned, along with
+the audited ELF interpreter/NEEDED library closure in `PI_COMMAND_HOME_LOADER_PINS`. Different
+runtime binaries, host library revisions or layouts are unsupported. The runtime, entrypoint,
+installation, explicit dependency roots and system loader/configuration roots must be outside
+every writable grant, including the provider home. These source pins still require actual outer
+mount/loader-resolution attestation before any future activation.
 
 Primary documentation describes the operations API, but mutable upstream main is not used as a
 runtime attestation: [Pi extensions](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md),
@@ -44,11 +50,15 @@ Policy diagnostics are fixed and do not disclose provider paths or content.
 
 The backend calls the existing `buildBwrapArgs`, `spawnAgent`, process-tree proof and termination
 primitives. The command remains a single shell payload after namespace entry; it is not rewritten
-with a shell prefix. The launcher receives a fixed environment with inherited variables scrubbed.
-The command's environment is passed to trusted `env -i` inside the child boundary, so loader
-variables do not affect the bubblewrap launch. Policy paths are captured at construction rather
-than taken from model arguments. Sandbox errors are returned as command failures; cancellation
-and unproven tree retirement fail closed without an unsandboxed retry.
+with a shell prefix. Both bubblewrap and the package-free Node child entrypoint receive a fixed
+environment with inherited variables scrubbed. A bounded private stdin frame carries the command
+and environment values; no values enter launcher argv, files, logs or refusal messages. The
+entrypoint enforces an exact versioned shape and byte/count/string limits, then launches only the
+captured canonical shell with explicit cwd, process env and ignored stdin. The shell cannot inherit
+the handoff stream. The entrypoint has no package imports or addon/global package search. Policy
+paths are captured at construction rather than taken from model arguments. Spawn/pipe errors,
+cancellation and unproven tree retirement fail closed without an unsandboxed retry. Proven abort
+and timeout preserve the exact pinned Pi operations errors for its normal output formatting.
 
 The provider remains in its original writable boundary. The prototype does not bind individual
 credential files read-only or change provider refresh/transcript/configuration code.
@@ -57,6 +67,10 @@ credential files read-only or change provider refresh/transcript/configuration c
 
 The source prototype has inert tests for argv/env separation, immutable snapshots, overlapping
 and aliased grants, wrong cwd, cancellation, failures without retries, tool provenance and reload.
+Private-entrypoint tests use a synthetic canary to verify correct child env delivery without argv,
+loader-env or output disclosure, ignored stdin, exit/signal behavior, and fixed refusals for
+truncated/trailing/oversized/invalid frames. Namespace skips require named bubblewrap namespace
+setup errors; bind/executable/payload permission errors fail the test.
 A local installed-SDK contract test imports only the pinned Bash tool factory in a separate process
 with a synthetic HOME and a clean environment. It executes the injected inert operations callback;
 no provider CLI, sign-in, credentials, network or model is exercised.

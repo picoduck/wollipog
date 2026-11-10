@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 const [moduleUrl, encoded] = process.argv.slice(2);
 const policy = JSON.parse(encoded);
-const { createPiCommandHomePrototype } = await import(moduleUrl);
+const { createPiCommandHomePrototype, piCommandHomePrototypeNamespaceUnavailable } = await import(moduleUrl);
 // This fixture proves the production operations backend's OS topology, NOT a real Pi runtime.
 // The separate source audit/eligibility tests do not turn this synthetic installation into Pi.
-const backend = createPiCommandHomePrototype(policy, { auditInstallation: () => true });
+const backend = createPiCommandHomePrototype(policy, { auditInstallation: () => true, auditRuntime: () => true });
 const home = policy.providerHome, cwd = policy.outer.protectedWorktree.path;
 const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
 async function command(text, signal) {
@@ -16,7 +16,7 @@ async function command(text, signal) {
   return { ...result, output };
 }
 const probe = await command("printf prototype-started");
-if (probe.exitCode !== 0 && /(?:No permissions to create new namespace|Operation not permitted|Permission denied)/u.test(probe.output)) {
+if (probe.exitCode !== 0 && piCommandHomePrototypeNamespaceUnavailable(probe.output)) {
   console.log("PI_COMMAND_HOME_UNAVAILABLE: nested namespace refused");
 } else {
   assert.equal(probe.exitCode, 0, probe.output);
@@ -51,7 +51,7 @@ if (probe.exitCode !== 0 && /(?:No permissions to create new namespace|Operation
   const controller = new AbortController();
   const pending = command("sleep 30", controller.signal);
   const timer = setTimeout(() => controller.abort(), 50);
-  try { await assert.rejects(pending, /cancelled|command-tree exit/u); }
+  try { await assert.rejects(pending, /aborted|command-tree exit/u); }
   finally { clearTimeout(timer); }
   console.log("PI_COMMAND_HOME_SYNTHETIC_CONFORMANCE: passed");
 }

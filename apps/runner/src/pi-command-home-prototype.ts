@@ -7,6 +7,20 @@ import { buildBwrapArgs, killTree, provenProcessTreeExit, spawnAgent,
   type BwrapSpawnIsolation } from "./spawn.js";
 
 export const PI_COMMAND_HOME_PROTOTYPE_VERSION = "0.85.0";
+// Audited Linux x64 Node v24.18.1 and this package-free, built-in-only child entrypoint.
+export const PI_COMMAND_HOME_RUNTIME_SHA256 = "f3432a45b03b2da0d270095fdd8813dc34cbea73f5fc8b18c7a384b7cf9b333a";
+export const PI_COMMAND_HOME_ENTRYPOINT_SHA256 = "78792caa31ef3c197081290c9793776a4316f2cb7907a92972088855acf1d73f";
+/** Audited ELF interpreter/NEEDED closure for this exact experimental Linux x64 runtime.
+ * Other host layouts/library revisions are unsupported, rather than inferred compatible. */
+export const PI_COMMAND_HOME_LOADER_PINS = Object.freeze({
+  "/usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.33": "1fd75fe70354a416d75aef22bcae68c47bd25d20e2d0568c30b1a9838cf62f11",
+  "/usr/lib/x86_64-linux-gnu/libdl.so.2": "c2994527172cc23b7fb0f7d611b71e00a37da27af12c2e5e9e0dc1a742886c96",
+  "/usr/lib/x86_64-linux-gnu/libm.so.6": "fce00b6f25f459cf4ae0b7fae4257909a1a8a86f9149e7c029a5d617baf1ccd0",
+  "/usr/lib/x86_64-linux-gnu/libgcc_s.so.1": "d93224d2b0dab4247598be683adca02f5cf00586f99c187579cd7e92058fb7cb",
+  "/usr/lib/x86_64-linux-gnu/libpthread.so.0": "90491a21ce44efcf3bd4b65ec82501c091d7ebe7f8d9b341dd01d721001d9ecd",
+  "/usr/lib/x86_64-linux-gnu/libc.so.6": "3a15d66867d83762c7f2f1e37359cb8f6c5743edb369c65285cb0b1c4f7498bf",
+  "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2": "c20a2dc8917c755f02b94049356320fe1f62ac7d9f8994731f807d9df39302da",
+});
 /** Exact installed code audited 2026-11-10. No mutable-main or version-only compatibility claim. */
 export const PI_COMMAND_HOME_SOURCE_PINS = Object.freeze({
   "dist/bundle/cli.js": "4c152df1ef4b743898ec780e49cf7a197e4032a4b0696f645730aa8c18703b96",
@@ -24,6 +38,11 @@ const within = (root: string, path: string) => {
 };
 const overlaps = (a: string, b: string) => within(a, b) || within(b, a);
 
+/** Test availability only for named namespace setup failures, never arbitrary permission errors. */
+export function piCommandHomePrototypeNamespaceUnavailable(stderr: string): boolean {
+  return /^bwrap: (?:No permissions to create new namespace[^\n]*|Creating new namespace failed: (?:Operation not permitted|Permission denied)|setting up uid map: Permission denied)$/mu.test(stderr);
+}
+
 /** Conservative eligibility only. Never add flags, drop user tools/extensions or infer versions. */
 export function piCommandHomePrototypeEligible(version: string | undefined, args: readonly string[], platform = process.platform): boolean {
   return platform === "linux" && version === PI_COMMAND_HOME_PROTOTYPE_VERSION &&
@@ -37,7 +56,8 @@ export interface PiCommandHomePrototypePolicy {
    * every writable source and target, not merely have their launch spelling quoted. */
   immutablePaths: readonly string[];
   shell: string;
-  envCommand: string;
+  nodeRuntime: string;
+  commandEntrypoint: string;
   installationRoot: string;
   version: string;
   /** The selected argv BEFORE any runner extension injection. */
@@ -60,6 +80,17 @@ function canonical(path: string): string {
   return path;
 }
 
+export function verifyPiCommandHomePrototypeRuntime(node: string, entrypoint: string): boolean {
+  try {
+    return [[node, PI_COMMAND_HOME_RUNTIME_SHA256], [entrypoint, PI_COMMAND_HOME_ENTRYPOINT_SHA256],
+      ...Object.entries(PI_COMMAND_HOME_LOADER_PINS)].every(([path, sha]) => {
+      canonical(path!);
+      const info = lstatSync(path!);
+      return info.isFile() && info.size <= 209_715_200 && createHash("sha256").update(readFileSync(path!)).digest("hex") === sha;
+    });
+  } catch { return false; }
+}
+
 /** Read metadata only, never credential contents. Refuse pre-existing aliases into writable roots.
  * The experimental caller supplies synthetic homes; production admission is not implemented. */
 function noProviderAliases(root: string, budget = { left: 10_000 }): void {
@@ -72,18 +103,21 @@ function noProviderAliases(root: string, budget = { left: 10_000 }): void {
 export function createPiCommandHomePrototype(policy: PiCommandHomePrototypePolicy, deps: Partial<{
   spawn: typeof spawnAgent; kill: typeof killTree; prove: typeof provenProcessTreeExit;
   auditInstallation: typeof verifyPiCommandHomePrototypeInstallation;
+  auditRuntime: typeof verifyPiCommandHomePrototypeRuntime;
 }> = {}) {
   const shell = policy.shell;
-  const envCommand = policy.envCommand;
+  const nodeRuntime = policy.nodeRuntime;
+  const entrypoint = policy.commandEntrypoint;
   let inner: BwrapSpawnIsolation;
   let cwdRoot: string;
   try {
     const outer = policy.outer;
     if (!piCommandHomePrototypeEligible(policy.version, policy.configuredArgs) ||
-        !(deps.auditInstallation ?? verifyPiCommandHomePrototypeInstallation)(policy.installationRoot)) throw new Error(REFUSAL);
+        !(deps.auditInstallation ?? verifyPiCommandHomePrototypeInstallation)(policy.installationRoot) ||
+        !(deps.auditRuntime ?? verifyPiCommandHomePrototypeRuntime)(nodeRuntime, entrypoint)) throw new Error(REFUSAL);
     if (process.platform !== "linux" || !outer.protectedWorktree || outer.args.length !== 0 ||
         outer.wslAgentControl || outer.claudeNamespace) throw new Error(REFUSAL);
-    canonical(outer.command); canonical(policy.shell); canonical(policy.envCommand);
+    canonical(outer.command); canonical(policy.shell); canonical(nodeRuntime); canonical(entrypoint);
     const home = canonical(policy.providerHome);
     if (!lstatSync(home).isDirectory()) throw new Error(REFUSAL);
     noProviderAliases(home);
@@ -104,12 +138,16 @@ export function createPiCommandHomePrototype(policy: PiCommandHomePrototypePolic
       canonical(path);
       if (overlaps(home, path)) throw new Error(REFUSAL);
     }
-    const immutable = [outer.command, policy.shell, policy.envCommand, policy.installationRoot, ...policy.immutablePaths];
+    const immutable = [outer.command, policy.shell, nodeRuntime, entrypoint, policy.installationRoot,
+      // The audited runtime's system loader/import/config roots must not be mutable through
+      // an unrelated outer grant. No HOME, NODE_OPTIONS or package search enters the loader.
+      "/usr", "/etc", ...policy.immutablePaths];
     if (policy.immutablePaths.length === 0) throw new Error(REFUSAL);
     for (const path of immutable) {
       canonical(path);
       if (path === "/tmp" || path.startsWith("/tmp/") || path === "/dev" || path.startsWith("/dev/") ||
-          path === "/proc" || path.startsWith("/proc/") || writable.some(root => overlaps(root, path))) throw new Error(REFUSAL);
+          path === "/proc" || path.startsWith("/proc/") || overlaps(home, path) ||
+          writable.some(root => overlaps(root, path))) throw new Error(REFUSAL);
     }
     inner = structuredClone({ ...outer, writableBinds: binds,
       // Last after every writable grant. Nothing makes HOME writable or enlarges Git/tmp grants.
@@ -125,43 +163,57 @@ export function createPiCommandHomePrototype(policy: PiCommandHomePrototypePolic
     async exec(command: string, cwd: string, options: {
       onData(data: Buffer): void; signal?: AbortSignal; timeout?: number; env?: NodeJS.ProcessEnv;
     }): Promise<{ exitCode: number | null }> {
-      if (options.signal?.aborted) throw new Error("Pi command-home prototype command cancelled.");
+      if (options.signal?.aborted) throw new Error("aborted");
       try {
         canonical(cwd);
         if (!within(cwdRoot, cwd) || typeof command !== "string" || command.includes("\0") ||
             (options.timeout !== undefined && (!Number.isFinite(options.timeout) || options.timeout <= 0 ||
               options.timeout > 2_147_483))) throw new Error(REFUSAL);
       } catch { throw new Error(REFUSAL); }
-      const environment: string[] = [];
+      const environment: Record<string, string> = Object.create(null);
+      if (Object.keys(options.env ?? {}).length > 256 || Buffer.byteLength(command) > 65_536) throw new Error(REFUSAL);
       for (const [key, value] of Object.entries(options.env ?? {})) {
         if (value === undefined) continue;
-        if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key) || value.includes("\0")) throw new Error(REFUSAL);
-        environment.push(`${key}=${value}`);
+        if (!key || key.length > 256 || /[=\0]/u.test(key) || typeof value !== "string" ||
+            value.includes("\0") || Buffer.byteLength(value) > 32_768) throw new Error(REFUSAL);
+        environment[key] = value;
       }
-      // bwrap itself never receives model/tool environment or loader injection. The env payload
-      // is applied by trusted env only after the child namespace exists, not by a shell prefix.
-      const args = buildBwrapArgs({ command: envCommand,
-        args: ["-i", ...environment, shell, "-c", command], cwd }, inner);
+      const payload = JSON.stringify({ version: 1, command, env: environment });
+      if (Buffer.byteLength(payload) > 262_144) throw new Error(REFUSAL);
+      // No values in argv or the loader environment. The fixed, pinned entrypoint reads one
+      // bounded private stdin frame inside the namespace; the shell receives no handoff fd.
+      const args = buildBwrapArgs({ command: nodeRuntime,
+        args: ["--no-addons", "--no-global-search-paths", entrypoint, shell, cwd], cwd }, inner);
       const child = spawn({ command: inner.command, args, cwd,
         env: { PATH: "/usr/bin:/bin", LANG: "C" }, scrubInheritedEnv: Object.keys(process.env),
         context: { kind: "native" }, windowsShell: false });
-      child.stdin.end();
       child.stdout.on("data", options.onData); child.stderr.on("data", options.onData);
       let timer: ReturnType<typeof setTimeout> | undefined;
-      let cancelled = false;
-      const cancel = () => { cancelled = true; void kill(child); };
+      let timedOut = false;
+      const cancel = () => { void kill(child); };
       if (options.signal) {
         options.signal.addEventListener("abort", cancel, { once: true });
         if (options.signal.aborted) cancel();
       }
-      if (options.timeout !== undefined) timer = setTimeout(cancel, options.timeout * 1000);
+      if (options.timeout !== undefined) timer = setTimeout(() => { timedOut = true; cancel(); }, options.timeout * 1000);
       try {
-        const exitCode = await new Promise<number | null>((resolve, reject) => {
-          child.once("error", () => reject(new Error("Pi command-home prototype sandbox failed.")));
+        let failure: Error | undefined;
+        const exitCode = await new Promise<number | null>(resolve => {
+          const fail = () => {
+            failure = new Error("Pi command-home prototype sandbox or handoff failed.");
+            cancel(); resolve(null);
+          };
+          child.once("error", fail);
+          child.stdin.once("error", fail);
           child.once("close", code => resolve(code));
+          try { child.stdin.end(payload); } catch { fail(); }
         });
         if (!await prove(child)) throw new Error("Pi command-home prototype could not prove command-tree exit.");
-        if (cancelled) throw new Error("Pi command-home prototype command cancelled.");
+        if (failure) throw failure;
+        // Pinned Pi formats these exact operations errors as cancellation/timeout, including
+        // accumulated output. Preserve that contract only after proving the tree has retired.
+        if (options.signal?.aborted) throw new Error("aborted");
+        if (timedOut) throw new Error(`timeout:${options.timeout}`);
         return { exitCode };
       } finally {
         if (timer) clearTimeout(timer);
