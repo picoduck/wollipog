@@ -177,7 +177,8 @@ test("#4403 a bound child can leave for unrelated work, but new issue work, deci
       const executed = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
       assert.equal(executed.ok, mode === "left", `${mode}: ${executed.error}`);
       assert.equal(h.state.executes, mode === "left" ? 1 : 0, mode);
-      if (!executed.ok) assert.match(executed.error!, /active child work changed/u);
+      if (!executed.ok) assert.match(executed.error!, mode === "missing_history"
+        ? /campaign pull-request ledger changed or became unreadable/u : /active child work changed/u);
       const legacy = { ...before, activeChildren: before.activeChildren.map(({ issueWorkDigest: _digest, ...child }) => child) };
       assert.equal(issueClosureActiveChildrenMatch(h.db, "root", legacy), false, "old approvals keep their old assignment check");
     } finally { h.db.close(); }
