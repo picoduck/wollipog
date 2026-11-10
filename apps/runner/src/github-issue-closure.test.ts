@@ -20,17 +20,22 @@ test("uncertain closure recovery reads exact state, reason, author and body with
   ] as const) {
     const value = change as { comments?: unknown[]; state?: string; stateReason?: string; truncated?: boolean };
     const calls: string[][] = [];
-    const read = await reconcileGithubIssueClosure(approved, at, async (command, args) => {
+    const run = async (command: string, args: string[]) => {
       calls.push([command, ...args]);
       if (command === "git") return "https://github.com/team/repo.git";
       return JSON.stringify({ data: { viewer: { login: "closer" }, repository: { nameWithOwner: approved.repository,
         issue: { number: approved.issue, url: approved.url, state: value.state ?? "CLOSED", stateReason: value.stateReason ?? "NOT_PLANNED",
           comments: { nodes: value.comments ?? [comment], pageInfo: { hasPreviousPage: value.truncated ?? false } } } } } });
-    });
+    };
+    const read = await reconcileGithubIssueClosure(approved, at, run);
     assert.equal(read, expected, name);
     assert.equal(calls.length, 2);
     assert.equal(calls[1]![1], "api");
     assert.ok(!calls.flat().some(arg => /mutation|closeIssue|addComment/.test(arg)));
+    if (expected) {
+      assert.equal(await reconcileGithubIssueClosure({ ...approved, comment: undefined }, at, run), false);
+      assert.equal(await reconcileGithubIssueClosure(approved, at + 1500, run), true, "GitHub timestamps have whole-second precision");
+    }
   }
   await assert.rejects(() => reconcileGithubIssueClosure(approved, at, async () => { throw Error("unreadable"); }));
 });

@@ -21688,6 +21688,13 @@ export class SessionManager {
     if (this.campaignHostTargetRefusal(meta)) {
       return { ...base, ok: false, failure: "runner_failed", error: "Issue closure requires a valid local or SSH host execution target belonging to its runner" };
     }
+    // A consumed operation's read-only outcome does not depend on current mutation scope.
+    if (message.operation === "reconcile") {
+      try {
+        return { ...base, ok: true, reconciled: await reconcileGithubIssueClosure(message.snapshot, message.consumedAt,
+          issueClosureRun(meta.context, meta.repoPath, options.agentEnv?.(meta) ?? {})) };
+      } catch (error) { return issueClosureFailure(base, error); }
+    }
     const issue = message.operation === "inspect" ? message.issue : message.snapshot.issue;
     if (!meta.orchestrator.issueNumbers?.includes(issue)) {
       return { ...base, ok: false, failure: "campaign_authority_changed", error: "Issue is outside the human-authorized campaign scope" };
@@ -21707,8 +21714,6 @@ export class SessionManager {
     if (!boundedAuthorityCurrent(meta)) return { ...base, ok: false, failure: "campaign_authority_changed", error: "Bounded closure authority is unsynchronized" };
     const run = issueClosureRun(meta.context, meta.repoPath, options.agentEnv?.(meta) ?? {});
     try {
-      if (message.operation === "reconcile") return { ...base, ok: true,
-        reconciled: await reconcileGithubIssueClosure(message.snapshot, message.consumedAt, run) };
       if (message.operation === "inspect") {
         const inspection = await inspectGithubIssueClosure(issue, run, message.deliveryPullRequests, message.epicMembers === true);
         if (meta.orchestrator.issueScope && inspection.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, failure: "repository_changed", error: "Repository differs from the authorized scope" };

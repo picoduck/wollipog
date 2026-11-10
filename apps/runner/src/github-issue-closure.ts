@@ -55,7 +55,8 @@ export async function reconcileGithubIssueClosure(snapshot: GithubIssueClosureSn
   const data = object(response.data), repository = object(data.repository), issue = object(repository.issue);
   if (text(repository.nameWithOwner).toLowerCase() !== snapshot.repository.toLowerCase() || issue.number !== snapshot.issue ||
       issue.url !== snapshot.url || issue.state !== "CLOSED" || issue.stateReason !== snapshot.reason.toUpperCase()) return false;
-  if (snapshot.comment === undefined) return true;
+  // State alone cannot attribute a comment-less closure to the consumed operation.
+  if (snapshot.comment === undefined) return false;
   const login = text(object(data.viewer).login);
   const comments = object(issue.comments);
   if (!login || object(comments.pageInfo).hasPreviousPage !== false || !Array.isArray(comments.nodes)) return false;
@@ -63,7 +64,7 @@ export async function reconcileGithubIssueClosure(snapshot: GithubIssueClosureSn
   const matches = comments.nodes.filter(raw => {
     const comment = object(raw);
     return typeof comment.id === "string" && text(object(comment.author).login) === login &&
-      digest(text(comment.body)) === digest(snapshot.comment!) && Date.parse(text(comment.createdAt)) >= consumedAt;
+      digest(text(comment.body)) === digest(snapshot.comment!) && Date.parse(text(comment.createdAt)) >= Math.floor(consumedAt / 1000) * 1000;
   });
   return matches.length === 1;
 }

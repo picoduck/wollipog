@@ -14555,9 +14555,13 @@ export class SessionsService {
         const snapshot = decision.resourceSnapshot;
         let result = decision.issueClosureResult;
         if (!result.reconciliation) {
+          const target = this.closureTarget(root, snapshot.repository);
+          // An upgrade/reconnect that cannot send a read has made no recovery attempt yet.
+          if (!target || !this.hub.isRunnerOnline(target.runnerId) ||
+              !runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, "issueClosureReconciliation")) continue;
+          const beforeRead = result;
           result = { ...result, reconciliation: { checkedAt: Date.now() } };
           this.db.recordGithubIssueClosureResult(decision.occurrenceId, result);
-          const target = this.closureTarget(root, snapshot.repository);
           let verified = false;
           if (target && runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, "issueClosureReconciliation")) {
             const requestId = `issue_closure_reconcile_${randomUUID()}`;
@@ -14569,7 +14573,13 @@ export class SessionsService {
               }, 60_000);
               verified = response.type === "github_issue_closure_result" && response.sessionId === decision.sessionId &&
                 response.ok === true && response.reconciled === true;
-            } catch { /* An unreadable forge is actionable owner recovery, never proof of success. */ }
+            } catch (error) {
+              if (isRunnerRequestNotSentError(error)) {
+                this.db.recordGithubIssueClosureResult(decision.occurrenceId, beforeRead);
+                continue;
+              }
+              // A dispatched unreadable forge is owner recovery, never proof of success.
+            }
           }
           if (verified) {
             this.db.recordGithubIssueClosureResult(decision.occurrenceId, { outcome: "closed", completedAt: Date.now(),
@@ -14579,12 +14589,14 @@ export class SessionsService {
           }
         }
         // Reserved coordinates make this idempotent even if a restart lost the result update.
-        let requestId = `issue_closure_recovery_${decision.occurrenceId}`;
+        let requestId = result.reconciliation?.ownerDecisionOccurrenceId
+          ? this.db.workflowDecisionByOccurrence(result.reconciliation.ownerDecisionOccurrenceId)?.requestId ?? `issue_closure_recovery_${decision.occurrenceId}`
+          : `issue_closure_recovery_${decision.occurrenceId}`;
         let question = this.db.workflowDecisionByRequestId(campaignId, requestId);
         // A session stop may revoke an unanswered card. Keep one current request, and never read
         // that revocation as acknowledgement or redispatch the forge read.
-        for (let n = 1; question?.status === "revoked" && n <= 20; n++) {
-          requestId = `issue_closure_recovery_${decision.occurrenceId}_${n}`;
+        while (question?.status === "revoked") {
+          requestId = `issue_closure_recovery_${decision.occurrenceId}_${question.occurrenceId}`;
           question = this.db.workflowDecisionByRequestId(campaignId, requestId);
         }
         if (!question) {
@@ -14592,7 +14604,7 @@ export class SessionsService {
             resourceKey: `issue_closure_recovery:${decision.occurrenceId}`,
             resourceSnapshot: { category: "owner_decision", kind: "question",
               question: `Review the uncertain closure of ${snapshot.repository}#${snapshot.issue} (occurrence ${decision.occurrenceId}).`,
-              material: `Wollipog could not prove the approved state reason and exact closing comment on the forge. Inspect ${snapshot.url}. Answer or dismiss this request to acknowledge the uncertainty and clear this recovery record. This does not close the issue, post a comment, or authorize another attempt.`,
+              material: `Wollipog could not prove the approved state reason and exact closing comment on the forge. Inspect [${snapshot.repository}/issues/${snapshot.issue}](${snapshot.url}). Answer or dismiss this request to acknowledge the uncertainty and clear this recovery record. This does not close the issue, post a comment, or authorize another attempt.`,
               options: [{ optionId: "acknowledge", label: "Acknowledge Outcome" }] } }, () => true,
           { trustedOwnerDecision: true, trustedIssueClosureRecovery: true });
           if (created.ok) question = created.data ?? null;
@@ -16425,6 +16437,7 @@ export class SessionsService {
     if (decision.authority === "human" && PERSON_SETTLED_WORKFLOW_DECISION_CATEGORIES.has(decision.category)) {
       return fail(`a person settles this ${decision.category} decision, so it cannot be withdrawn`, 403);
     }
+    if (decision.requestId.startsWith("issue_closure_recovery_")) return fail("Only the owner can acknowledge issue closure recovery; agents cannot withdraw it", 403);
     if (!byRequester && decision.authority !== "orchestrator") {
       return fail("only its requester can withdraw a human-owned workflow decision", 403);
     }

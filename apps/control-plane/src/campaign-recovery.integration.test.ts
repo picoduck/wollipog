@@ -5,7 +5,7 @@ import { BACKGROUND_JOB_STALL_MS, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARE
   type GithubIssueClosureSnapshot, type SessionSnapshot } from "@wollipog/protocol";
 import { closureDeliveryGaps } from "./campaign-issue-authority.js";
 import { ControlPlaneDb, RUNNER_REPORTED_STOP } from "./db.js";
-import { Hub } from "./hub.js";
+import { Hub, RunnerRequestNotSentError } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { fakeScreenRuntime, settleScreens } from "./credential-screen-test-fixture.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
@@ -1177,6 +1177,57 @@ for (const outcome of ["closed_without_comment", "open", "unreadable", "lost_rea
     } finally { h.db.close(); }
   });
 }
+
+for (const unavailable of ["offline", "old_runner", "not_sent"] as const) {
+  test(`4398 recovery waits for ${unavailable} without consuming its forge read`, async () => {
+    const h = mergedWorkVerificationFixture("delivered");
+    try {
+      recordEpicClosure(h, "upgrade-wait", { outcome: "uncertain" });
+      let ready = false, reads = 0;
+      h.hub.isRunnerOnline = () => unavailable !== "offline" || ready;
+      if (unavailable === "old_runner") h.db.registerRunner(h.metadata, 1, 349);
+      h.hub.requestFromRunner = async (_runner, requestId) => {
+        if (unavailable === "not_sent" && !ready) throw new RunnerRequestNotSentError();
+        reads++;
+        return { type: "github_issue_closure_result", requestId, sessionId: "root", ok: true, reconciled: true };
+      };
+      await h.svc.reconcileUncertainIssueClosures("root");
+      assert.equal(h.db.workflowDecisionByOccurrence("upgrade-wait")!.issueClosureResult!.reconciliation, undefined);
+      ready = true;
+      h.db.registerRunner(h.metadata, 2, PROTOCOL_VERSION);
+      await h.svc.reconcileUncertainIssueClosures("root");
+      assert.equal(reads, 1);
+      assert.equal(h.db.workflowDecisionByOccurrence("upgrade-wait")!.issueClosureResult!.outcome, "closed");
+    } finally { h.db.close(); }
+  });
+}
+
+test("4398 owner recovery survives more than twenty revoked cards and refuses agent withdrawal", async () => {
+  const h = mergedWorkVerificationFixture("delivered");
+  try {
+    recordEpicClosure(h, "repeated-stop", { outcome: "uncertain" });
+    let reads = 0;
+    h.hub.requestFromRunner = async (_runner, requestId) => {
+      reads++;
+      return { type: "github_issue_closure_result", requestId, sessionId: "root", ok: true, reconciled: false };
+    };
+    for (let n = 0; n < 25; n++) {
+      await h.svc.reconcileUncertainIssueClosures("root");
+      const id = h.db.workflowDecisionByOccurrence("repeated-stop")!.issueClosureResult!.reconciliation!.ownerDecisionOccurrenceId!;
+      assert.equal(h.db.workflowDecisionByOccurrence(id)!.status, "pending");
+      assert.equal(h.svc.withdrawWorkflowDecision("root", id, { reason: "agent assertion" }).ok, false);
+      // Simulate the server's stop/restart revocation, not an agent acknowledgement.
+      h.db.markWorkflowDecisionRevoked(id, Date.now());
+      h.db.setPendingApproval("root", null);
+    }
+    await h.svc.reconcileUncertainIssueClosures("root");
+    const id = h.db.workflowDecisionByOccurrence("repeated-stop")!.issueClosureResult!.reconciliation!.ownerDecisionOccurrenceId!;
+    assert.equal(h.db.workflowDecisionByOccurrence(id)!.status, "pending");
+    assert.equal(reads, 1);
+    assert.ok(h.svc.answerOwnerQuestion("root", id, {}, "dismiss", { kind: "human", id: h.identity.userId }).ok);
+    assert.notEqual(h.db.campaignProjection("root")!.status, "waiting_human");
+  } finally { h.db.close(); }
+});
 
 test("an item in another campaign repository is finished only by a fresh merge in its own repository (#4119)", () => {
   const h = mergedWorkVerificationFixture("delivered");
