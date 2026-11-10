@@ -1297,6 +1297,11 @@ CREATE TABLE IF NOT EXISTS provider_login_notice_dismissals (
 -- User-submitted prompts and recovered question answers use the runner's durable receipt lane.
 -- Unlike scheduler-owned automation commands these rows belong directly to a session and remain
 -- recoverable across a control-plane restart without manufacturing an automation execution.
+-- Server-only provenance survives outbox pruning. Unknown legacy messages remain assignments.
+CREATE TABLE IF NOT EXISTS session_system_notice_commands (
+  command_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS session_prompt_commands (
   command_id       TEXT PRIMARY KEY,
   session_id       TEXT NOT NULL,
@@ -6381,7 +6386,7 @@ export class ControlPlaneDb {
     const policy = row ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) : undefined;
     const children = this.campaignDescendantIds(campaignId), verified = this.validCampaignChildReportIds(campaignId);
     const childRows = children.map(id => this.stmt("SELECT archived FROM sessions WHERE id=?").get(id) as { archived: number });
-    if (!row || !policy || children.length === 0 || children.some((id, i) => !verified.has(id) ||
+    if (!row || !policy || children.length === 0 || children.some((id, i) => !(verified.has(id) || this.campaignChildFailureSuperseded(campaignId, id)) ||
         policy.behavior.completion !== "retain" && (childRows[i]!.archived !== 1 || this.campaignWorktreeCleanup(id).length > 0)) ||
         pendingRequests(parseJson<PendingApproval>(row.pending_approval)).length > 0 ||
         this.stmt("SELECT 1 FROM workflow_decisions WHERE controlling_session_id=? AND status='pending'").get(campaignId)) {
@@ -22411,8 +22416,9 @@ export class ControlPlaneDb {
   }
 
   /** Seq of the session's last top-level report when no later report or assignment superseded it,
-   * and null when its last word is not a report. The same predicate that keeps a stored
-   * attestation valid, so a stopped session's report stays attestable after it ends (#1440). */
+   * and null when its last word is not a report. Failed/stopped recovery also requires proof that
+   * active commands and ledger assignments did not supersede it. Ordinary idle/completed stored
+   * attestations retain their established rules until a new turn or user message invalidates them. */
   durableFinalReportSeq(sessionId: string): number | null {
     const row = this.stmt(
       `SELECT target.seq AS seq FROM session_events target
@@ -22430,9 +22436,27 @@ export class ControlPlaneDb {
             AND json_type(later.payload, '$.parentToolUseId') IS NULL)
          )
        ) AND NOT EXISTS (
+         SELECT 1 FROM session_prompt_commands command
+         WHERE command.session_id=target.session_id
+           AND command.state IN ('pending','sent','accepted','queued','started','uncertain')
+           AND NOT EXISTS (SELECT 1 FROM session_system_notice_commands notice
+             WHERE notice.command_id=command.command_id AND notice.session_id=command.session_id)
+           AND NOT EXISTS (SELECT 1 FROM session_events delivered
+             WHERE delivered.session_id=target.session_id AND delivered.seq<target.seq
+               AND delivered.kind='user_message'
+               AND json_extract(delivered.payload, '$.commandId')=command.command_id)
+       ) AND NOT EXISTS (
+         SELECT 1 FROM campaign_work_attempts assignment
+         WHERE assignment.session_id=target.session_id
+           AND assignment.start_event_epoch=(SELECT event_epoch FROM sessions WHERE id=target.session_id)
+           AND assignment.start_seq>=target.seq
+       ) AND NOT EXISTS (
          SELECT 1 FROM session_events assignment
          WHERE assignment.session_id=target.session_id AND assignment.seq>target.seq
            AND assignment.kind='user_message'
+           AND NOT EXISTS (SELECT 1 FROM session_system_notice_commands notice
+             WHERE notice.session_id=assignment.session_id
+               AND notice.command_id=json_extract(assignment.payload, '$.commandId'))
        ) LIMIT 1`,
     ).get(sessionId) as { seq: number } | undefined;
     return row?.seq ?? null;
@@ -22490,7 +22514,7 @@ export class ControlPlaneDb {
        JOIN session_events target ON target.session_id=child.id AND target.seq=verification.report_event_seq
        WHERE verification.report_digest IS NULL AND verification.report_event_epoch IS NULL
          AND child.event_epoch=0
-         AND (child.archived=1 OR child.status IN ('idle','completed','stopped')
+         AND (child.archived=1 OR child.status IN ('idle','completed','stopped','failed')
            OR (child.status='input_required' AND child.policy_resume_status='idle'))${childFilter}`,
     ).all(...(childSessionId === undefined ? [] : [childSessionId])) as Array<{
       campaign_session_id: string; child_session_id: string; report_event_seq: number; verified_at: number;
@@ -22567,6 +22591,9 @@ export class ControlPlaneDb {
   invalidateCampaignReportsForLiveEvent(sessionId: string, payload: SessionEventPayload, ts: number): void {
     const digest = this.campaignReportDigest(payload);
     if (payload.kind !== "user_message" && !digest) return;
+    if (payload.kind === "user_message" && payload.commandId && this.stmt(
+      "SELECT 1 FROM session_system_notice_commands WHERE session_id=? AND command_id=?",
+    ).get(sessionId, payload.commandId)) return;
     if (this.stmt(
       `SELECT 1 FROM orchestrator_campaign_child_reports WHERE child_session_id=?
        AND (report_digest IS NULL OR report_digest!=? OR report_ts!=?) LIMIT 1`,
@@ -22575,6 +22602,24 @@ export class ControlPlaneDb {
 
   campaignChildReportVerified(campaignSessionId: string, childSessionId: string): boolean {
     return this.validCampaignChildReportIds(campaignSessionId, childSessionId).has(childSessionId);
+  }
+
+  /** A failed attempt is never delivery. A separately verified successor can settle its owed
+   * work, leaving any preserved worktree visible as cleanup rather than unverified work. */
+  campaignChildFailureSuperseded(campaignId: string, childId: string): boolean {
+    const child = this.stmt("SELECT status FROM sessions WHERE id=?").get(childId) as { status: string } | undefined;
+    if (child?.status !== "failed" && !(child?.status === "stopped" && this.sessionStopProvenance(childId)?.confirmation)) return false;
+    const attempts = this.stmt("SELECT work_item_id, ordinal, ended_at, end_reason FROM campaign_work_attempts WHERE campaign_session_id=? AND session_id=?")
+      .all(campaignId, childId) as Array<{ work_item_id: string; ordinal: number; ended_at: number | null; end_reason: string | null }>;
+    if (!attempts.length || this.campaignDescendantIds(childId).length || this.unconsumedWorkflowDecisionsForSession(childId).length) return false;
+    return attempts.every((attempt) => {
+      if (attempt.ended_at === null || !["failed", "superseded", "reassigned"].includes(attempt.end_reason ?? "")) return false;
+      const item = this.campaignWorkLedger.detail(campaignId, attempt.work_item_id, Date.now());
+      if (item?.primaryState !== "delivered") return false;
+      return item.attempts.some((successor) => successor.ordinal > attempt.ordinal && successor.sessionId !== childId &&
+        successor.sessionId !== null && this.campaignChildReportVerified(campaignId, successor.sessionId) &&
+        item.verifications.some((v) => v.attemptId === successor.id && v.outcome === "delivered"));
+    });
   }
 
   /** The root campaign whose verification of this child is current. Verifications are keyed by the
@@ -22593,7 +22638,7 @@ export class ControlPlaneDb {
       `SELECT verification.child_session_id AS id FROM orchestrator_campaign_child_reports verification
        JOIN sessions child ON child.id=verification.child_session_id
        WHERE verification.campaign_session_id=? AND verification.report_digest IS NULL
-         AND (child.archived=1 OR child.status IN ('idle','completed','stopped'))`,
+         AND (child.archived=1 OR child.status IN ('idle','completed','stopped','failed'))`,
     ).all(campaignSessionId) as Array<{ id: string }>).map((row) => row.id);
   }
 
@@ -23130,7 +23175,7 @@ export class ControlPlaneDb {
          AND verification.report_event_epoch=child.event_epoch
        WHERE verification.campaign_session_id=?${childFilter}
          AND verification.report_digest IS NOT NULL
-         AND (child.archived=1 OR child.status IN ('idle','completed','stopped'))
+         AND (child.archived=1 OR child.status IN ('idle','completed','stopped','failed'))
          AND ((verification.report_digest IS NOT NULL AND verification.report_event_epoch!=child.event_epoch) OR (
          (
            target.kind='agent_response_completed' OR
@@ -23148,9 +23193,29 @@ export class ControlPlaneDb {
            )
          )
          AND NOT EXISTS (
+           SELECT 1 FROM session_prompt_commands command
+           WHERE child.status IN ('failed','stopped') AND command.session_id=target.session_id
+             AND command.state IN ('pending','sent','accepted','queued','started','uncertain')
+             AND NOT EXISTS (SELECT 1 FROM session_system_notice_commands notice
+               WHERE notice.command_id=command.command_id AND notice.session_id=command.session_id)
+             AND NOT EXISTS (SELECT 1 FROM session_events delivered
+               WHERE delivered.session_id=target.session_id AND delivered.seq<target.seq
+                 AND delivered.kind='user_message'
+                 AND json_extract(delivered.payload, '$.commandId')=command.command_id)
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM campaign_work_attempts assignment
+           WHERE child.status IN ('failed','stopped') AND assignment.session_id=target.session_id
+             AND assignment.start_event_epoch=child.event_epoch
+             AND assignment.start_seq>=target.seq
+         )
+         AND NOT EXISTS (
            SELECT 1 FROM session_events assignment
            WHERE assignment.session_id=target.session_id AND assignment.seq>target.seq
              AND assignment.kind='user_message'
+           AND NOT EXISTS (SELECT 1 FROM session_system_notice_commands notice
+             WHERE notice.session_id=assignment.session_id
+               AND notice.command_id=json_extract(assignment.payload, '$.commandId'))
          )))`,
     ).all(...params) as unknown as Array<{ id: string }>;
     return new Set(rows.map((row) => row.id));
@@ -23435,7 +23500,7 @@ export class ControlPlaneDb {
       if (childHasHumanRequest) waitingHuman += 1;
       // A retained child may receive more work after verification. Re-check both the exact
       // latest report and terminal-for-review state instead of trusting a durable row forever.
-      const reportVerified = verified.has(child.id);
+      const reportVerified = verified.has(child.id) || this.campaignChildFailureSuperseded(resolvedCampaignId, child.id);
       const childCleanup = reportVerified && policy.behavior.completion === "stop_and_archive"
         ? this.campaignWorktreeCleanup(child.id) : [];
       cleanupWorktrees.push(...childCleanup);
@@ -24989,7 +25054,7 @@ export class ControlPlaneDb {
         `UPDATE session_restart_notices SET state='delivering', command_id=?, updated_at=?
          WHERE occurrence_id=? AND session_id=? AND state='held'`,
       );
-      const staged = this.stageSessionPromptCommand(input.command);
+      const staged = this.stageSessionPromptCommand({ ...input.command, systemNotice: true });
       for (const occurrenceId of input.occurrenceIds) {
         if (Number(update.run(staged.commandId, input.command.now, occurrenceId, input.command.sessionId).changes) !== 1) {
           throw new Error("restart notice changed before it could be staged");
@@ -28549,6 +28614,7 @@ export class ControlPlaneDb {
     payloadSha256: string;
     expiresAt: number;
     now: number;
+    systemNotice?: true;
   }): SessionPromptCommandRecord {
     JSON.parse(input.payloadJson);
     const existing = this.getSessionPromptCommand(input.commandId);
@@ -28568,6 +28634,9 @@ export class ControlPlaneDb {
       input.commandId, input.sessionId, input.runnerId, input.payloadJson, input.payloadSha256,
       input.now, input.expiresAt, input.now, input.now,
     );
+    if (input.systemNotice) this.stmt(
+      "INSERT INTO session_system_notice_commands (command_id,session_id) VALUES (?,?)",
+    ).run(input.commandId, input.sessionId);
     return this.getSessionPromptCommand(input.commandId)!;
   }
 

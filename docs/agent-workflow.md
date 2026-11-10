@@ -224,6 +224,29 @@ Wollipog; report provider-exit deferrals. Parent verification, rather than idlen
 
 ## Child Worktree Inspection Recovery
 
+For a failed child, use `verify_campaign_child` with its exact last completed top-level report.
+The report must still stand: a newer completed report, a real later prompt or a later campaign
+assignment supersedes it. A system notice that produced no completed response does not supersede
+it only when durable server-recorded command provenance proves it was an informational restart
+notice. Decision resumes, review continuations, PR-watch wakes and campaign continuations can
+carry work, so they still supersede reports. Unknown legacy
+provenance fails closed; notice-looking text is never proof. An active work-carrying command
+without a correlated earlier user message remains unresolved, even if staged or sent before the
+report: the runner may have queued it without starting its assigned work. Stage/send positions
+and CP/runner timestamps are never proof of delivery. A confirmed stopped child follows
+the same rule. A provisional stop still needs the runner's confirmation.
+
+`record_campaign_work_item_delivery` accepts that report inside its attempt, including an attempt
+ended as failed, and records delivery independently of session verification and archival. Failure
+alone never counts as delivery. With no standing report, end the failed attempt and dispatch a
+successor. Once a later attempt independently delivers the item and its child's current report is
+verified, the earlier failed child no longer counts as unverified campaign work. This applies only
+when every one of its attempts is ended and covered by a verified successor; open decisions or
+descendants still block settlement. It does not invent a report attestation for the failed child.
+Archive the failed session through the normal lifecycle. Preserved worktrees remain cleanup;
+never make throwaway commits, delete uncommitted files or create a replacement child solely to
+clear the campaign's status. Worktree inspection and retirement keep their independent checks.
+
 `verify_campaign_child` inspects managed worktrees before Stop and Archive. A refusal names the
 child, the worktree's position in its deduplicated managed-path inventory, and the first 12 hex
 characters of SHA-256 of the stored path. Match this against `get_session` worktrees (excluding

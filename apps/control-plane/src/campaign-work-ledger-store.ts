@@ -1612,8 +1612,8 @@ export class CampaignWorkLedgerStore {
 
   /** The child's attempt on this item whose event window holds the exact report, or the refusal.
    * Any attempt the child had counts, open or closed as reassigned, superseded or delivered; one the
-   * Orchestrator ended as abandoned or failed does not. A window whose history was replaced since
-   * (another event epoch) proves nothing. */
+   * Orchestrator abandoned does not. Failed attempts additionally need service-level finality proof.
+   * A window whose history was replaced since (another event epoch) proves nothing. */
   reportAttempt(
     campaignId: string,
     workItemId: string,
@@ -1626,13 +1626,13 @@ export class CampaignWorkLedgerStore {
     ).all(item.id, report.childSessionId) as unknown as AttemptRow[];
     if (!attempts.length) return fail("the child never had an attempt on this work item", 409);
     const sameEpoch = (epoch: number | null) => epoch !== null && report.eventEpoch !== null && epoch === report.eventEpoch;
-    const attempt = attempts.find((candidate) => candidate.end_reason !== "abandoned" && candidate.end_reason !== "failed" &&
+    const attempt = attempts.find((candidate) => candidate.end_reason !== "abandoned" &&
       sameEpoch(candidate.start_event_epoch) && report.seq > (candidate.start_seq ?? 0) &&
       (candidate.ended_at === null ||
         (sameEpoch(candidate.end_event_epoch) && candidate.end_seq !== null && report.seq <= candidate.end_seq)));
     if (!attempt) {
-      return fail("the report is not inside the child's attempt on this work item (an attempt ended as abandoned or " +
-        "failed does not count, and history replaced since the attempt cannot be matched)", 409);
+      return fail("the report is not inside the child's attempt on this work item (an abandoned attempt does not count, and " +
+        "history replaced since the attempt cannot be matched); use a report inside the matching attempt or dispatch a successor", 409);
     }
     return done({ attempt, open: attempt.ended_at === null, endSeq: attempt.end_seq });
   }

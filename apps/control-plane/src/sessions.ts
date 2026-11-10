@@ -9899,14 +9899,14 @@ export class SessionsService {
     // final as a completed one. Refusing it stranded a helper a child stopped on its way out,
     // which nothing but a human unarchive could bring back to a verifiable state (#1440).
     if (child.status !== "idle" && child.status !== "completed" &&
-        !(child.status === "stopped" && this.db.durableFinalReportSeq(child.id) !== null)) {
+        !((child.status === "stopped" || child.status === "failed") && this.db.durableFinalReportSeq(child.id) !== null)) {
       return fail(
-        "campaign child must be idle, completed, or stopped with a final report before its report can be verified",
+        "campaign child is " + child.status + "; verification requires idle, completed, or a settled stopped/failed child with an unsuperseded final report. Read events and verify the latest report; after a real later prompt, resume for a new report. With no report, end the attempt as failed and dispatch a successor",
         409,
       );
     }
     if (!this.db.hasCompletedAgentReportAt(child.id, request.reportEventSeq)) {
-      return fail("reportEventSeq is not a completed top-level agent response", 409);
+      return fail("reportEventSeq is not a completed top-level agent response or was superseded; read events and use the latest report, or dispatch a successor when no report exists", 409);
     }
     // An approved UI evidence decision gates a later enqueue rather than authorizing an action of
     // its own, so consuming it has no effect beyond its status. A finished child need not consume
@@ -9935,7 +9935,8 @@ export class SessionsService {
     const unfinishedDescendantId = this.db.campaignDescendantIds(child.id)
       .find((id) => {
         const candidate = this.db.getSession(id);
-        return !candidate || !this.db.campaignChildReportVerified(root.id, candidate.id) ||
+        return !candidate || !(this.db.campaignChildReportVerified(root.id, candidate.id) ||
+          this.db.campaignChildFailureSuperseded(root.id, candidate.id)) ||
         (completion === "stop_and_archive" &&
           (!candidate.archived || !this.db.campaignChildWorktreesRetired(candidate.id)));
       });
@@ -10230,19 +10231,27 @@ export class SessionsService {
       }
       const identity = this.db.campaignReportIdentity(child.id, report.reportEventSeq);
       // Only a top-level report has a digest.
-      if (identity.digest === null) return fail("reportEventSeq is not a completed top-level agent response", 409);
+      if (identity.digest === null) return fail("reportEventSeq is not a completed top-level agent response or was superseded; read events and use the latest report, or dispatch a successor when no report exists", 409);
       const attempt = this.db.campaignWorkLedger.reportAttempt(root.id, item.id,
         { childSessionId: child.id, seq: identity.seq, eventEpoch: identity.eventEpoch });
       if (!attempt.ok) return fail(attempt.error, attempt.status);
       if (attempt.data.open) {
+        if ((child.status === "failed" || child.status === "stopped") &&
+            this.db.durableFinalReportSeq(child.id) !== report.reportEventSeq) {
+          return fail("the child is " + child.status + " and this report was superseded by a later report or assignment; " +
+            "read events and use its standing report, or resume for a new report and dispatch a successor if it cannot run", 409);
+        }
         // While the attempt is open, only a finished turn's latest report is final (the verify_campaign_child rule).
         if (child.status !== "idle" && child.status !== "completed" &&
-            !(child.status === "stopped" && this.db.durableFinalReportSeq(child.id) !== null)) {
-          return fail("the child is still working on this item; record its report once its turn has finished", 409);
+            !((child.status === "stopped" || child.status === "failed") && this.db.durableFinalReportSeq(child.id) !== null)) {
+          return fail("the child is " + child.status + " without a final report; record delivery after an unsuperseded completed report, or end the attempt as failed and dispatch a successor", 409);
         }
         if (!this.db.hasCompletedAgentReportAt(child.id, report.reportEventSeq)) {
           return fail("reportEventSeq is not the child's latest completed report", 409);
         }
+      } else if (attempt.data.attempt.end_reason === "failed" &&
+          this.db.durableFinalReportSeq(child.id) !== report.reportEventSeq) {
+        return fail("the failed attempt has a superseded report; resume for a new report or dispatch a successor", 409);
       } else if (attempt.data.endSeq === null ||
           this.db.lastAgentReportThrough(child.id, attempt.data.endSeq) !== report.reportEventSeq) {
         // A closed attempt's report is the last one the child gave before that attempt closed.

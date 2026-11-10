@@ -856,7 +856,7 @@ test("inspection skips attached operator worktrees and refuses a running child b
     const sentBefore = sentToRunner.length;
     const running = await svc.verifyCampaignChildWithHistory(root, { childSessionId: worker, reportEventSeq: seq, followUpsAccounted: true });
     assert.equal(running.ok, false);
-    assert.match(running.error!, /must be idle, completed, or stopped/u);
+    assert.match(running.error!, /campaign child is running; verification requires/u);
     assert.equal(sentToRunner.length, sentBefore);
     setRunnerReply((message, hub) => {
       if (message.type === "session_worktree") hub.resolveRunnerRequest({ type: "session_worktree_result",

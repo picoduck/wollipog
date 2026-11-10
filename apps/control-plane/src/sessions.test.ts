@@ -1433,6 +1433,13 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       parent.id, grandchild.data.id, humanMerge.data.occurrenceId,
       { outcome: "approve" }, "human", { kind: "human", id: "owner" }, () => true,
     ).ok);
+    // This fixture acts on the approved resume before reporting. Model the runner's correlated
+    // user message too: transport send alone cannot prove queued work actually started (#4400).
+    const nestedResume = hub.sentOfType("durable_session_command").find((message) =>
+      message.command.type === "prompt_session" && message.command.sessionId === grandchild.data!.id);
+    assert.ok(nestedResume && nestedResume.command.type === "prompt_session");
+    db.appendEvent(grandchild.data.id, { kind: "user_message", text: nestedResume.command.text,
+      commandId: nestedResume.commandId }, Date.now());
     const humanMergeSnapshot = { ...mergeSnapshot, headSha: "b".repeat(40),
       requiredChecks: { ...mergeSnapshot.requiredChecks, headSha: "b".repeat(40) } };
     const humanMergeCommand = canonicalPrMergeEnqueueCommand(humanMergeSnapshot);
@@ -2025,13 +2032,13 @@ test("a stopped campaign child with a final report can still be verified, and ar
     svc.onSessionStatus(silentHelper, "stopped");
     const silentEvent = db.appendEvent(silentHelper, { kind: "stderr", text: "died" }, Date.now()).seq;
     assert.match(verify(silentHelper, silentEvent).error ?? "",
-      /must be idle, completed, or stopped with a final report/,
+      /campaign child is stopped; verification requires/,
       "a stopped helper that never posted a report cannot be verified");
 
     const supersededReport = report(silentHelper, "Helper report");
     db.appendEvent(silentHelper, { kind: "user_message", text: "Also check the logs" }, Date.now());
     assert.match(verify(silentHelper, supersededReport).error ?? "",
-      /must be idle, completed, or stopped with a final report/,
+      /campaign child is stopped; verification requires/,
       "and a report a later assignment superseded is not its last word either");
 
     const freshReport = report(silentHelper, "Helper report after the follow-up");
