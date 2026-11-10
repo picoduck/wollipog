@@ -1918,6 +1918,83 @@ function promptedClosure(requestId: string) {
   } };
 }
 
+test("#4403 age alone preserves a human or delegated closure approval", async () => {
+  for (const full of [false, true]) {
+    const h = harness(full);
+    try {
+      const c = await h.svc.requestGithubIssueClosure("root", { requestId: "aged-approval", issue: 100, reason: "completed",
+        explanation: "Delivery reported", evidence: ["Report"] });
+      assert.ok(c.ok, c.error ?? "closure request");
+      const d = c.data!.decision!;
+      assert.equal(d.authority, "human", "unproven delivery stays the person's even in Full Control");
+      assert.ok(h.approve(d).ok);
+      h.db.raw().prepare("UPDATE workflow_decisions SET resolved_at=? WHERE occurrence_id=?")
+        .run(Date.now() - 2 * 60 * 60_000, d.occurrenceId);
+      const result = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+      assert.ok(result.ok, result.error ?? "closure execution");
+      assert.equal(h.state.executes, 1);
+    } finally { h.db.close(); }
+  }
+  const { h, approved } = promptedClosure("aged-delegated-approval");
+  try {
+    const d = await approved();
+    h.db.raw().prepare("UPDATE workflow_decisions SET resolved_at=? WHERE occurrence_id=?")
+      .run(Date.now() - 2 * 60 * 60_000, d.occurrenceId);
+    const result = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+    assert.ok(result.ok, result.error ?? "closure execution");
+    assert.equal(h.state.executes, 1);
+  } finally { h.db.close(); }
+});
+
+test("#4403 stale approvals name the changed binding even after thirty minutes", async () => {
+  for (const binding of ["payload digest", "issue scope", "policy revision", "approval authority", "active child work"] as const) {
+    const h = harness(false);
+    try {
+      const c = await h.svc.requestGithubIssueClosure("root", { requestId: "stale-approval", issue: 100, reason: "completed",
+        explanation: "Delivery reported", evidence: ["Report"] });
+      assert.ok(c.ok, c.error ?? "closure request");
+      const d = c.data!.decision!;
+      assert.ok(h.approve(d).ok);
+      h.db.raw().prepare("UPDATE workflow_decisions SET resolved_at=? WHERE occurrence_id=?")
+        .run(Date.now() - 2 * 60 * 60_000, d.occurrenceId);
+      if (binding === "issue scope") h.db.raw().prepare("UPDATE workflow_decisions SET resource_snapshot=json_set(resource_snapshot,'$.scopeRevision',99) WHERE occurrence_id=?").run(d.occurrenceId);
+      if (binding === "policy revision") h.db.raw().prepare("UPDATE workflow_decisions SET policy_revision=999 WHERE occurrence_id=?").run(d.occurrenceId);
+      if (binding === "approval authority") h.db.raw().prepare("UPDATE workflow_decisions SET authority='orchestrator' WHERE occurrence_id=?").run(d.occurrenceId);
+      if (binding === "active child work") h.db.updateSessionStatus("child", "completed", Date.now());
+      const result = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, binding === "payload digest" ? "wrong" : d.resourceDigest);
+      assert.equal(result.ok, false);
+      assert.match(result.error!, new RegExp(`${binding} changed`, "u"));
+      assert.equal(h.state.executes, 0);
+      assert.equal(h.db.workflowDecisionByOccurrence(d.occurrenceId)?.status, "revoked");
+    } finally { h.db.close(); }
+  }
+});
+
+test("#4403 synchronization cannot hide a changed binding behind an old approval", async () => {
+  const h = harness(false);
+  try {
+    const c = await h.svc.requestGithubIssueClosure("root", { requestId: "sync-change", issue: 100, reason: "completed",
+      explanation: "Delivery reported", evidence: ["Report"] });
+    assert.ok(c.ok, c.error ?? "closure request");
+    const d = c.data!.decision!;
+    assert.ok(h.approve(d).ok);
+    h.db.raw().prepare("UPDATE workflow_decisions SET resolved_at=? WHERE occurrence_id=?")
+      .run(Date.now() - 2 * 60 * 60_000, d.occurrenceId);
+    const request = h.hub.requestFromRunner;
+    h.hub.requestFromRunner = async (r, id, message, timeout) => {
+      const result = await request(r, id, message, timeout);
+      if (message.type === "campaign_issue_scope" && message.operation === "synchronize") {
+        h.db.updateSessionStatus("child", "completed", Date.now());
+      }
+      return result;
+    };
+    const result = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+    assert.equal(result.ok, false);
+    assert.match(result.error!, /active child work changed/u);
+    assert.equal(h.state.executes, 0);
+  } finally { h.db.close(); }
+});
+
 test("#3793 a prompt delivery retry between approval and execution keeps the closure", async () => {
   const { h, pending, approved } = promptedClosure("retried-prompt");
   try {

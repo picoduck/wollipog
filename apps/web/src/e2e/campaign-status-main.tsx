@@ -103,7 +103,7 @@ const params = new URLSearchParams(window.location.search);
 const scenario = params.get("scenario") ?? "campaign";
 if (params.get("theme") === "light") document.documentElement.dataset.theme = "light";
 
-const NOW = Date.now();
+const NOW = params.has("closureRecovery") ? Date.parse("2026-01-01T12:00:00Z") : Date.now();
 const recoveryReason = params.get("recovery");
 const recoveryRecord = recoveryReason && ["missing_access", "missing_human_information", "boundary_enlargement",
   "human_required_rule", "unsupported_capability", "attempts_exhausted", "failed_checks", "reviewer_objection", "uncertain_outcome", "request_declined",
@@ -320,7 +320,7 @@ if (params.get("forge") === "gitlab") {
   };
 }
 
-const ROOT_TITLE = "#2417 Campaign Orchestrator";
+const ROOT_TITLE = params.has("closureRecovery") ? "#4398 Closure Recovery Campaign" : "#2417 Campaign Orchestrator";
 const recordedWork = (revision: number) => workSummary(NOW, {
   revision,
   coverage: { untrackedChildren: 0, predatesLedger: false },
@@ -682,6 +682,19 @@ const projectionFor = (rev: number) => campaignProjection(
         summary: "Add picoduck/notes-site to the campaign", handedOff: false, createdAt: NOW - 2 * 60_000 },
     ] } } : {}),
     ...(fullControlScenario ? fullControlProjection(fullControlScenario) : {}),
+    ...(params.has("closureRecovery") ? {
+      status: params.get("closureRecovery") === "settled" ? "verified_complete" as const : "waiting_human" as const,
+      limits: { maximumConcurrentChildren: 3, occupied: 0, remaining: 3, costBudgetUsd: null, maxToolCalls: null },
+      children: { total: 1, active: 0, waitingHuman: 0, blocked: 0, verified: 1, cleanupPending: 0 },
+      heldChildren: [], followUps: { unique: 0, duplicates: 0 },
+      pendingDecisions: { human: params.get("closureRecovery") === "settled" ? 0 : 1, orchestrator: 0 },
+      work: workSummary(NOW, { revision: rev, counts: { committed: 1, delivered: 1, original: 1, followUp: 0, cancelled: 0, removed: 0,
+        byState: { planned: 0, queued: 0, running: 0, waiting: 0, blocked: 0, delivered: 1, cancelled: 0, removed: 0 } },
+        recommendations: { awaiting_adjudication: 0, accepted: 0, rejected: 0, deferred: 0, duplicate: 0 },
+        obligations: { verification: 0, adjudication: 0, publication: 0, cleanup: 0 },
+        elapsed: { startedAt: NOW - 12 * MINUTE, endedAt: params.get("closureRecovery") === "settled" ? NOW : null },
+        cost: { total: knownCost(1), workItems: knownCost(1), coordination: knownCost(0), unattributed: knownCost(0), attributedSince: NOW - 12 * MINUTE } }),
+    } : {}),
   },
 );
 
@@ -690,7 +703,12 @@ const projectionFor = (rev: number) => campaignProjection(
 const ownerScenario = ["before", "after", "rule"].includes(params.get("owners") ?? "") ? params.get("owners") as "before" | "after" | "rule" : null;
 const ownerRule = { source: "~/.codex/skills/issue-workflow/SKILL.md",
   quote: "Never merge a pull request without per-PR user authorization through the structured question tool." };
-const ownerSnapshot = { category: "owner_decision" as const, question: "Which credential design should the provider bridge use?",
+const ownerSnapshot = params.get("closureRecovery") === "owner" ? {
+  category: "owner_decision" as const, kind: "question" as const,
+  question: "Review the uncertain closure of picoduck/wollipog#4398 (occurrence closure_4398).",
+  material: "Wollipog could not prove the approved state reason and exact closing comment on the forge. Inspect [picoduck/wollipog/issues/4398](https://github.com/picoduck/wollipog/issues/4398). Answer or dismiss this request to acknowledge the uncertainty and clear this recovery record. This does not close the issue, post a comment, or authorize another attempt.",
+  options: [{ optionId: "acknowledge", label: "Acknowledge Outcome", description: "Acknowledge the uncertainty." }],
+} : { category: "owner_decision" as const, question: "Which credential design should the provider bridge use?",
   material: "PR picoduck/wollipog#4141 at head 3f9c2e1. Both designs pass CI; the broker adds a helper process the owner would run.",
   recommendedOptionId: "lease", options: [
     { optionId: "lease", label: "Short-Lived Lease", description: "Credentials expire with the session." },
@@ -706,9 +724,9 @@ const ownerCard: import("@wollipog/protocol").PendingApproval | null = ownerScen
     authority: "human", authorityEvaluation: { owner: "human", basis: "human_required", reason: "owner_kept", operation: "owner_decision" },
     status: "pending", createdAt: NOW - 4 * MINUTE },
 } : null;
-const ownerProjection = ownerScenario === "after" ? { status: "waiting_human" as const, ownerDecisions: { total: 2, items: [
+const ownerProjection = ownerScenario === "after" ? { status: "waiting_human" as const, ownerDecisions: { total: params.has("closureRecovery") ? 1 : 2, items: [
   { occurrenceId: "workflow_owner_1", sessionId: "s_root", category: "owner_decision" as const, summary: ownerSnapshot.question, handedOff: false, createdAt: NOW - 4 * MINUTE },
-  { occurrenceId: "occ_1", sessionId: "s_child_3", category: "pr_merge" as const, summary: "Merge picoduck/wollipog#4141", handedOff: true, createdAt: NOW - 8 * MINUTE },
+  ...(params.has("closureRecovery") ? [] : [{ occurrenceId: "occ_1", sessionId: "s_child_3", category: "pr_merge" as const, summary: "Merge picoduck/wollipog#4141", handedOff: true, createdAt: NOW - 8 * MINUTE }]),
 ] } } : ownerScenario === "rule" ? { status: "waiting_human" as const, ownerDecisions: { total: 1, items: [
   { occurrenceId: "occ_1", sessionId: "s_child_3", category: "pr_merge" as const, summary: "Merge picoduck/wollipog#4141", handedOff: false,
     ownerRule, createdAt: NOW - 8 * MINUTE },
@@ -842,7 +860,7 @@ const ownerRequests = (owners: "before" | "after" | "rule"): DescendantRequestVi
   };
   return ownerCard ? [{ sessionId: "s_root", sessionTitle: "Full Control Campaign", runnerId: "runner-1", runnerOnline: true, eventEpoch: 1,
     createdAt: NOW - 4 * MINUTE, responseOwner: "human", authorityEvaluation: ownerCard.workflowDecision!.authorityEvaluation,
-    occurrenceId: "workflow_owner_1", request: ownerCard }, merge] : [merge];
+    occurrenceId: "workflow_owner_1", request: ownerCard }, ...(params.has("closureRecovery") ? [] : [merge])] : [merge];
 };
 
 /** The request the blocked item's recorded blocker names, pending on its child. */
@@ -878,7 +896,10 @@ const forgeRefreshes: string[] = [];
 let openedSession: string | null = null;
 let selectedRequestKey: string | null = null;
 
-const visibleItems = scenario === "planless" ? items.filter((item) => item.id === "cwi_2" || item.id === "cwi_3") : items;
+const visibleItems = params.has("closureRecovery") ? [itemSummary("cwi_4398", NOW, {
+  title: "Uncertain Issue Closure Recovery", issue: { repository: "picoduck/wollipog", number: 4398 }, primaryState: "delivered",
+  currentAttempt: null, blocker: null, elapsed: { startedAt: NOW - 12 * MINUTE, endedAt: NOW - MINUTE } })]
+  : scenario === "planless" ? items.filter((item) => item.id === "cwi_2" || item.id === "cwi_3") : items;
 
 // The same sentence and versions the control plane returns (campaign-issue-scope.ts).
 const SCOPE_GRANT_TARGET = { source: "automatic", runnerId: "r", machineName: "Studio", agentId: "claude", harnessName: "Claude Code",
@@ -1163,6 +1184,7 @@ const client = {
     // `activity=…` (#4146): the authorized scope covers every work item, so nothing reads as outside it.
     ...(activityScenario ? { repository: "picoduck/wollipog", revision: 1, canPropose: false, outsideScope: [], candidates: [],
       issueNumbers: [...new Set(items.flatMap((item) => item.issue ? [item.issue.number] : []))] } : {}),
+    ...(params.has("closureRecovery") ? { repository: "picoduck/wollipog", revision: 1, issueNumbers: [4398], outsideScope: [], candidates: [] } : {}),
     ...(params.get("completedChildren") === "1" && recoveryRecord?.reason === "failed_checks" ? {
       // Disclosed static scope data, not a live mint/approval or supported-profile assertion.
       issueNumbers: [123], revision: 1, canPropose: false, outsideScope: [], candidates: [],
@@ -1304,7 +1326,7 @@ function Fixture() {
     consumeSubagentFocusRequest: () => {},
   };
   return (
-    <main className="app" style={{ display: "block", height: ownerScopeCards.length && window.innerWidth <= 760 ? "calc(100dvh - var(--bottom-bar-h))" : "100dvh" }}>
+    <main className="app" style={{ display: "block", height: (ownerScopeCards.length || params.has("closureRecovery")) && window.innerWidth <= 760 ? "calc(100dvh - var(--bottom-bar-h))" : "100dvh" }}>
       <section className="session-detail expanded" style={{ height: "100%" }}>
         <header className="detail-bar session-bar">
           <h1 className="detail-bar-title session-bar-title">{session.title}</h1>
@@ -1321,7 +1343,7 @@ function Fixture() {
                   ))}
                 </div>
               </div>
-              {ownerScopeCards.length > 0 && session.pendingApproval && (
+              {(ownerScopeCards.length > 0 || params.get("closureRecovery") === "owner") && session.pendingApproval && (
                 <RequestDock session={session} requests={dockRequests(pendingRequests(withPresentedOwnerQuestions(session).pendingApproval))} runnerOnline />
               )}
             </div>

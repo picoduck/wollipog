@@ -5582,10 +5582,11 @@ test("a Location's closure gets no commit when the campaign's authority changes 
       closures.length = 0;
       return decision;
     };
-    const refused = (occurrenceId: string, reason: string) => {
+    const refused = (occurrenceId: string, reason: string, changedBinding?: string) => {
       const after = f.db.workflowDecisionByOccurrence(occurrenceId)!;
       assert.equal(after.status, "consumed");
       assert.deepEqual([after.issueClosureResult?.outcome, after.issueClosureResult?.refusal?.reason], ["refused", reason]);
+      if (changedBinding) assert.match(after.issueClosureResult?.refusal?.runnerError ?? "", new RegExp(changedBinding, "u"));
       assert.deepEqual(operations(), ["execute"], "the Location's runner never got a commit, so it wrote nothing");
     };
 
@@ -5594,7 +5595,7 @@ test("a Location's closure gets no commit when the campaign's authority changes 
     const workspacePath = f.db.getWorkspacePath.bind(f.db);
     state.duringChecks = () => { f.db.getWorkspacePath = (runnerId, workspaceId) => workspaceId === "a" ? "/fixture/elsewhere" : workspacePath(runnerId, workspaceId); };
     assert.equal((await f.sessions.executeGithubIssueClosure(id, moved.occurrenceId, moved.resourceDigest)).ok, true);
-    refused(moved.occurrenceId, "campaign_authority_changed");
+    refused(moved.occurrenceId, "campaign_authority_changed", "repository Location changed");
     f.db.getWorkspacePath = workspacePath;
 
     // A malformed answer can't prove readiness, and no write can have happened without a commit: not
@@ -5615,7 +5616,7 @@ test("a Location's closure gets no commit when the campaign's authority changes 
     state.duringChecks = () => { f.db.setPendingApproval(id, { requestId: "continue", kind: "authentication", title: "Authentication Required",
       options: [{ optionId: "auth:revalidate", name: "Recheck Authentication", kind: "allow_once" }] }); };
     assert.equal((await f.sessions.executeGithubIssueClosure(id, asked.occurrenceId, asked.resourceDigest)).ok, true);
-    refused(asked.occurrenceId, "campaign_authority_changed");
+    refused(asked.occurrenceId, "campaign_authority_changed", "session guardrails changed");
     f.db.setPendingApproval(id, null);
 
     // So does a policy hook's approval.
@@ -5623,7 +5624,7 @@ test("a Location's closure gets no commit when the campaign's authority changes 
     const openHooks = f.db.listOpenPolicyHookApprovals.bind(f.db);
     state.duringChecks = () => { f.db.listOpenPolicyHookApprovals = () => [{}] as unknown as ReturnType<typeof openHooks>; };
     assert.equal((await f.sessions.executeGithubIssueClosure(id, hooked.occurrenceId, hooked.resourceDigest)).ok, true);
-    refused(hooked.occurrenceId, "campaign_authority_changed");
+    refused(hooked.occurrenceId, "campaign_authority_changed", "session guardrails changed");
     f.db.listOpenPolicyHookApprovals = openHooks;
 
     // The owner removes the issue from the scope while the checks run, after the last check before
@@ -5635,14 +5636,14 @@ test("a Location's closure gets no commit when the campaign's authority changes 
       assert.equal(approve(removal.data!.occurrenceId).ok, true);
     };
     assert.equal((await f.sessions.executeGithubIssueClosure(id, removed.occurrenceId, removed.resourceDigest)).ok, true);
-    refused(removed.occurrenceId, "campaign_authority_changed");
+    refused(removed.occurrenceId, "campaign_authority_changed", "issue scope changed");
     assert.equal(p.other.runnerId, "r2");
 
     // The campaign ends while the checks run.
     const ended = await approved("close-40-ended", 40);
     state.duringChecks = () => { f.db.updateSessionStatus(id, "completed", Date.now()); };
     assert.equal((await f.sessions.executeGithubIssueClosure(id, ended.occurrenceId, ended.resourceDigest)).ok, true);
-    refused(ended.occurrenceId, "campaign_authority_changed");
+    refused(ended.occurrenceId, "campaign_authority_changed", "campaign session changed");
   } finally { await server.close(); f.db.close(); }
 });
 

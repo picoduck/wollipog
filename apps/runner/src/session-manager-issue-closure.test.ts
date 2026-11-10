@@ -123,6 +123,20 @@ function fixture(t: TestContext, mode: CloseMode = "closed") {
 
 const digest = (snapshot: GithubIssueClosureSnapshot) => createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
 
+test("4398 read-only reconciliation reaches the forge after the issue leaves current scope", async (t) => {
+  const f = fixture(t);
+  const approved = await f.snapshot();
+  f.store().patchMeta(sessionId, { orchestrator: { ...f.diskMeta().orchestrator!, issueNumbers: [],
+    issueScope: { repository: approved.repository, issueNumbers: [], revision: 2, authorizedByUserId: "owner", authorizedAt: 1 } } });
+  const before = f.commands.length;
+  const read = await f.manager().githubIssueClosure({ type: "github_issue_closure", operation: "reconcile", sessionId,
+    requestId: "recovery", occurrenceId: "consumed", snapshot: { ...approved, scopeRevision: 1 }, consumedAt: 1 });
+  assert.equal(read.ok, true, read.error ?? "recovery read refused");
+  assert.equal(read.reconciled, false, "fixture is still open, so no success is invented");
+  assert.ok(f.commands.slice(before).some(c => c.file === "gh" && c.args[1] === "graphql"));
+  assert.equal(f.mutations().length, 0);
+});
+
 for (const change of ["unchanged", "custom", "revision", "operation", "reason", "launch"] as const) {
   test(`bounded closure rechecks ${change} authority after forge inspection at its mutation fence`, async (t) => {
     const f = fixture(t);

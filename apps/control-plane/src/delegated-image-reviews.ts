@@ -130,7 +130,13 @@ export class DelegatedImageReviews {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS delegated_image_reviews_one_live ON delegated_image_reviews(occurrence_id)
       WHERE state IN ${LIVE};
-    CREATE INDEX IF NOT EXISTS delegated_image_reviews_root ON delegated_image_reviews(root_session_id);`);
+    CREATE INDEX IF NOT EXISTS delegated_image_reviews_root ON delegated_image_reviews(root_session_id);
+    CREATE TABLE IF NOT EXISTS delegated_image_review_reuses (
+      occurrence_id TEXT PRIMARY KEY, review_id TEXT NOT NULL, brief_sha256 TEXT NOT NULL,
+      resource_digest TEXT NOT NULL,
+      FOREIGN KEY (occurrence_id) REFERENCES workflow_decisions(occurrence_id) ON DELETE CASCADE,
+      FOREIGN KEY (review_id) REFERENCES delegated_image_reviews(review_id) ON DELETE CASCADE
+    );`);
   }
 
   private stmt(text: string): ReturnType<DatabaseSync["prepare"]> {
@@ -180,6 +186,28 @@ export class DelegatedImageReviews {
   byReviewer(reviewerSessionId: string): DelegatedImageReviewRecord | null {
     return this.parse(this.stmt("SELECT * FROM delegated_image_reviews WHERE reviewer_session_id=?")
       .get(reviewerSessionId) as Row | undefined);
+  }
+
+  forChild(rootSessionId: string, childSessionId: string): DelegatedImageReviewRecord[] {
+    return (this.stmt(`SELECT * FROM delegated_image_reviews WHERE root_session_id=? AND child_session_id=?
+      AND verdict_json IS NOT NULL ORDER BY created_at DESC`).all(rootSessionId, childSessionId) as unknown as Row[])
+      .map((row) => this.parse(row)!);
+  }
+
+  clearReuse(occurrenceId: string): void {
+    this.stmt("DELETE FROM delegated_image_review_reuses WHERE occurrence_id=?").run(occurrenceId);
+  }
+
+  prepareReuse(occurrenceId: string, reviewId: string, briefSha256: string, resourceDigest: string): void {
+    this.stmt(`INSERT OR REPLACE INTO delegated_image_review_reuses
+      (occurrence_id, review_id, brief_sha256, resource_digest) VALUES (?, ?, ?, ?)`)
+      .run(occurrenceId, reviewId, briefSha256, resourceDigest);
+  }
+
+  reusePrepared(occurrenceId: string, reviewId: string, briefSha256: string, resourceDigest: string): boolean {
+    return Boolean(this.stmt(`SELECT 1 FROM delegated_image_review_reuses
+      WHERE occurrence_id=? AND review_id=? AND brief_sha256=? AND resource_digest=?`)
+      .get(occurrenceId, reviewId, briefSha256, resourceDigest));
   }
 
   isReviewer(sessionId: string): boolean {

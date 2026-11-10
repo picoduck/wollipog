@@ -6515,7 +6515,9 @@ export class ControlPlaneDb {
   campaignRecoverySettledDecisions(campaignId: string): WorkflowDecisionView[] {
     return (this.stmt(`SELECT decision.* FROM workflow_decisions decision
       WHERE controlling_session_id=? AND (status='denied' OR
-        (status='consumed' AND json_extract(issue_closure_result,'$.outcome')='uncertain'))
+        (status='consumed' AND json_extract(issue_closure_result,'$.outcome')='uncertain'
+          AND json_extract(issue_closure_result,'$.reconciliation.acknowledgedAt') IS NULL))
+        AND NOT (category='owner_decision' AND request_id GLOB 'issue_closure_recovery_*')
         AND NOT EXISTS (SELECT 1 FROM campaign_recovery_denial_settlements settled
           WHERE decision.status='denied' AND settled.campaign_session_id=decision.controlling_session_id
             AND settled.occurrence_id=decision.occurrence_id)
@@ -25610,11 +25612,15 @@ export class ControlPlaneDb {
     reviewerSessionId: string,
     now: number,
   ): UiEvidenceReviewReceipt[] {
-    return (this.stmt(
+    return this.uiEvidenceReceiptRows(this.stmt(
       `SELECT * FROM ui_evidence_review_receipts
        WHERE occurrence_id=? AND reviewer_session_id=? AND acknowledged_at IS NOT NULL
          AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at>? ORDER BY evidence_id`,
-    ).all(occurrenceId, reviewerSessionId, now) as unknown as Array<{
+    ).all(occurrenceId, reviewerSessionId, now));
+  }
+
+  private uiEvidenceReceiptRows(rows: unknown): UiEvidenceReviewReceipt[] {
+    return (rows as Array<{
       receipt_id: string; occurrence_id: string; reviewer_session_id: string; child_session_id: string;
       policy_revision: number; evidence_id: string; artifact_id: string; sha256: string; delivered_at: number;
       delivery_order: number | null; video_source_artifact_id: string | null;
@@ -25642,6 +25648,44 @@ export class ControlPlaneDb {
     }));
   }
 
+  /** A spent delivery can prove review again, without extending its expiry. Explicit revocation
+   * cannot; supersession by itself retains only the delivery proof, never the old approval. */
+  reusableUiEvidenceReviewReceipts(decision: WorkflowDecisionView, reviewerSessionId: string, now: number): UiEvidenceReviewReceipt[] {
+    const snapshot = decision.resourceSnapshot;
+    if (snapshot.category !== "ui_evidence_approval" || snapshot.videoReview) return [];
+    const controller = this.getSession(decision.controllingSessionId);
+    if (!controller || !runnerSupportsProtocol(this.uiEvidenceReviewClient(controller, "orchestrator").runnerProtocolVersion,
+      "uiEvidenceReceiptReuse")) return [];
+    const rows = this.stmt(`SELECT receipt.* FROM ui_evidence_review_receipts receipt
+      JOIN workflow_decisions source ON source.occurrence_id=receipt.occurrence_id
+      WHERE source.controlling_session_id=? AND source.authority='orchestrator'
+        AND source.category='ui_evidence_approval'
+        AND source.session_id=? AND source.policy_revision=? AND receipt.reviewer_session_id=?
+        AND receipt.child_session_id=? AND receipt.policy_revision=?
+        AND receipt.occurrence_id<>? AND receipt.acknowledged_at IS NOT NULL AND receipt.expires_at>?
+        AND receipt.video_source_artifact_id IS NULL
+        AND json_extract(source.resource_snapshot,'$.videoReview') IS NULL
+        AND ((source.status IN ('pending','approved','consumed') AND receipt.revoked_at IS NULL)
+          OR (source.status='superseded' AND source.superseded_by IS NOT NULL AND receipt.revoked_at IS NULL))
+      ORDER BY receipt.delivered_at DESC`).all(decision.controllingSessionId, decision.sessionId,
+      decision.policyRevision, reviewerSessionId, decision.sessionId, decision.policyRevision,
+      decision.occurrenceId, now);
+    const candidates = this.uiEvidenceReceiptRows(rows);
+    return snapshot.evidence.flatMap((item) => {
+      if (!item.artifactId || !item.mediaType?.startsWith("image/")) return [];
+      const receipt = candidates.find((candidate) => candidate.artifactId === item.artifactId && candidate.sha256 === item.sha256);
+      if (!receipt) return [];
+      const artifact = this.workflowArtifactExportPreflight(item.artifactId)?.artifact;
+      if (!artifact || artifact.sessionId !== decision.sessionId || artifact.kind !== "screenshot" ||
+          artifact.sha256 !== item.sha256 || artifact.mimeType !== item.mediaType) return [];
+      try {
+        const bytes = this.readWorkflowArtifactBytes(item.artifactId);
+        if (!bytes || createHash("sha256").update(bytes).digest("hex") !== item.sha256) return [];
+      } catch { return []; }
+      return [{ ...receipt, evidenceId: item.evidenceId }];
+    });
+  }
+
   consumeUiEvidenceReviewReceipts(occurrenceId: string, now: number): void {
     this.stmt(
       `UPDATE ui_evidence_review_receipts SET consumed_at=?
@@ -25654,7 +25698,7 @@ export class ControlPlaneDb {
   revokeUiEvidenceReviewReceipts(occurrenceId: string, now: number): void {
     this.stmt(
       `UPDATE ui_evidence_review_receipts SET revoked_at=?
-       WHERE occurrence_id=? AND consumed_at IS NULL AND revoked_at IS NULL`,
+       WHERE occurrence_id=? AND revoked_at IS NULL`,
     ).run(now, occurrenceId);
     // Whatever revoked the receipts (supersession, revocation, policy or ownership change) ends the
     // occurrence's delegated image review with them, so its verdict can never back an approval.
