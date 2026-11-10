@@ -156,6 +156,7 @@ export function AddBoxDialog({ onClose, onConnected }: {
           void submit();
         }}
       >
+        <p className="section-note">Connecting lets this server use the machine's existing permitted provider sign-ins. Credentials stay on the machine; provider billing and usage limits still apply. Existing access restrictions are preserved, and an account in use may need to become free before this server can use it.</p>
         <details className="disclosure">
           <summary><ChevronRightIcon className="disclosure-chevron" />What This Needs</summary>
           <div className="disclosure-body">

@@ -371,6 +371,14 @@ if (accountSetup) {
   runner.providerAccounts = [];
   if (accountSetup === "missing") runner.agents = [];
   if (accountSetup === "old") runner.protocolVersion = 100;
+  if (["busy", "unknown", "restricted", "offline"].includes(accountSetup)) {
+    const report = { checkedAt: Date.now() - 60_000, installation: "compatible" as const, authentication: "unknown" as const,
+      reason: accountSetup === "busy" ? "in_use" as const : accountSetup === "restricted" ? "restricted" as const : "unknown" as const };
+    runner.agents = runner.agents.map((agent) => ({ ...agent, authStatus: "unknown", providerReadiness: report,
+      ...(agent.claudeCode ? { claudeCode: { ...agent.claudeCode, status: "ready", auth: { status: "unknown", billingSource: "unknown" } } } : {}) }));
+    runner.providerAccounts = [{ id: "work", label: "Work", provider: "claude", authStatus: "unknown", providerReadiness: report }];
+    if (accountSetup === "offline") runner.status = "offline";
+  }
 }
 
 const snapshot: UiSnapshotMessage = {

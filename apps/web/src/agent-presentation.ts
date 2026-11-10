@@ -182,8 +182,11 @@ function reportedAgentStatus(agent: AgentDefinition): Exclude<AgentStatus, "read
   if (agent.providerReadiness) {
     if (agent.providerReadiness.installation === "missing") return "not_installed";
     if (agent.providerReadiness.installation === "incompatible") return "update_required";
+    // Another explicitly permitted account may prove aggregate availability without changing the
+    // default. Its observation must not disable that installation or select another account.
+    if (agent.available === true) return "ready";
     if (agent.providerReadiness.reason === "sign_in_required") return "sign_in_required";
-    if (agent.providerReadiness.reason !== "ready") return "unavailable";
+    return "unavailable";
   }
   if (agent.claudeCode?.status === "unavailable" || agent.codexAppServer?.status === "unavailable" ||
       RUNNER_REASON_PATTERNS.notInstalled.test(agent.unavailableReason ?? "") ||

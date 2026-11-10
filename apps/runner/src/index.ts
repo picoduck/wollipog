@@ -717,9 +717,8 @@ function providerAccountsForControlPlane() {
   return providerProfileGrants.project(config.providerAccounts, (account) => ({
     ...providerAccountDefinition(account),
     ...(providerAccountReadiness.has(account.id) ? { providerReadiness: providerAccountReadiness.get(account.id)! } : {}),
-    ...(providerAccountAuthStatus.has(account.id)
-      ? { authStatus: providerAccountAuthStatus.get(account.id)! }
-      : {}),
+    // A credential marker is not an authentication check (keyrings and busy homes differ).
+    authStatus: providerAccountAuthStatus.get(account.id) ?? "unknown",
     ...(providerAccountBilling.has(account.id) ? { billing: providerAccountBilling.get(account.id)! } : {}),
     ...selectionCooldownField(account.id),
   }));
@@ -952,6 +951,7 @@ const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSuperv
   },
   onAccountAdded: (account) => {
     providerAccountAuthStatus.set(account.id, "authenticated");
+    providerAccountReadiness.delete(account.id);
     sendUp({
       type: "agents_updated",
       runnerId: config.runnerId,
@@ -1006,6 +1006,7 @@ const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSuperv
   } : {}),
   onAccountRemoved: (account) => {
     providerAccountAuthStatus.delete(account.id);
+    providerAccountReadiness.delete(account.id);
     sendUp({
       type: "agents_updated",
       runnerId: config.runnerId,
@@ -2294,6 +2295,10 @@ async function discoverAndPublish(refreshModels: boolean, refreshSubscriptionUsa
   });
   log(JSON.stringify({ event: "provider_discovery_completed", runnerId: config.runnerId,
     nativeProbeHome: "isolated", agents: metadata.agents.length,
+    checkedAt: Date.now(),
+    inUse: metadata.agents.filter((agent) => agent.providerReadiness?.reason === "in_use").length,
+    restricted: metadata.agents.filter((agent) => agent.providerReadiness?.reason === "restricted").length,
+    uninspected: metadata.agents.filter((agent) => agent.providerReadiness?.reason === "unknown").length,
     available: metadata.agents.filter((agent) => agent.available === true).length,
     signInRequired: metadata.agents.filter((agent) => agent.authStatus === "unauthenticated").length }));
   discoveryDone = true;

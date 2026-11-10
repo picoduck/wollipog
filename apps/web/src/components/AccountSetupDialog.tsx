@@ -33,6 +33,7 @@ export function AccountSetupDialog({ runnerId, onClose }: { runnerId: string; on
       {runner ? <>
         {!online && <p className="section-note">This machine is offline. Installation and account details are last reported; reconnect before starting setup.</p>}
         {!runnerSupportsProtocol(runner.protocolVersion, "providerLogin") && <p className="section-note">Update this machine's runner to set up accounts here. Its existing sign-in status may be unknown.</p>}
+        {!runnerSupportsProtocol(runner.protocolVersion, "providerSetupReadiness") && <p className="section-note">This runner does not report separate installation, account-use, or last-check facts. Update it for those details; unknown status does not mean signed out.</p>}
         <MachineAgentsSection runner={runner} online={online} machineName={name} canFindSessions={false} />
         <ProviderAccountsSection runner={runner} online={online} machineName={name}
           canManageProfiles={canManageProviderProfiles(identity?.context)} profileAccessKnown={identitySettled} showMachineSettings={false} />

@@ -593,7 +593,7 @@ test("Owners recover a stale provider HOME lease only where the machine can prov
 });
 
 test("Machine owners can start both provider sign-in flow shapes", async ({ page }) => {
-  await providerAccounts(page).getByRole("button", { name: "Add Account…" }).click();
+  await providerAccounts(page).getByRole("button", { name: "Add Separate Sign-In…" }).click();
   const claudeDialog = page.getByRole("dialog", { name: "Add Account" });
   await claudeDialog.getByLabel("Account Label").fill("Studio Claude");
   await claudeDialog.getByRole("button", { name: "Start Sign-In" }).click();
@@ -608,7 +608,7 @@ test("Machine owners can start both provider sign-in flow shapes", async ({ page
   await page.screenshot({ path: "test-results/provider-login/claude-paste-code.png", fullPage: true });
 
   await accountRow(page, "Studio Claude").getByRole("button", { name: "Cancel" }).click();
-  await providerAccounts(page).getByRole("button", { name: "Add Account…" }).click();
+  await providerAccounts(page).getByRole("button", { name: "Add Separate Sign-In…" }).click();
   const codexDialog = page.getByRole("dialog", { name: "Add Account" });
   await codexDialog.getByRole("radio", { name: "Codex" }).click();
   await codexDialog.getByLabel("Account Label").fill("Studio Codex");
@@ -741,7 +741,7 @@ test("a hidden email's sign-in head and badge remain unclipped at 390px (#2996)"
 });
 
 test("Add Account refuses an empty or duplicate label under the field, and shows a request failure above the footer", async ({ page }) => {
-  await providerAccounts(page).getByRole("button", { name: "Add Account…" }).click();
+  await providerAccounts(page).getByRole("button", { name: "Add Separate Sign-In…" }).click();
   const dialog = page.getByRole("dialog", { name: "Add Account" });
   await expect(dialog).toContainText("Design Workstation");
   await page.screenshot({ path: "test-results/provider-accounts/add-account-empty-desktop.png" });
@@ -1253,7 +1253,7 @@ for (const width of [390, 320]) {
   test("at " + width + "px the compact list sets defaults directly and discloses usage", async ({ page }) => {
     await page.setViewportSize({ width, height: 844 });
     const accounts = providerAccounts(page);
-    await expect(accounts.getByRole("button", { name: "Add Account…" })).toHaveCount(1);
+    await expect(accounts.getByRole("button", { name: "Add Separate Sign-In…" })).toHaveCount(1);
     expect((await accounts.boundingBox())!.height).toBeLessThan(500);
     await (await openAccountMenu(page, "Work")).getByRole("menuitem", { name: "Set as Default", exact: true }).click();
     await expect(accountRow(page, "Work").locator(".provider-default-marker")).toHaveText("Default");
@@ -1272,7 +1272,7 @@ for (const width of [390, 320]) {
 test("offline default and switching actions save while adding/sign-in stay unavailable", async ({ page }) => {
   await setOffline(page);
   const accounts = providerAccounts(page);
-  await expect(accounts.getByRole("button", { name: "Add Account…" })).toBeDisabled();
+  await expect(accounts.getByRole("button", { name: "Add Separate Sign-In…" })).toBeDisabled();
   await expect(accounts.getByRole("button", { name: /^Usage Details for Work/u })).toHaveAccessibleName(/Last Known/u);
   await (await openAccountMenu(page, "Work")).getByRole("menuitem", { name: "Set as Default", exact: true }).click();
   await expect(accountRow(page, "Work").locator(".provider-default-marker")).toHaveText("Default");

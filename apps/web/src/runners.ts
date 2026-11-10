@@ -161,6 +161,9 @@ export function machineStatus(runner: MachineStatusRunner | undefined, box: Mach
     if (!runner) return "connecting";
   }
   if (!runner || runner.status !== "online") return "offline";
+  // An SSH connection's badge describes transport health. Provider availability is presented in
+  // Agents and Provider Accounts, separately from a replacement's readiness verification.
+  if (box?.status === "online") return "online";
   const has = (status: AgentStatus) => machineAgentsWithStatus(runner.agents, status).length > 0;
   if (runnerOutdated(runner.protocolVersion) || has("update_required")) return "update_required";
   if (has("approval_required")) return "approval_required";

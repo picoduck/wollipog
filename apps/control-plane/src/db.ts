@@ -458,7 +458,7 @@ const SESSION_PROMPT_TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60_000;
 export const PROJECT_CREATION_REQUESTS_PER_USER = 100;
 const SESSION_PROMPT_ATTEMPT_RETENTION_LIMIT = 128;
 
-function safeProviderAccounts(value: RunnerView["providerAccounts"]): NonNullable<RunnerView["providerAccounts"]> {
+function safeProviderAccounts(value: RunnerView["providerAccounts"], readinessSupported = false): NonNullable<RunnerView["providerAccounts"]> {
   if (!Array.isArray(value) || value.length > 32) throw new Error("runner provider account inventory is invalid");
   const ids = new Set<string>();
   return value.map((account) => {
@@ -484,7 +484,7 @@ function safeProviderAccounts(value: RunnerView["providerAccounts"]): NonNullabl
       label: account.label.trim(),
       provider: account.provider,
       authStatus: account.authStatus,
-      ...(safeProviderReadiness(account.providerReadiness) ? { providerReadiness: safeProviderReadiness(account.providerReadiness)! } : {}),
+      ...(readinessSupported && safeProviderReadiness(account.providerReadiness) ? { providerReadiness: safeProviderReadiness(account.providerReadiness)! } : {}),
       ...(account.profile ? { profile: { id: account.profile.id, access: account.profile.access } } : {}),
       // Protocol v334 (#4353). An unrecognized value reads as unverified, which selection passes over.
       ...(account.billing === "subscription" || account.billing === "api" || account.billing === "unknown"
@@ -8769,7 +8769,7 @@ export class ControlPlaneDb {
         reviewSession: safeReviewSessionCapability(meta.runtime.reviewSession),
       }) : null;
       const providerAccounts = runnerSupportsProtocol(protocolVersion, "providerAccounts")
-        ? JSON.stringify(safeProviderAccounts(meta.providerAccounts ?? []))
+        ? JSON.stringify(safeProviderAccounts(meta.providerAccounts ?? [], runnerSupportsProtocol(protocolVersion, "providerSetupReadiness")))
         : null;
       const providerLogins = runnerSupportsProtocol(protocolVersion, "providerLogin")
         ? JSON.stringify(safeProviderLogins(meta.providerLogins ?? []))
@@ -8857,6 +8857,7 @@ export class ControlPlaneDb {
         !runnerSupportsProtocol(protocolVersion, "runnerLocalAgentEnv"),
         runnerSupportsProtocol(protocolVersion, "nativeTuiAccountingDiagnostics"),
         runnerSupportsProtocol(protocolVersion, "wslSafeLauncher"),
+        runnerSupportsProtocol(protocolVersion, "providerSetupReadiness"),
       );
       if (manageTransaction) this.db.exec("COMMIT");
     } catch (err) {
@@ -8873,6 +8874,7 @@ export class ControlPlaneDb {
     persistEnvironment: boolean,
     persistNativeTuiAccounting: boolean,
     persistWslSafeLauncher: boolean,
+    persistProviderReadiness: boolean,
   ): void {
     this.stmt("DELETE FROM runner_agents WHERE runner_id = ?").run(runnerId);
     const upAgent = this.stmt(
@@ -8913,7 +8915,7 @@ export class ControlPlaneDb {
         a.registry ? JSON.stringify(a.registry) : null,
         a.acpTransport ?? null,
         a.providerAccountReadiness ? JSON.stringify(a.providerAccountReadiness) : null,
-        safeProviderReadiness(a.providerReadiness) ? JSON.stringify(safeProviderReadiness(a.providerReadiness)) : null,
+        persistProviderReadiness && safeProviderReadiness(a.providerReadiness) ? JSON.stringify(safeProviderReadiness(a.providerReadiness)) : null,
       );
     }
   }
@@ -8934,6 +8936,7 @@ export class ControlPlaneDb {
         !runnerSupportsProtocol(protocol?.protocol_version, "runnerLocalAgentEnv"),
         runnerSupportsProtocol(protocol?.protocol_version, "nativeTuiAccountingDiagnostics"),
         runnerSupportsProtocol(protocol?.protocol_version, "wslSafeLauncher"),
+        runnerSupportsProtocol(protocol?.protocol_version, "providerSetupReadiness"),
       );
       if (executionTargets !== undefined) {
         if (!runnerSupportsProtocol(protocol?.protocol_version, "targetHarnessInstallations") ||
@@ -8952,7 +8955,7 @@ export class ControlPlaneDb {
           "UPDATE runners SET agents_refreshed_at=?, updated_at=?, editors=COALESCE(?, editors), provider_accounts=COALESCE(?, provider_accounts) WHERE runner_id=?",
         )
         .run(now, now, editors ? JSON.stringify(editors) : null,
-          providerAccounts ? JSON.stringify(safeProviderAccounts(providerAccounts)) : null, runnerId);
+          providerAccounts ? JSON.stringify(safeProviderAccounts(providerAccounts, runnerSupportsProtocol(protocol?.protocol_version, "providerSetupReadiness"))) : null, runnerId);
       this.db.exec("COMMIT");
     } catch (err) {
       this.db.exec("ROLLBACK");

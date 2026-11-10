@@ -349,6 +349,9 @@ if (sshState && runner) {
   if (sshState === "connecting") runner = null;
   else if (sshState !== "online" && sshState !== "legacy") Object.assign(runner, { status: "offline", lastSeen: Date.now() - 4 * 60_000 });
 }
+if (box && fixtureParams.has("readinessFailure")) {
+  box.harnessReadiness = { state: "failed", reason: "authentication_regressed", checkedAt: Date.now() };
+}
 /** A Machine Settings field whose saves fail until cleared: a partial save (#2991). */
 let failingSettingsSave: "capacity" | null = null;
 /** How many lifecycle requests the busy machine refuses before it is forced (`busy` in the URL). */

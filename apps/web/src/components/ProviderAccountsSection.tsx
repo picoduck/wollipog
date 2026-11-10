@@ -2,6 +2,7 @@ import React, { Fragment, useEffect, useId, useRef, useState, type ReactNode } f
 import {
   PROVIDER_ACCOUNT_POLICY_NOT_FIXED, PROVIDER_CREDENTIAL_IMPORT_DEFAULT_SOURCE_LABEL, providerAccountPolicyMode, providerAccountPolicyFixedId,
   runnerSupportsProtocol, runnerSupportsProviderCredentialImport,
+  providerForDriver, providerLoginInstallationMissing,
   type ProviderAccountDefinition, type ProviderHomeLeaseInspection, type ProviderLoginView, type RunnerView,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
@@ -971,6 +972,15 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
 
   if (!supported && accounts.length === 0) return null;
   const canAdd = supported && canManage;
+  const installationIssues: Partial<Record<ProviderAccountDefinition["provider"], string>> = {};
+  for (const provider of ["claude", "codex"] as const) {
+    const native = runner.agents.filter((agent) => providerForDriver(agent.driver ?? "acp") === provider &&
+      agent.context?.kind !== "wsl" && !agent.harnessSelectionBlocked && agent.installation?.selection !== "other");
+    if ((native.length > 0 && native.every(providerLoginInstallationMissing)) ||
+        (native.length === 0 && runner.agentsRefreshed === true && runnerSupportsProtocol(runner.protocolVersion, "providerSetupReadiness"))) {
+      installationIssues[provider] = `Install ${providerName(provider)} on this machine, then rediscover before starting sign-in.`;
+    }
+  }
   const count = accounts.length + newLogins.length;
   return (
     <section ref={sectionRef} className="section" aria-labelledby={headingId}>
@@ -982,14 +992,14 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
           <div className="actions">
             <button type="button" className="btn sm" disabled={!online} aria-describedby={online ? undefined : offlineId}
               onClick={() => setAdding("claude")}>
-              Add Account…
+              Add Separate Sign-In…
             </button>
           </div>
         )}
       </div>
       {canAdd && !online && <p className="section-note" id={offlineId}>{OFFLINE}</p>}
       {supported && accounts.length === 0 && (
-        <p className="section-note">Sign in to Claude or Codex on this machine without opening a shell.</p>
+        <p className="section-note">Wollipog uses this machine's existing sign-ins where access is permitted. A separate sign-in is optional. Credentials stay on the machine; the provider's billing and usage limits still apply.</p>
       )}
       {supported && !canManage && (
         <p className="section-note">Only this machine's owner or an organization admin can add or remove its accounts.</p>
@@ -1170,6 +1180,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
           accounts={accounts}
           logins={logins}
           initialProvider={adding}
+          installationIssues={installationIssues}
           {...(canManageProfiles && canManage ? { importOffer: providerCredentialImportOffer(runner, online, accounts) } : {})}
           onStarted={(login) => setStarted({ operationId: login.operationId, accountId: login.accountId, provider: login.provider })}
           onImported={(account) => setStarted({ operationId: "", accountId: account.accountId, provider: account.provider })}

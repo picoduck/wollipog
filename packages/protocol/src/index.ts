@@ -297,6 +297,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v180 current-identity inspection and account selection from an Authentication Required card. */
   providerAuthenticationAccountRecovery: 180,
   providerAccounts: 170,
+  providerSetupReadiness: 357,
   /** v334 (#4353): a runner reports each account's billing and cooldown and rechecks a policy-chosen
    * account at launch, so the control plane may enforce a non-fixed account selection policy. */
   providerAccountSelectionPolicy: 334,

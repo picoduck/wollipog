@@ -1459,7 +1459,7 @@ export class BoxOrchestrator {
           ? "authentication_regressed"
           : undefined;
     clearTimeout(pending.timer);
-    this.log(JSON.stringify({ event: "ssh_runner_readiness", boxId, epoch: rt.epoch, outcome: problem ? "failed" : "ready" }));
+    this.log(JSON.stringify({ event: "ssh_runner_readiness", boxId, epoch: rt.epoch, outcome: problem ? "failed" : "ready", reason: problem ?? null, transport: "online" }));
     this.deps.db.setBoxHarnessReadiness(boxId, { state: problem ? "failed" : "ready", checkedAt: Date.now(), ...(problem ? { reason: problem } : {}) });
     this.deps.hub.boxChanged(boxId);
     if (!problem) rt.readiness = undefined;
