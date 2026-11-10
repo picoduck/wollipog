@@ -1478,7 +1478,7 @@ for (const trigger of ["explicit_discard", "pull_request_reconciliation"] as con
           await internalsOf(h).replayDeferredWorktreeRetirements();
           assert.deepEqual(journal(h), [], "a record that can no longer finish does not stay");
           assert.ok(errorText(h).some((text) => text.includes(worktree) && /stays/u.test(text)), "and the session is told");
-          assert.ok(errorText(h).some((text) => /deleting the session removes its worktrees, uncommitted changes included/u.test(text)),
+          assert.ok(errorText(h).some((text) => /Deleting this session leaves it in place too/u.test(text)),
             "including what session deletion would do to it");
         } else if (replay === "restart") {
           h.restart();
@@ -2840,4 +2840,865 @@ test("the sweep never touches the reservation of a switch still running its setu
     h.manager.stop(h.sessionId);
     await waitFor(() => journal(h).length === 0, "the stop did not give the worktree back");
   });
+});
+
+// The forced removal paths and kept-worktree leaks left after #4395.
+
+interface KeepInternals {
+  reapWorktree: (...args: unknown[]) => Promise<void>;
+  terminateRollbackProcesses: (marker: string) => Promise<boolean>;
+}
+const keepInternalsOf = (h: Harness) => h.manager as unknown as KeepInternals;
+
+const alive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const keptNotices = (h: Harness) => errorText(h).filter((text) => /^Kept the (worktree|directory)/u.test(text));
+
+/** In docs, a request for `fix/other` whose activation fails while its removal is stuck, then a person
+ * writes notes in it, so the rollback keeps it. `setup` is the request's setup step. */
+async function keptRequest(h: Harness, setup: unknown, beforeKeep?: (slot: string) => void) {
+  git(h.docs, "checkout", "--quiet", "-b", "config-base");
+  writeFileSync(join(h.docs, ".wollipog.json"), JSON.stringify({ version: 1, setup: [setup] }));
+  git(h.docs, "add", ".wollipog.json");
+  git(h.docs, "commit", "--quiet", "-m", "setup");
+  git(h.docs, "checkout", "--quiet", "main");
+  assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+  await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+  const internals = internalsOf(h);
+  const activate = internals.activateWorktreeWithNotice.bind(h.manager);
+  internals.activateWorktreeWithNotice = async () => { throw new Error("activation failed"); };
+  const removal = stickRemoval(h);
+  const failing = h.manager.requestWorktree(h.sessionId, { baseRef: "config-base", branch: "fix/other" });
+  await answerTrust(h, "trust");
+  await assert.rejects(failing, /activation failed/u);
+  internals.activateWorktreeWithNotice = activate;
+  const [record] = journal(h);
+  const slot = record!.worktreePath;
+  const row = h.store.readMeta(h.sessionId)!.worktrees!.find((item) => item.path === slot)!;
+  writeFileSync(join(slot, "notes.txt"), "a person's notes\n");
+  beforeKeep?.(slot);
+  const before = files(slot);
+  removal.free();
+  dueLater(h);
+  await internals.replayDeferredWorktreeRetirements();
+  return { slot, owner: `${h.sessionId}\0${row.id}`, before };
+}
+
+const LOG_STEP = (h: Harness) => ({ name: "Log the Run", command: [process.execPath, "-e",
+  `require('fs').appendFileSync(${JSON.stringify(join(h.root, "ran"))},'x')`], timeoutSeconds: 30 });
+
+for (const replay of ["at once", "after a restart", "after a relaunch"] as const) {
+  test(`deleting a session leaves a worktree its request's rollback kept for a person's work, byte for byte (${replay})`, async () => {
+    await withSession(`delete-kept-request-${replay.replaceAll(" ", "-")}`, async (h) => {
+      const { slot, owner, before } = await keptRequest(h, LOG_STEP(h));
+      assert.deepEqual(journal(h), [], "the rollback kept it and ended");
+      const current = h.store.readMeta(h.sessionId)!.worktreePath!;
+      const tip = git(h.docs, "rev-parse", "refs/heads/fix/other");
+
+      if (replay === "after a relaunch") {
+        // A launch rebuilds the session's record, and the keep has to survive that.
+        h.restart();
+        await relaunch(h, "docs", h.docs);
+        await h.manager.delete(h.sessionId);
+      } else if (replay === "after a restart") {
+        // The deletion is on record, and a real restart replays it.
+        keepInternalsOf(h).reapWorktree = async () => {};
+        await h.manager.delete(h.sessionId);
+        assert.ok(journal(h).length >= 1, "the deletion is journaled");
+        h.restart();
+        await waitFor(() => journal(h).length === 0, "the restart did not settle the deletion");
+      } else {
+        await h.manager.delete(h.sessionId);
+      }
+      assert.equal(h.store.has(h.sessionId), false);
+      assert.deepEqual(files(slot), before, "every file the person kept is there");
+      assert.ok(docsWorktrees(h).includes(slot), "still a worktree");
+      assert.equal(git(h.docs, "rev-parse", "refs/heads/fix/other"), tip, "on its branch");
+      assert.equal(internalsOf(h).worktreePortAllocator.get(owner), undefined, "its ports are free");
+      assert.equal(existsSync(current), false, "a worktree nobody kept still goes with the session");
+      assert.deepEqual(journal(h), []);
+    });
+  });
+}
+
+test("a keep that lands while a relaunch waits for the worktree lane survives the relaunch's write, and deletion leaves it", async () => {
+  await withSession("keep-during-relaunch", async (h) => {
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    const { worktree } = await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/plain" });
+    writeFileSync(join(worktree.path, "notes.txt"), "a person's notes\n");
+    const before = files(worktree.path);
+    // As an older runner left the session: not yet known to record every keep.
+    h.store.patchMeta(h.sessionId, { keptWorktreesTracked: undefined });
+    h.restart();
+    const lease = h.store.readWorktreeLease(h.sessionId);
+    if (lease) h.store.releaseWorktreeLease(h.sessionId, lease.owner);
+    const lane = h.manager as unknown as {
+      runWorktreeOperation: (sessionId: string, operation: () => Promise<void>) => Promise<void>;
+      markWorktreeKept: (sessionId: string, path: string) => void;
+    };
+    // An operation queued right behind the relaunch's first use of the lane, its remap check, starts
+    // before the relaunch reads the session, and keeps that worktree before the relaunch writes.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const run = lane.runWorktreeOperation.bind(h.manager);
+    let keeping: Promise<void> | undefined;
+    lane.runWorktreeOperation = (sessionId, operation) => {
+      const result = run(sessionId, operation);
+      keeping ??= run(sessionId, async () => {
+        await held;
+        lane.markWorktreeKept(h.sessionId, worktree.path);
+        // A keep also forgets history rows at its path; stand in for that with a visible edit.
+        assert.equal(h.store.readMeta(h.sessionId)!.locationHistory!.length, 1);
+        // And a deletion's look at an older runner's session records that it has looked.
+        h.store.patchMeta(h.sessionId, { locationHistory: [], keptWorktreesTracked: true });
+      });
+      return result;
+    };
+    const starting = h.manager.start({ sessionId: h.sessionId, workspaceId: "docs", workspacePath: h.docs, agentId: "claude-code",
+      command: "claude-code", args: [], env: {}, useWorktree: false, driver: "claude-code", context: { kind: "native" } });
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    release();
+    await keeping;
+    await starting;
+    assert.ok(h.store.readMeta(h.sessionId)?.keptWorktreePaths?.includes(worktree.path), "the relaunch kept the keep");
+    assert.equal(h.store.readMeta(h.sessionId)!.locationHistory?.length ?? 0, 0, "and the history as the operation left it");
+    assert.equal(h.store.readMeta(h.sessionId)!.keptWorktreesTracked, true, "and that its keeps are recorded");
+    await h.manager.delete(h.sessionId);
+    assert.deepEqual(files(worktree.path), before);
+    assert.ok(docsWorktrees(h).includes(worktree.path));
+  });
+});
+
+test("a keep that lands while a deletion is under way is honored: the deletion leaves that worktree", async () => {
+  await withSession("keep-during-delete", async (h) => {
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    const { worktree } = await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/plain" });
+    writeFileSync(join(worktree.path, "notes.txt"), "a person's notes\n");
+    const before = files(worktree.path);
+    const lane = h.manager as unknown as {
+      runWorktreeOperation: (sessionId: string, operation: () => Promise<void>) => Promise<void>;
+      markWorktreeKept: (sessionId: string, path: string) => void;
+    };
+    // An operation already under way when the deletion begins keeps this worktree only after the
+    // deletion has read the session and written its records.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const keeping = lane.runWorktreeOperation(h.sessionId, async () => {
+      await held;
+      lane.markWorktreeKept(h.sessionId, worktree.path);
+    });
+    const deleting = h.manager.delete(h.sessionId);
+    await waitFor(() => journal(h).some((record) => record.trigger === "session_delete" && record.worktreePath === worktree.path),
+      "the deletion did not write its records");
+    await new Promise<void>((resolve) => setTimeout(resolve, 200));
+    release();
+    await keeping;
+    await deleting;
+    assert.deepEqual(files(worktree.path), before, "the kept worktree is all there");
+    assert.ok(docsWorktrees(h).includes(worktree.path));
+  });
+});
+
+test("selecting a worktree a launch rollback still names ends that rollback, so a restart leaves the worktree", async () => {
+  await withSession("select-ends-launch-rollback", async (h) => {
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    const moved = h.store.readMeta(h.sessionId)!.worktreePath!;
+    const { worktree } = await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/plain" });
+    await h.manager.selectWorktree(h.sessionId, moved);
+    await waitFor(() => h.store.readMeta(h.sessionId)?.worktreePath === moved && h.store.readMeta(h.sessionId)?.status !== "running",
+      "the session did not go back to its first worktree");
+    // A launch's rollback of this worktree that could not finish, as a refused identity check leaves.
+    const internals = internalsOf(h);
+    const meta = h.store.readMeta(h.sessionId)!;
+    const row = meta.worktrees!.find((item) => item.path === worktree.path)!;
+    internals.cleanupJournal.add({ ...internals.cleanupRecordForWorktree(meta, row, "creation_rollback", "force"),
+      checkpointGenerationDisposable: true });
+    await h.manager.selectWorktree(h.sessionId, worktree.path);
+    await waitFor(() => h.store.readMeta(h.sessionId)?.worktreePath === worktree.path, "the selection did not land");
+    writeFileSync(join(worktree.path, "notes.txt"), "work done since it was taken back\n");
+    const before = files(worktree.path);
+    assert.deepEqual(journal(h), [], "the selection ends the rollback");
+    h.restart();
+    await new Promise<void>((resolve) => setTimeout(resolve, 1000));
+    assert.deepEqual(files(worktree.path), before, "and a restart leaves the worktree as it is");
+  });
+});
+
+test("a request that reaches setup only after its session's deletion began cancels it, so the deletion finishes", async () => {
+  if (process.platform === "win32") return;
+  await withSession("setup-after-delete", async (h) => {
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    git(h.docs, "checkout", "--quiet", "-b", "config-base");
+    writeFileSync(join(h.docs, ".wollipog.json"), JSON.stringify({ version: 1, setup: [LOG_STEP(h)] }));
+    git(h.docs, "add", ".wollipog.json");
+    git(h.docs, "commit", "--quiet", "-m", "a setup nobody has trusted yet");
+    git(h.docs, "checkout", "--quiet", "main");
+    // The request's checkout waits at a gate, after the request has checked that the session can open.
+    const hooks = join(h.root, "hooks");
+    const started = join(h.root, "checkout-started");
+    const gate = join(h.root, "checkout-gate");
+    mkdirSync(hooks);
+    writeFileSync(join(hooks, "post-checkout"), `#!/bin/sh\n: > ${JSON.stringify(started)}\nwhile [ ! -e ${JSON.stringify(gate)} ]; do sleep 0.05; done\n`,
+      { mode: 0o755 });
+    execFileSync("git", ["-C", h.docs, "config", "core.hooksPath", hooks]);
+    const requesting = h.manager.requestWorktree(h.sessionId, { baseRef: "config-base", branch: "fix/late" }).then(() => "created", () => "failed");
+    await waitFor(() => existsSync(started), "the request did not reach its checkout");
+
+    // The deletion begins, and its provider takes a while to go, so the session's row is still there
+    // when the request reaches setup.
+    const internals = h.manager as unknown as { beginProviderRetirement: (...args: unknown[]) => { promise: Promise<unknown> } };
+    const retire = internals.beginProviderRetirement.bind(h.manager);
+    let letGo!: () => void;
+    const retirementHeld = new Promise<void>((resolve) => { letGo = resolve; });
+    internals.beginProviderRetirement = (...args) => {
+      const retirement = retire(...args);
+      return { ...retirement, promise: retirement.promise.then(async (value) => { await retirementHeld; return value; }) };
+    };
+    const deleting = h.manager.delete(h.sessionId).then(() => "deleted", (error: Error) => `failed: ${error.message}`);
+    await waitFor(() => h.store.isDeleted(h.sessionId), "the deletion did not begin");
+    writeFileSync(gate, "");
+    await new Promise<void>((resolve) => setTimeout(resolve, 500));
+    letGo();
+    const settled = (promise: Promise<string>) => Promise.race([promise,
+      new Promise<string>((resolve) => setTimeout(() => resolve("still waiting"), 20_000))]);
+    assert.equal(await settled(requesting), "failed", "the request ends without anyone answering a trust card");
+    assert.equal(await settled(deleting), "deleted", "and the deletion finishes");
+    const cardsShown = h.sent.filter((message) => message.type === "session_event" && message.sessionId === h.sessionId &&
+      message.payload.kind === "permission_request" && message.payload.title === "Trust Worktree Setup Configuration?");
+    assert.equal(cardsShown.length, 0, "no trust card was shown for a session being deleted");
+  });
+});
+
+test("a keep that lands while a deletion ends a worktree's processes runs no teardown over it", async () => {
+  await withSession("keep-before-teardown", async (h) => {
+    const teardownLog = join(h.root, "teardown-log");
+    git(h.docs, "checkout", "--quiet", "-b", "config-base");
+    writeFileSync(join(h.docs, ".wollipog.json"), JSON.stringify({ version: 1, setup: [LOG_STEP(h)],
+      teardown: [{ name: "Tear Down", command: [process.execPath, "-e", `require('fs').appendFileSync(${JSON.stringify(teardownLog)},'x')`], timeoutSeconds: 30 }] }));
+    git(h.docs, "add", ".wollipog.json");
+    git(h.docs, "commit", "--quiet", "-m", "setup and teardown");
+    git(h.docs, "checkout", "--quiet", "main");
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    const requesting = h.manager.requestWorktree(h.sessionId, { baseRef: "config-base", branch: "fix/torn" });
+    await answerTrust(h, "trust");
+    const { worktree } = await requesting;
+    writeFileSync(join(worktree.path, "notes.txt"), "a person's notes\n");
+    const before = files(worktree.path);
+    const internals = internalsOf(h);
+    const retire = internals.retireWorktreeProcesses.bind(h.manager);
+    internals.retireWorktreeProcesses = async (...args) => {
+      await retire(...args);
+      if (args[2] === worktree.path) {
+        (h.manager as unknown as { markWorktreeKept: (sessionId: string, path: string) => void }).markWorktreeKept(h.sessionId, worktree.path);
+      }
+    };
+    await h.manager.delete(h.sessionId);
+    assert.equal(existsSync(teardownLog), false, "no teardown ran over what was kept");
+    assert.deepEqual(files(worktree.path), before);
+  });
+});
+
+test("deleting a session whose pending rollback names a worktree another session attached frees what the session held there", async () => {
+  await withSession("delete-pending-attached", async (h) => {
+    git(h.docs, "checkout", "--quiet", "-b", "config-base");
+    writeFileSync(join(h.docs, ".wollipog.json"), JSON.stringify({ version: 1, setup: [LOG_STEP(h)] }));
+    git(h.docs, "add", ".wollipog.json");
+    git(h.docs, "commit", "--quiet", "-m", "setup");
+    git(h.docs, "checkout", "--quiet", "main");
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    const internals = internalsOf(h);
+    const activate = internals.activateWorktreeWithNotice.bind(h.manager);
+    internals.activateWorktreeWithNotice = async () => { throw new Error("activation failed"); };
+    const removal = stickRemoval(h);
+    const failing = h.manager.requestWorktree(h.sessionId, { baseRef: "config-base", branch: "fix/other" });
+    await answerTrust(h, "trust");
+    await assert.rejects(failing, /activation failed/u);
+    internals.activateWorktreeWithNotice = activate;
+    const [rollback] = journal(h);
+    const slot = rollback!.worktreePath;
+    const owner = `${h.sessionId}\0${rollback!.worktreeId}`;
+    assert.ok(internals.worktreePortAllocator.get(owner), "setup gave the request a port block");
+    // Another session attaches that worktree, then this one is deleted.
+    const meta = h.store.readMeta(h.sessionId)!;
+    h.store.create({ ...meta, sessionId: "s_attached_elsewhere", worktreePath: slot, worktreeBranch: "fix/other",
+      worktrees: [{ id: "attached-elsewhere", path: slot, branch: "fix/other", source: "attached" }], locationHistory: undefined,
+      keptWorktreePaths: undefined, worktreeHooks: undefined, worktreeProcessMarkers: undefined });
+    const before = files(slot);
+    removal.free();
+    await h.manager.delete(h.sessionId);
+    assert.deepEqual(files(slot), before, "the worktree stays with the session that attached it");
+    assert.equal(internalsOf(h).worktreePortAllocator.get(owner), undefined, "the deleted session's port block is given back");
+    assert.deepEqual(journal(h), []);
+    h.restart();
+    assert.equal(internalsOf(h).worktreePortAllocator.get(owner), undefined, "and stays given back after a restart");
+    assert.deepEqual(files(slot), before);
+  });
+});
+
+test("a deleted session's rollback that gave way to an attaching session never takes the worktree back, even once that session goes too", async () => {
+  await withSession("delete-pending-attached-later", async (h) => {
+    const teardownLog = join(h.root, "teardown-log");
+    git(h.docs, "checkout", "--quiet", "-b", "config-base");
+    writeFileSync(join(h.docs, ".wollipog.json"), JSON.stringify({ version: 1, setup: [LOG_STEP(h)],
+      teardown: [{ name: "Tear Down", command: [process.execPath, "-e", `require('fs').appendFileSync(${JSON.stringify(teardownLog)},'x')`], timeoutSeconds: 30 }] }));
+    git(h.docs, "add", ".wollipog.json");
+    git(h.docs, "commit", "--quiet", "-m", "setup and teardown");
+    git(h.docs, "checkout", "--quiet", "main");
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    const internals = internalsOf(h);
+    const activate = internals.activateWorktreeWithNotice.bind(h.manager);
+    internals.activateWorktreeWithNotice = async () => { throw new Error("activation failed"); };
+    const removal = stickRemoval(h);
+    const failing = h.manager.requestWorktree(h.sessionId, { baseRef: "config-base", branch: "fix/other" });
+    await answerTrust(h, "trust");
+    await assert.rejects(failing, /activation failed/u);
+    internals.activateWorktreeWithNotice = activate;
+    const [rollback] = journal(h);
+    assert.ok(rollback?.processMarker, "the rollback has setup's processes to stop");
+    const slot = rollback!.worktreePath;
+    const meta = h.store.readMeta(h.sessionId)!;
+    h.store.create({ ...meta, sessionId: "s_attached_then_gone", worktreePath: slot, worktreeBranch: "fix/other",
+      worktrees: [{ id: "attached-then-gone", path: slot, branch: "fix/other", source: "attached" }], locationHistory: undefined,
+      keptWorktreePaths: undefined, worktreeHooks: undefined, worktreeProcessMarkers: undefined });
+    const before = files(slot);
+    removal.free();
+    // The deleted session's processes will not stop just now, so its rollback stays on record.
+    keepInternalsOf(h).terminateRollbackProcesses = async () => false;
+    await h.manager.delete(h.sessionId);
+    assert.equal(journal(h).length, 1, "the rollback waits for its processes");
+    // Then the session that attached the worktree goes too, which leaves an attached worktree alone.
+    await h.manager.delete("s_attached_then_gone");
+    h.restart();
+    await waitFor(() => journal(h).length === 0, "the restart did not finish the rollback");
+    assert.deepEqual(files(slot), before, "nothing took the worktree back");
+    assert.equal(existsSync(teardownLog), false, "and no teardown ran there");
+    assert.equal(git(h.docs, "rev-parse", "--verify", "refs/heads/fix/other").length, 40, "the branch stays");
+  });
+});
+
+test("deleting a session while its request's rollback is still pending lets that rollback decide, so hand edits are kept", async () => {
+  await withSession("delete-pending-rollback", async (h) => {
+    git(h.docs, "checkout", "--quiet", "-b", "config-base");
+    writeFileSync(join(h.docs, ".wollipog.json"), JSON.stringify({ version: 1, setup: [LOG_STEP(h)] }));
+    git(h.docs, "add", ".wollipog.json");
+    git(h.docs, "commit", "--quiet", "-m", "setup");
+    git(h.docs, "checkout", "--quiet", "main");
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    const internals = internalsOf(h);
+    const activate = internals.activateWorktreeWithNotice.bind(h.manager);
+    internals.activateWorktreeWithNotice = async () => { throw new Error("activation failed"); };
+    const removal = stickRemoval(h);
+    const failing = h.manager.requestWorktree(h.sessionId, { baseRef: "config-base", branch: "fix/other" });
+    await answerTrust(h, "trust");
+    await assert.rejects(failing, /activation failed/u);
+    internals.activateWorktreeWithNotice = activate;
+    const [rollback] = journal(h);
+    assert.ok(rollback?.auxiliaryWorktreeRollback, "the request's rollback is pending");
+    const slot = rollback!.worktreePath;
+    // Someone edits the stuck worktree by hand, then the session is deleted.
+    writeFileSync(join(slot, "notes.txt"), "edited by hand\n");
+    const before = files(slot);
+    removal.free();
+    await h.manager.delete(h.sessionId);
+    assert.deepEqual(files(slot), before, "the rollback sees the edit and keeps the worktree");
+    assert.deepEqual(journal(h), []);
+  });
+});
+
+test("a kept mark goes once the runner itself removes that worktree", async () => {
+  await withSession("mark-forgotten-on-removal", async (h) => {
+    serveOriginLocally(h);
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    const moved = h.store.readMeta(h.sessionId)!.worktreePath!;
+    const { worktree } = await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/plain" });
+    await h.manager.selectWorktree(h.sessionId, moved);
+    // Until the relaunch into the first worktree is done, the provider still runs in this one.
+    await waitFor(() => h.store.readMeta(h.sessionId)?.worktreePath === moved && h.providers.at(-1)?.cwd === moved &&
+      h.store.readMeta(h.sessionId)?.status === "idle", "the session did not go back to its first worktree");
+    (h.manager as unknown as { markWorktreeKept: (sessionId: string, path: string) => void }).markWorktreeKept(h.sessionId, worktree.path);
+    assert.ok(h.store.readMeta(h.sessionId)?.keptWorktreePaths?.includes(worktree.path));
+    // What was kept there has since been dealt with, and the worktree holds nothing of anyone's.
+    const result = await h.manager.discardWorktree(h.sessionId, worktree.path);
+    assert.equal(existsSync(worktree.path), false, JSON.stringify(result));
+    assert.equal(h.store.readMeta(h.sessionId)?.keptWorktreePaths?.includes(worktree.path) ?? false, false,
+      "nothing is kept at a path whose worktree the runner removed");
+  });
+});
+
+for (const { kind, dirty, label } of [
+  { kind: "with uncommitted work", dirty: true, label: "dirty" },
+  { kind: "with a commit no remote has, and nothing uncommitted", dirty: true, label: "unpushed" },
+  { kind: "holding nothing of its own", dirty: false, label: "clean" },
+]) {
+  test(`deleting a session from before kept worktrees were recorded ${dirty ? "leaves" : "removes"} an earlier worktree ${kind}`, async () => {
+    if (process.platform === "win32") return;
+    await withSession(`backfill-${label}`, async (h) => {
+      serveOriginLocally(h);
+      git(h.app, "branch", "away");
+      assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+      await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+      const worktree = h.store.readMeta(h.sessionId)!.worktreePath!;
+      if (label === "dirty") writeFileSync(join(worktree, "untracked.txt"), "untracked notes\n");
+      if (label === "unpushed") {
+        writeFileSync(join(worktree, "committed.txt"), "committed, never pushed\n");
+        git(worktree, "add", "committed.txt");
+        git(worktree, "commit", "--quiet", "-m", "local only");
+        assert.equal(git(worktree, "status", "--porcelain"), "", "nothing uncommitted");
+      }
+      assert.deepEqual(await moveAway(h), { ok: true });
+      await waitFor(() => h.providers[2]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move away did not finish");
+      // As an older runner left it: whatever it kept, it did not record.
+      h.store.patchMeta(h.sessionId, { keptWorktreePaths: undefined, keptWorktreesTracked: undefined });
+      const before = existsSync(worktree) ? files(worktree) : {};
+
+      await h.manager.delete(h.sessionId);
+      if (dirty) {
+        assert.deepEqual(files(worktree), before, "work found nowhere else is left where it is");
+        assert.ok(docsWorktrees(h).includes(worktree));
+      } else {
+        assert.equal(existsSync(worktree), false, "a worktree with nothing of its own goes with the session, as before");
+      }
+      assert.deepEqual(journal(h), []);
+    });
+  });
+}
+
+test("a worktree the runner makes again where a kept one was is removed with the session, as any other is", async () => {
+  await withSession("delete-remade-kept", async (h) => {
+    const { slot } = await keptRequest(h, LOG_STEP(h));
+    // The person took what they needed and removed the worktree and its branch, then asked again.
+    git(h.docs, "worktree", "remove", "--force", slot);
+    git(h.docs, "branch", "--quiet", "-D", "fix/other");
+    const { worktree } = await h.manager.requestWorktree(h.sessionId, { baseRef: "config-base", branch: "fix/other" });
+    assert.equal(worktree.path, slot);
+    assert.equal(readFileSync(join(h.root, "ran"), "utf8"), "xx", "it was made new, with setup, on the trust given before");
+    await h.manager.delete(h.sessionId);
+    assert.equal(existsSync(slot), false, "nothing of a person's is there now, so nothing keeps it");
+    assert.deepEqual(journal(h), []);
+  });
+});
+
+test("deleting a session leaves a worktree whose retirement its switch overtook, byte for byte", async () => {
+  if (process.platform === "win32") return;
+  await withSession("delete-overtaken", async (h) => {
+    serveOriginLocally(h);
+    git(h.app, "branch", "away");
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message({ recoverBranch: undefined })), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    const meta = h.store.readMeta(h.sessionId)!;
+    const worktree = meta.worktreePath!;
+    const branch = `agent/${h.sessionId}`;
+    writeFileSync(join(worktree, "tracked.txt"), "committed\n");
+    git(worktree, "add", "tracked.txt");
+    git(worktree, "commit", "--quiet", "-m", "unpushed work");
+    writeFileSync(join(worktree, "tracked.txt"), "edited, never committed\n");
+    writeFileSync(join(worktree, "untracked.txt"), "untracked notes\n");
+    const internals = internalsOf(h);
+    internals.cleanupJournal.add(internals.cleanupRecordForWorktree(meta, meta.worktrees![0], "explicit_discard", "safe"));
+    await internals.replayDeferredWorktreeRetirements();
+    assert.deepEqual(await moveAway(h), { ok: true });
+    await waitFor(() => h.providers[2]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move away did not finish");
+    await internals.replayDeferredWorktreeRetirements();
+    assert.deepEqual(journal(h), [], "the overtaken retirement was dropped");
+    const notices = errorText(h);
+    const before = workState(worktree, branch);
+
+    await h.manager.delete(h.sessionId);
+    assert.deepEqual(workState(worktree, branch), before, "every file, the index and the unpushed commit are there");
+    assert.deepEqual(journal(h), []);
+    assert.ok(notices.some((text) => /Deleting this session leaves it/u.test(text)), "which is what the notice said deletion would do");
+  });
+});
+
+// Not a behavior test: it records why a kept request has no setup process to stop. A setup step owns
+// no descendants past its own end (spawnAgent ends the step's whole boundary when it closes), and a
+// request reaches its activation only once every step has ended.
+test("a request's setup leaves no process running once its step ends, so a kept request has none to stop", async () => {
+  if (process.platform !== "linux") return;
+  await withSession("kept-processes", async (h) => {
+    const pidFile = join(h.root, "server-pid");
+    const server = { name: "Start Server", timeoutSeconds: 30, command: [process.execPath, "-e",
+      `require('fs').writeFileSync(${JSON.stringify(pidFile)},String(require('node:child_process').spawn(process.execPath,` +
+      "['-e','setTimeout(()=>{},120000)'],{detached:true,stdio:'ignore'}).pid));process.exit(0)"] };
+    let pid: number | undefined;
+    try {
+      const { slot, before } = await keptRequest(h, server, () => {
+        pid = Number(readFileSync(pidFile, "utf8"));
+        assert.equal(alive(pid), false, "the step's server ended with the step, before the request failed");
+      });
+      assert.deepEqual(journal(h), []);
+      assert.ok(h.store.readMeta(h.sessionId)!.worktrees!.some((item) => item.path === slot), "the row stays");
+      assert.deepEqual(files(slot), before);
+    } finally {
+      if (pid !== undefined && alive(pid)) process.kill(pid, "SIGKILL");
+    }
+  });
+});
+
+test("a kept worktree is reported once, however often its processes refuse to stop", async () => {
+  await withSession("kept-once", async (h) => {
+    const { record, removal } = await stuckProvedRollback(h);
+    assert.ok(record.processMarker, "setup's processes carry the rollback's marker");
+    const slot = record.worktreePath;
+    writeFileSync(join(slot, "notes.txt"), "a person's notes\n");
+    const before = files(slot);
+    let refusals = 3;
+    keepInternalsOf(h).terminateRollbackProcesses = async () => refusals-- <= 0;
+    removal.free();
+    dueLater(h);
+    const internals = internalsOf(h);
+    await internals.replayDeferredWorktreeRetirements();
+    assert.equal(keptNotices(h).length, 1);
+    assert.equal(journal(h).length, 1, "the record waits for its processes");
+    for (let day = 2; journal(h).length && day < 10; day++) {
+      const later = Date.now() + day * 24 * 60 * 60 * 1000;
+      internals.worktreePullRequestDiscoveryNow = () => later;
+      await internals.replayDeferredWorktreeRetirements();
+    }
+    assert.deepEqual(journal(h), [], "the record ends once they stop");
+    assert.equal(keptNotices(h).length, 1, "and the session heard about the keep only once");
+    assert.equal(errorText(h).some((text) => /could not be removed after/u.test(text)), false, "and never that it was being removed");
+    assert.deepEqual(files(slot), before);
+  });
+});
+
+test("while a kept worktree's processes will not stop, asking for it again says it was kept, and giving up says what is left", async () => {
+  await withSession("kept-gives-up", async (h) => {
+    const { record, removal } = await stuckProvedRollback(h);
+    const slot = record.worktreePath;
+    writeFileSync(join(slot, "notes.txt"), "a person's notes\n");
+    const before = files(slot);
+    let stopping = false;
+    keepInternalsOf(h).terminateRollbackProcesses = async () => stopping;
+    removal.free();
+    dueLater(h);
+    await internalsOf(h).replayDeferredWorktreeRetirements();
+    assert.equal(keptNotices(h).length, 1);
+
+    const firstFailure = failure(h)!.at;
+    assert.deepEqual(await backToDocs(h, "fix/install-link", "occurrence-again"), { ok: true });
+    await waitFor(() => (failure(h)?.at ?? 0) > firstFailure, "the second switch did not settle");
+    assert.match(failure(h)!.reason!, /kept this session's earlier worktree/u);
+    assert.doesNotMatch(failure(h)!.reason!, /still removing/u);
+
+    const internals = internalsOf(h);
+    for (let day = 2; !journal(h)[0]?.rollbackGaveUpAt && day < 4096; day *= 2) {
+      const later = Date.now() + day * 24 * 60 * 60 * 1000;
+      internals.worktreePullRequestDiscoveryNow = () => later;
+      await internals.replayDeferredWorktreeRetirements();
+    }
+    assert.ok(journal(h)[0]?.rollbackGaveUpAt, "the schedule ends");
+    const gaveUp = errorText(h).filter((text) => /stopped trying on its own/u.test(text));
+    assert.equal(gaveUp.length, 1);
+    assert.match(gaveUp[0]!, /was kept, but the processes its setup started there could not be stopped/u);
+    assert.equal(keptNotices(h).length, 1);
+
+    // A real restart tries once more. Nothing of setup's runs there any more, so the record ends,
+    // keeping all of it.
+    h.restart();
+    await waitFor(() => journal(h).length === 0, "the restart did not finish the kept record");
+    assert.deepEqual(files(slot), before);
+    assert.equal(keptNotices(h).length, 1);
+  });
+});
+
+test("a kept directory Git no longer lists says asking again is refused until it is gone, and so it is", async () => {
+  await withSession("kept-unregistered", async (h) => {
+    const { slot, before } = await keptRequest(h, LOG_STEP(h), (path) => {
+      // A person pruned its registration, so only the directory is left.
+      rmSync(git(path, "rev-parse", "--absolute-git-dir"), { recursive: true, force: true });
+    });
+    assert.deepEqual(journal(h), []);
+    const [notice] = keptNotices(h);
+    assert.ok(notice, "the session is told");
+    assert.match(notice!, /no longer registered/u);
+    assert.doesNotMatch(notice!, /continues there/u, "it does not promise what will not happen");
+    await assert.rejects(h.manager.requestWorktree(h.sessionId, { baseRef: "config-base", branch: "fix/other" }), /no longer registered/u);
+    assert.deepEqual(files(slot), before);
+    // The refused request made nothing there, so the directory is still kept, and deletion leaves it
+    // rather than trying to remove a worktree Git no longer knows of.
+    assert.ok(h.store.readMeta(h.sessionId)?.keptWorktreePaths?.includes(slot), "the refusal leaves the keep in place");
+    await h.manager.delete(h.sessionId);
+    assert.deepEqual(files(slot), before);
+    assert.deepEqual(journal(h), [], "and the deletion finishes");
+  });
+});
+
+test("a session worktree made again where one was kept goes with the session as usual", async () => {
+  if (process.platform === "win32") return;
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-remade-kept-launch-")));
+  const fake = fakeProvider();
+  const sessionId = "s_remade_kept_launch";
+  const dataDir = join(root, "data");
+  const store = new SessionStore(join(dataDir, "sessions"));
+  const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, fake.factory as never, dataDir, 2);
+  try {
+    const app = join(root, "app");
+    mkdirSync(app);
+    git(app, "init", "--quiet", "--initial-branch=main");
+    git(app, "commit", "--quiet", "--allow-empty", "-m", "base");
+    manager.configureSharedDirectories([{ id: "app", name: "App", path: realpathSync(app) }] as never);
+    const spec = { sessionId, workspaceId: "app", workspacePath: realpathSync(app), agentId: "claude-code", command: "claude-code",
+      args: [], env: {}, useWorktree: true, driver: "claude-code" as const, context: { kind: "native" as const } };
+    await manager.start(spec);
+    const worktree = store.readMeta(sessionId)!.worktreePath!;
+    (manager as unknown as { markWorktreeKept: (sessionId: string, path: string) => void }).markWorktreeKept(sessionId, worktree);
+    manager.stop(sessionId);
+    await waitFor(() => store.readMeta(sessionId)?.status === "stopped", "the session did not stop");
+    // The person dealt with what was kept, and the next launch makes the session's worktree again.
+    git(app, "worktree", "remove", "--force", worktree);
+    // With no row recorded for it, as #4395 describes, the launch goes through createWorktree.
+    store.patchMeta(sessionId, { worktreePath: null, worktreeBranch: undefined, worktrees: undefined });
+    const lease = store.readWorktreeLease(sessionId);
+    if (lease) store.releaseWorktreeLease(sessionId, lease.owner);
+    await manager.start(spec);
+    assert.equal(store.readMeta(sessionId)?.worktreePath, worktree);
+    assert.equal(store.readMeta(sessionId)?.keptWorktreePaths?.includes(worktree) ?? false, false, "a new worktree there is not kept");
+    await manager.delete(sessionId);
+    assert.equal(existsSync(worktree), false, "and it goes with the session");
+  } finally {
+    manager.shutdownAll();
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a session whose port block an older runner left colliding launches again, with a new block and a notice", async () => {
+  await withSession("stale-block-launch", async (h) => {
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    const row = h.store.readMeta(h.sessionId)!.worktrees![0]!;
+    const held = row.portBlock!;
+    assert.ok(held);
+    // An older runner moved the session without revalidating: its row names a block another holds.
+    const allocator = internalsOf(h).worktreePortAllocator;
+    allocator.release(`${h.sessionId}\0${row.id}`);
+    allocator.allocate("s_other\0other-worktree", held);
+
+    h.restart();
+    await relaunch(h, "docs", h.docs);
+    const current = h.store.readMeta(h.sessionId)!.worktrees![0]!;
+    assert.equal(h.providers.at(-1)!.cwd, row.path);
+    assert.notDeepEqual(current.portBlock, held, "it does not take what another session holds");
+    assert.deepEqual(internalsOf(h).worktreePortAllocator.get("s_other\0other-worktree"), held);
+    assert.equal(h.providers.at(-1)!.env?.WOLLIPOG_PORT_BLOCK_START, String(current.portBlock!.start));
+    assert.ok(errorText(h).some((text) => text.includes(`port block changed to ${current.portBlock!.start}-${current.portBlock!.end}`)),
+      "and the session is told");
+  });
+});
+
+test("a session whose stale port block cannot be replaced still refuses to launch, and says why", async () => {
+  await withSession("stale-block-exhausted", async (h) => {
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    const row = h.store.readMeta(h.sessionId)!.worktrees![0]!;
+    const allocator = internalsOf(h).worktreePortAllocator;
+    allocator.release(`${h.sessionId}\0${row.id}`);
+    allocator.allocate("s_other\0other-worktree", row.portBlock);
+    h.restart();
+    const next = internalsOf(h).worktreePortAllocator;
+    const allocate = next.allocate.bind(next);
+    next.allocate = (owner, preferred) => {
+      if (owner.startsWith(h.sessionId) && !preferred) throw new Error("worktree port range is exhausted");
+      return allocate(owner, preferred);
+    };
+    const launched = h.providers.length;
+    const lease = h.store.readWorktreeLease(h.sessionId);
+    if (lease) h.store.releaseWorktreeLease(h.sessionId, lease.owner);
+    await h.manager.start({ sessionId: h.sessionId, workspaceId: "docs", workspacePath: h.docs, agentId: "claude-code", command: "claude-code",
+      args: [], env: {}, useWorktree: false, driver: "claude-code", context: { kind: "native" } }).catch(() => undefined);
+    await waitFor(() => errorText(h).some((text) => /exhausted/u.test(text)), "the launch did not say why it refused");
+    assert.equal(h.providers.length, launched, "nothing launched");
+    assert.deepEqual(internalsOf(h).worktreePortAllocator.get("s_other\0other-worktree"), row.portBlock, "and the other session keeps its block");
+  });
+});
+
+test("a worktree a launch makes again after a refused rollback is never removed by that rollback, even when its setup fails", async () => {
+  if (process.platform === "win32") return;
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-launch-remade-after-refusal-")));
+  const fake = fakeProvider();
+  const sessionId = "s_launch_remade_after_refusal";
+  const dataDir = join(root, "data");
+  const managers: SessionManager[] = [];
+  const logs: string[] = [];
+  const retried = () => logs.some((line) => /needs retry after worktree removal/u.test(line));
+  const runner = () => {
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const manager = new SessionManager(() => {}, (line: string) => { logs.push(line); }, store, "runner", undefined, fake.factory as never, dataDir, 2);
+    managers.push(manager);
+    return { store, manager };
+  };
+  try {
+    const app = join(root, "app");
+    mkdirSync(app);
+    git(app, "init", "--quiet", "--initial-branch=main");
+    git(app, "commit", "--quiet", "--allow-empty", "-m", "base");
+    const locations = [{ id: "app", name: "App", path: realpathSync(app) }];
+    let { store, manager } = runner();
+    manager.configureSharedDirectories(locations as never);
+    git(app, "checkout", "--quiet", "-b", `agent/${sessionId}`);
+    writeFileSync(join(app, ".wollipog.json"), JSON.stringify({ version: 1, setup: [{ name: "Install Packages", command: fail, timeoutSeconds: 30 }] }));
+    git(app, "add", ".wollipog.json");
+    git(app, "commit", "--quiet", "-m", "the session's own commit");
+    git(app, "checkout", "--quiet", "main");
+    const spec = { sessionId, workspaceId: "app", workspacePath: realpathSync(app), agentId: "claude-code", command: "claude-code",
+      args: [], env: {}, useWorktree: true, driver: "claude-code" as const, context: { kind: "native" as const } };
+    const cards = () => store.readEvents(sessionId).map((event) => event.payload).filter((payload) => payload.kind === "permission_request");
+    const releaseLease = () => {
+      const lease = store.readWorktreeLease(sessionId);
+      if (lease) store.releaseWorktreeLease(sessionId, lease.owner);
+    };
+
+    // The first launch is stopped at its trust card while its worktree's configuration is broken, so
+    // its rollback's identity check refuses, and the rollback stays on record.
+    const starting = manager.start(spec).catch(() => undefined);
+    await waitFor(() => store.has(sessionId) && cards().length > 0, "the first launch did not ask for trust");
+    const worktree = git(app, "worktree", "list", "--porcelain").split("\n").filter((line) => line.startsWith("worktree "))
+      .map((line) => line.slice("worktree ".length)).find((path) => path !== realpathSync(app))!;
+    git(app, "config", "extensions.worktreeConfig", "true");
+    writeFileSync(join(git(worktree, "rev-parse", "--absolute-git-dir"), "config.worktree"), "[broken\n");
+    manager.stop(sessionId);
+    await starting;
+    await waitFor(() => !existsSync(worktree) || retried(), "the rollback did not try");
+    assert.equal(existsSync(worktree), true, "the refused rollback removed nothing");
+
+    // The person removes it, as the refusal says to, and the next launch makes it again. Its required
+    // setup fails, so the session keeps it with Retry Setup, and the person fixes things there.
+    git(app, "worktree", "remove", "--force", worktree);
+    releaseLease();
+    const relaunching = manager.start(spec).catch(() => undefined);
+    await waitFor(() => cards().length > 1, "the second launch did not ask for trust");
+    manager.resolvePermission(sessionId, cards().at(-1)!.requestId, "trust");
+    await relaunching;
+    await waitFor(() => store.readMeta(sessionId)?.worktreePath === worktree &&
+      store.readMeta(sessionId)?.worktrees?.some((row) => row.path === worktree && row.setup?.status === "failed") === true,
+    "the session did not keep the remade worktree after its setup failed");
+    writeFileSync(join(worktree, "fixes.txt"), "the person's fixes since\n");
+    const kept = files(worktree);
+
+    manager.shutdownAll();
+    ({ store, manager } = runner());
+    manager.configureSharedDirectories(locations as never);
+    manager.reconcileStore();
+    await new Promise<void>((resolve) => setTimeout(resolve, 1500));
+    assert.equal(existsSync(worktree), true, "a restart does not take the worktree the session holds");
+    assert.deepEqual(files(worktree), kept, "with everything in it");
+    assert.equal(git(app, "rev-parse", "--verify", `refs/heads/agent/${sessionId}`).length, 40);
+  } finally {
+    for (const manager of managers) manager.shutdownAll();
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a launch rollback leaves a worktree Git cannot answer from inside byte for byte, through a real restart", async () => {
+  if (process.platform === "win32") return;
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-launch-rollback-identity-")));
+  const fake = fakeProvider();
+  const sessionId = "s_launch_rollback_identity";
+  const dataDir = join(root, "data");
+  const managers: SessionManager[] = [];
+  const logs: string[] = [];
+  const retried = () => logs.some((line) => /needs retry after worktree removal/u.test(line));
+  const runner = () => {
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const manager = new SessionManager(() => {}, (line: string) => { logs.push(line); }, store, "runner", undefined, fake.factory as never, dataDir, 2);
+    managers.push(manager);
+    return { store, manager };
+  };
+  try {
+    const app = join(root, "app");
+    mkdirSync(app);
+    git(app, "init", "--quiet", "--initial-branch=main");
+    git(app, "commit", "--quiet", "--allow-empty", "-m", "base");
+    const locations = [{ id: "app", name: "App", path: realpathSync(app) }];
+    let { store, manager } = runner();
+    manager.configureSharedDirectories(locations as never);
+    // The session's branch holds its own commit, so its rollback keeps the branch (#4209).
+    git(app, "checkout", "--quiet", "-b", `agent/${sessionId}`);
+    writeFileSync(join(app, ".wollipog.json"), JSON.stringify({ version: 1, setup: [{ name: "Step", command: sleep, timeoutSeconds: 120 }] }));
+    git(app, "add", ".wollipog.json");
+    git(app, "commit", "--quiet", "-m", "the session's own commit");
+    git(app, "checkout", "--quiet", "main");
+
+    const starting = manager.start({ sessionId, workspaceId: "app", workspacePath: realpathSync(app), agentId: "claude-code", command: "claude-code",
+      args: [], env: {}, useWorktree: true, driver: "claude-code", context: { kind: "native" } }).catch(() => undefined);
+    const cards = () => store.readEvents(sessionId).map((event) => event.payload).filter((payload) => payload.kind === "permission_request");
+    await waitFor(() => store.has(sessionId) && cards().length > 0, "the remade worktree's setup did not ask for trust");
+    const worktree = git(app, "worktree", "list", "--porcelain").split("\n").filter((line) => line.startsWith("worktree "))
+      .map((line) => line.slice("worktree ".length)).find((path) => path !== realpathSync(app))!;
+    // While trust is open, a person writes there, and its own configuration stops parsing.
+    writeFileSync(join(worktree, "notes.txt"), "a person's notes\n");
+    git(app, "config", "extensions.worktreeConfig", "true");
+    writeFileSync(join(git(worktree, "rev-parse", "--absolute-git-dir"), "config.worktree"), "[broken\n");
+    const before = files(worktree);
+    manager.stop(sessionId);
+    await starting;
+    await waitFor(() => !existsSync(worktree) || retried(), "the rollback did not try");
+    assert.deepEqual(files(worktree), before, "nothing in it is removed");
+
+    manager.shutdownAll();
+    logs.length = 0;
+    ({ store, manager } = runner());
+    manager.configureSharedDirectories(locations as never);
+    manager.reconcileStore();
+    await waitFor(() => !existsSync(worktree) || retried(), "the restart did not replay the rollback");
+    assert.deepEqual(files(worktree), before, "nor when a restart replays it");
+    assert.equal(git(app, "rev-parse", "--verify", `refs/heads/agent/${sessionId}`).length, 40, "and the branch stays");
+
+    // The next launch is refused and says to repair it. The person does, and the session takes it back.
+    const spec = { sessionId, workspaceId: "app", workspacePath: realpathSync(app), agentId: "claude-code", command: "claude-code",
+      args: [], env: {}, useWorktree: true, driver: "claude-code" as const, context: { kind: "native" as const } };
+    const releaseLease = () => {
+      const lease = store.readWorktreeLease(sessionId);
+      if (lease) store.releaseWorktreeLease(sessionId, lease.owner);
+    };
+    releaseLease();
+    await manager.start(spec).catch(() => undefined);
+    const errors = () => store.readEvents(sessionId).map((event) => event.payload)
+      .filter((payload) => payload.kind === "error").map((payload) => String((payload as { message?: string }).message));
+    await waitFor(() => errors().some((text) => /left as it is, in case it holds work/u.test(text)), "the unrepaired worktree was not refused");
+    rmSync(join(git(app, "rev-parse", "--path-format=absolute", "--git-common-dir"), "worktrees", worktree.split("/").at(-1)!, "config.worktree"));
+    const launched = fake.providers.length;
+    releaseLease();
+    const relaunching = manager.start(spec).catch(() => undefined);
+    await waitFor(() => cards().length > 1 || fake.providers.length > launched, "the repaired worktree did not relaunch");
+    const card = cards().at(-1)!;
+    if (fake.providers.length === launched) manager.resolvePermission(sessionId, card.requestId, "skip");
+    await relaunching;
+    await waitFor(() => fake.providers.length > launched && store.readMeta(sessionId)?.worktreePath === worktree,
+      "the session did not take its worktree back");
+    writeFileSync(join(worktree, "after-repair.txt"), "work done since the repair\n");
+    const taken = files(worktree);
+
+    // A later restart finds nothing to replay against it.
+    manager.shutdownAll();
+    ({ store, manager } = runner());
+    manager.configureSharedDirectories(locations as never);
+    manager.reconcileStore();
+    await new Promise<void>((resolve) => setTimeout(resolve, 1500));
+    assert.equal(existsSync(worktree), true, "the worktree the session took back is still there");
+    assert.deepEqual(files(worktree), taken, "with everything done in it since");
+    assert.equal((manager as unknown as { cleanupJournal: { list(): WorktreeCleanupRecord[] } }).cleanupJournal.list().length, 0);
+  } finally {
+    for (const manager of managers) manager.shutdownAll();
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    rmSync(root, { recursive: true, force: true });
+  }
 });

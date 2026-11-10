@@ -107,6 +107,17 @@ export function FullControlLocationNotices({ report }: { report: FullControlLoca
   </>;
 }
 
+/** How a Full Control launch takes its issues: the owner's first message names them, and the server
+ * checks each against those exact words. A bare number means the launch repository; another of the
+ * campaign's repositories needs its issue written qualified, so the dialog says so before Start. */
+export function FullControlFirstMessageNotice() {
+  return <Notice tone="info" title="Name Issues in Your First Message">
+    <p>When the session opens, your first message sets the campaign's task and issues. Write <code>#12</code> for
+      an issue in this repository. For another repository in the campaign, write <code>owner/repo#12</code> or
+      paste the issue's link, because a bare number always means this repository.</p>
+  </Notice>;
+}
+
 function newRequestId(): string {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }

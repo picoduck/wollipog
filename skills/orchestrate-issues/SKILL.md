@@ -272,6 +272,8 @@ resolves each by full name, name without the owner, or Location name, and refuse
 them, now or in a later addition. Admission removes every other repository from the campaign; one comes
 back only through `request_campaign_repository_addition`, which its owner decides. If the message names
 only other repositories, the launch repository gets no campaign work: place every child in a named one.
+When recorded work needs the launch repository after all, ask its owner the same way, naming one of its
+Locations; only an approval brings it back into the limit.
 The constraint check
 judges whether the message really limits the work to them, so never send a repository the message only
 mentions or excludes, and never leave out one it limits the work to. Any name that matches none or
