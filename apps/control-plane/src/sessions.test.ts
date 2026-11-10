@@ -30599,7 +30599,7 @@ test("a refused issue closure records why, keeps the runner's sanitized message,
 test("issue closure binds only children whose work bears on the issue (#3084)", async () => {
   // Each mode changes one child after the human approved closing issue 1440, then executes.
   const executable = new Set(["unrelated_prompt", "unrelated_decision", "new_unrelated_child", "linked_unrelated_prompt",
-    "other_issue_follow_up_decision"]);
+    "other_issue_follow_up_decision", "earlier_attempt_prompt", "issue_cleared"]);
   for (const mode of ["unrelated_prompt", "unrelated_decision", "new_unrelated_child", "related_prompt",
     "related_decision", "unattributed_prompt", "unechoed_launch", "earlier_attempt_prompt", "issue_cleared",
     "follow_up_prompt", "follow_up_decision", "transitive_follow_up_prompt", "upstream_follow_up_prompt",

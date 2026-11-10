@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { CAMPAIGN_FORGE_OBSERVATION, CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL, type CampaignControl, type CampaignPublicationAdmissionFailure, type RunnerMetadata, type WorkflowDecisionView,
@@ -22,8 +25,8 @@ const openPullRequest = (number: number) => ({ number, title: "Work", url: `http
 /** Each gap's code and work item, without its derived action and summary. */
 const gapNames = (gaps: IssueClosureDeliveryGap[] | null | undefined) => gaps?.map((gap) => ({ code: gap.code, workItemId: gap.workItemId }));
 
-function harness(full = true, maximum = 5, issues = [100]) {
-  const db = ControlPlaneDb.open(":memory:");
+function harness(full = true, maximum = 5, issues = [100], databasePath = ":memory:") {
+  const db = ControlPlaneDb.open(databasePath);
   const principal: HumanPrincipal = { ...db.localIdentityContext(), kind: "human", actorId: db.localIdentityContext().userId };
   const metadata: RunnerMetadata = { runnerId: "r", hostname: "test", os: "linux", version: "test",
     workspaces: [{ id: "w", name: "Repo", path: "/repos/test" }], agents: [{ id: "codex", name: "Codex", command: "codex", args: [], env: {},
@@ -53,6 +56,7 @@ function harness(full = true, maximum = 5, issues = [100]) {
     }
     if (message.type === "github_issue_closure") {
       state.closureMessages.push(message);
+      if (message.operation === "execute" && message.prepare) return { type: "github_issue_closure_result", requestId, sessionId: message.sessionId, ok: true, prepared: true };
       if (message.operation !== "inspect") { state.executes++; return { type: "github_issue_closure_result", requestId, sessionId: message.sessionId, ok: true,
         result: { outcome: "uncertain", completedAt: Date.now() } }; }
       return { type: "github_issue_closure_result", requestId, sessionId: message.sessionId, ok: true, inspection: { repository: "team/repo", issue: message.issue,
@@ -96,8 +100,51 @@ test("#4403 campaign PR identities include other work, and incomplete ledger rea
   } finally { h.db.close(); }
 });
 
-test("#4403 a new campaign PR or unreadable ledger after approval refuses before dispatch", async () => {
-  for (const mode of ["joined", "unreadable"] as const) {
+test("#4403 upgrading existing work retains unknown PR and delivery history across reopen", () => {
+  const dir = mkdtempSync(join(tmpdir(), "closure-history-upgrade-"));
+  const path = join(dir, "test.db");
+  const h = harness(true, 5, [100], path);
+  const itemId = h.item.id;
+  try {
+    assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: itemId, childSessionId: "child" }).ok);
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: itemId,
+      stage: { stage: "implementing", pullRequests: [{ repository: "team/repo", number: 77 }] } }).ok);
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: itemId, stage: null,
+      endAttempt: { reason: "failed", note: "Ended old work" } }).ok);
+    // Reproduce a pre-history schema, whose cleared stages cannot be reconstructed on upgrade.
+    h.db.raw().exec(`DROP TRIGGER campaign_work_delivery_stage_inserted;
+      DROP TRIGGER campaign_work_delivery_stage_updated;
+      DROP TRIGGER campaign_work_pr_stage_inserted;
+      DROP TRIGGER campaign_work_pr_stage_updated;
+      DROP TRIGGER campaign_work_pr_delivery_recorded;
+      DROP TABLE campaign_work_delivery_activity;
+      DROP TABLE campaign_work_pr_history;
+      DROP TABLE campaign_work_pr_history_legacy;
+      DROP TABLE campaign_work_pr_history_start;`);
+  } finally { h.db.close(); }
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(path);
+    assert.equal(db.campaignWorkLedger.closurePullRequestHistory("root", "team/repo"), undefined);
+    assert.equal(db.campaignWorkLedger.epicTrackingItem("root", itemId), false,
+      "an ended legacy attempt cannot prove absence of delivery work");
+    const svc = new SessionsService(db, new Hub(db), { info() {}, warn() {}, error() {} });
+    const added = svc.recordCampaignPlan("root", { planComplete: true,
+      items: [{ key: "fresh-tracking", issue: { repository: "team/repo", number: 100 } }] });
+    assert.ok(added.ok, added.error ?? "new tracking item");
+    const freshId = added.data!.items.find((item) => item.key === "fresh-tracking")!.workItemId;
+    assert.equal(db.campaignWorkLedger.epicTrackingItem("root", freshId), true);
+    db.close();
+    db = ControlPlaneDb.open(path);
+    assert.equal(db.campaignWorkLedger.epicTrackingItem("root", freshId), true,
+      "reopening does not misclassify post-migration items as legacy");
+    assert.equal(db.campaignWorkLedger.epicTrackingItem("root", itemId), false);
+    assert.equal(db.campaignWorkLedger.closurePullRequestHistory("root", "team/repo"), undefined);
+  } finally { db?.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("#4403 execution refreshes campaign context, retains the approved payload and fences inspection races", async () => {
+  for (const mode of ["closed_record", "unreadable", "during_checks", "downgraded"] as const) {
     const h = harness(false);
     try {
       const result = await h.svc.requestGithubIssueClosure("root", { requestId: mode, issue: 100, reason: "completed",
@@ -106,13 +153,34 @@ test("#4403 a new campaign PR or unreadable ledger after approval refuses before
       const d = result.data!.decision!;
       assert.deepEqual(closureSnapshot(d).campaignPullRequests, []);
       assert.ok(h.approve(d).ok);
-      if (mode === "joined") assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id,
+      if (mode === "closed_record") assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id,
         stage: { stage: "in_review", pullRequests: [{ repository: "team/repo", number: 77 }] } }).ok);
-      else h.db.campaignWorkLedger.detail = () => null;
+      if (mode === "unreadable") h.db.campaignWorkLedger.detail = () => null;
+      if (mode === "downgraded") h.db.registerRunner(h.metadata, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.closureCampaignPullRequests - 1);
+      const runner = h.hub.requestFromRunner;
+      h.hub.requestFromRunner = async (r, id, message, timeout) => {
+        const answer = await runner(r, id, message, timeout);
+        if (message.type === "github_issue_closure" && message.operation === "execute" && mode === "during_checks") {
+          assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id,
+            stage: { stage: "in_review", pullRequests: [{ repository: "team/repo", number: 77 }] } }).ok);
+        }
+        return answer;
+      };
       const executed = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
-      assert.equal(executed.ok, false);
-      assert.match(executed.error!, /campaign pull-request ledger changed or became unreadable/u);
-      assert.equal(h.state.executes, 0);
+      if (mode === "downgraded") {
+        assert.equal(executed.ok, false);
+        assert.match(executed.error!, /requires a runner supporting fresh campaign PR context/u);
+        assert.equal(h.state.executes, 0);
+      } else {
+        assert.ok(executed.ok, executed.error ?? mode);
+        assert.equal(h.state.executes, mode === "during_checks" ? 0 : 1);
+        if (mode === "during_checks") assert.match(executed.data!.issueClosureResult?.refusal?.runnerError ?? "", /context changed during forge inspection/u);
+        const dispatch = h.state.closureMessages.find((raw) => (raw as { operation: string }).operation === "execute") as {
+          snapshot: { campaignPullRequests: number[] }; campaignPullRequests: number[] | null; prepare: boolean };
+        assert.deepEqual(dispatch.snapshot.campaignPullRequests, [], "approved payload remains unchanged");
+        assert.deepEqual(dispatch.campaignPullRequests, mode === "closed_record" ? [77] : mode === "unreadable" ? null : []);
+        assert.equal(dispatch.prepare, true);
+      }
     } finally { h.db.close(); }
   }
 });
@@ -146,7 +214,7 @@ test("#4403 an ended epic-tracking attempt is enough, but delivery work, PRs, op
 });
 
 test("#4403 a bound child can leave for unrelated work, but new issue work, decisions, children and missing history refuse", async () => {
-  for (const mode of ["left", "issue_work", "decision", "joined", "missing_history"] as const) {
+  for (const mode of ["left", "issue_work", "issue_prompt", "unassigned_prompt", "decision", "joined", "missing_history"] as const) {
     const h = harness(false, 5, [100, 101]);
     try {
       h.db.appendEvent("child", { kind: "user_message", text: "Implement issue 100" }, Date.now());
@@ -163,6 +231,12 @@ test("#4403 a bound child can leave for unrelated work, but new issue work, deci
       const before = closureSnapshot(d);
       assert.ok(before.activeChildren.find((child) => child.sessionId === "child")?.issueWorkDigest);
       assert.ok(h.approve(d).ok);
+      if (mode === "issue_prompt") assert.ok(h.svc.prompt("child", "Change the implementation of issue 100").ok);
+      if (mode === "unassigned_prompt") {
+        assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id,
+          endAttempt: { reason: "failed", note: "Ended before reassignment" } }).ok);
+        assert.ok(h.svc.prompt("child", "Continue earlier issue work").ok);
+      }
       assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: other, childSessionId: "child" }).ok);
       assert.ok(h.svc.prompt("child", "Implement issue 101").ok);
       if (mode === "issue_work") assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id, stage: { stage: "implementing" } }).ok);
@@ -177,8 +251,7 @@ test("#4403 a bound child can leave for unrelated work, but new issue work, deci
       const executed = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
       assert.equal(executed.ok, mode === "left", `${mode}: ${executed.error}`);
       assert.equal(h.state.executes, mode === "left" ? 1 : 0, mode);
-      if (!executed.ok) assert.match(executed.error!, mode === "missing_history"
-        ? /campaign pull-request ledger changed or became unreadable/u : /active child work changed/u);
+      if (!executed.ok) assert.match(executed.error!, /active child work changed/u);
       const legacy = { ...before, activeChildren: before.activeChildren.map(({ issueWorkDigest: _digest, ...child }) => child) };
       assert.equal(issueClosureActiveChildrenMatch(h.db, "root", legacy), false, "old approvals keep their old assignment check");
     } finally { h.db.close(); }
@@ -481,7 +554,8 @@ test("#4060 an in-scope epic's completed closure is Orchestrator-owned from its 
     assert.equal(current.authority, "orchestrator");
     assert.ok(h.approve(current).ok);
     assert.ok((await h.svc.executeGithubIssueClosure("root", current.occurrenceId, current.resourceDigest)).ok);
-    const executed = h.state.closureMessages.at(-1) as { operation: string; snapshot: { epicMembers?: IssueClosureEpicMembers } };
+    const executed = [...h.state.closureMessages].reverse().find((message) => (message as { operation: string }).operation === "execute") as {
+      operation: string; snapshot: { epicMembers?: IssueClosureEpicMembers } };
     assert.equal(executed.operation, "execute");
     assert.deepEqual(executed.snapshot.epicMembers, h.state.epicMembers);
   } finally { h.db.close(); }

@@ -1945,6 +1945,7 @@ export class SessionManager {
   private readonly stateDir: string;
   /** Closures at a Location waiting at their mutation fence for the control plane's commit (#4119). */
   private readonly preparedLocationClosures = new Map<string, { commit: () => void; finished: Promise<GithubIssueClosureResultMessage> }>();
+  private readonly preparedRootClosures = new Map<string, { commit: () => void; finished: Promise<GithubIssueClosureResultMessage> }>();
   /** Evidence for widening the provider-history classifier (#876). Nothing reads it to decide. */
   private readonly unclassifiedRejections: UnclassifiedRejectionJournal;
   private readonly providerStateReconcileTimer: ReturnType<typeof setInterval>;
@@ -21689,7 +21690,12 @@ export class SessionManager {
     const base = { type: "github_issue_closure_result" as const, requestId: message.requestId, sessionId: message.sessionId };
     if (message.location) return this.githubIssueClosureAtLocation(message, message.location, base, options.locationCommitWaitMs);
     const meta = this.store.readMeta(message.sessionId);
-    if (message.operation === "commit") return { ...base, ok: false, failure: "runner_failed", error: "Only a closure at a Location is committed separately" };
+    if (message.operation === "commit") {
+      const prepared = this.preparedRootClosures.get(`${message.sessionId}:${message.occurrenceId}`);
+      if (!prepared) return { ...base, ok: false, failure: "runner_failed", error: "No root closure is prepared for this approval; nothing was written" };
+      prepared.commit();
+      return { ...await prepared.finished, ...base };
+    }
     if (!meta?.orchestrator || !meta.repoPath) {
       return { ...base, ok: false, failure: "runner_failed", error: "Issue closure requires a runner-local Orchestrator repository" };
     }
@@ -21729,7 +21735,10 @@ export class SessionManager {
       }
       if (meta.orchestrator.issueScope && message.snapshot.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, failure: "repository_changed", error: "Closure repository differs from the authorized scope" };
       const digest = createHash("sha256").update(JSON.stringify(message.snapshot)).digest("hex");
-      const result = await executeGithubIssueClosure(message.snapshot, run, () => {
+      if (message.snapshot.campaignPullRequests !== undefined && (message.prepare !== true || message.campaignPullRequests === undefined)) {
+        return { ...base, ok: false, failure: "campaign_authority_changed", error: "Filtered closure requires fresh campaign PR context and a separate commit" };
+      }
+      const begin = () => {
         const fresh = this.store.readMeta(message.sessionId);
         const attempts = fresh?.githubIssueClosureAttempts ?? {};
         if (!fresh || attempts[message.occurrenceId] || Object.keys(attempts).length >= 1000 ||
@@ -21746,7 +21755,31 @@ export class SessionManager {
         return this.store.patchMeta(message.sessionId, {
           githubIssueClosureAttempts: { ...attempts, [message.occurrenceId]: digest },
         }) !== null;
-      });
+      };
+      if (message.prepare === true) {
+        const key = `${message.sessionId}:${message.occurrenceId}`;
+        if (this.preparedRootClosures.has(key)) return { ...base, ok: false, failure: "runner_failed", error: "This root closure is already prepared; nothing more was written" };
+        let commit = () => {};
+        let answerCommit = (_granted: boolean) => {};
+        const committed = new Promise<boolean>((resolve) => { answerCommit = resolve; });
+        let atFence = () => {};
+        const reachedFence = new Promise<"prepared">((resolve) => { atFence = () => resolve("prepared"); });
+        const finished = executeGithubIssueClosure(message.snapshot, run, async () => {
+          const timer = setTimeout(() => answerCommit(false), options.locationCommitWaitMs ?? LOCATION_ISSUE_CLOSURE_COMMIT_WAIT_MS);
+          timer.unref();
+          commit = () => { clearTimeout(timer); answerCommit(true); };
+          atFence();
+          return await committed && begin();
+        }, message.campaignPullRequests).then((result): GithubIssueClosureResultMessage => {
+          this.log(JSON.stringify({ event: "github_issue_closure_result", entryPoint: "root_commit", sessionId: message.sessionId,
+            occurrenceId: message.occurrenceId, outcome: result.outcome, ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
+          return { ...base, ok: true, result };
+        }, (error) => issueClosureFailure(base, error)).finally(() => this.preparedRootClosures.delete(key));
+        this.preparedRootClosures.set(key, { commit: () => commit(), finished });
+        const first = await Promise.race([reachedFence, finished]);
+        return first === "prepared" ? { ...base, ok: true, prepared: true } : first;
+      }
+      const result = await executeGithubIssueClosure(message.snapshot, run, begin);
       this.log(JSON.stringify({ event: "github_issue_closure_result", sessionId: message.sessionId,
         occurrenceId: message.occurrenceId, outcome: result.outcome, ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
       return { ...base, ok: true, result };
@@ -21799,6 +21832,9 @@ export class SessionManager {
       if (message.snapshot.repository.toLowerCase() !== repository) return { ...base, ok: false, failure: "repository_changed", error: "Closure repository differs from the Location's" };
       if (this.preparedLocationClosures.has(message.occurrenceId)) return { ...base, ok: false, failure: "runner_failed", error: "This approval's closure is already prepared; nothing more was written" };
       const { occurrenceId, snapshot } = message;
+      if (snapshot.campaignPullRequests !== undefined && message.campaignPullRequests === undefined) {
+        return { ...base, ok: false, failure: "campaign_authority_changed", error: "Filtered closure requires fresh campaign PR context" };
+      }
       const digest = createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
       let commit = () => {};
       let answerCommit = (_granted: boolean) => {};
@@ -21813,7 +21849,7 @@ export class SessionManager {
         atFence();
         // Nothing awaits between the commit and the durable record, and the mutation follows it.
         return await committed && this.beginLocationIssueClosure(occurrenceId, digest);
-      }).then((result): GithubIssueClosureResultMessage => {
+      }, message.campaignPullRequests).then((result): GithubIssueClosureResultMessage => {
         this.log(JSON.stringify({ event: "github_issue_closure_result", sessionId: message.sessionId, workspaceId: location.workspaceId,
           occurrenceId, outcome: result.outcome, ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
         return { ...base, ok: true, result };

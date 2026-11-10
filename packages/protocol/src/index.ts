@@ -10001,7 +10001,11 @@ export type GithubIssueClosureMessage = {
       campaignPullRequests?: number[] | null;
       /** v278 (#4060): also read the issue's epic members into the inspection and its digest. */
       epicMembers?: true }
-  | { operation: "execute"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot }
+  | { operation: "execute"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot;
+      /** v357: fresh server-derived campaign context. Null relates every open PR. */
+      campaignPullRequests?: number[] | null;
+      /** v357: root execution also stops at the forge fence for a final control-plane recheck. */
+      prepare?: true }
   | { operation: "reconcile"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot; consumedAt: number }
   /** v323 (#4119): only with `location`. A Location's runner holds no copy of the campaign's scope,
    * so its `execute` stops at the mutation fence and answers `prepared`. The control plane rechecks

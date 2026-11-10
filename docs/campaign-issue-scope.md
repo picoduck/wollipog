@@ -762,15 +762,40 @@ still covers a stale boundary, another repository, an issue outside the scope, a
 operation the boundary does not delegate (whose `deliveryFailure` reads `outside_boundary`, with no
 gaps), and an admission bound to another boundary revision.
 
-**A timeline-only reference keeps blocking.** The runner relates an open pull request to the issue
-by closing reference, by a mention in its title or body, or by GitHub's `cross-referenced`
-timeline event. GitHub keeps that event after the mention is edited out, so a sibling PR that no
-longer mentions the issue and has no closing reference still blocks delegated closure until it
-merges or closes. This is deliberate: the timeline event is the only record the forge keeps of
-the relation, the snapshot does not carry the PR's body to re-check, and a body can be edited back
-at any moment. Treating an edited-out mention as unrelated would let an agent's edit remove a
-proof condition. The gap names each such PR and says it blocks until it merges or closes; the
-person-owned route stays available meanwhile.
+**Closure relatedness uses closing references and campaign history (#4403).** On runner protocol
+357+, the server supplies append-only campaign PR identities. Every open campaign PR remains a
+gap, even without an issue mention. An outside PR is related only when its forge closing references
+include the issue. An unreadable closing-reference connection counts that PR as related; incomplete
+or unreadable campaign history counts every open PR as related. A bare outside mention or retained
+timeline event is not a gap when both facts are known. Older peers retain the conservative mention
+and timeline rule.
+
+Execution reads current campaign identities and forge closing references again using the same
+predicate. New closed PR identities do not require reapproval; a newly related open PR does. The
+approved snapshot remains immutable. Root and Location executions with this context use the existing
+prepare/commit fence: after the forge read, the server rechecks scope, policy, authority, child work,
+delivery and the dispatched campaign identities before allowing a write. A concurrent context
+change refuses; no close or comment precedes the durable attempt fence.
+
+**Epic tracking work uses server facts (#4403).** A completed epic without a fixed-by plan can be
+proven by its in-scope members, all closed as completed and freshly read on the forge. Its own items
+still need delivery proof unless the ledger proves they are tracking work: no open attempts,
+delivered attempts, verifications, deliveries, PRs or recorded delivery-stage activity. Ended
+tracking attempts alone do not disqualify an item. Titles prove nothing. Sticky activity and PR
+history prevent cleared stages from qualifying; incomplete migrated history retains the ordinary
+proof for dispatched work. Campaign Status item states, counts, recovery and closure gaps use the
+same predicate and the verified member-proven closure receipt. The old placeholder rule required
+zero attempts, so it excluded tracking items whose tracking attempts had already ended.
+
+An approved closure's issue-specific child digest preserves its binding when the child moves to
+unrelated recorded work. New issue work, newly bound children and unconsumed issue-bound decisions
+still invalidate it. Prompt identities are captured at attempt boundaries: issue prompts admitted
+before reassignment remain bound, while later prompts on the unrelated attempt do not. A prompt
+in an unassigned interval cannot be attributed away from the issue. Missing boundary history or
+uncertain attribution retains strict assignment binding.
+Approved root notifications on protocol 357+ can promote the same durable queued command through
+the existing steering lane at a safe tool boundary. Rejection retains queued delivery; uncertain
+provider delivery is not replayed. Older runners keep queued continuation delivery.
 
 ### Decision Model Checks on Follow-Ups and Closures (#4104)
 

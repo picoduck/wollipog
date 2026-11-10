@@ -1106,7 +1106,8 @@ function recordEpicClosure(h: ReturnType<typeof mergedWorkVerificationFixture>, 
     resource_snapshot, resource_digest, policy_revision, authority, status, created_at, issue_closure_result)
     VALUES (?, ?, 'root', 'root', 'issue_closure', 'issue_closure:picoduck/wollipog#2938', ?, ?, 1, ?, 'consumed', ?, ?)`)
     .run(occurrence, occurrence, JSON.stringify(snapshot), "f".repeat(64), change.authority ?? "orchestrator", h.now,
-      JSON.stringify({ outcome: change.outcome ?? "closed", completedAt: h.now }));
+      JSON.stringify({ outcome: "uncertain", completedAt: h.now }));
+  h.db.recordGithubIssueClosureResult(occurrence, { outcome: change.outcome ?? "closed", completedAt: h.now });
 }
 
 test("uncertain closures recover on upgrade, deduplicate reads, and release campaign status (#4398)", async () => {
@@ -1342,9 +1343,17 @@ test("#4403 Campaign Status finishes ended epic tracking and retains the same de
       if (mode === "legacy") h.db.raw().prepare("INSERT INTO campaign_work_pr_history_legacy VALUES (?)").run(itemId);
       const report = h.db.appendEvent("unaffected", { kind: "agent_message", final: true, text: "Tracking report." }, Date.now());
       assert.ok(h.svc.verifyCampaignChild("root", { childSessionId: "unaffected", reportEventSeq: report.seq, followUpsAccounted: true }).ok);
+      const before = h.db.campaignProjection("root")!.work!;
+      assert.equal(before.counts.delivered, 1, "prime the cached projection before the closure receipt");
       recordEpicClosure(h, "tracking-closure");
       assert.equal(h.db.campaignRecoveryCompletion("root", Date.now()).state, mode === "tracking" ? "complete" : "recovery_held", mode);
       assert.equal(h.db.campaignProjection("root")!.status, mode === "tracking" ? "verified_complete" : "stuck", mode);
+      const after = h.db.campaignProjection("root")!.work!;
+      assert.ok(after.revision > before.revision, "the closure receipt invalidates the summary and work-list cursor");
+      assert.equal(after.counts.delivered, mode === "tracking" ? 2 : 1, mode);
+      const detail = h.db.campaignWorkLedger.detail("root", itemId, Date.now())!;
+      assert.equal(detail.primaryState === "delivered", mode === "tracking", mode);
+      assert.deepEqual(detail.deliveries, [], "tracking completion invents no delivery record");
     } finally { h.db.close(); }
   }
 });

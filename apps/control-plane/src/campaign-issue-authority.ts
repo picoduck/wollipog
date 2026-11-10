@@ -453,7 +453,7 @@ export function epicSourceApplies(db: ControlPlaneDb, root: SessionView, snapsho
  * agent text never names one. Every member must be in the campaign's scope and closed as completed.
  * An open member is not proven here even when its own closure would be, so an epic never closes
  * ahead of a member: closing the member first is the route. The epic's own work items still count,
- * each delivered under the ordinary proof, except a placeholder that was never dispatched. An
+ * each delivered under the ordinary proof, except server-derived epic tracking work. An
  * issue without members keeps the ordinary proof. */
 function epicMemberEvidence(db: ControlPlaneDb, root: SessionView, snapshot: GithubIssueClosureSnapshot) {
   const read = snapshot.epicMembers;

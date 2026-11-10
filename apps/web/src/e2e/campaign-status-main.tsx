@@ -65,6 +65,7 @@ import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-t
 import { MINUTE, campaignProjection, forgeObservation, itemDetail, itemSummary, knownCost, workSummary } from "./campaign-status-fixtures.js";
 import "../styles.css";
 import { campaignRecoveryFixture } from "./campaign-recovery-fixtures.js";
+import { epicTrackingFixture } from "./epic-tracking-fixture.js";
 import {
   campaignDecisionsFixture,
   DECISION_TARGET,
@@ -103,7 +104,8 @@ const params = new URLSearchParams(window.location.search);
 const scenario = params.get("scenario") ?? "campaign";
 if (params.get("theme") === "light") document.documentElement.dataset.theme = "light";
 
-const NOW = params.has("closureRecovery") ? Date.parse("2026-01-01T12:00:00Z") : Date.now();
+const NOW = params.has("closureRecovery") || params.has("epicTracking") ? Date.parse("2026-01-01T12:00:00Z") : Date.now();
+const epicTracking = params.has("epicTracking") ? epicTrackingFixture(NOW, params.get("epicTracking") === "delivery") : null;
 const recoveryReason = params.get("recovery");
 const recoveryRecord = recoveryReason && ["missing_access", "missing_human_information", "boundary_enlargement",
   "human_required_rule", "unsupported_capability", "attempts_exhausted", "failed_checks", "reviewer_objection", "uncertain_outcome", "request_declined",
@@ -320,7 +322,7 @@ if (params.get("forge") === "gitlab") {
   };
 }
 
-const ROOT_TITLE = params.has("closureRecovery") ? "#4398 Closure Recovery Campaign" : "#2417 Campaign Orchestrator";
+const ROOT_TITLE = epicTracking ? "#4403 Epic Tracking Campaign" : params.has("closureRecovery") ? "#4398 Closure Recovery Campaign" : "#2417 Campaign Orchestrator";
 const recordedWork = (revision: number) => workSummary(NOW, {
   revision,
   coverage: { untrackedChildren: 0, predatesLedger: false },
@@ -345,7 +347,7 @@ const recordedWork = (revision: number) => workSummary(NOW, {
 function baseSession(overrides: Partial<SessionView>): SessionView {
   return {
     id: "s_root", runnerId: "runner-1", workspaceId: null, agentId: "claude-native", driver: "claude-code",
-    title: ROOT_TITLE, status: "running", adopted: false, eventEpoch: 1, archived: false, runId: null,
+    title: ROOT_TITLE, status: epicTracking ? "idle" : "running", adopted: false, eventEpoch: 1, archived: false, runId: null,
     parentSessionId: null, pendingApproval: null, createdAt: NOW - 3 * HOUR, updatedAt: NOW, lastEventAt: NOW,
     messageCount: 40, tokensIn: 0, tokensOut: 0, costUsd: 0, costBudgetUsd: null, maxToolCalls: null,
     ...overrides,
@@ -682,6 +684,7 @@ const projectionFor = (rev: number) => campaignProjection(
         summary: "Add picoduck/notes-site to the campaign", handedOff: false, createdAt: NOW - 2 * 60_000 },
     ] } } : {}),
     ...(fullControlScenario ? fullControlProjection(fullControlScenario) : {}),
+    ...(epicTracking?.projection(rev) ?? {}),
     ...(params.has("closureRecovery") ? {
       status: params.get("closureRecovery") === "settled" ? "verified_complete" as const : "waiting_human" as const,
       limits: { maximumConcurrentChildren: 3, occupied: 0, remaining: 3, costBudgetUsd: null, maxToolCalls: null },
@@ -864,7 +867,7 @@ const ownerRequests = (owners: "before" | "after" | "rule"): DescendantRequestVi
 };
 
 /** The request the blocked item's recorded blocker names, pending on its child. */
-const descendantRequests: DescendantRequestView[] = ownerScopeCards.length ? [] : ownerScenario ? ownerRequests(ownerScenario) : scenario === "campaign" ? [{
+const descendantRequests: DescendantRequestView[] = epicTracking || ownerScopeCards.length ? [] : ownerScenario ? ownerRequests(ownerScenario) : scenario === "campaign" ? [{
   sessionId: "s_child_3",
   sessionTitle: "#2417 Slice 5: Read API",
   runnerId: "runner-1",
@@ -896,10 +899,11 @@ const forgeRefreshes: string[] = [];
 let openedSession: string | null = null;
 let selectedRequestKey: string | null = null;
 
-const visibleItems = params.has("closureRecovery") ? [itemSummary("cwi_4398", NOW, {
+if (epicTracking) Object.assign(details, epicTracking.details);
+const visibleItems = epicTracking?.items ?? (params.has("closureRecovery") ? [itemSummary("cwi_4398", NOW, {
   title: "Uncertain Issue Closure Recovery", issue: { repository: "picoduck/wollipog", number: 4398 }, primaryState: "delivered",
   currentAttempt: null, blocker: null, elapsed: { startedAt: NOW - 12 * MINUTE, endedAt: NOW - MINUTE } })]
-  : scenario === "planless" ? items.filter((item) => item.id === "cwi_2" || item.id === "cwi_3") : items;
+  : scenario === "planless" ? items.filter((item) => item.id === "cwi_2" || item.id === "cwi_3") : items);
 
 // The same sentence and versions the control plane returns (campaign-issue-scope.ts).
 const SCOPE_GRANT_TARGET = { source: "automatic", runnerId: "r", machineName: "Studio", agentId: "claude", harnessName: "Claude Code",
@@ -1185,6 +1189,7 @@ const client = {
     ...(activityScenario ? { repository: "picoduck/wollipog", revision: 1, canPropose: false, outsideScope: [], candidates: [],
       issueNumbers: [...new Set(items.flatMap((item) => item.issue ? [item.issue.number] : []))] } : {}),
     ...(params.has("closureRecovery") ? { repository: "picoduck/wollipog", revision: 1, issueNumbers: [4398], outsideScope: [], candidates: [] } : {}),
+    ...(epicTracking ? { repository: "picoduck/wollipog", revision: 1, canPropose: false, issueNumbers: [4403, 44031], outsideScope: [], candidates: [] } : {}),
     ...(params.get("completedChildren") === "1" && recoveryRecord?.reason === "failed_checks" ? {
       // Disclosed static scope data, not a live mint/approval or supported-profile assertion.
       issueNumbers: [123], revision: 1, canPropose: false, outsideScope: [], candidates: [],

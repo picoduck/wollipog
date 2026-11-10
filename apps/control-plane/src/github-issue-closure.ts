@@ -205,7 +205,7 @@ function issueClosureChildWorkDigest(db: ControlPlaneDb, rootId: string, childId
       return !("repository" in snapshot && "pullRequest" in snapshot && typeof snapshot.pullRequest === "number" &&
         work.unrelatedPullRequests.has(`${snapshot.repository.toLowerCase()}#${snapshot.pullRequest}`));
     }).map((decision) => ({ occurrenceId: decision.occurrenceId, digest: decision.resourceDigest, status: decision.status }));
-    const serialized = JSON.stringify({ items: work.items, pending });
+    const serialized = JSON.stringify({ items: work.items, prompts: work.prompts, pending });
     return serialized.length > 1_000_000 ? undefined : createHash("sha256").update(serialized).digest("hex");
   } catch { return undefined; }
 }
@@ -235,6 +235,7 @@ export function issueClosureActiveChildrenMatch(db: ControlPlaneDb, rootId: stri
     const reassigned = db.campaignWorkLedger.closureReassignedSessions(rootId, issue.repository, issue.number);
     return snapshot.activeChildren.every((before) => {
       if (before.issueWorkDigest !== undefined && reassigned.has(before.sessionId) && db.initialUserMessageText(before.sessionId) !== null &&
+          db.campaignWorkLedger.closureChildIssueWork(rootId, before.sessionId, issue.repository, issue.number)?.departureUnambiguous &&
           issueClosureChildWorkDigest(db, rootId, before.sessionId, issue) === before.issueWorkDigest) return true;
       const after = current.find((child) => child.sessionId === before.sessionId);
       return after?.title === before.title && after.assignmentDigest === before.assignmentDigest &&

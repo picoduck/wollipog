@@ -6595,6 +6595,7 @@ export class ControlPlaneDb {
             pullRequest: { repository: snapshot.repository, number: snapshot.pullRequest } }] : [];
         }),
       campaignRepositories: (campaignId) => this.campaignRepositoriesOf(campaignId),
+      memberProvenEpicClosure: (campaignId, repository, issue) => this.memberProvenEpicClosure(campaignId, repository, issue),
     });
     return this.campaignWorkLedgerStore;
   }
@@ -25850,9 +25851,16 @@ export class ControlPlaneDb {
   }
 
   recordGithubIssueClosureResult(occurrenceId: string, result: NonNullable<WorkflowDecisionView["issueClosureResult"]>): void {
+    const before = this.workflowDecisionByOccurrence(occurrenceId);
     this.stmt(`UPDATE workflow_decisions SET issue_closure_result=?
       WHERE occurrence_id=? AND category='issue_closure' AND status='consumed'`)
       .run(JSON.stringify(result), occurrenceId);
+    const snapshot = before?.resourceSnapshot;
+    if (result.outcome === "closed" && before?.issueClosureResult?.outcome !== "closed" && before?.status === "consumed" &&
+        before.authority === "orchestrator" && snapshot?.category === "issue_closure" && snapshot.reason === "completed" &&
+        snapshot.issueAdmission && snapshot.epicMembers?.readable && snapshot.epicMembers.members.length) {
+      this.campaignWorkLedger.observedChanged(before.sessionId, result.completedAt);
+    }
   }
 
   /** The refusal of this session's latest executed closure of `resourceKey`, when that execution was

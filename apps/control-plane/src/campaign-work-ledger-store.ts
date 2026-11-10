@@ -85,6 +85,17 @@ import {
   type CampaignMergePrerequisite,
 } from "./campaign-merge-dependencies.js";
 
+/** Prompt identities only, never text or retry bookkeeping. Capture this before an assignment ends
+ * so an issue prompt admitted before reassignment cannot disappear behind unrelated later work. */
+const closurePromptStateSql = (session: string) => `json_object(
+  'latest', (SELECT max(seq) FROM session_events WHERE session_id=${session} AND kind='user_message'),
+  'command', (SELECT json_object('id',command_id,'digest',payload_sha256) FROM session_prompt_commands
+    WHERE session_id=${session} ORDER BY created_at DESC,rowid DESC LIMIT 1),
+  'immediate', (SELECT json_object('id',admission_id,'digest',payload_sha256) FROM session_immediate_prompt_admissions WHERE session_id=${session}),
+  'steering', (SELECT json_object('id',request_id,'digest',request_sha256,'count',
+    (SELECT count(*) FROM session_steering_attempts WHERE session_id=${session})) FROM session_steering_attempts
+    WHERE session_id=${session} ORDER BY rowid DESC LIMIT 1))`;
+
 /** Tables, in SCHEMA order. Child-session references are SET NULL so history survives a child's
  * deletion; the root campaign reference cascades, so deleting the root deletes its ledger. */
 export const CAMPAIGN_WORK_LEDGER_SCHEMA = `
@@ -294,6 +305,22 @@ CREATE TABLE IF NOT EXISTS campaign_work_pr_history (
 CREATE TABLE IF NOT EXISTS campaign_work_delivery_activity (
   work_item_id TEXT PRIMARY KEY REFERENCES campaign_work_items(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS campaign_work_attempt_closure_prompts (
+  attempt_id TEXT PRIMARY KEY REFERENCES campaign_work_attempts(id) ON DELETE CASCADE,
+  start_state TEXT NOT NULL,
+  prompt_state TEXT
+);
+CREATE TRIGGER IF NOT EXISTS campaign_work_begin_closure_prompts AFTER INSERT ON campaign_work_attempts
+WHEN NEW.session_id IS NOT NULL
+BEGIN
+  INSERT INTO campaign_work_attempt_closure_prompts (attempt_id,start_state)
+    VALUES (NEW.id, ${closurePromptStateSql("NEW.session_id")}) ON CONFLICT DO NOTHING;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_work_capture_closure_prompts BEFORE UPDATE OF ended_at ON campaign_work_attempts
+WHEN OLD.ended_at IS NULL AND NEW.ended_at IS NOT NULL AND OLD.session_id IS NOT NULL
+BEGIN
+  UPDATE campaign_work_attempt_closure_prompts SET prompt_state=${closurePromptStateSql("OLD.session_id")} WHERE attempt_id=OLD.id;
+END;
 INSERT INTO campaign_work_delivery_activity SELECT id FROM campaign_work_items WHERE stage IS NOT NULL
   ON CONFLICT DO NOTHING;
 CREATE TRIGGER IF NOT EXISTS campaign_work_delivery_stage_inserted AFTER INSERT ON campaign_work_items WHEN NEW.stage IS NOT NULL
@@ -445,6 +472,8 @@ const itemIssue = (repository: string | null, number: number | null): CampaignIs
 /** What the ledger needs from the rest of the control plane. Observations must read raw session
  * rows: a SessionView embeds the campaign projection, which would recurse. */
 export interface CampaignWorkLedgerHooks {
+  /** Server-observed, Orchestrator-owned completed closure proven from members. */
+  memberProvenEpicClosure?(campaignId: string, repository: string, issue: number): boolean;
   observeSession(sessionId: string): CampaignAttemptSessionObservation | null;
   /** How current the control plane's copy of a session is: fresh while its runner is connected,
    * otherwise last known as of the row's update time. Null when the session is gone. */
@@ -872,6 +901,17 @@ export class CampaignWorkLedgerStore {
       UNION SELECT edge.origin_work_item_id FROM related JOIN campaign_work_lineage_edges edge ON edge.result_work_item_id=related.work_item_id)
       SELECT work_item_id FROM related LIMIT 10001`).all(campaignId, repository, issue) as Array<{ work_item_id: string }>).map((row) => row.work_item_id));
     if (related.size > 10_000) return null;
+    const promptRows = this.stmt(`SELECT a.id,a.work_item_id,p.start_state,CASE WHEN a.ended_at IS NULL THEN ${closurePromptStateSql("a.session_id")}
+      ELSE p.prompt_state END AS state FROM campaign_work_attempts a LEFT JOIN campaign_work_attempt_closure_prompts p ON p.attempt_id=a.id
+      WHERE a.campaign_session_id=? AND a.session_id=? ORDER BY a.rowid LIMIT 10001`).all(campaignId, sessionId) as
+      Array<{ id: string; work_item_id: string; start_state: string | null; state: string | null }>;
+    if (promptRows.length > 10_000) return null;
+    const prompts = promptRows.filter((row) => related.has(row.work_item_id));
+    if (prompts.some((row) => row.state === null)) return null;
+    const lastIssueAttempt = prompts[prompts.length - 1];
+    const firstDeparture = promptRows.slice(lastIssueAttempt ? promptRows.indexOf(lastIssueAttempt) + 1 : promptRows.length)[0];
+    // A prompt admitted in an unassigned interval cannot be attributed to the new unrelated task.
+    const departureUnambiguous = Boolean(lastIssueAttempt?.state && firstDeparture?.start_state === lastIssueAttempt.state);
     const items = attempted.filter((row) => related.has(row.work_item_id)).map((row) => this.detail(campaignId, row.work_item_id, Date.now()));
     if (items.some((item) => !item) || !items.length) return null;
     const prs = this.stmt(`SELECT repository,number,work_item_id FROM campaign_work_pr_history WHERE campaign_session_id=? LIMIT 10001`)
@@ -880,7 +920,8 @@ export class CampaignWorkLedgerStore {
     const key = (pr: { repository: string; number: number }) => `${pr.repository.toLowerCase()}#${pr.number}`;
     const relatedPrs = new Set(prs.filter((pr) => related.has(pr.work_item_id)).map(key));
     const attemptedIds = new Set(attempted.map((row) => row.work_item_id));
-    return { unrelatedPullRequests: new Set(prs.filter((pr) => attemptedIds.has(pr.work_item_id) && !related.has(pr.work_item_id) && !relatedPrs.has(key(pr))).map(key)),
+    return { departureUnambiguous, prompts: prompts.map(({ id, state }) => ({ id, state })),
+      unrelatedPullRequests: new Set(prs.filter((pr) => attemptedIds.has(pr.work_item_id) && !related.has(pr.work_item_id) && !relatedPrs.has(key(pr))).map(key)),
       items: items.map((item) => ({ id: item!.id, commitment: item!.commitmentRecord, stage: item!.stage,
         attempts: item!.attempts.map((attempt) => ({ id: attempt.id, sessionId: attempt.sessionId, delivered: attempt.endReason === "delivered" })),
         verifications: item!.verifications, deliveries: item!.deliveries })) };
@@ -2263,6 +2304,8 @@ export class CampaignWorkLedgerStore {
         } : null,
         openAttemptSession: open?.session_id ? observations.get(open.session_id) ?? null : null,
         recordedDelivery: currentDelivery(deliveries.get(item.id), latest) !== null,
+        epicTrackingClosed: Boolean(item.issue_repository && item.issue_number && this.epicTrackingItem(campaignId, item.id) &&
+          this.hooks.memberProvenEpicClosure?.(campaignId, item.issue_repository, item.issue_number)),
         mergeDependencies: (mergePrerequisites.get(item.id) ?? []).map(campaignMergeDependencyStatus),
         ...(ownMerges.has(item.id) ? { ownPullRequestsMerged: ownMerges.get(item.id)!.merged } : {}),
       };

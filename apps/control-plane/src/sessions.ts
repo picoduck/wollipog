@@ -14237,10 +14237,6 @@ export class SessionsService {
         !this.closureScopeCurrent(session, snapshot)) return "issue scope changed";
     if (!session.parentControlPolicy || decision.policyRevision !== session.parentControlPolicy.revision) return "policy revision changed";
     if (!this.workflowDecisionAuthorityCurrent(session, session.parentControlPolicy, decision)) return "approval authority changed";
-    if (snapshot.campaignPullRequests !== undefined &&
-        auditDigest(closureCampaignPullRequests(this.db, session, snapshot.repository) ?? null) !== auditDigest(snapshot.campaignPullRequests)) {
-      return "campaign pull-request ledger changed or became unreadable";
-    }
     if (!issueClosureActiveChildrenMatch(this.db, sessionId, snapshot)) return "active child work changed";
     return null;
   }
@@ -14249,15 +14245,21 @@ export class SessionsService {
    * approval depends on, read after the Location's forge checks. Synchronous, so nothing can change
    * between the answer and the commit. */
   private closureCommitChange(sessionId: string, decision: WorkflowDecisionView, snapshot: GithubIssueClosureSnapshot,
-    synchronizedScopeRevision: number | undefined, runnerId: string, location: GithubIssueClosureLocation): string | null {
+    synchronizedScopeRevision: number | undefined, runnerId: string, location?: GithubIssueClosureLocation,
+    campaignPullRequests?: number[] | null): string | null {
     const bindingChange = this.closureApprovalChange(sessionId, decision, snapshot, decision.resourceDigest);
     if (bindingChange) return bindingChange;
     const session = this.db.getSession(sessionId);
     if (!session || session.orchestratorPolicy?.issueScope?.revision !== synchronizedScopeRevision) return "synchronized issue scope changed";
+    if (snapshot.campaignPullRequests !== undefined &&
+        auditDigest(closureCampaignPullRequests(this.db, session, snapshot.repository) ?? null) !== auditDigest(campaignPullRequests)) {
+      return "campaign pull-request context changed during forge inspection";
+    }
     if (this.pendingPolicyAsk(session) || pendingRequests(session.pendingApproval).some((request) => request.kind !== "workflow_decision") ||
         this.db.listOpenPolicyHookApprovals(sessionId).length || this.gateOnPolicy(sessionId, Date.now())) return "session guardrails changed";
     if (decision.authority === "orchestrator" && (scopeCompatibility(this.db, session) ||
         issueEvidenceDigest(closureEvidence(this.db, session, snapshot)) !== snapshot.issueAdmission?.evidenceDigest)) return "verified delivery changed";
+    if (!location) return session.runnerId === runnerId ? null : "campaign runner changed";
     // The Location must still be one of that repository's, at the path the checks ran in.
     const entry = campaignScopeRepositories(session).find((candidate) => candidate.repository === location.repository);
     return entry?.locationIds.some((id) => {
@@ -14356,6 +14358,12 @@ export class SessionsService {
         this.db.listOpenPolicyHookApprovals(sessionId).length || this.gateOnPolicy(sessionId, settled)) {
       return fail("The closure approval, runner or guardrails changed while execution was being prepared; no closure was attempted", 409);
     }
+    const campaignPullRequests = snapshot.campaignPullRequests === undefined ? undefined
+      : closureCampaignPullRequests(this.db, freshSession, snapshot.repository) ?? null;
+    const prepare = snapshot.campaignPullRequests !== undefined;
+    if (prepare && !runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, "closureCampaignPullRequests")) {
+      return fail("This approved closure requires a runner supporting fresh campaign PR context and the commit fence; no closure was attempted", 409);
+    }
     const consumed = this.db.consumeGithubIssueClosure(occurrenceId, now);
     if (!consumed) return fail("issue-closure approval was consumed concurrently", 409);
     this.issueClosureRecoveries.add(occurrenceId);
@@ -14370,28 +14378,29 @@ export class SessionsService {
     // The runner receives only the binding: the excluded children are for the approver (#3237).
     const binding = issueClosureBindingSnapshot(snapshot);
     const dispatched = synchronizedScopeRevision === undefined ? binding : { ...binding, scopeRevision: synchronizedScopeRevision };
-    // At a Location nothing can be written until `commit` is sent (#4119).
-    let mayHaveWritten = !target.location;
+    // Location and filtered root closures cannot write until the final `commit` fence.
+    let mayHaveWritten = !target.location && !prepare;
     try {
       const requestId = `issue_closure_execute_${randomUUID()}`;
       let response = await this.hub.requestFromRunner(target.runnerId, requestId, {
         type: "github_issue_closure", operation: "execute", requestId, sessionId, occurrenceId, snapshot: dispatched,
+        ...(prepare ? { prepare: true as const, campaignPullRequests } : {}),
         ...(target.location ? { location: target.location } : {}),
       }, 150_000);
-      if (target.location && response.type === "github_issue_closure_result" && response.sessionId === sessionId && response.ok && response.prepared === true) {
-        // The forge reads took time. This runner holds no copy of the campaign's scope, so the checks
-        // the root's runner makes at its own mutation fence are made here, with nothing awaited
-        // between them and the commit.
-        const commitChange = this.closureCommitChange(sessionId, decision, snapshot, synchronizedScopeRevision, target.runnerId, target.location);
+      if ((target.location || prepare) && response.type === "github_issue_closure_result" && response.sessionId === sessionId && response.ok && response.prepared === true) {
+        // Forge reads took time. Recheck the server's bindings with nothing awaited between this
+        // answer and commit; the root runner also retains its local authority fence.
+        const commitChange = this.closureCommitChange(sessionId, decision, snapshot, synchronizedScopeRevision, target.runnerId, target.location, campaignPullRequests);
         if (commitChange) {
           response = { type: "github_issue_closure_result", requestId, sessionId, ok: false, failure: "campaign_authority_changed",
-            error: `Issue-closure approval refused: ${commitChange} while the Location's checks ran; nothing was written.` };
+            error: `Issue-closure approval refused: ${commitChange} while forge checks ran; nothing was written.` };
           this.log.info(JSON.stringify({ event: "campaign_issue_closure_authority_changed", entryPoint: "closure_commit", sessionId, occurrenceId, outcome: "refused" }));
         } else {
           mayHaveWritten = true;
           const commitId = `issue_closure_commit_${randomUUID()}`;
           response = await this.hub.requestFromRunner(target.runnerId, commitId, {
-            type: "github_issue_closure", operation: "commit", requestId: commitId, sessionId, occurrenceId, location: target.location,
+            type: "github_issue_closure", operation: "commit", requestId: commitId, sessionId, occurrenceId,
+            ...(target.location ? { location: target.location } : {}),
           }, 150_000);
         }
       } else if (!mayHaveWritten && !(response.type === "github_issue_closure_result" && response.sessionId === sessionId && (!response.ok ||

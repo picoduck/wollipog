@@ -121,16 +121,21 @@ the forge at request time from the sources scope admission accepts (GitHub sub-i
 epic body's member checklist), never from agent text, and binds that read into the closure. The
 closure is Orchestrator-owned when every member is in the campaign's scope and closed as
 completed, and every work item of the epic itself is either delivered under the existing proof or
-a placeholder that was never dispatched. Anything else keeps the closure human-owned and names the
+server-derived epic tracking work. A tracking item has no open attempt, delivered attempt,
+verification, delivery, PR or recorded delivery-stage activity; ended tracking attempts alone do
+not disqualify it. Titles do not establish this fact. Incomplete migrated history retains ordinary
+delivery proof. Anything else keeps the closure human-owned and names the
 member: open (`epic_member_open`; close it through its own closure request first, then ask again),
 closed another way, outside scope (including a member added after launch that scope never
 admitted), or unreadable. An epic never closes while a member is open on the forge, even one whose
 own closure would pass. If a member joins, leaves or changes state before execution, the runner
-refuses the approval with `epic_members_changed`. A placeholder item of an epic closed this way no
-longer holds the campaign's completion, so the root need not mark it `scope_removed`; any epic
-item with an attempt still needs its own delivery. Not-planned closures, issues with a fixed-by
+refuses the approval with `epic_members_changed`. A tracking item of an epic closed this way no
+longer holds the campaign's completion, so the root need not mark it `scope_removed`. Campaign
+Status uses the same tracking predicate and closure receipt for item states, counts and recovery.
+An item with delivery activity or an open attempt still needs its own delivery. Not-planned closures, issues with a fixed-by
 plan and issues without members are unchanged. The member read needs runner protocol 278 and a
-GitHub repository; elsewhere the epic keeps the own-work proof and its closure stays human-owned.
+GitHub repository; the expanded tracking rule needs protocol 357. Elsewhere the epic keeps the
+own-work proof and its closure stays human-owned.
 
 Custom preserves existing user approval rules. Full Control delegates an eligible exact decision
 only when the server-established human boundary, current occurrence owner and repository rules

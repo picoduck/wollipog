@@ -187,6 +187,25 @@ test("#4403 execution uses the same relatedness rule, ignoring new outside menti
   }
 });
 
+test("#4403 execution refreshes campaign identities without invalidating unrelated closed history", async () => {
+  for (const mode of ["closed-history", "new-campaign-pr", "outside-mention", "missing-ledger", "shrunk-history"] as const) {
+    const f = fixture();
+    const { state: _state, ...inspection } = await inspectGithubIssueClosure(123, f.run, undefined, false, [79]);
+    const approved: GithubIssueClosureSnapshot = { ...inspection, category: "issue_closure", reason: "not_planned",
+      explanation: "Retire obsolete work", evidence: ["Verified"], activeChildren: [] };
+    f.repository.pullRequests.nodes = mode === "closed-history" || mode === "shrunk-history" ? [] : [relatedPullRequest(80)];
+    const context = mode === "missing-ledger" ? null : mode === "shrunk-history" ? [] :
+      mode === "outside-mention" ? [79] : [79, 80];
+    let begun = false;
+    const result = await executeGithubIssueClosure(approved, f.run, () => { begun = true; return true; }, context);
+    const allowed = mode === "closed-history" || mode === "outside-mention";
+    assert.equal(result.outcome, allowed ? "closed" : "refused", mode);
+    assert.equal(begun, allowed, mode);
+    assert.equal(f.calls.some((call) => call.args[0] === "issue"), allowed, mode);
+    if (!allowed) assert.equal(result.refusal?.reason, "related_pull_requests_changed", mode);
+  }
+});
+
 test("routine activity on a related open PR keeps an approved closure (#4059)", async () => {
   for (const activity of [
     { headRefOid: "b".repeat(40), updatedAt: "2026-11-01T17:28:30Z" },

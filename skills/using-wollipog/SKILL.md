@@ -846,8 +846,25 @@ wollipog decision get <occurrence-id> --json
 wollipog issue-closure execute <occurrence-id> --digest <resource-digest> --json
 ```
 
-Approval expires 30 minutes after resolution. Changed issue evidence, policy, or included child
-work requires renewed review, as does a child moving into or out of the included set.
+An approved closure does not expire on age alone. The payload, scope, policy revision, authority,
+issue-bound child work and freshly read forge evidence must still match; a changed binding is
+named in the refusal. A bound child moving to unrelated recorded work does not invalidate unchanged
+issue work on protocol 357+. A new child joining the issue or a new unconsumed issue-bound decision
+still does; incomplete history retains the stricter binding. Human-owned closures stay human-owned.
+On compatible runners an approval received mid-turn uses the existing durable steering lane at a
+safe tool boundary; rejected steering retains its queued continuation, and uncertain delivery is
+never replayed. Older runners keep queued delivery.
+
+On protocol 357+, an open PR is a closure gap when it closes the issue or belongs to this campaign.
+A mere mention by an outside PR is not a gap. Unreadable closing references or campaign history
+count the PR as related. Execution repeats these reads before writing; older runners retain the
+conservative mention and timeline rule.
+
+For a completed epic proven by in-scope members closed as completed, the server exempts only epic
+tracking items: no open attempts, delivered attempts, verification records, delivery records, PRs
+or recorded delivery-stage activity. An ended tracking attempt alone does not disqualify an item.
+Titles never establish this fact, and incomplete migrated history retains ordinary delivery proof.
+After the epic closes through this proof, Campaign Status uses the same test to finish those items.
 Never substitute a shell command or generic approval, and never
 approve a human-owned request. A root may resolve an eligible Full Control occurrence only from
 its server-recorded standing authorization; the server rechecks it when the root resolves. Under

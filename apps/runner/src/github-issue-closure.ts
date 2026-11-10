@@ -227,12 +227,17 @@ export async function executeGithubIssueClosure(
   snapshot: GithubIssueClosureSnapshot,
   run: Run,
   begin: () => boolean | Promise<boolean>,
+  campaignPullRequests: number[] | null | undefined = snapshot.campaignPullRequests,
 ): Promise<GithubIssueClosureResult> {
   const result = (outcome: GithubIssueClosureResult["outcome"]): GithubIssueClosureResult => ({ outcome, completedAt: Date.now() });
   // Every refusal precedes the mutation fence, so it names its reason and nothing was written.
   const refused = (refusal: GithubIssueClosureRefusal): GithubIssueClosureResult => ({ ...result("refused"), refusal });
+  if (snapshot.campaignPullRequests && campaignPullRequests !== null &&
+      snapshot.campaignPullRequests.some((number) => !campaignPullRequests?.includes(number))) {
+    return refused(githubIssueClosureRefusal("related_pull_requests_changed", { pullRequests: snapshot.campaignPullRequests.filter((number) => !campaignPullRequests?.includes(number)) }));
+  }
   const current = await inspectGithubIssueClosure(snapshot.issue, run, snapshot.delivery?.map(({number,headSha}) => ({number,headSha})),
-    snapshot.epicMembers !== undefined, snapshot.campaignPullRequests);
+    snapshot.epicMembers !== undefined, campaignPullRequests);
   if (current.repository !== snapshot.repository) return refused(githubIssueClosureRefusal("repository_changed"));
   if (current.state === "CLOSED") return result("already_closed");
   if (current.forgeDigest !== snapshot.forgeDigest) return refused(forgeChange(snapshot, current));
